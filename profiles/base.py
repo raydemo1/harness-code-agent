@@ -131,6 +131,56 @@ class BaseProfile(ABC):
         """Config for the evaluation agent."""
         ...
 
+    def main_agent(self) -> AgentConfig:
+        """Config for the single owner agent that runs the full task loop."""
+        base_cfg = self.builder()
+        prompt = (
+            "You are the main agent for this task. You own the complete execution loop: "
+            "understand the task, maintain progress, inspect the workspace, modify files, "
+            "run verification, integrate all feedback, and decide when to stop.\n\n"
+            "Sub-agents are consultation tools only. Use consult_subagent for local investigation, "
+            "parallel search, test design, or review. They must not modify files, merge work, "
+            "or decide whether the task is complete. Only you may modify files, create tests, "
+            "perform final integration, and make the final stop decision.\n\n"
+            "Required loop:\n"
+            "1. Read the task and repository state.\n"
+            "2. Call update_progress before substantive work and keep progress.md current.\n"
+            "3. Consult sub-agents only when their read-only findings would reduce context load or risk.\n"
+            "4. Apply all code and test changes yourself.\n"
+            "5. Run concrete verification commands.\n"
+            "6. If verification fails, diagnose and continue. If it passes, do a final review before stopping.\n\n"
+            f"Scenario guidance:\n{base_cfg.system_prompt}"
+        )
+        return AgentConfig(
+            system_prompt=prompt,
+            extra_tool_schemas=base_cfg.extra_tool_schemas,
+            enabled=base_cfg.enabled,
+            middlewares=base_cfg.middlewares,
+            time_budget=base_cfg.time_budget,
+        )
+
+    def subagent_policy(self) -> dict:
+        """Policy for consultation-only sub-agents."""
+        return {
+            "allowed_scopes": [
+                "codebase_investigation",
+                "parallel_search",
+                "test_design",
+                "review",
+            ],
+            "read_only": True,
+            "may_modify_files": False,
+            "may_decide_completion": False,
+        }
+
+    def acceptance_criteria(self) -> list[str]:
+        """High-level completion criteria for the main agent."""
+        return [
+            "The main agent made any required code or test changes itself.",
+            "The main agent ran concrete verification commands.",
+            "The main agent reviewed verification output before stopping.",
+        ]
+
     def contract_proposer(self) -> AgentConfig:
         """Config for contract proposer. Override to customize or disable."""
         return AgentConfig(system_prompt="", enabled=False)

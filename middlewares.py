@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 log = logging.getLogger("harness")
 
 
+MAIN_AGENT_NAMES = {"main_agent", "builder"}
+
+
 class AgentMiddleware(ABC):
     """Base class for agent middlewares."""
 
@@ -176,8 +179,8 @@ class PreExitVerificationMiddleware(AgentMiddleware):
 
     @staticmethod
     def _has_done_work(messages: list[dict]) -> bool:
-        """Check if the agent has called any action tools (run_bash, write_file, delegate_task)."""
-        action_tools = {"run_bash", "write_file", "delegate_task"}
+        """Check if the agent has called any action tools."""
+        action_tools = {"run_bash", "write_file", "consult_subagent", "delegate_task"}
         for msg in messages:
             if msg.get("role") == "assistant":
                 for tc in msg.get("tool_calls", []):
@@ -390,9 +393,9 @@ class TaskTrackingMiddleware(AgentMiddleware):
 
 
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
-    """Hard-require progress updates before substantive builder actions."""
+    """Hard-require progress updates before substantive main-agent actions."""
 
-    ACTION_TOOLS = {"run_bash", "write_file", "delegate_task"}
+    ACTION_TOOLS = {"run_bash", "write_file", "consult_subagent", "delegate_task"}
 
     def before_tool(
         self,
@@ -402,7 +405,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         runtime_state=None,
         agent_name: str | None = None,
     ) -> str | None:
-        if agent_name != "builder" or runtime_state is None:
+        if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         if tool_name not in self.ACTION_TOOLS:
             return None
@@ -417,7 +420,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
     def post_tool(self, tool_name: str, tool_args: dict, result: str,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
-        if agent_name != "builder" or runtime_state is None:
+        if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         if result.startswith("[error]") or result.startswith("[blocked]"):
             return None
@@ -435,7 +438,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
 
     def pre_exit(self, messages: list[dict], runtime_state=None,
                  agent_name: str | None = None) -> str | None:
-        if agent_name != "builder" or runtime_state is None:
+        if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         board = runtime_state.task_board
         if board.update_count > 0 and board.needs_final_update:
@@ -457,7 +460,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         "no module named",
         "modulenotfounderror",
     )
-    ACTION_TOOLS = {"run_bash", "write_file", "delegate_task"}
+    ACTION_TOOLS = {"run_bash", "write_file", "consult_subagent", "delegate_task"}
     READ_ONLY_PREFIXES = (
         "cat ", "ls", "pwd", "find ", "grep ", "head ", "tail ", "sed ",
         "git status", "git diff", "git log", "pytest", "python -m pytest",
@@ -549,7 +552,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         runtime_state=None,
         agent_name: str | None = None,
     ) -> str | None:
-        if agent_name != "builder" or runtime_state is None:
+        if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         mode = runtime_state.recovery.mode
         if mode == "NORMAL":
@@ -558,12 +561,12 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             return None
 
         if mode == "ENV_FIX":
-            if tool_name in {"write_file", "delegate_task"}:
+            if tool_name in {"write_file", "consult_subagent", "delegate_task"}:
                 return "[blocked] Recovery mode ENV_FIX only allows diagnosis, installation, and environment repair actions."
             return None
 
         if mode == "SPEC_RECHECK":
-            if tool_name in {"write_file", "delegate_task"}:
+            if tool_name in {"write_file", "consult_subagent", "delegate_task"}:
                 return "[blocked] Recovery mode SPEC_RECHECK is read-only. Re-read the task and verification outputs first."
             if tool_name == "run_bash" and not self._is_read_only_command(tool_args.get("command", "")):
                 return "[blocked] Recovery mode SPEC_RECHECK only allows read-only verification commands."
@@ -575,7 +578,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             return None
 
         if mode == "FINAL_VERIFY":
-            if tool_name in {"delegate_task", "web_search", "web_fetch"}:
+            if tool_name in {"consult_subagent", "delegate_task", "web_search", "web_fetch"}:
                 return "[blocked] Recovery mode FINAL_VERIFY only allows direct verification and final fixes."
             return None
 
@@ -584,7 +587,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
     def post_tool(self, tool_name: str, tool_args: dict, result: str,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
-        if agent_name != "builder" or runtime_state is None:
+        if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         self.observe_tool_result(tool_name, tool_args, result, runtime_state)
         if result.startswith("[error]") or result.startswith("[blocked]"):
@@ -609,6 +612,44 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
 
         if tool_name == "write_file":
             self.observe_edit_attempt(tool_args.get("path", ""), runtime_state)
+        return None
+
+
+class ReadOnlySubagentMiddleware(AgentMiddleware):
+    """Restrict consultation sub-agents to read-only investigation."""
+
+    READ_ONLY_TOOLS = {"read_file", "list_files", "run_bash", "web_search", "web_fetch"}
+    READ_ONLY_PREFIXES = (
+        "cat ", "ls", "pwd", "find ", "grep ", "rg ", "head ", "tail ", "sed ",
+        "git status", "git diff", "git log", "git show", "git branch",
+        "python -m unittest", "python -m pytest", "pytest", "test ", "diff ",
+        "wc ", "which ", "where ", "env", "echo ", "printf ",
+    )
+
+    def _is_read_only_command(self, command: str) -> bool:
+        lowered = command.strip().lower()
+        return any(lowered.startswith(prefix) for prefix in self.READ_ONLY_PREFIXES)
+
+    def before_tool(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        messages: list[dict],
+        runtime_state=None,
+        agent_name: str | None = None,
+    ) -> str | None:
+        if not (agent_name or "").startswith("consult_"):
+            return None
+        if tool_name not in self.READ_ONLY_TOOLS:
+            return (
+                "[blocked] Consultation sub-agents are read-only. "
+                "Return findings and recommendations; the main agent owns all code changes."
+            )
+        if tool_name == "run_bash" and not self._is_read_only_command(tool_args.get("command", "")):
+            return (
+                "[blocked] Consultation sub-agents may only run read-only shell commands. "
+                "Do not modify files, start services, install packages, or change git state."
+            )
         return None
 
 

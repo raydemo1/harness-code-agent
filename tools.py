@@ -265,6 +265,98 @@ def _smart_truncate_output(stdout: str, stderr: str, limit: int = 30_000) -> str
 # Sub-agent delegation (context isolation)
 # ---------------------------------------------------------------------------
 
+CONSULTATION_SCOPES = {
+    "codebase_investigation",
+    "parallel_search",
+    "test_design",
+    "review",
+}
+
+
+def _tool_schema_by_name(name: str) -> dict | None:
+    for schema in TOOL_SCHEMAS:
+        if schema.get("function", {}).get("name") == name:
+            return schema
+    return None
+
+
+def consultation_tool_schemas() -> list[dict]:
+    """Return the read-only tool surface for consultation sub-agents."""
+    names = {"read_file", "list_files", "run_bash", "web_search", "web_fetch"}
+    return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
+
+
+def _as_consultation_report(scope: str, raw_result: str) -> str:
+    raw_result = raw_result or ""
+    try:
+        parsed = json.loads(raw_result)
+        if isinstance(parsed, dict) and {"status", "scope", "findings", "evidence", "recommendations", "risks"} <= set(parsed):
+            report = parsed
+        else:
+            raise ValueError("not a consultation report")
+    except Exception:
+        report = {
+            "status": "completed" if raw_result.strip() else "blocked",
+            "scope": scope,
+            "findings": [raw_result[:7000]] if raw_result.strip() else [],
+            "evidence": [],
+            "recommendations": [],
+            "risks": [],
+        }
+
+    text = json.dumps(report, ensure_ascii=False)
+    if len(text) > 8000:
+        report["findings"] = [
+            "\n".join(str(item) for item in report.get("findings", []))[:7000]
+            + "\n...(truncated)"
+        ]
+        text = json.dumps(report, ensure_ascii=False)
+    return text
+
+
+def consult_subagent(task: str, scope: str = "codebase_investigation") -> str:
+    """
+    Ask a read-only consultation sub-agent for local findings.
+
+    The main agent owns all code changes, final integration, verification, and
+    stopping decisions. Consultation sub-agents may only investigate, search,
+    suggest tests, or review; they return a structured report.
+    """
+    if scope not in CONSULTATION_SCOPES:
+        return (
+            "[error] Invalid consultation scope. Use one of: "
+            + ", ".join(sorted(CONSULTATION_SCOPES))
+        )
+
+    from agents import Agent
+    from middlewares import ReadOnlySubagentMiddleware
+
+    sub = Agent(
+        name=f"consult_{scope}",
+        system_prompt=(
+            "You are a read-only consultation helper. You are not a separate implementation owner.\n"
+            "You may inspect files, run read-only commands, search, and fetch references. "
+            "You must not modify files, start services, install packages, change git state, "
+            "or decide whether the overall task is complete.\n"
+            "Return only JSON with this shape:\n"
+            "{\n"
+            '  "status": "completed | blocked",\n'
+            f'  "scope": "{scope}",\n'
+            '  "findings": ["..."],\n'
+            '  "evidence": ["file/path.py:line or command output summary"],\n'
+            '  "recommendations": ["..."],\n'
+            '  "risks": ["..."]\n'
+            "}\n"
+            "For test_design scope, provide test cases and assertions only; do not write tests."
+        ),
+        use_tools=True,
+        tool_schemas=consultation_tool_schemas(),
+        middlewares=[ReadOnlySubagentMiddleware()],
+    )
+
+    result = sub.run(task)
+    return _as_consultation_report(scope, result)
+
 def delegate_task(task: str, role: str = "assistant") -> str:
     """
     Spawn a sub-agent in a completely isolated context to handle a subtask.
@@ -573,15 +665,11 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "delegate_task",
+            "name": "consult_subagent",
             "description": (
-                "Spawn a sub-agent in a completely isolated context to handle a subtask. "
-                "The sub-agent gets a clean context window and does NOT see your conversation history. "
-                "Only its structured result comes back. Use this for: "
-                "(1) exploring/reading many files without bloating your context, "
-                "(2) running a series of bash commands and getting a summary, "
-                "(3) any 'dirty work' that would waste your context budget. "
-                "The sub-agent has access to the same workspace and tools."
+                "Ask a read-only consultation sub-agent for findings, evidence, recommendations, and risks. "
+                "Use only for local codebase investigation, parallel search, test design, or review. "
+                "The main agent owns all code changes, final integration, verification, and stop decisions."
             ),
             "parameters": {
                 "type": "object",
@@ -589,12 +677,13 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "Detailed description of the subtask to delegate",
+                        "description": "Detailed read-only consultation request",
                     },
-                    "role": {
+                    "scope": {
                         "type": "string",
-                        "description": "Role for the sub-agent (e.g. 'codebase_explorer', 'test_runner', 'dependency_installer')",
-                        "default": "assistant",
+                        "enum": ["codebase_investigation", "parallel_search", "test_design", "review"],
+                        "description": "Consultation mode",
+                        "default": "codebase_investigation",
                     },
                 },
             },
@@ -892,6 +981,7 @@ TOOL_DISPATCH = {
     "update_progress": update_progress,
     "list_files": list_files,
     "run_bash": run_bash,
+    "consult_subagent": consult_subagent,
     "delegate_task": delegate_task,
     "web_search": web_search,
     "web_fetch": web_fetch,

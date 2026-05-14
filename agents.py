@@ -198,13 +198,15 @@ class Agent:
     def __init__(self, name: str, system_prompt: str, use_tools: bool = True,
                  extra_tool_schemas: list[dict] | None = None,
                  middlewares: list | None = None,
-                 time_budget: float | None = None):
+                 time_budget: float | None = None,
+                 tool_schemas: list[dict] | None = None):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
         self.extra_tool_schemas = extra_tool_schemas or []
         self.middlewares = middlewares or []  # list[AgentMiddleware]
         self.time_budget = time_budget
+        self.tool_schemas = tool_schemas
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
         return AgentRuntimeState(task_board=TaskBoard(goal=task))
@@ -263,7 +265,10 @@ class Agent:
                     max_tokens=32768,
                 )
                 if self.use_tools:
-                    kwargs["tools"] = tools.TOOL_SCHEMAS + self.extra_tool_schemas
+                    if self.tool_schemas is not None:
+                        kwargs["tools"] = self.tool_schemas
+                    else:
+                        kwargs["tools"] = tools.TOOL_SCHEMAS + self.extra_tool_schemas
                     kwargs["tool_choice"] = "auto"
 
                 try:

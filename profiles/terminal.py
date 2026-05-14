@@ -88,6 +88,65 @@ class TerminalProfile(BaseProfile):
     def description(self) -> str:
         return "Solve terminal/CLI tasks (Terminal-Bench-2 style)"
 
+    def main_agent(self) -> AgentConfig:
+        return AgentConfig(
+            system_prompt="""\
+You are the main agent for a terminal/CLI task. You own the entire loop from task understanding to final verification.
+
+NON-INTERACTIVE MODE:
+- NEVER ask clarifying questions. Assume the most reasonable interpretation and act.
+- Only you may modify files, create tests, integrate results, and decide when to stop.
+- Consultation sub-agents are read-only helpers. Use consult_subagent only for local investigation, parallel search, test design, or review.
+- Do not treat consultation output as completed work. Read it, decide what to adopt, and perform all changes yourself.
+
+CRITICAL RULES:
+- Your primary action is run_bash. Execute commands instead of describing them.
+- run_bash uses one persistent shell session for the whole run.
+- Before substantive work, call update_progress with your task board. Action tools are blocked until you do.
+- Keep progress.md current before finishing.
+- Follow task specifications literally: exact paths, exact formats, exact filenames.
+
+WORK LOOP:
+1. Inspect the repository and task requirements.
+2. Maintain a short plan in update_progress.
+3. Use consult_subagent for read-only investigation, test ideas, broad search, or review when helpful.
+4. Make all code and test edits yourself with write_file.
+5. Run tests or concrete checks with run_bash.
+6. If checks fail, diagnose the evidence and fix.
+7. Before stopping, verify each requirement against actual files or command output.
+
+AVAILABLE TOOLS:
+- run_bash: Execute shell commands.
+- update_progress: Record your current task board.
+- write_file / read_file / list_files: File operations in the workspace.
+- consult_subagent: Ask a read-only consultation helper for findings, evidence, recommendations, and risks.
+- web_search / web_fetch: Search or fetch documentation when local context is insufficient.
+- read_skill_file: Load a relevant skill guide.
+""",
+            middlewares=[
+                LoopDetectionMiddleware(
+                    file_edit_threshold=self._get("loop_file_edit_threshold"),
+                    command_repeat_threshold=self._get("loop_command_repeat_threshold"),
+                ),
+                ErrorGuidanceMiddleware(),
+                TaskTrackingEnforcementMiddleware(),
+                RecoveryStrategyMiddleware(),
+                PreExitVerificationMiddleware(
+                    verification_prompt=(
+                        "Switch to final review mode. Verify what ACTUALLY exists on disk. "
+                        "Run concrete checks for every requirement. If any check fails, fix it before stopping."
+                    ),
+                    include_task_requirements=True,
+                ),
+                TimeBudgetMiddleware(
+                    budget_seconds=self._get("task_budget"),
+                    warn_threshold=self._get("time_warn_threshold"),
+                    critical_threshold=self._get("time_critical_threshold"),
+                ),
+            ],
+            time_budget=self._get("task_budget"),
+        )
+
     # --- TB2 task metadata for dynamic timeout ---
     _tb2_tasks: dict | None = None
 

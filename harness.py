@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-Harness — profile-driven multi-agent architecture for autonomous task execution.
+Harness — profile-driven main-agent architecture for autonomous task execution.
 
-Reproduces the design from Anthropic's "Harness design for long-running
-application development" using a pure Python + OpenAI-compatible API approach.
-
-The core loop (Plan → Build → Evaluate → Iterate) is generic.
-Profiles define the scenario-specific behavior (prompts, tools, scoring).
+The core loop is owned by one main agent. Consultation sub-agents are read-only
+helpers for local investigation, parallel search, test design, and review.
 
 Built-in profiles:
   app-builder  — Build web apps from a prompt (original Anthropic article scenario)
@@ -26,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -42,19 +40,17 @@ log = logging.getLogger("harness")
 
 class Harness:
     """
-    Generic orchestration loop driven by a Profile.
+    Generic main-agent controller driven by a Profile.
 
     The Profile defines:
-      - System prompts for each agent role
-      - Which tools each agent gets
-      - Evaluation criteria and pass threshold
-      - Whether contract negotiation is enabled
+      - The main-agent system prompt
+      - Which extra tools and middlewares the main agent gets
+      - Consultation sub-agent policy
+      - Acceptance criteria
 
     The Harness handles:
-      - The Plan → Build → Evaluate → Iterate loop
-      - Context lifecycle (compaction / reset)
-      - Score tracking and REFINE/PIVOT decisions
       - Workspace and git management
+      - Starting exactly one main agent for the task
     """
 
     def __init__(self, profile: BaseProfile):
@@ -62,40 +58,12 @@ class Harness:
         self.skill_registry = SkillRegistry()
         skill_catalog = self.skill_registry.build_catalog_prompt()
 
-        # Build agents from profile config
-        planner_cfg = profile.planner()
-        builder_cfg = profile.builder()
-        evaluator_cfg = profile.evaluator()
-        proposer_cfg = profile.contract_proposer()
-        reviewer_cfg = profile.contract_reviewer()
-
-        self.planner = Agent(
-            "planner", planner_cfg.system_prompt + skill_catalog,
-            use_tools=True, extra_tool_schemas=planner_cfg.extra_tool_schemas,
-            middlewares=planner_cfg.middlewares, time_budget=planner_cfg.time_budget,
-        ) if planner_cfg.enabled else None
-
-        self.builder = Agent(
-            "builder", builder_cfg.system_prompt + skill_catalog,
-            use_tools=True, extra_tool_schemas=builder_cfg.extra_tool_schemas,
-            middlewares=builder_cfg.middlewares, time_budget=builder_cfg.time_budget,
+        main_cfg = profile.main_agent()
+        self.main_agent = Agent(
+            "main_agent", main_cfg.system_prompt + skill_catalog,
+            use_tools=True, extra_tool_schemas=main_cfg.extra_tool_schemas,
+            middlewares=main_cfg.middlewares, time_budget=main_cfg.time_budget,
         )
-
-        self.evaluator = Agent(
-            "evaluator", evaluator_cfg.system_prompt,
-            use_tools=True, extra_tool_schemas=evaluator_cfg.extra_tool_schemas,
-            middlewares=evaluator_cfg.middlewares, time_budget=evaluator_cfg.time_budget,
-        ) if evaluator_cfg.enabled else None
-
-        self.contract_proposer = Agent(
-            "contract_proposer", proposer_cfg.system_prompt, use_tools=True,
-            middlewares=proposer_cfg.middlewares,
-        ) if proposer_cfg.enabled else None
-
-        self.contract_reviewer = Agent(
-            "contract_reviewer", reviewer_cfg.system_prompt, use_tools=True,
-            middlewares=reviewer_cfg.middlewares,
-        ) if reviewer_cfg.enabled else None
 
     def run(self, user_prompt: str) -> None:
         # Create a unique project subdirectory under workspace
@@ -119,156 +87,36 @@ class Harness:
         # Initialize git
         git_dir = Path(config.WORKSPACE) / ".git"
         if not git_dir.exists():
-            os.system(f"cd {config.WORKSPACE} && git init && git add -A 2>/dev/null; git commit -m 'init' --allow-empty 2>/dev/null")
+            subprocess.run(["git", "init"], cwd=config.WORKSPACE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "add", "-A"], cwd=config.WORKSPACE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["git", "commit", "-m", "init", "--allow-empty"],
+                cwd=config.WORKSPACE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
         total_start = time.time()
-        max_rounds = self.profile.max_rounds() or config.MAX_HARNESS_ROUNDS
-        threshold = self.profile.pass_threshold()
+        from middlewares import TimeBudgetMiddleware
+        for mw in self.main_agent.middlewares:
+            if isinstance(mw, TimeBudgetMiddleware):
+                mw.sync_start_time(total_start)
+                task_timeout = self.profile.resolve_task_timeout(user_prompt)
+                if task_timeout:
+                    mw.budget_seconds = task_timeout
+                    log.info(f"Time budget set to {task_timeout}s from task metadata")
 
-        # ---- Resolve dynamic time allocation ----
-        allocation = self.profile.resolve_time_allocation(user_prompt)
-        skip_planner = not allocation.get("planner_enabled", True)
-        skip_evaluator = not allocation.get("evaluator_enabled", True)
-        log.info(f"Time allocation: planner={allocation['planner']:.0%} "
-                 f"builder={allocation['builder']:.0%} "
-                 f"evaluator={allocation['evaluator']:.0%} "
-                 f"(planner={'skip' if skip_planner else 'on'}, "
-                 f"evaluator={'skip' if skip_evaluator else 'on'})")
-
-        # ---- Phase 1: Planning ----
-        if self.planner and not skip_planner:
-            log.info("=" * 60)
-            log.info("PHASE 1: PLANNING")
-            log.info("=" * 60)
-            phase_start = time.time()
-
-            self.planner.run(
-                f"Create a plan for the following task:\n\n"
-                f"{user_prompt}\n\n"
-                f"Save the plan to spec.md."
-            )
-
-            log.info(f"Planning completed in {time.time() - phase_start:.0f}s")
-        else:
-            # No planner — write prompt directly as spec
-            spec_path = Path(config.WORKSPACE) / config.SPEC_FILE
-            spec_path.write_text(f"# Task\n\n{user_prompt}\n", encoding="utf-8")
-            log.info("No planner — wrote prompt directly to spec.md")
-
-        # ---- Phase 2: Build → Evaluate loop ----
-        score_history: list[float] = []
-
-        for round_num in range(1, max_rounds + 1):
-
-            # ---- Contract negotiation (if enabled) ----
-            if self.contract_proposer and self.contract_reviewer:
-                log.info("=" * 60)
-                log.info(f"ROUND {round_num}/{max_rounds}: CONTRACT NEGOTIATION")
-                log.info("=" * 60)
-                contract_start = time.time()
-                self._negotiate_contract(round_num)
-                log.info(f"Contract negotiation completed in {time.time() - contract_start:.0f}s")
-
-            # ---- Build ----
-            log.info("=" * 60)
-            log.info(f"ROUND {round_num}/{max_rounds}: BUILD")
-            log.info("=" * 60)
-            build_start = time.time()
-
-            # Sync time budget to harness start so builder knows total elapsed time
-            from middlewares import TimeBudgetMiddleware
-            for mw in self.builder.middlewares:
-                if isinstance(mw, TimeBudgetMiddleware):
-                    mw.sync_start_time(total_start)
-                    # Let the profile resolve task-specific timeout
-                    task_timeout = self.profile.resolve_task_timeout(user_prompt)
-                    if task_timeout:
-                        mw.budget_seconds = task_timeout
-                        log.info(f"Time budget set to {task_timeout}s from task metadata")
-
-            feedback_path = Path(config.WORKSPACE) / config.FEEDBACK_FILE
-            prev_feedback = feedback_path.read_text(encoding="utf-8") if feedback_path.exists() else ""
-
-            build_task = self.profile.format_build_task(
-                user_prompt, round_num, prev_feedback, score_history,
-            )
-
-            self.builder.run(build_task)
-            log.info(f"Build round {round_num} completed in {time.time() - build_start:.0f}s")
-
-            # ---- Evaluate (if enabled) ----
-            if self.evaluator and not skip_evaluator:
-                log.info("=" * 60)
-                log.info(f"ROUND {round_num}/{max_rounds}: EVALUATE")
-                log.info("=" * 60)
-                eval_start = time.time()
-
-                self.evaluator.run(
-                    f"This is evaluation round {round_num}.\n"
-                    f"Read spec.md to understand the task.\n"
-                    f"Examine the work done and test it thoroughly.\n"
-                    f"Score each criterion honestly. Write your evaluation to feedback.md."
-                )
-
-                log.info(f"Evaluation round {round_num} completed in {time.time() - eval_start:.0f}s")
-                tools.stop_dev_server()
-
-                # Check score
-                feedback_text = ""
-                if feedback_path.exists():
-                    feedback_text = feedback_path.read_text(encoding="utf-8")
-                score = self.profile.extract_score(feedback_text)
-                score_history.append(score)
-                log.info(f"Round {round_num} average score: {score:.1f} / 10  (threshold: {threshold})")
-                log.info(f"Score history: {score_history}")
-
-                if score >= threshold:
-                    log.info(f"PASSED at round {round_num}.")
-                    break
-            else:
-                log.info("No evaluator — single-pass execution.")
-                break
-
-        else:
-            log.warning(f"Did not pass after {max_rounds} rounds.")
+        log.info("=" * 60)
+        log.info("MAIN AGENT LOOP")
+        log.info("=" * 60)
+        self.main_agent.run(user_prompt)
+        tools.stop_dev_server()
 
         total_duration = time.time() - total_start
         log.info("=" * 60)
         log.info(f"HARNESS COMPLETE — total time: {total_duration / 60:.1f} minutes")
         log.info(f"Output in: {config.WORKSPACE}")
         log.info("=" * 60)
-
-    def _negotiate_contract(self, round_num: int, max_iterations: int = 3) -> None:
-        self.contract_proposer.run(
-            f"This is round {round_num}.\n"
-            f"Read spec.md. If feedback.md exists, read it too.\n"
-            f"Propose a sprint contract for this round. Write it to contract.md."
-        )
-
-        for i in range(max_iterations):
-            log.info(f"[contract] Review iteration {i + 1}/{max_iterations}")
-
-            self.contract_reviewer.run(
-                f"Review the sprint contract in contract.md for round {round_num}.\n"
-                f"Read spec.md for context. Read feedback.md if it exists.\n"
-                f"If acceptable, write APPROVED at the top and save to contract.md.\n"
-                f"If changes needed, write revision requests and save updated contract."
-            )
-
-            contract_path = Path(config.WORKSPACE) / "contract.md"
-            if contract_path.exists():
-                contract_text = contract_path.read_text(encoding="utf-8")
-                if "APPROVED" in contract_text.upper()[:200]:
-                    log.info("[contract] Contract approved.")
-                    return
-
-            if i < max_iterations - 1:
-                log.info("[contract] Contract needs revision...")
-                self.contract_proposer.run(
-                    f"The reviewer requested changes. Read contract.md and revise."
-                )
-
-        log.warning("[contract] Max iterations reached, proceeding with current contract.")
 
 
 # ---------------------------------------------------------------------------
