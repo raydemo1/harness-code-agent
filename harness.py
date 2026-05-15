@@ -42,6 +42,9 @@ from workspace_service import WorkspaceService
 
 log = logging.getLogger("harness")
 
+COMMIT_POLICIES = {"none", "checkpoint", "milestone"}
+GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
+
 
 class Harness:
     """
@@ -99,21 +102,14 @@ class Harness:
             config.WORKSPACE = os.path.abspath(project_dir)
             Path(config.WORKSPACE).mkdir(parents=True, exist_ok=True)
 
+        commit_policy = _resolve_commit_policy()
+
         log.info(f"Profile: {self.profile.name()}")
         log.info(f"Project directory: {config.WORKSPACE}")
 
         # Initialize git before runtime metadata is created so .harness does not
         # become part of the initial project commit.
-        git_dir = Path(config.WORKSPACE) / ".git"
-        if not git_dir.exists():
-            subprocess.run(["git", "init"], cwd=config.WORKSPACE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["git", "add", "-A"], cwd=config.WORKSPACE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(
-                ["git", "commit", "-m", "init", "--allow-empty"],
-                cwd=config.WORKSPACE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        _ensure_git_repository(Path(config.WORKSPACE))
 
         permission_mode = os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write")
         session_store = SessionStore(Path(config.WORKSPACE) / ".harness")
@@ -155,10 +151,21 @@ class Harness:
         log.info("=" * 60)
         log.info("MAIN AGENT LOOP")
         log.info("=" * 60)
+        run_failed = False
         try:
             self.main_agent.run(self._format_main_agent_task(user_prompt))
+        except Exception:
+            run_failed = True
+            raise
         finally:
             tools.stop_dev_server()
+            _commit_session_changes(
+                Path(config.WORKSPACE),
+                policy=commit_policy,
+                user_prompt=user_prompt,
+                session_id=session.id,
+                run_failed=run_failed,
+            )
             event_bus.emit(
                 "session_finished",
                 agent="main_agent",
@@ -182,6 +189,133 @@ class Harness:
             "- Consultation sub-agents are read-only and may only return findings, evidence, recommendations, and risks.\n"
             "- Verify the acceptance criteria against actual files or command output before stopping."
         )
+
+
+def _resolve_commit_policy() -> str:
+    policy = os.environ.get("HARNESS_COMMIT_POLICY", "checkpoint").strip().lower()
+    if policy not in COMMIT_POLICIES:
+        raise ValueError(
+            "HARNESS_COMMIT_POLICY must be one of: "
+            + ", ".join(sorted(COMMIT_POLICIES))
+        )
+    return policy
+
+
+def _ensure_git_repository(workspace: Path) -> None:
+    git_dir = workspace / ".git"
+    if git_dir.exists():
+        return
+
+    subprocess.run(
+        ["git", "init"],
+        cwd=workspace,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    _git_add_runtime_exclude(workspace)
+    subprocess.run(
+        _git_commit_command("init", allow_empty=True),
+        cwd=workspace,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+
+
+def _commit_session_changes(
+    workspace: Path,
+    *,
+    policy: str,
+    user_prompt: str,
+    session_id: str,
+    run_failed: bool,
+) -> None:
+    if policy == "none":
+        return
+    if policy == "milestone" and run_failed:
+        return
+    if not _git_has_committable_changes(workspace):
+        return
+
+    _git_add_runtime_exclude(workspace)
+    if not _git_has_staged_changes(workspace):
+        return
+
+    prefix = "checkpoint" if policy == "checkpoint" else "milestone"
+    detail = session_id if policy == "checkpoint" else _slugify(user_prompt, limit=48)
+    message = f"{prefix}: {detail}"
+    subprocess.run(
+        _git_commit_command(message),
+        cwd=workspace,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+
+
+def _git_add_runtime_exclude(workspace: Path) -> None:
+    subprocess.run(
+        _runtime_excluded_git_command("add", "-A"),
+        cwd=workspace,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+
+
+def _git_has_committable_changes(workspace: Path) -> bool:
+    result = subprocess.run(
+        _runtime_excluded_git_command("status", "--porcelain"),
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def _git_has_staged_changes(workspace: Path) -> bool:
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=workspace,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 1
+
+
+def _runtime_excluded_git_command(*args: str) -> list[str]:
+    return [
+        "git",
+        *args,
+        "--",
+        ".",
+        ":(exclude).harness",
+        f":(exclude){config.PROGRESS_FILE}",
+    ]
+
+
+def _git_commit_command(message: str, *, allow_empty: bool = False) -> list[str]:
+    name, email = GIT_COMMIT_AUTHOR
+    command = [
+        "git",
+        "-c",
+        f"user.name={name}",
+        "-c",
+        f"user.email={email}",
+        "commit",
+        "-m",
+        message,
+    ]
+    if allow_empty:
+        command.append("--allow-empty")
+    return command
+
+
+def _slugify(text: str, *, limit: int) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower().strip()).strip("-")
+    return (slug or "session")[:limit].strip("-") or "session"
 
 
 # ---------------------------------------------------------------------------
