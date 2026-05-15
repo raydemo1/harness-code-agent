@@ -152,6 +152,18 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertIn("stop decisions", prompt)
         self.assertIn("consult subagents", prompt)
 
+    def test_harness_injects_vibe_skill_routing_policy(self):
+        profile = FakeProfile()
+
+        with patch("harness.Agent", RecordingAgent):
+            Harness(profile)
+
+        prompt = RecordingAgent.instances[0].system_prompt
+        self.assertIn("Skill routing policy", prompt)
+        self.assertIn("skills/vibe-kickoff/SKILL.md", prompt)
+        self.assertIn("skills/vibe-execution-guard/SKILL.md", prompt)
+        self.assertIn("PROJECT_STATE.md", prompt)
+
     def test_checkpoint_policy_commits_workspace_changes_after_session(self):
         os.environ["HARNESS_COMMIT_POLICY"] = "checkpoint"
         profile = FakeProfile()

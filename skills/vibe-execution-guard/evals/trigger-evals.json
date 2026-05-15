@@ -1,0 +1,82 @@
+[
+  {
+    "query": "Only change the backend permission check for project members. Do not touch the UI or unrelated routes.",
+    "should_trigger": true
+  },
+  {
+    "query": "The tenant isolation bug may leak another customer's records. Reproduce it and patch the smallest safe cause.",
+    "should_trigger": true
+  },
+  {
+    "query": "We need to roll back the experimental caching change but keep any useful tests if they still pass.",
+    "should_trigger": true
+  },
+  {
+    "query": "This form submit 500 has survived two fixes already. Make a minimal repro and stop guessing.",
+    "should_trigger": true
+  },
+  {
+    "query": "Before touching this migration, define the rollback point and verify the smallest safe patch.",
+    "should_trigger": true
+  },
+  {
+    "query": "Add server-side validation for this payment form because the frontend-only check is not enough.",
+    "should_trigger": true
+  },
+  {
+    "query": "The production API key leaked in a frontend bundle. Find the exposure and patch it now.",
+    "should_trigger": true
+  },
+  {
+    "query": "只改 settings API 的权限判断，不要动前端，也不要改 unrelated routes。",
+    "should_trigger": true
+  },
+  {
+    "query": "The import job corrupts rows when a CSV has blank lines. Reproduce it first, then fix only that behavior.",
+    "should_trigger": true
+  },
+  {
+    "query": "A production incident started after the billing deploy. Identify the safest rollback or minimal hotfix path.",
+    "should_trigger": true
+  },
+  {
+    "query": "I want to build a project management SaaS. First help me decide the MVP, page map, and architecture.",
+    "should_trigger": false
+  },
+  {
+    "query": "Implement the notes list page from the approved PRD and wire it to the existing API.",
+    "should_trigger": false
+  },
+  {
+    "query": "Review this PR and list only the bugs or missing tests. Do not edit code yet.",
+    "should_trigger": false
+  },
+  {
+    "query": "Summarize how the auth module works for a new teammate.",
+    "should_trigger": false
+  },
+  {
+    "query": "What is the difference between unit tests and integration tests?",
+    "should_trigger": false
+  },
+  {
+    "query": "Help me write a PRD for a local habit tracker before we touch code.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run git status and tell me whether the working tree is clean.",
+    "should_trigger": false
+  },
+  {
+    "query": "Polish the spacing and typography on the landing page; no behavior changes.",
+    "should_trigger": false
+  },
+  {
+    "query": "Open the app in the browser and tell me what you see.",
+    "should_trigger": false
+  },
+  {
+    "query": "Explain this stack trace to me, but don't make changes yet.",
+    "should_trigger": false
+  }
+]

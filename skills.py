@@ -71,8 +71,14 @@ class SkillRegistry:
         lines = [
             "\n## Available Skills",
             "The following skills are available. If a skill is relevant to your "
-            "current task, load it by reading its SKILL.md file with the read_file tool. "
+            "current task, load it by reading its SKILL.md file with the read_skill_file tool. "
             "Only load skills you actually need — don't load them all.\n",
+            "Skill routing policy:",
+            "- If PROJECT_STATE.md exists in the workspace, read it first and resume from it instead of re-running kickoff.",
+            "- If the task starts a new or fuzzy project/major feature, read `skills/vibe-kickoff/SKILL.md` before implementation.",
+            "- If the task is already scoped, do not run kickoff; execute directly from the existing task context.",
+            "- If execution touches high-risk or tightly bounded areas, read `skills/vibe-execution-guard/SKILL.md` before editing.",
+            "- Keep PROJECT_STATE.md current when scope, decisions, progress, next steps, or known issues change.\n",
         ]
         for skill in self.catalog:
             lines.append(
