@@ -15,6 +15,7 @@ import config
 import tools
 import context
 from shell_session import PersistentShellSession
+from tool_runtime import ToolContext
 
 log = logging.getLogger("harness")
 
@@ -199,7 +200,8 @@ class Agent:
                  extra_tool_schemas: list[dict] | None = None,
                  middlewares: list | None = None,
                  time_budget: float | None = None,
-                 tool_schemas: list[dict] | None = None):
+                 tool_schemas: list[dict] | None = None,
+                 tool_context: ToolContext | None = None):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
@@ -207,6 +209,7 @@ class Agent:
         self.middlewares = middlewares or []  # list[AgentMiddleware]
         self.time_budget = time_budget
         self.tool_schemas = tool_schemas
+        self.tool_context = tool_context
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
         return AgentRuntimeState(task_board=TaskBoard(goal=task))
@@ -393,7 +396,13 @@ class Agent:
                         runtime_state.shell_session = PersistentShellSession(config.WORKSPACE)
 
                     log.info(f"[{self.name}] tool: {fn_name}({_truncate(str(fn_args), 120)})")
-                    result = tools.execute_tool(fn_name, fn_args, runtime_state=runtime_state, agent_name=self.name)
+                    result = tools.execute_tool(
+                        fn_name,
+                        fn_args,
+                        runtime_state=runtime_state,
+                        agent_name=self.name,
+                        tool_context=self.tool_context,
+                    )
                     log.debug(f"[{self.name}] tool result: {_truncate(result, 200)}")
                     trace.tool_call(fn_name, fn_args, result)
 

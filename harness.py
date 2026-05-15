@@ -30,10 +30,15 @@ from pathlib import Path
 
 import config
 import tools
+from approvals import ConsoleApprovalProvider
 from agents import Agent
 from skills import SkillRegistry
 from profiles import get_profile, list_profiles
 from profiles.base import BaseProfile
+from permissions import PermissionPolicy
+from session import SessionStore
+from tool_runtime import ToolContext
+from workspace_service import WorkspaceService
 
 log = logging.getLogger("harness")
 
@@ -57,13 +62,26 @@ class Harness:
         self.profile = profile
         self.skill_registry = SkillRegistry()
         skill_catalog = self.skill_registry.build_catalog_prompt()
+        self._main_cfg = profile.main_agent()
+        self._skill_catalog = skill_catalog
+        self.main_agent = self._build_main_agent()
 
-        main_cfg = profile.main_agent()
+    def _build_main_agent(self, tool_context: ToolContext | None = None) -> Agent:
+        main_cfg = self._main_cfg
+        kwargs = {
+            "use_tools": True,
+            "extra_tool_schemas": main_cfg.extra_tool_schemas,
+            "middlewares": main_cfg.middlewares,
+            "time_budget": main_cfg.time_budget,
+        }
+        if tool_context is not None:
+            kwargs["tool_context"] = tool_context
         self.main_agent = Agent(
-            "main_agent", main_cfg.system_prompt + skill_catalog,
-            use_tools=True, extra_tool_schemas=main_cfg.extra_tool_schemas,
-            middlewares=main_cfg.middlewares, time_budget=main_cfg.time_budget,
+            "main_agent",
+            main_cfg.system_prompt + self._skill_catalog,
+            **kwargs,
         )
+        return self.main_agent
 
     def run(self, user_prompt: str) -> None:
         # Create a unique project subdirectory under workspace
@@ -84,7 +102,8 @@ class Harness:
         log.info(f"Profile: {self.profile.name()}")
         log.info(f"Project directory: {config.WORKSPACE}")
 
-        # Initialize git
+        # Initialize git before runtime metadata is created so .harness does not
+        # become part of the initial project commit.
         git_dir = Path(config.WORKSPACE) / ".git"
         if not git_dir.exists():
             subprocess.run(["git", "init"], cwd=config.WORKSPACE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -96,8 +115,35 @@ class Harness:
                 stderr=subprocess.DEVNULL,
             )
 
+        permission_mode = os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write")
+        session_store = SessionStore(Path(config.WORKSPACE) / ".harness")
+        session = session_store.create(
+            profile=self.profile.name(),
+            cwd=Path(config.WORKSPACE),
+            model=config.MODEL,
+            permission_mode=permission_mode,
+        )
+        event_bus = session_store.event_bus(session)
+        tool_context = ToolContext(
+            workspace=WorkspaceService(
+                root=config.WORKSPACE,
+                snapshots_dir=session.snapshots_dir,
+            ),
+            permission_policy=PermissionPolicy(mode=permission_mode),
+            event_bus=event_bus,
+            session_id=session.id,
+            approval_provider=ConsoleApprovalProvider(),
+        )
+        setattr(self.main_agent, "tool_context", tool_context)
+        event_bus.emit(
+            "session_started",
+            agent="main_agent",
+            payload={"profile": self.profile.name(), "workspace": config.WORKSPACE},
+        )
+
         total_start = time.time()
         from middlewares import TimeBudgetMiddleware
+        assert self.main_agent is not None
         for mw in self.main_agent.middlewares:
             if isinstance(mw, TimeBudgetMiddleware):
                 mw.sync_start_time(total_start)
@@ -109,8 +155,15 @@ class Harness:
         log.info("=" * 60)
         log.info("MAIN AGENT LOOP")
         log.info("=" * 60)
-        self.main_agent.run(self._format_main_agent_task(user_prompt))
-        tools.stop_dev_server()
+        try:
+            self.main_agent.run(self._format_main_agent_task(user_prompt))
+        finally:
+            tools.stop_dev_server()
+            event_bus.emit(
+                "session_finished",
+                agent="main_agent",
+                payload={"profile": self.profile.name()},
+            )
 
         total_duration = time.time() - total_start
         log.info("=" * 60)

@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 
 import config
+from approvals import ApprovalRequest
+from tool_runtime import ToolContext
 
 # Playwright is optional — only needed for evaluator browser testing
 try:
@@ -944,11 +946,24 @@ TOOL_DISPATCH = {
 }
 
 
-def execute_tool(name: str, arguments: dict, runtime_state=None, agent_name: str | None = None) -> str:
+def execute_tool(
+    name: str,
+    arguments: dict,
+    runtime_state=None,
+    agent_name: str | None = None,
+    tool_context: ToolContext | None = None,
+) -> str:
     """Execute a tool by name with pre-validation and auto-correction."""
     fn = TOOL_DISPATCH.get(name)
     if fn is None:
         return f"[error] Unknown tool: {name}"
+
+    if tool_context is not None:
+        tool_context.event_bus.emit(
+            "before_tool",
+            agent=agent_name,
+            payload={"tool": name, "args": _redact_tool_args(arguments)},
+        )
 
     # Pre-validate and auto-correct arguments
     arguments, fix_warning = _validate_and_fix(name, arguments)
@@ -959,8 +974,83 @@ def execute_tool(name: str, arguments: dict, runtime_state=None, agent_name: str
     if fix_warning and "interactive command" in fix_warning:
         return fix_warning
 
+    if tool_context is not None:
+        decision = tool_context.permission_policy.decide_tool_call(name, arguments)
+        tool_context.event_bus.emit(
+            "permission_decided",
+            agent=agent_name,
+            payload={
+                "tool": name,
+                "allowed": decision.allowed,
+                "risk": decision.risk,
+                "action": decision.action,
+                "requires_approval": decision.requires_approval,
+                "reason": decision.reason,
+            },
+        )
+        if decision.requires_approval:
+            approval_request = ApprovalRequest(
+                tool_name=name,
+                args=_redact_tool_args(arguments),
+                risk=decision.risk,
+                reason=decision.reason,
+                agent_name=agent_name,
+                session_id=tool_context.session_id,
+            )
+            tool_context.event_bus.emit(
+                "approval_requested",
+                agent=agent_name,
+                payload={
+                    "tool": name,
+                    "risk": decision.risk,
+                    "reason": decision.reason,
+                    "args": _redact_tool_args(arguments),
+                },
+            )
+            approval_result = tool_context.approval_provider.request(approval_request)
+            tool_context.event_bus.emit(
+                "approval_decided",
+                agent=agent_name,
+                payload={
+                    "tool": name,
+                    "approved": approval_result.approved,
+                    "reason": approval_result.reason,
+                    "metadata": approval_result.metadata,
+                },
+            )
+            if not approval_result.approved:
+                result = f"[approval_denied] {approval_result.reason}"
+                tool_context.event_bus.emit(
+                    "after_tool",
+                    agent=agent_name,
+                    payload={
+                        "tool": name,
+                        "ok": False,
+                        "requires_approval": True,
+                        "result": result[:500],
+                    },
+                )
+                return result
+        elif not decision.allowed:
+            result = f"[blocked] {decision.reason}"
+            tool_context.event_bus.emit(
+                "after_tool",
+                agent=agent_name,
+                payload={
+                    "tool": name,
+                    "ok": False,
+                    "requires_approval": decision.requires_approval,
+                    "result": result[:500],
+                },
+            )
+            return result
+
     try:
-        if name in {"run_bash", "update_progress"}:
+        if tool_context is not None and name == "read_file":
+            result = _read_file_with_context(arguments, tool_context)
+        elif tool_context is not None and name == "write_file":
+            result = _write_file_with_context(arguments, tool_context, agent_name)
+        elif name in {"run_bash", "update_progress"}:
             result = fn(**arguments, runtime_state=runtime_state, agent_name=agent_name)
         else:
             result = fn(**arguments)
@@ -971,4 +1061,61 @@ def execute_tool(name: str, arguments: dict, runtime_state=None, agent_name: str
     if fix_warning:
         result = f"{fix_warning}\n\n{result}"
 
+    if tool_context is not None:
+        tool_context.event_bus.emit(
+            "after_tool",
+            agent=agent_name,
+            payload={
+                "tool": name,
+                "ok": not result.startswith("[error]") and not result.startswith("[blocked]"),
+                "result": result[:500],
+            },
+        )
+
     return result
+
+
+def _read_file_with_context(arguments: dict, tool_context: ToolContext) -> str:
+    path = arguments.get("path", "")
+    p = tool_context.workspace.resolve(path)
+    if not p.exists():
+        return f"[error] File not found: {path}"
+    content = p.read_text(encoding="utf-8", errors="replace")
+    limit = 60_000
+    if len(content) > limit:
+        total = len(content)
+        content = content[:limit] + (
+            f"\n\n[TRUNCATED] You are seeing {limit} of {total} total characters. "
+            f"The remaining {total - limit} characters are NOT shown above. "
+            f"You MUST use run_bash with head/tail/sed to read the rest if needed."
+        )
+    return content
+
+
+def _write_file_with_context(
+    arguments: dict,
+    tool_context: ToolContext,
+    agent_name: str | None,
+) -> str:
+    path = arguments.get("path", "")
+    content = arguments.get("content", "")
+    if not path or not str(path).strip():
+        return "[error] Empty file path"
+    write_result = tool_context.workspace.write_text(path, content)
+    rel = write_result.path.relative_to(tool_context.workspace.root)
+    tool_context.event_bus.emit(
+        "file_changed",
+        agent=agent_name,
+        payload={
+            "path": str(rel),
+            "snapshot_path": str(write_result.snapshot_path) if write_result.snapshot_path else None,
+        },
+    )
+    return f"Wrote {len(content)} chars to {path}"
+
+
+def _redact_tool_args(arguments: dict) -> dict:
+    redacted = dict(arguments or {})
+    if "content" in redacted:
+        redacted["content"] = f"[{len(str(redacted['content']))} chars]"
+    return redacted
