@@ -103,7 +103,21 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
 
         self.assertEqual(profile.legacy_calls, [])
         self.assertEqual([agent.name for agent in RecordingAgent.instances], ["main_agent"])
-        self.assertEqual(RecordingAgent.runs, [("main_agent", "fix the issue")])
+        self.assertEqual(len(RecordingAgent.runs), 1)
+        self.assertEqual(RecordingAgent.runs[0][0], "main_agent")
+        self.assertIn("fix the issue", RecordingAgent.runs[0][1])
+
+    def test_harness_injects_acceptance_criteria_into_main_agent_task(self):
+        profile = FakeProfile()
+
+        with patch("harness.Agent", RecordingAgent):
+            Harness(profile).run("fix the issue")
+
+        task = RecordingAgent.runs[0][1]
+        self.assertIn("Acceptance criteria", task)
+        self.assertIn("main agent verifies the task before stopping", task)
+        self.assertIn("Only the main agent may modify files", task)
+        self.assertIn("Consultation sub-agents are read-only", task)
 
     def test_main_agent_prompt_owns_edits_integration_and_stop_decision(self):
         profile = FakeProfile()

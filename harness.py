@@ -109,7 +109,7 @@ class Harness:
         log.info("=" * 60)
         log.info("MAIN AGENT LOOP")
         log.info("=" * 60)
-        self.main_agent.run(user_prompt)
+        self.main_agent.run(self._format_main_agent_task(user_prompt))
         tools.stop_dev_server()
 
         total_duration = time.time() - total_start
@@ -117,6 +117,18 @@ class Harness:
         log.info(f"HARNESS COMPLETE — total time: {total_duration / 60:.1f} minutes")
         log.info(f"Output in: {config.WORKSPACE}")
         log.info("=" * 60)
+
+    def _format_main_agent_task(self, user_prompt: str) -> str:
+        criteria = self.profile.acceptance_criteria()
+        criteria_text = "\n".join(f"- {item}" for item in criteria) if criteria else "- Verify the task requirements before stopping."
+        return (
+            f"Task:\n{user_prompt}\n\n"
+            f"Acceptance criteria:\n{criteria_text}\n\n"
+            "Main-agent ownership rules:\n"
+            "- Only the main agent may modify files, create tests, integrate results, and decide when to stop.\n"
+            "- Consultation sub-agents are read-only and may only return findings, evidence, recommendations, and risks.\n"
+            "- Verify the acceptance criteria against actual files or command output before stopping."
+        )
 
 
 # ---------------------------------------------------------------------------

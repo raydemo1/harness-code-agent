@@ -17,7 +17,7 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from profiles import get_profile, list_profiles
-from profiles.base import AgentConfig
+from profiles.base import AgentConfig, BaseProfile
 
 
 class ProfileInterfaceTests(unittest.TestCase):
@@ -43,6 +43,27 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertNotIn("planner", prompt)
         self.assertNotIn("builder", prompt)
         self.assertNotIn("evaluator", prompt)
+
+    def test_profile_can_exist_without_legacy_role_methods(self):
+        class MinimalProfile(BaseProfile):
+            def name(self) -> str:
+                return "minimal"
+
+            def description(self) -> str:
+                return "Minimal main-agent-only profile"
+
+        profile = MinimalProfile()
+
+        self.assertIsInstance(profile.main_agent(), AgentConfig)
+        self.assertFalse(profile.planner().enabled)
+        self.assertFalse(profile.builder().enabled)
+        self.assertFalse(profile.evaluator().enabled)
+
+    def test_builtin_profiles_do_not_prompt_for_delegate_task(self):
+        for profile_meta in list_profiles():
+            profile = get_profile(profile_meta["name"])
+
+            self.assertNotIn("delegate_task", profile.main_agent().system_prompt)
 
 
 if __name__ == "__main__":

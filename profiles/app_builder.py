@@ -17,6 +17,12 @@ class AppBuilderProfile(BaseProfile):
     def description(self) -> str:
         return "Build complete web applications from a one-sentence prompt (Anthropic article scenario)"
 
+    def main_agent(self) -> AgentConfig:
+        return AgentConfig(
+            system_prompt=prompts.BUILDER_SYSTEM,
+            extra_tool_schemas=tools.BROWSER_TOOL_SCHEMAS,
+        )
+
     def planner(self) -> AgentConfig:
         return AgentConfig(system_prompt=prompts.PLANNER_SYSTEM)
 

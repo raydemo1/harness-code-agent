@@ -180,7 +180,7 @@ class PreExitVerificationMiddleware(AgentMiddleware):
     @staticmethod
     def _has_done_work(messages: list[dict]) -> bool:
         """Check if the agent has called any action tools."""
-        action_tools = {"run_bash", "write_file", "consult_subagent", "delegate_task"}
+        action_tools = {"run_bash", "write_file", "consult_subagent"}
         for msg in messages:
             if msg.get("role") == "assistant":
                 for tc in msg.get("tool_calls", []):
@@ -395,7 +395,7 @@ class TaskTrackingMiddleware(AgentMiddleware):
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
     """Hard-require progress updates before substantive main-agent actions."""
 
-    ACTION_TOOLS = {"run_bash", "write_file", "consult_subagent", "delegate_task"}
+    ACTION_TOOLS = {"run_bash", "write_file", "consult_subagent"}
 
     def before_tool(
         self,
@@ -460,11 +460,11 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         "no module named",
         "modulenotfounderror",
     )
-    ACTION_TOOLS = {"run_bash", "write_file", "consult_subagent", "delegate_task"}
+    ACTION_TOOLS = {"run_bash", "write_file", "consult_subagent"}
     READ_ONLY_PREFIXES = (
-        "cat ", "ls", "pwd", "find ", "grep ", "head ", "tail ", "sed ",
+        "cat ", "ls", "pwd", "grep ", "head ", "tail ",
         "git status", "git diff", "git log", "pytest", "python -m pytest",
-        "test ", "diff ", "wc ", "which ", "env", "echo ", "printf ",
+        "test ", "diff ", "wc ", "which ", "env",
     )
     VERIFICATION_FAILURE_PATTERNS = (
         "assert",
@@ -561,12 +561,12 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             return None
 
         if mode == "ENV_FIX":
-            if tool_name in {"write_file", "consult_subagent", "delegate_task"}:
+            if tool_name in {"write_file", "consult_subagent"}:
                 return "[blocked] Recovery mode ENV_FIX only allows diagnosis, installation, and environment repair actions."
             return None
 
         if mode == "SPEC_RECHECK":
-            if tool_name in {"write_file", "consult_subagent", "delegate_task"}:
+            if tool_name in {"write_file", "consult_subagent"}:
                 return "[blocked] Recovery mode SPEC_RECHECK is read-only. Re-read the task and verification outputs first."
             if tool_name == "run_bash" and not self._is_read_only_command(tool_args.get("command", "")):
                 return "[blocked] Recovery mode SPEC_RECHECK only allows read-only verification commands."
@@ -578,7 +578,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             return None
 
         if mode == "FINAL_VERIFY":
-            if tool_name in {"consult_subagent", "delegate_task", "web_search", "web_fetch"}:
+            if tool_name in {"consult_subagent", "web_search", "web_fetch"}:
                 return "[blocked] Recovery mode FINAL_VERIFY only allows direct verification and final fixes."
             return None
 
@@ -620,10 +620,10 @@ class ReadOnlySubagentMiddleware(AgentMiddleware):
 
     READ_ONLY_TOOLS = {"read_file", "list_files", "run_bash", "web_search", "web_fetch"}
     READ_ONLY_PREFIXES = (
-        "cat ", "ls", "pwd", "find ", "grep ", "rg ", "head ", "tail ", "sed ",
+        "cat ", "ls", "pwd", "grep ", "rg ", "head ", "tail ",
         "git status", "git diff", "git log", "git show", "git branch",
         "python -m unittest", "python -m pytest", "pytest", "test ", "diff ",
-        "wc ", "which ", "where ", "env", "echo ", "printf ",
+        "wc ", "which ", "where ", "env",
     )
 
     def _is_read_only_command(self, command: str) -> bool:

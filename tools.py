@@ -357,51 +357,6 @@ def consult_subagent(task: str, scope: str = "codebase_investigation") -> str:
     result = sub.run(task)
     return _as_consultation_report(scope, result)
 
-def delegate_task(task: str, role: str = "assistant") -> str:
-    """
-    Spawn a sub-agent in a completely isolated context to handle a subtask.
-
-    The sub-agent gets a clean context window — it does NOT inherit the parent's
-    conversation history. It has access to the same workspace and tools.
-    Only the structured result comes back to the parent.
-
-    Use this for:
-    - Exploring/reading many files without polluting your context
-    - Running a series of bash commands and summarizing results
-    - Any "dirty work" that would bloat your context window
-
-    The sub-agent's internal reasoning is invisible to the caller.
-    """
-    # Lazy import to avoid circular dependency
-    from agents import Agent
-
-    sub = Agent(
-        name=f"sub_{role}",
-        system_prompt=(
-            f"You are a sub-agent with the role: {role}. "
-            f"Complete the assigned task and provide a concise, structured summary of your findings. "
-            f"You have access to the workspace files and bash. "
-            f"Focus only on the task — do not do extra work.\n"
-            f"When done, respond with a clear summary of:\n"
-            f"1. What you found or did\n"
-            f"2. Key results or artifacts created\n"
-            f"3. Any issues encountered"
-        ),
-        use_tools=True,
-    )
-
-    result = sub.run(task)
-
-    if not result:
-        return "[sub-agent returned no output]"
-
-    # Truncate to avoid blowing up the parent's context
-    if len(result) > 8000:
-        result = result[:8000] + "\n...(truncated)"
-
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Playwright browser testing
 # ---------------------------------------------------------------------------
@@ -982,7 +937,6 @@ TOOL_DISPATCH = {
     "list_files": list_files,
     "run_bash": run_bash,
     "consult_subagent": consult_subagent,
-    "delegate_task": delegate_task,
     "web_search": web_search,
     "web_fetch": web_fetch,
     "browser_test": browser_test,

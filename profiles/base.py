@@ -116,24 +116,20 @@ class BaseProfile(ABC):
         """One-line description shown in --help."""
         ...
 
-    @abstractmethod
     def planner(self) -> AgentConfig:
-        """Config for the planning agent. Return enabled=False to skip planning."""
-        ...
+        """Legacy role config. Harness no longer calls this directly."""
+        return AgentConfig(system_prompt="", enabled=False)
 
-    @abstractmethod
     def builder(self) -> AgentConfig:
-        """Config for the execution agent."""
-        ...
+        """Legacy role config. Harness no longer calls this directly."""
+        return AgentConfig(system_prompt="", enabled=False)
 
-    @abstractmethod
     def evaluator(self) -> AgentConfig:
-        """Config for the evaluation agent."""
-        ...
+        """Legacy role config. Harness no longer calls this directly."""
+        return AgentConfig(system_prompt="", enabled=False)
 
     def main_agent(self) -> AgentConfig:
         """Config for the single owner agent that runs the full task loop."""
-        base_cfg = self.builder()
         prompt = (
             "You are the main agent for this task. You own the complete execution loop: "
             "understand the task, maintain progress, inspect the workspace, modify files, "
@@ -149,15 +145,9 @@ class BaseProfile(ABC):
             "4. Apply all code and test changes yourself.\n"
             "5. Run concrete verification commands.\n"
             "6. If verification fails, diagnose and continue. If it passes, do a final review before stopping.\n\n"
-            f"Scenario guidance:\n{base_cfg.system_prompt}"
+            "Use the task text and profile acceptance criteria as the source of truth."
         )
-        return AgentConfig(
-            system_prompt=prompt,
-            extra_tool_schemas=base_cfg.extra_tool_schemas,
-            enabled=base_cfg.enabled,
-            middlewares=base_cfg.middlewares,
-            time_budget=base_cfg.time_budget,
-        )
+        return AgentConfig(system_prompt=prompt)
 
     def subagent_policy(self) -> dict:
         """Policy for consultation-only sub-agents."""

@@ -69,27 +69,53 @@ class SubagentConsultationTests(unittest.TestCase):
     def test_read_only_subagent_blocks_non_read_only_shell_commands(self):
         middleware = ReadOnlySubagentMiddleware()
 
-        blocked = middleware.before_tool(
-            "run_bash",
-            {"command": "rm -rf build"},
-            messages=[],
-            agent_name="consult_review",
-        )
+        dangerous_commands = [
+            "rm -rf build",
+            "echo hacked > file.txt",
+            "printf hacked >> file.txt",
+            "sed -i 's/a/b/' file.txt",
+            "find . -name '*.pyc' -delete",
+        ]
 
-        self.assertIsNotNone(blocked)
-        self.assertIn("read-only", blocked.lower())
+        for command in dangerous_commands:
+            with self.subTest(command=command):
+                blocked = middleware.before_tool(
+                    "run_bash",
+                    {"command": command},
+                    messages=[],
+                    agent_name="consult_review",
+                )
+
+                self.assertIsNotNone(blocked)
+                self.assertIn("read-only", blocked.lower())
 
     def test_read_only_subagent_allows_read_only_shell_commands(self):
         middleware = ReadOnlySubagentMiddleware()
 
-        blocked = middleware.before_tool(
-            "run_bash",
-            {"command": "git status --short"},
-            messages=[],
-            agent_name="consult_review",
-        )
+        read_only_commands = [
+            "git status --short",
+            "git diff",
+            "rg consult_subagent .",
+            "cat tools.py",
+        ]
 
-        self.assertIsNone(blocked)
+        for command in read_only_commands:
+            with self.subTest(command=command):
+                blocked = middleware.before_tool(
+                    "run_bash",
+                    {"command": command},
+                    messages=[],
+                    agent_name="consult_review",
+                )
+
+                self.assertIsNone(blocked)
+
+    def test_delegate_task_is_not_available_as_a_tool(self):
+        tool_names = {schema["function"]["name"] for schema in tools.TOOL_SCHEMAS}
+
+        self.assertNotIn("delegate_task", tool_names)
+        self.assertNotIn("delegate_task", tools.TOOL_DISPATCH)
+        self.assertIn("Unknown tool", tools.execute_tool("delegate_task", {"task": "do work"}))
 
 
 if __name__ == "__main__":

@@ -249,7 +249,7 @@ Workflow:
    - What does the task actually require?
 2. PLAN: Based on what you found, write a brief step-by-step plan.
 3. DECOMPOSE: If the task has multiple independent parts, mark which steps \
-can be delegated to sub-agents via delegate_task. Use this format:
+can benefit from read-only consultation via consult_subagent. Use this format:
 
 ```
 ## Plan
@@ -258,14 +258,14 @@ can be delegated to sub-agents via delegate_task. Use this format:
 - Command: ...
 - Verify: ...
 
-### Step 2: [description] [DELEGATE]
-- Delegate to sub-agent with role: "module_writer"
-- Task: "Write the X module that does Y, save to Z"
+### Step 2: [description] [CONSULT]
+- Consult with scope: "codebase_investigation"
+- Task: "Inspect the X module and report relevant findings"
 - Verify: ...
 
-### Step 3: [description] [DELEGATE]
-- Delegate to sub-agent with role: "parser_writer"
-- Task: "Write a parser for X format, save to Z"
+### Step 3: [description] [CONSULT]
+- Consult with scope: "test_design"
+- Task: "Suggest tests and edge cases for X format"
 - Verify: ...
 
 ### Step 4: [description]
@@ -276,8 +276,7 @@ can be delegated to sub-agents via delegate_task. Use this format:
 Plan rules:
 - Keep it SHORT — 5-10 steps max.
 - Be specific: list exact commands, file paths, tools needed.
-- Mark steps as [DELEGATE] only if they are truly independent \
-(no dependency on other delegate steps).
+- Mark steps as [CONSULT] only when read-only findings would reduce risk or context load.
 - Note how to VERIFY each step.
 
 Use write_file to save the plan to spec.md, then stop.
@@ -320,9 +319,8 @@ not results.txt or output.txt.
 
 PROBLEM-SOLVING STRATEGY:
 1. Plan & Discover: Read spec.md, scan the codebase, understand the task.
-2. Build: Implement step by step. For steps marked [DELEGATE] in spec.md, \
-use delegate_task to run them in isolated sub-agents. Example:
-   delegate_task(task="Write a BPE tokenizer in C, save to tokenizer.c", role="module_writer")
+2. Build: Implement step by step. For steps marked [CONSULT] in spec.md, \
+use consult_subagent for read-only findings. You must perform all edits yourself.
 3. Verify: Run tests, read FULL output, compare against task spec (not your code).
 4. Fix: If anything fails, re-read the original spec and fix.
 
@@ -356,12 +354,12 @@ AVAILABLE TOOLS:
 - run_bash: Execute shell commands (your primary tool).
 - update_progress: Record your current task board before work and before finishing.
 - write_file / read_file / list_files: File operations in the workspace.
-- delegate_task: Spawn an isolated sub-agent for independent subtasks.
+- consult_subagent: Ask a read-only consultation helper for findings, evidence, recommendations, and risks.
 - web_search: Search the web via DuckDuckGo (for docs, APIs, algorithms).
 - web_fetch: Fetch a specific URL's content as text.
 - read_skill_file: Load a skill guide if one is relevant (see skill catalog below).
 Use the right tool for the job — e.g. web_search for lookup tasks, \
-delegate_task for parallelizable subtasks.
+consult_subagent for read-only investigation, test design, or review.
 """,
             middlewares=[
                 LoopDetectionMiddleware(
@@ -473,9 +471,8 @@ Use write_file to save to feedback.md, then stop.
                     f"\n\n--- STRATEGY HINT (total timeout: {total_mins} min, "
                     f"your budget: ~{builder_time} min, difficulty: {difficulty}) ---\n"
                     "This is a complex task. Consider breaking it into independent subtasks:\n"
-                    "- Use delegate_task to handle isolated pieces in parallel "
-                    "(e.g. one sub-agent writes a parser, another writes the core logic).\n"
-                    "- Each delegate_task runs in a clean context and returns a summary.\n"
+                    "- Use consult_subagent for read-only investigation, test design, or review.\n"
+                    "- Consultation returns findings only; you must make all edits yourself.\n"
                     "- Focus on getting a WORKING solution first, then optimize.\n"
                     "- Don't spend too long on any single approach — if stuck after 3-4 tries, pivot.\n"
                     "--- END STRATEGY HINT ---\n"
@@ -491,8 +488,8 @@ Use write_file to save to feedback.md, then stop.
                 strategy_hint = (
                     f"\n\n--- STRATEGY HINT (total timeout: {total_mins} min, "
                     f"your budget: ~{builder_time} min, difficulty: {difficulty}) ---\n"
-                    "Work methodically: implement, test, verify. Use delegate_task if "
-                    "the task has clearly separable parts.\n"
+                    "Work methodically: implement, test, verify. Use consult_subagent if "
+                    "read-only investigation would reduce risk.\n"
                     "--- END STRATEGY HINT ---\n"
                 )
 

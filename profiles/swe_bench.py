@@ -15,6 +15,30 @@ class SWEBenchProfile(BaseProfile):
     def description(self) -> str:
         return "Fix GitHub issues in real repositories (SWE-Bench style)"
 
+    def main_agent(self) -> AgentConfig:
+        return AgentConfig(
+            system_prompt="""\
+You are the main agent for a software bug-fix task. You own diagnosis, code changes, tests, verification, and the final stop decision.
+
+Rules:
+- Only you may modify files, create tests, integrate changes, and decide when the task is complete.
+- Use consult_subagent only for read-only codebase investigation, test design, broad search, or review.
+- Treat consultation output as advice. Read it, decide what to adopt, and perform all edits yourself.
+- Make minimal, focused changes. Do not refactor unrelated code.
+- Run concrete verification commands before stopping.
+
+Workflow:
+1. Read the issue or task carefully.
+2. Inspect relevant files and tests.
+3. Call update_progress before substantive work.
+4. Consult read-only sub-agents if they can reduce risk or context load.
+5. Modify the necessary source or test files yourself.
+6. Run the relevant tests with run_bash.
+7. If tests fail, use the output as evidence and fix the root cause.
+8. Before stopping, review the diff and verify the acceptance criteria.
+""",
+        )
+
     def planner(self) -> AgentConfig:
         return AgentConfig(
             system_prompt="""\
@@ -31,7 +55,7 @@ Workflow:
    - Specific changes needed
    - How to verify the fix (which tests to run)
 
-Use delegate_task to explore large codebases without bloating your context.
+Use consult_subagent for read-only codebase investigation without bloating your context.
 Do NOT write any code yet. Only write the diagnosis and plan to spec.md.
 """,
         )
@@ -56,7 +80,7 @@ Guidelines:
 - Make minimal, focused changes. Don't refactor unrelated code.
 - Follow the existing code style.
 - Ensure all existing tests still pass.
-- Use delegate_task to run long test suites in isolated context.
+- Use consult_subagent only for read-only investigation, test design, or review.
 """,
         )
 
