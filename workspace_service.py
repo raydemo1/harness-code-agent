@@ -68,13 +68,23 @@ class WorkspaceService:
         shutil.copy2(resolved, snapshot_path)
         return snapshot_path
 
+    _SAFE_ENV_SUFFIXES = {'.example', '.template', '.sample', '.default', '.dist'}
+
     def _ensure_writable(self, path: Path) -> None:
         rel = path.relative_to(self.root)
         parts = rel.parts
         if ".git" in parts:
             raise ValueError(f"Refusing to write inside .git: {rel}")
-        if path.name in self.protected_names:
+        if self._is_protected_name(path.name):
             raise ValueError(f"Refusing to write protected file: {rel}")
+
+    def _is_protected_name(self, name: str) -> bool:
+        if name in self.protected_names:
+            return True
+        for p in self.protected_names:
+            if name.startswith(p + '.') and not any(name.endswith(s) for s in self._SAFE_ENV_SUFFIXES):
+                return True
+        return False
 
     @staticmethod
     def _is_relative_to(path: Path, root: Path) -> bool:

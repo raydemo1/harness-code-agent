@@ -69,13 +69,13 @@ class PermissionPolicy:
     def classify_shell_command(self, command: str) -> str:
         lowered = command.strip().lower()
         dangerous_patterns = [
-            r"\brm\s+-[^\n;|&]*r",
+            r"\brm\s+-[^\n;|&]*[rf]",
             r"\bgit\s+reset\s+--hard\b",
             r"\bgit\s+checkout\s+--\b",
             r"\bdel\s+/[qsf]",
             r"\bremove-item\b.*\b-recurse\b",
-            r">\s*\S+",
-            r">>\s*\S+",
+            r">(?!&)\s*\S+",
+            r">>(?!&)\s*\S+",
             r"\bsed\s+-i\b",
             r"\bfind\b.*\b-delete\b",
             r"\bchmod\b",
