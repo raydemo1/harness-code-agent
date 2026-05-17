@@ -165,9 +165,14 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         prompt = RecordingAgent.instances[0].system_prompt
         self.assertIn("Skill routing policy", prompt)
         self.assertIn("skills/prd/SKILL.md", prompt)
+        self.assertIn("skills/planning-with-files/SKILL.md", prompt)
         self.assertIn("skills/vibe-execution-guard/SKILL.md", prompt)
         self.assertIn("PRD.md", prompt)
+        self.assertIn("task_plan.md", prompt)
+        self.assertIn("findings.md", prompt)
+        self.assertIn("progress.md", prompt)
         self.assertIn("planning-with-files", prompt)
+        self.assertIn("Treat `prd` and `planning-with-files` as collaborators", prompt)
 
     def test_checkpoint_policy_commits_workspace_changes_after_session(self):
         os.environ["HARNESS_COMMIT_POLICY"] = "checkpoint"

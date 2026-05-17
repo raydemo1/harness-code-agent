@@ -46,7 +46,7 @@ class SubagentConsultationTests(unittest.TestCase):
         self.assertIn("run_bash", tool_names)
         self.assertIn("web_search", tool_names)
         self.assertNotIn("write_file", tool_names)
-        self.assertNotIn("update_progress", tool_names)
+        self.assertNotIn("update_planning_files", tool_names)
         self.assertLessEqual(len(result), 8200)
         parsed = json.loads(result)
         self.assertEqual(parsed["status"], "completed")

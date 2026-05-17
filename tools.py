@@ -77,20 +77,24 @@ def write_file(path: str, content: str) -> str:
     return f"Wrote {len(content)} chars to {path}"
 
 
-def update_progress(
+def update_planning_files(
+    mode: str,
     goal: str,
     steps: list[str],
     current_step: str,
     completed_steps: list[str],
     blockers: list[str],
     next_action: str,
+    task_plan: str | None = None,
+    findings: str | None = None,
     runtime_state=None,
     agent_name: str | None = None,
 ) -> str:
-    """Update the agent task board and persist it to progress.md."""
+    """Update planning-with-files state and write the files required by the selected mode."""
     if runtime_state is None:
-        return "[error] update_progress requires runtime state"
+        return "[error] update_planning_files requires runtime state"
 
+    mode = (mode or "").strip().lower()
     goal = (goal or "").strip()
     current_step = (current_step or "").strip()
     next_action = (next_action or "").strip()
@@ -98,16 +102,18 @@ def update_progress(
     completed_steps = [str(step).strip() for step in (completed_steps or []) if str(step).strip()]
     blockers = [str(item).strip() for item in (blockers or []) if str(item).strip()]
 
+    if mode not in {"skip", "light", "full"}:
+        return "[error] mode must be one of: skip, light, full"
     if not goal:
-        return "[error] update_progress requires a non-empty goal"
+        return "[error] update_planning_files requires a non-empty goal"
     if not steps:
-        return "[error] update_progress requires at least one step"
+        return "[error] update_planning_files requires at least one step"
     if current_step not in steps:
         return "[error] current_step must be one of the declared steps"
     if any(step not in steps for step in completed_steps):
         return "[error] completed_steps must be a subset of steps"
     if not next_action:
-        return "[error] update_progress requires a non-empty next_action"
+        return "[error] update_planning_files requires a non-empty next_action"
 
     board = runtime_state.task_board
     board.goal = goal
@@ -119,9 +125,13 @@ def update_progress(
     board.update_count += 1
     board.requires_update = False
     board.needs_final_update = False
+    board.planning_mode = mode
 
     progress_lines = [
         "# Progress",
+        "",
+        "## Planning Mode",
+        mode,
         "",
         f"## Goal",
         goal,
@@ -149,9 +159,27 @@ def update_progress(
         str(board.update_count),
     ])
 
-    progress_path = Path(config.WORKSPACE) / config.PROGRESS_FILE
-    progress_path.write_text("\n".join(progress_lines) + "\n", encoding="utf-8")
-    return f"Updated progress in {config.PROGRESS_FILE}"
+    workspace = Path(config.WORKSPACE)
+    written: list[str] = []
+    if mode in {"light", "full"}:
+        progress_path = workspace / config.PROGRESS_FILE
+        progress_path.write_text("\n".join(progress_lines) + "\n", encoding="utf-8")
+        written.append(config.PROGRESS_FILE)
+
+    if mode == "full":
+        plan_text = (task_plan or "").strip()
+        findings_text = (findings or "").strip()
+        if not plan_text:
+            return "[error] full mode requires task_plan content"
+        if not findings_text:
+            return "[error] full mode requires findings content"
+        (workspace / "task_plan.md").write_text(plan_text + "\n", encoding="utf-8")
+        (workspace / "findings.md").write_text(findings_text + "\n", encoding="utf-8")
+        written.extend(["task_plan.md", "findings.md"])
+
+    if mode == "skip":
+        return "Planning mode set to skip; no planning files required"
+    return "Updated planning files: " + ", ".join(written)
 
 
 def list_files(directory: str = ".") -> str:
@@ -555,12 +583,17 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "update_progress",
-            "description": "Update the structured task board before doing substantive work or before finishing.",
+            "name": "update_planning_files",
+            "description": "Set the planning mode and update planning-with-files state. Use skip for <3 estimated tool calls, light for 3-5 tool calls and progress.md only, full for >5 tool calls and task_plan.md/findings.md/progress.md.",
             "parameters": {
                 "type": "object",
-                "required": ["goal", "steps", "current_step", "completed_steps", "blockers", "next_action"],
+                "required": ["mode", "goal", "steps", "current_step", "completed_steps", "blockers", "next_action"],
                 "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": "Planning mode selected by the agent self-check: skip, light, or full",
+                        "enum": ["skip", "light", "full"],
+                    },
                     "goal": {"type": "string", "description": "Overall task goal"},
                     "steps": {
                         "type": "array",
@@ -579,6 +612,14 @@ TOOL_SCHEMAS = [
                         "items": {"type": "string"},
                     },
                     "next_action": {"type": "string", "description": "The exact next action to take"},
+                    "task_plan": {
+                        "type": "string",
+                        "description": "Full task_plan.md content. Required in full mode; ignored otherwise.",
+                    },
+                    "findings": {
+                        "type": "string",
+                        "description": "Full findings.md content. Required in full mode; ignored otherwise.",
+                    },
                 },
             },
         },
@@ -935,7 +976,7 @@ TOOL_DISPATCH = {
     "read_file": read_file,
     "read_skill_file": read_skill_file,
     "write_file": write_file,
-    "update_progress": update_progress,
+    "update_planning_files": update_planning_files,
     "list_files": list_files,
     "run_bash": run_bash,
     "consult_subagent": consult_subagent,
@@ -1050,7 +1091,7 @@ def execute_tool(
             result = _read_file_with_context(arguments, tool_context)
         elif tool_context is not None and name == "write_file":
             result = _write_file_with_context(arguments, tool_context, agent_name)
-        elif name in {"run_bash", "update_progress"}:
+        elif name in {"run_bash", "update_planning_files"}:
             result = fn(**arguments, runtime_state=runtime_state, agent_name=agent_name)
         else:
             result = fn(**arguments)

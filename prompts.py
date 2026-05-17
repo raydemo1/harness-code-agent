@@ -38,7 +38,11 @@ If you finish without creating any source code files, you have FAILED.
 
 Step-by-step workflow:
 1. Read the user task and current workspace.
-2. Call update_progress before substantive work.
+2. Run a Planning Mode Self-Check before substantive work:
+   - skip for fewer than 3 estimated tool calls; no visible note needed.
+   - light for 3-5 estimated tool calls; briefly tell the user and maintain progress.md.
+   - full for more than 5 estimated tool calls; briefly tell the user and maintain task_plan.md, findings.md, and progress.md.
+   Call update_planning_files with that mode before action tools.
 3. If local investigation, test design, broad search, or review would help, use consult_subagent.
 4. Treat consultation output as advice only. You must decide what to adopt.
 5. WRITE CODE: Use write_file to create every source file needed. \
@@ -51,7 +55,7 @@ Technical guidelines:
 - If a framework is needed, use React+Vite.
 - Make the UI polished and appropriate for the requested product.
 
-You have these tools: read_file, write_file, list_files, run_bash, update_progress, read_skill_file, consult_subagent.
+You have these tools: read_file, write_file, list_files, run_bash, update_planning_files, read_skill_file, consult_subagent.
 Work inside the current directory. All files you create will persist.
 """
 

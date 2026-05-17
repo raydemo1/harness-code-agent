@@ -34,7 +34,7 @@ class AgentRuntimeStateTests(unittest.TestCase):
         prompt = TerminalProfile().builder().system_prompt
 
         self.assertIn("persistent shell", prompt.lower())
-        self.assertIn("update_progress", prompt)
+        self.assertIn("update_planning_files", prompt)
         self.assertIn("recovery mode", prompt.lower())
 
     def test_terminal_builder_uses_enforcement_middlewares(self):

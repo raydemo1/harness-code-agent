@@ -393,7 +393,7 @@ class TaskTrackingMiddleware(AgentMiddleware):
 
 
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
-    """Hard-require progress updates before substantive main-agent actions."""
+    """Hard-require planning updates for light/full planning modes."""
 
     ACTION_TOOLS = {"run_bash", "write_file", "consult_subagent"}
 
@@ -409,11 +409,20 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             return None
         if tool_name not in self.ACTION_TOOLS:
             return None
+        if tool_name == "update_planning_files":
+            return None
         board = runtime_state.task_board
-        if board.update_count == 0 or board.requires_update:
+        if board.planning_mode == "skip":
+            return None
+        if board.update_count == 0 or board.planning_mode == "unset":
             return (
-                "[blocked] Call update_progress before using action tools. "
-                "You must explicitly record your goal, current step, and next action first."
+                "[blocked] Run the Planning Mode Self-Check first. "
+                "Call update_planning_files with mode skip, light, or full before substantive action tools."
+            )
+        if board.requires_update:
+            return (
+                "[blocked] Update planning state before more edits or commands. "
+                "Call update_planning_files to refresh progress.md, and task_plan.md/findings.md in full mode."
             )
         return None
 
@@ -426,14 +435,15 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             return None
 
         board = runtime_state.task_board
-        if tool_name == "update_progress":
+        if tool_name == "update_planning_files":
             board.requires_update = False
             board.needs_final_update = False
             return None
 
         if tool_name in self.ACTION_TOOLS:
             runtime_state.action_tool_count += 1
-            board.needs_final_update = True
+            if board.planning_mode in {"light", "full"}:
+                board.needs_final_update = True
         return None
 
     def pre_exit(self, messages: list[dict], runtime_state=None,
@@ -441,9 +451,9 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         board = runtime_state.task_board
-        if board.update_count > 0 and board.needs_final_update:
+        if board.planning_mode in {"light", "full"} and board.needs_final_update:
             return (
-                "[SYSTEM] Before finishing, call update_progress with the final state of the task. "
+                "[SYSTEM] Before finishing, call update_planning_files with the final planning state. "
                 "Record what is complete, what remains blocked, and the exact next action or verification result."
             )
         return None
@@ -557,7 +567,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         mode = runtime_state.recovery.mode
         if mode == "NORMAL":
             return None
-        if tool_name == "update_progress":
+        if tool_name == "update_planning_files":
             return None
 
         if mode == "ENV_FIX":
@@ -574,7 +584,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
 
         if mode == "RETHINK":
             if tool_name in self.ACTION_TOOLS and runtime_state.task_board.requires_update:
-                return "[blocked] Recovery mode RETHINK requires update_progress before more edits or commands."
+                return "[blocked] Recovery mode RETHINK requires update_planning_files before more edits or commands."
             return None
 
         if mode == "FINAL_VERIFY":
@@ -607,7 +617,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             ):
                 self.observe_verification_failure(result, runtime_state)
 
-        if tool_name == "update_progress" and runtime_state.recovery.mode == "SPEC_RECHECK":
+        if tool_name == "update_planning_files" and runtime_state.recovery.mode == "SPEC_RECHECK":
             self._clear_mode(runtime_state)
 
         if tool_name == "write_file":

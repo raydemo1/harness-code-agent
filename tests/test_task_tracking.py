@@ -1,7 +1,6 @@
 import os
 import shutil
 import sys
-import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -26,38 +25,90 @@ from middlewares import TaskTrackingEnforcementMiddleware
 from tools import execute_tool
 
 
-class UpdateProgressToolTests(unittest.TestCase):
-    def test_update_progress_updates_runtime_state_and_file(self):
-        temp_dir = os.path.join(os.getcwd(), "workspace", "test-progress-tool")
-        old_workspace = config.WORKSPACE
-        try:
-            os.makedirs(temp_dir, exist_ok=True)
-            config.WORKSPACE = temp_dir
-            state = AgentRuntimeState()
-            result = execute_tool(
-                "update_progress",
-                {
-                    "goal": "fix task",
-                    "steps": ["inspect", "edit", "verify"],
-                    "current_step": "inspect",
-                    "completed_steps": [],
-                    "blockers": [],
-                    "next_action": "read tests",
-                },
-                runtime_state=state,
-                agent_name="builder",
-            )
-            self.assertIn("Updated progress", result)
-            self.assertEqual(state.task_board.current_step, "inspect")
-            self.assertEqual(state.task_board.update_count, 1)
-            self.assertTrue(Path(temp_dir, config.PROGRESS_FILE).exists())
-        finally:
-            config.WORKSPACE = old_workspace
-            shutil.rmtree(temp_dir, ignore_errors=True)
+class UpdatePlanningFilesToolTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = os.path.join(os.getcwd(), "workspace", "test-planning-tool")
+        self.old_workspace = config.WORKSPACE
+        os.makedirs(self.temp_dir, exist_ok=True)
+        config.WORKSPACE = self.temp_dir
+
+    def tearDown(self):
+        config.WORKSPACE = self.old_workspace
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_light_mode_updates_runtime_state_and_progress_file(self):
+        state = AgentRuntimeState()
+        result = execute_tool(
+            "update_planning_files",
+            {
+                "mode": "light",
+                "goal": "fix task",
+                "steps": ["inspect", "edit", "verify"],
+                "current_step": "inspect",
+                "completed_steps": [],
+                "blockers": [],
+                "next_action": "read tests",
+            },
+            runtime_state=state,
+            agent_name="builder",
+        )
+
+        self.assertIn("Updated planning files", result)
+        self.assertEqual(state.task_board.planning_mode, "light")
+        self.assertEqual(state.task_board.current_step, "inspect")
+        self.assertEqual(state.task_board.update_count, 1)
+        self.assertTrue(Path(self.temp_dir, config.PROGRESS_FILE).exists())
+        self.assertFalse(Path(self.temp_dir, "task_plan.md").exists())
+        self.assertFalse(Path(self.temp_dir, "findings.md").exists())
+
+    def test_full_mode_writes_all_planning_files(self):
+        state = AgentRuntimeState()
+        result = execute_tool(
+            "update_planning_files",
+            {
+                "mode": "full",
+                "goal": "build feature",
+                "steps": ["plan", "implement", "verify"],
+                "current_step": "plan",
+                "completed_steps": [],
+                "blockers": [],
+                "next_action": "inspect repo",
+                "task_plan": "# Task Plan\n\n- plan\n",
+                "findings": "# Findings\n\n- none yet\n",
+            },
+            runtime_state=state,
+            agent_name="builder",
+        )
+
+        self.assertIn("task_plan.md", result)
+        self.assertTrue(Path(self.temp_dir, config.PROGRESS_FILE).exists())
+        self.assertTrue(Path(self.temp_dir, "task_plan.md").exists())
+        self.assertTrue(Path(self.temp_dir, "findings.md").exists())
+
+    def test_skip_mode_sets_state_without_files(self):
+        state = AgentRuntimeState()
+        result = execute_tool(
+            "update_planning_files",
+            {
+                "mode": "skip",
+                "goal": "quick check",
+                "steps": ["run command"],
+                "current_step": "run command",
+                "completed_steps": [],
+                "blockers": [],
+                "next_action": "run pwd",
+            },
+            runtime_state=state,
+            agent_name="builder",
+        )
+
+        self.assertIn("skip", result)
+        self.assertEqual(state.task_board.planning_mode, "skip")
+        self.assertFalse(Path(self.temp_dir, config.PROGRESS_FILE).exists())
 
 
 class TaskTrackingEnforcementTests(unittest.TestCase):
-    def test_builder_cannot_run_bash_before_progress_update(self):
+    def test_builder_cannot_run_bash_before_planning_mode_self_check(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
 
@@ -70,18 +121,35 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(blocked)
-        self.assertIn("update_progress", blocked)
+        self.assertIn("update_planning_files", blocked)
 
-    def test_builder_cannot_exit_without_final_progress_update(self):
+    def test_skip_mode_allows_action_without_planning_files(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
+        state.task_board.planning_mode = "skip"
+        state.task_board.update_count = 1
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "pwd"},
+            messages=[],
+            runtime_state=state,
+            agent_name="builder",
+        )
+
+        self.assertIsNone(blocked)
+
+    def test_light_mode_requires_final_planning_update_after_action(self):
+        middleware = TaskTrackingEnforcementMiddleware()
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "light"
         state.task_board.update_count = 1
         state.task_board.needs_final_update = True
 
         blocked = middleware.pre_exit(messages=[], runtime_state=state, agent_name="builder")
 
         self.assertIsNotNone(blocked)
-        self.assertIn("update_progress", blocked)
+        self.assertIn("update_planning_files", blocked)
 
 
 if __name__ == "__main__":

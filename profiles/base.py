@@ -140,11 +140,13 @@ class BaseProfile(ABC):
             "perform final integration, and make the final stop decision.\n\n"
             "Required loop:\n"
             "1. Read the task and repository state.\n"
-            "2. Call update_progress before substantive work and keep progress.md current.\n"
+            "2. Run a Planning Mode Self-Check before substantive work. "
+            "Use skip for <3 estimated tool calls, light for 3-5, and full for >5. "
+            "Only mention the mode to the user for light/full. Call update_planning_files with that mode.\n"
             "3. Consult sub-agents only when their read-only findings would reduce context load or risk.\n"
             "4. Apply all code and test changes yourself.\n"
             "5. Run concrete verification commands.\n"
-            "6. If verification fails, diagnose and continue. If it passes, do a final review before stopping.\n\n"
+            "6. If verification fails, diagnose and continue. If it passes, update planning state when in light/full and do a final review before stopping.\n\n"
             "Use the task text and profile acceptance criteria as the source of truth."
         )
         return AgentConfig(system_prompt=prompt)

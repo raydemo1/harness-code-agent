@@ -30,7 +30,7 @@ Rules:
 Workflow:
 1. Read the issue or task carefully.
 2. Inspect relevant files and tests.
-3. Call update_progress before substantive work.
+3. Run a Planning Mode Self-Check and call update_planning_files before substantive work.
 4. Consult read-only sub-agents if they can reduce risk or context load.
 5. Modify the necessary source or test files yourself.
 6. Run the relevant tests with run_bash.

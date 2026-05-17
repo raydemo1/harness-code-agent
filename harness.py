@@ -131,7 +131,7 @@ class Harness:
             session_id=session.id,
             approval_provider=ConsoleApprovalProvider(),
         )
-        self.main_agent = self._build_main_agent(tool_context=tool_context)
+        self.main_agent.tool_context = tool_context
         event_bus.emit(
             "session_started",
             agent="main_agent",

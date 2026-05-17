@@ -17,6 +17,44 @@ Keep execution memory out of the PRD. If the task needs phase tracking, research
 
 Do not create `ARCH.md` or `PROJECT_STATE.md` from this skill. Put only lightweight technical direction in `PRD.md`; create separate architecture docs only if the user explicitly asks.
 
+## Collaboration With planning-with-files
+
+Use `prd` and `planning-with-files` as a pair when a task moves from fuzzy product intent into multi-step execution.
+
+`prd` owns:
+- Product goal and background.
+- Target users and core scenarios.
+- MVP scope and non-goals.
+- Acceptance criteria.
+- User workflow and constraints.
+- First implementation slice and suggested verification.
+
+`planning-with-files` owns:
+- `task_plan.md` phase breakdown and current status.
+- `findings.md` research and codebase discoveries.
+- `progress.md` session log, tool-level progress, errors, and verification results.
+- Retry history and next actions.
+
+After writing or updating `PRD.md`, hand off to `planning-with-files` when execution is complex, multi-step, research-heavy, or likely to take more than a few tool calls. The handoff should include:
+
+```md
+PRD goal:
+Current slice:
+Acceptance criteria:
+Execution phases:
+Suggested verification:
+Known risks:
+```
+
+If implementation reveals a product decision changed, return to `PRD.md` and update the requirement source of truth before changing the execution plan. If only status, discovered facts, errors, or verification results changed, update the planning files only.
+
+After the PRD pass, choose the planning mode for the first execution slice:
+- `skip`: fewer than 3 estimated tool calls; no planning files required.
+- `light`: 3-5 estimated tool calls; maintain `progress.md` only.
+- `full`: more than 5 estimated tool calls; maintain `task_plan.md`, `findings.md`, and `progress.md`.
+
+Do not force full planning just because `PRD.md` exists. `PRD.md` defines scope and acceptance; the execution slice still chooses the lightest planning mode that fits.
+
 ## When To Use
 
 Use this skill when the user asks to:
@@ -54,6 +92,8 @@ Output inside `PRD.md`:
 - Acceptance criteria.
 - First slice.
 - Open questions, only if blocking.
+
+If execution will continue immediately, choose `skip`, `light`, or `full` with `planning-with-files` after the brief is written.
 
 ### Full PRD
 
@@ -158,6 +198,8 @@ Every PRD pass should end with:
 - First implementation slice.
 - Suggested verification.
 - Known risks.
+- Whether `planning-with-files` should be used next.
+- Suggested planning mode for the first execution slice: `skip`, `light`, or `full`.
 
 Default execution contract:
 - Work one verifiable slice at a time.
@@ -166,6 +208,8 @@ Default execution contract:
 - Use planning-with-files for task plans, findings, progress, and retry logs when the task is long or complex.
 - Verify with concrete commands or manual checks before claiming done.
 - Report any verification that could not be run.
+
+When handing off to `planning-with-files`, do not restate the entire PRD in planning files. Copy only the goal, current slice, acceptance criteria, verification target, and known risks needed to execute the slice.
 
 ## PRD.md Template
 
@@ -204,6 +248,7 @@ PRD work is done when:
 - Important constraints are named or explicitly deferred.
 - `PRD.md` is written or updated when useful.
 - The first execution slice is ready.
+- For complex execution, the handoff to `planning-with-files` is explicit.
 
 ## Examples
 

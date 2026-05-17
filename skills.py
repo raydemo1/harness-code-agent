@@ -75,9 +75,11 @@ class SkillRegistry:
             "Only load skills you actually need — don't load them all.\n",
             "Skill routing policy:",
             "- If PRD.md exists in the workspace, read it first and use it as the product requirements source of truth.",
-            "- If the task starts a new or fuzzy project/major feature, read `skills/prd/SKILL.md` before implementation and create or update PRD.md only.",
+            "- If the task starts a new or fuzzy project/major feature, read `skills/prd/SKILL.md` before implementation and create or update PRD.md as the requirements artifact.",
             "- If the task is already scoped by PRD.md or the user request, do not re-run PRD planning; execute directly from the existing context.",
-            "- For long or complex execution, use planning-with-files for task plans, findings, progress, and retry logs instead of putting execution state in PRD.md.",
+            "- Treat `prd` and `planning-with-files` as collaborators: PRD.md defines goal, scope, non-goals, acceptance criteria, first slice, and risks; planning-with-files tracks execution in task_plan.md, findings.md, and progress.md.",
+            "- Use a Planning Mode Self-Check before substantive work: skip for <3 estimated tool calls, light for 3-5 with progress.md only, and full for >5 with task_plan.md, findings.md, and progress.md. Only mention the mode to the user for light/full.",
+            "- For long, complex, research-heavy, or multi-tool execution, read `skills/planning-with-files/SKILL.md` after PRD context is clear and keep task plans, findings, progress, retries, and verification out of PRD.md.",
             "- If execution touches high-risk or tightly bounded areas, read `skills/vibe-execution-guard/SKILL.md` before editing.",
             "- Keep PRD.md current when scope, requirements, acceptance criteria, risks, or major product decisions change.\n",
         ]

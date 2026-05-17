@@ -33,7 +33,7 @@ Rules:
 
 Workflow:
 1. Identify the domain and required facts or computations.
-2. Call update_progress before substantive work.
+2. Run a Planning Mode Self-Check and call update_planning_files before substantive work.
 3. Work through the solution step by step.
 4. Use consult_subagent for read-only review or parallel lookup when useful.
 5. Save the solution if the task asks for a file.

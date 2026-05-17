@@ -154,6 +154,7 @@ class TaskBoard:
     completed_steps: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     next_action: str = ""
+    planning_mode: str = "unset"
     update_count: int = 0
     requires_update: bool = False
     needs_final_update: bool = False
