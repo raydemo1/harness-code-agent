@@ -1,6 +1,6 @@
 [
   {
-    "query": "I want to build a small internal tool for searching our team docs. Before coding, help me define the MVP, pages, architecture, and first slice.",
+    "query": "I want to build a small internal tool for searching our team docs. Before coding, help me define the MVP, pages, acceptance criteria, and first slice.",
     "should_trigger": true
   },
   {
@@ -12,7 +12,7 @@
     "should_trigger": true
   },
   {
-    "query": "Help me choose a boring, testable stack and directory structure for a new API service.",
+    "query": "Help me choose a boring, testable product direction and first implementation slice for a new API service.",
     "should_trigger": true
   },
   {
@@ -20,7 +20,7 @@
     "should_trigger": true
   },
   {
-    "query": "We need durable project docs so future AI sessions know the product scope, architecture, current state, and next slice.",
+    "query": "We need a durable PRD so future AI sessions know the product scope, acceptance criteria, non-goals, and next slice.",
     "should_trigger": true
   },
   {
@@ -36,7 +36,7 @@
     "should_trigger": true
   },
   {
-    "query": "Let's prepare the Vibe Coding foundation: PRD, ARCH, PROJECT_STATE, and the first execution contract.",
+    "query": "Let's prepare the Vibe Coding PRD: scope, non-goals, acceptance criteria, risks, and the first execution contract.",
     "should_trigger": true
   },
   {

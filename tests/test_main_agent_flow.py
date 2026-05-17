@@ -5,6 +5,8 @@ import sys
 import tempfile
 import types
 import unittest
+from io import StringIO
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -23,6 +25,7 @@ _install_fake_openai_module()
 
 import config
 from harness import Harness
+from session import SessionStore
 from profiles.base import AgentConfig
 
 
@@ -68,13 +71,14 @@ class RecordingAgent:
     runs = []
 
     def __init__(self, name, system_prompt, use_tools=True, extra_tool_schemas=None,
-                 middlewares=None, time_budget=None):
+                 middlewares=None, time_budget=None, **kwargs):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
         self.extra_tool_schemas = extra_tool_schemas or []
         self.middlewares = middlewares or []
         self.time_budget = time_budget
+        self.tool_context = kwargs.get("tool_context")
         self.__class__.instances.append(self)
 
     def run(self, task):
@@ -152,7 +156,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertIn("stop decisions", prompt)
         self.assertIn("consult subagents", prompt)
 
-    def test_harness_injects_vibe_skill_routing_policy(self):
+    def test_harness_injects_prd_skill_routing_policy(self):
         profile = FakeProfile()
 
         with patch("harness.Agent", RecordingAgent):
@@ -160,9 +164,10 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
 
         prompt = RecordingAgent.instances[0].system_prompt
         self.assertIn("Skill routing policy", prompt)
-        self.assertIn("skills/vibe-kickoff/SKILL.md", prompt)
+        self.assertIn("skills/prd/SKILL.md", prompt)
         self.assertIn("skills/vibe-execution-guard/SKILL.md", prompt)
-        self.assertIn("PROJECT_STATE.md", prompt)
+        self.assertIn("PRD.md", prompt)
+        self.assertIn("planning-with-files", prompt)
 
     def test_checkpoint_policy_commits_workspace_changes_after_session(self):
         os.environ["HARNESS_COMMIT_POLICY"] = "checkpoint"
@@ -202,6 +207,80 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         subjects = self._git("log", "--format=%s").splitlines()
 
         self.assertTrue(subjects[0].startswith("milestone: "))
+
+    def test_sessions_command_lists_sessions_without_api_key(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = store.create(
+            profile="terminal",
+            cwd=Path(self.temp_dir),
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+
+        with patch.object(sys, "argv", ["harness.py", "sessions"]), patch("sys.stdout", new_callable=StringIO) as out:
+            with self.assertRaises(SystemExit) as raised:
+                import harness
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        output = out.getvalue()
+        self.assertIn(session.id, output)
+        self.assertIn("terminal", output)
+
+    def test_session_command_shows_session_without_api_key(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = store.create(
+            profile="reasoning",
+            cwd=Path(self.temp_dir),
+            model="model-b",
+            permission_mode="read-only",
+        )
+        store.event_bus(session).emit("session_started", agent="main_agent", payload={})
+
+        with patch.object(sys, "argv", ["harness.py", "session", session.id]), patch("sys.stdout", new_callable=StringIO) as out:
+            with self.assertRaises(SystemExit) as raised:
+                import harness
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        output = out.getvalue()
+        self.assertIn(session.id, output)
+        self.assertIn("reasoning", output)
+        self.assertIn("events: 1", output)
+
+    def test_config_show_prints_runtime_configuration_without_api_key(self):
+        with (
+            patch.object(config, "API_KEY", ""),
+            patch.object(sys, "argv", ["harness.py", "config", "show"]),
+            patch("sys.stdout", new_callable=StringIO) as out,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                import harness
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        output = out.getvalue()
+        self.assertIn("api_key: unset", output)
+        self.assertIn(f"workspace: {self.temp_dir}", output)
+        self.assertIn("commit_policy:", output)
+        self.assertIn("permission_mode:", output)
+
+    def test_doctor_reports_environment_without_api_key_preflight(self):
+        with (
+            patch.object(config, "API_KEY", ""),
+            patch.object(sys, "argv", ["harness.py", "doctor"]),
+            patch("sys.stdout", new_callable=StringIO) as out,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                import harness
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        output = out.getvalue()
+        self.assertIn("Harness doctor", output)
+        self.assertIn("API key", output)
+        self.assertIn("Python", output)
+        self.assertIn("Workspace", output)
 
 
 if __name__ == "__main__":

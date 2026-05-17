@@ -18,7 +18,6 @@ htmlcov/
 .agents/
 .claude/
 .codex/
-.trellis/
 
 
 # Virtual environments

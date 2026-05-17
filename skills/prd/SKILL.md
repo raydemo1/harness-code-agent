@@ -1,19 +1,21 @@
 ---
-name: vibe-kickoff
-description: "Use this skill before Vibe Coding implementation when the user is starting a new project, shaping a fuzzy feature, defining MVP scope, writing PRD-style context, setting acceptance criteria, choosing architecture or tech stack, mapping pages/workflows, or creating durable project context for future agent runs. It turns ambiguity into concrete docs, boundaries, and the first verifiable execution slice. Do not use for already-scoped bug fixes, routine implementation, code review, simple explanations, or status checks unless requirements or project direction need to be clarified."
+name: prd
+description: "Use this skill before Vibe Coding implementation when the user needs to define or refine product requirements, MVP scope, non-goals, acceptance criteria, user workflows, constraints, or the first implementation slice. This skill owns PRD.md only. Do not create ARCH.md or PROJECT_STATE.md; use planning-with-files for execution plans, findings, and progress logs."
 ---
 
-# Vibe Kickoff
+# PRD
 
-Use this skill when a project or feature needs a stable foundation before code is written.
+Use this skill when a project or feature needs a clear product requirements document before code is written.
 
-The job is simple: turn a fuzzy idea into durable context, clear boundaries, acceptance criteria, and a first execution slice.
+The job is simple: turn a fuzzy idea into `PRD.md` with clear scope, boundaries, acceptance criteria, and the first verifiable implementation slice.
 
 ## Core Principle
 
-Requirements should land somewhere durable. If the agent only chats through the plan, the next run will have to rediscover it.
+`PRD.md` is the source of truth for what should be built and how success will be judged.
 
-Plan only enough to make implementation safe and verifiable. Do not turn small edits into a ceremony.
+Keep execution memory out of the PRD. If the task needs phase tracking, research notes, retry logs, or session progress, use `planning-with-files` alongside this skill.
+
+Do not create `ARCH.md` or `PROJECT_STATE.md` from this skill. Put only lightweight technical direction in `PRD.md`; create separate architecture docs only if the user explicitly asks.
 
 ## When To Use
 
@@ -21,54 +23,54 @@ Use this skill when the user asks to:
 - Start a new app, website, tool, workflow, or product.
 - Clarify a fuzzy feature before coding.
 - Define MVP scope, non-goals, or acceptance criteria.
-- Create or update project context documents.
-- Choose a practical architecture, data model, page map, or tech stack.
-- Turn a broad request into implementation slices.
-- Prepare a reusable context for future AI/harness runs.
+- Create or update `PRD.md`.
+- Choose a practical product direction, page map, user flow, or first implementation slice.
+- Turn a broad request into implementation-ready requirements.
+- Prepare reusable product context for future AI/harness runs.
 
 ## When Not To Use
 
 Do not use this skill for:
 - A specific bug fix with clear repro steps.
-- An already-scoped implementation task.
+- An already-scoped implementation task with an existing PRD.
 - Code review without requested edits.
 - Simple command execution or status checks.
 - Pure explanation or summarization.
-- Documentation polishing that does not affect project direction.
+- Documentation polishing that does not affect product scope or acceptance criteria.
 
-If the user wants to skip planning, do the shortest useful kickoff: record assumptions, define the first slice, and move on.
+If the user wants to skip planning, do the shortest useful PRD pass: record assumptions, define the first slice, and move on.
 
 ## Output Modes
 
-### Quick Brief
+### Quick PRD Brief
 
 Use for small features or existing projects with limited uncertainty.
 
-Output:
-- Understanding.
+Output inside `PRD.md`:
+- Goal.
 - Assumptions.
-- First slice.
+- In scope.
+- Out of scope.
 - Acceptance criteria.
+- First slice.
 - Open questions, only if blocking.
 
-### Project Foundation
+### Full PRD
 
-Use for new projects or major features.
+Use for new projects, major features, or fuzzy MVPs.
 
 Output:
-- `PRD.md` draft.
-- `ARCH.md` draft.
-- `PROJECT_STATE.md` draft.
+- `PRD.md` only.
 - First execution slice.
-- Quality checks.
+- Suggested verification.
 
-Write files when the user asks for files or when the context is stable enough to preserve.
+If planning or progress tracking is needed, create or update the planning-with-files documents separately. Do not duplicate those logs in `PRD.md`.
 
-### High-Risk Foundation
+### High-Risk PRD
 
 Use for public products, multi-user systems, auth, payment, privacy, sensitive data, destructive data handling, production rollout, or expensive integrations.
 
-Also include:
+Also include in `PRD.md`:
 - Security and data boundaries.
 - Non-functional requirements.
 - Rollout and rollback expectations.
@@ -136,95 +138,78 @@ Consider:
 - Deployment fit.
 - Project size.
 
-Avoid architecture for speculative future features.
+Avoid architecture for speculative future features. Keep this section lightweight unless the user asks for architecture work.
 
-### 7. Create Durable Context
+### 7. Write Or Update PRD.md
 
-For substantial work, create or update:
-- `PRD.md`
-- `ARCH.md`
-- `PROJECT_STATE.md`
+For substantial work, create or update `PRD.md`.
 
-Keep these documents concise. They are working context, not a novel.
+Keep the PRD concise. It is product context, not an execution diary.
 
-Update them when scope, architecture, current goal, known issues, or major decisions change.
+Update it when scope, requirements, acceptance criteria, risks, or major product decisions change.
 
 ### 8. End With An Execution Contract
 
-Every kickoff should end with:
+Every PRD pass should end with:
 - Goal.
 - In scope.
 - Out of scope.
 - Acceptance criteria.
+- First implementation slice.
 - Suggested verification.
 - Known risks.
 
 Default execution contract:
 - Work one verifiable slice at a time.
-- Do not expand scope without updating the project state.
+- Do not expand scope without updating `PRD.md`.
 - Preserve existing project conventions.
+- Use planning-with-files for task plans, findings, progress, and retry logs when the task is long or complex.
 - Verify with concrete commands or manual checks before claiming done.
 - Report any verification that could not be run.
 
-## Document Templates
-
-### `PRD.md`
+## PRD.md Template
 
 ```md
-# Project Name
+# Project / Feature Name
+
 ## Goal And Background
+
 ## Target Users
+
 ## Core Scenarios
+
 ## MVP Scope
+
 ## Feature List
+
 ## Page / Workflow Map
+
 ## Acceptance Criteria
+
 ## Non-Goals
+
+## Technical Direction
+
 ## Risks And Dependencies
-```
 
-### `ARCH.md`
-
-```md
-# Architecture
-## Tech Stack
-## System Boundaries
-## Directory Structure
-## Core Modules
-## Data Model / Core Entities
-## Frontend And Backend Responsibilities
-## Security And Deployment Notes
-## Expected Evolution Points
-```
-
-### `PROJECT_STATE.md`
-
-```md
-# Project State
-## Current Phase
-## Current Goal
-## Completed
-## Next Step
-## Known Issues
-## Decisions
-## Open Questions
+## First Implementation Slice
 ```
 
 ## Done Criteria
 
-Kickoff is done when:
+PRD work is done when:
 - The goal is clear.
 - MVP and non-goals are separated.
 - Acceptance criteria are testable.
 - Important constraints are named or explicitly deferred.
-- Durable context is written when useful.
+- `PRD.md` is written or updated when useful.
 - The first execution slice is ready.
 
 ## Examples
 
 **New internal tool**
 Input: "I want to build an internal knowledge-base search app. Help me plan it first."
-Behavior: Define users, sources, access boundary, MVP, architecture, docs, and first slice.
+Behavior: Define users, sources, access boundary, MVP, PRD, and first slice.
 
 **Fuzzy MVP**
 Input: "Let's make a tiny SaaS for invoice reminders, but I'm not sure what the MVP should be."
@@ -232,4 +217,4 @@ Behavior: Separate first-version workflows from later billing, templates, analyt
 
 **Planning plus implementation**
 Input: "Plan a local habit tracker and then start building it."
-Behavior: Create a short foundation, define the first slice, then proceed to implementation.
+Behavior: Create a concise PRD, define the first slice, then proceed to implementation.

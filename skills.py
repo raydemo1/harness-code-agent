@@ -74,11 +74,12 @@ class SkillRegistry:
             "current task, load it by reading its SKILL.md file with the read_skill_file tool. "
             "Only load skills you actually need — don't load them all.\n",
             "Skill routing policy:",
-            "- If PROJECT_STATE.md exists in the workspace, read it first and resume from it instead of re-running kickoff.",
-            "- If the task starts a new or fuzzy project/major feature, read `skills/vibe-kickoff/SKILL.md` before implementation.",
-            "- If the task is already scoped, do not run kickoff; execute directly from the existing task context.",
+            "- If PRD.md exists in the workspace, read it first and use it as the product requirements source of truth.",
+            "- If the task starts a new or fuzzy project/major feature, read `skills/prd/SKILL.md` before implementation and create or update PRD.md only.",
+            "- If the task is already scoped by PRD.md or the user request, do not re-run PRD planning; execute directly from the existing context.",
+            "- For long or complex execution, use planning-with-files for task plans, findings, progress, and retry logs instead of putting execution state in PRD.md.",
             "- If execution touches high-risk or tightly bounded areas, read `skills/vibe-execution-guard/SKILL.md` before editing.",
-            "- Keep PROJECT_STATE.md current when scope, decisions, progress, next steps, or known issues change.\n",
+            "- Keep PRD.md current when scope, requirements, acceptance criteria, risks, or major product decisions change.\n",
         ]
         for skill in self.catalog:
             lines.append(

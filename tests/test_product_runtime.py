@@ -31,6 +31,33 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(events[0]["type"], "session_started")
             self.assertEqual(events[0]["sequence"], 1)
 
+    def test_session_store_lists_and_reads_sessions(self):
+        from session import SessionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / ".harness")
+            first = store.create(
+                profile="terminal",
+                cwd=Path(tmp),
+                model="model-a",
+                permission_mode="workspace-write",
+            )
+            second = store.create(
+                profile="reasoning",
+                cwd=Path(tmp),
+                model="model-b",
+                permission_mode="read-only",
+            )
+            store.event_bus(second).emit("session_finished", agent="main_agent", payload={})
+
+            sessions = store.list_sessions()
+            metadata = store.read_metadata(second.id)
+            events = store.read_events(second.id)
+
+            self.assertEqual([item["id"] for item in sessions], [second.id, first.id])
+            self.assertEqual(metadata["profile"], "reasoning")
+            self.assertEqual(events[0]["type"], "session_finished")
+
     def test_workspace_service_resolves_paths_and_snapshots_before_write(self):
         from workspace_service import WorkspaceService
 

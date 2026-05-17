@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -318,6 +319,168 @@ def _slugify(text: str, *, limit: int) -> str:
     return (slug or "session")[:limit].strip("-") or "session"
 
 
+def _session_store() -> SessionStore:
+    return SessionStore(Path(config.WORKSPACE) / ".harness")
+
+
+def _print_sessions() -> None:
+    sessions = _session_store().list_sessions()
+    if not sessions:
+        print("No sessions found.")
+        return
+    print(f"{'ID':28s} {'PROFILE':15s} {'MODE':18s} CREATED")
+    for item in sessions:
+        print(
+            f"{item.get('id', ''):28s} "
+            f"{item.get('profile', ''):15s} "
+            f"{item.get('permission_mode', ''):18s} "
+            f"{item.get('created_at', '')}"
+        )
+
+
+def _print_session(session_id: str) -> None:
+    store = _session_store()
+    metadata = store.read_metadata(session_id)
+    events = store.read_events(session_id)
+    print(f"id: {metadata.get('id', session_id)}")
+    print(f"profile: {metadata.get('profile', '')}")
+    print(f"model: {metadata.get('model', '')}")
+    print(f"permission_mode: {metadata.get('permission_mode', '')}")
+    print(f"status: {metadata.get('status', '')}")
+    print(f"cwd: {metadata.get('cwd', '')}")
+    print(f"created_at: {metadata.get('created_at', '')}")
+    print(f"events: {len(events)}")
+    if events:
+        print("recent_events:")
+        for event in events[-5:]:
+            print(
+                f"- #{event.get('sequence')} "
+                f"{event.get('type')} "
+                f"agent={event.get('agent')}"
+            )
+
+
+def _redact_secret(value: str) -> str:
+    if not value:
+        return "unset"
+    if len(value) <= 8:
+        return "set"
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def _print_config_show() -> None:
+    print("Harness config")
+    print(f"api_key: {_redact_secret(config.API_KEY)}")
+    print(f"base_url: {config.BASE_URL}")
+    print(f"model: {config.MODEL}")
+    print(f"workspace: {config.WORKSPACE}")
+    print(f"permission_mode: {os.environ.get('HARNESS_PERMISSION_MODE', 'workspace-write')}")
+    print(f"commit_policy: {os.environ.get('HARNESS_COMMIT_POLICY', 'checkpoint')}")
+    print(f"compress_threshold: {config.COMPRESS_THRESHOLD}")
+    print(f"reset_threshold: {config.RESET_THRESHOLD}")
+    print(f"max_harness_rounds: {config.MAX_HARNESS_ROUNDS}")
+    print(f"max_agent_iterations: {config.MAX_AGENT_ITERATIONS}")
+
+
+def _check_command(command: list[str]) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    output = (result.stdout or result.stderr).strip().splitlines()
+    detail = output[0] if output else f"exit {result.returncode}"
+    return result.returncode == 0, detail
+
+
+def _doctor_line(status: str, label: str, detail: str) -> None:
+    print(f"{status:4s} {label:18s} {detail}")
+
+
+def _run_doctor() -> int:
+    print("Harness doctor")
+    failures = 0
+
+    api_ok = bool(config.API_KEY)
+    _doctor_line("OK" if api_ok else "FAIL", "API key", "configured" if api_ok else "missing OPENAI_API_KEY")
+    failures += 0 if api_ok else 1
+
+    base_url_ok = bool(config.BASE_URL)
+    _doctor_line("OK" if base_url_ok else "FAIL", "API base URL", config.BASE_URL or "missing OPENAI_BASE_URL")
+    failures += 0 if base_url_ok else 1
+
+    python_detail = f"{sys.executable} ({sys.version.split()[0]})"
+    _doctor_line("OK", "Python", python_detail)
+
+    shell_path = shutil.which("pwsh") or shutil.which("powershell") or os.environ.get("ComSpec", "")
+    shell_ok = bool(shell_path)
+    _doctor_line("OK" if shell_ok else "FAIL", "Shell", shell_path or "no shell found")
+    failures += 0 if shell_ok else 1
+
+    git_ok, git_detail = _check_command(["git", "--version"])
+    _doctor_line("OK" if git_ok else "FAIL", "Git", git_detail)
+    failures += 0 if git_ok else 1
+
+    workspace = Path(config.WORKSPACE)
+    workspace_ok = workspace.exists() and workspace.is_dir()
+    _doctor_line("OK" if workspace_ok else "FAIL", "Workspace", str(workspace))
+    failures += 0 if workspace_ok else 1
+
+    try:
+        PermissionPolicy(mode=os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write"))
+        permission_ok = True
+        permission_detail = os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write")
+    except ValueError as e:
+        permission_ok = False
+        permission_detail = str(e)
+    _doctor_line("OK" if permission_ok else "FAIL", "Permission mode", permission_detail)
+    failures += 0 if permission_ok else 1
+
+    try:
+        commit_policy = _resolve_commit_policy()
+        commit_ok = True
+        commit_detail = commit_policy
+    except ValueError as e:
+        commit_ok = False
+        commit_detail = str(e)
+    _doctor_line("OK" if commit_ok else "FAIL", "Commit policy", commit_detail)
+    failures += 0 if commit_ok else 1
+
+    playwright = shutil.which("playwright")
+    _doctor_line("OK" if playwright else "WARN", "Playwright", playwright or "not installed")
+
+    return 0 if failures == 0 else 1
+
+
+def _handle_product_command(args: list[str]) -> bool:
+    if not args:
+        return False
+    if args[0] == "sessions":
+        _print_sessions()
+        sys.exit(0)
+    if args[0] == "session":
+        if len(args) != 2:
+            print("Usage: python harness.py session <session-id>")
+            sys.exit(1)
+        try:
+            _print_session(args[1])
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        sys.exit(0)
+    if args[:2] == ["config", "show"]:
+        _print_config_show()
+        sys.exit(0)
+    if args[0] == "doctor":
+        sys.exit(_run_doctor())
+    return False
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -328,6 +491,8 @@ def main():
 
     # Parse flags
     args = [a for a in sys.argv[1:] if a not in ("--verbose", "-v")]
+
+    _handle_product_command(args)
 
     # --list-profiles
     if "--list-profiles" in args:

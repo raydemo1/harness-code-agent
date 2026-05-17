@@ -1,13 +1,13 @@
 ---
 name: vibe-execution-guard
-description: "Use this skill only for high-risk or tightly bounded execution in Vibe Coding: user-specified 'only change this' constraints, auth/permissions/secrets/payment/privacy, destructive data changes, migrations, production incidents, rollback, or bugs that survived repeated fixes. It locks scope, identifies risk and rollback points, requires fact-based debugging, and verifies the smallest safe patch. Do not use for ordinary implementation when scope is already clear, project kickoff, PRD work, code review without edits, simple explanations, or status checks."
+description: "Use this skill only for high-risk or tightly bounded execution in Vibe Coding: user-specified 'only change this' constraints, auth/permissions/secrets/payment/privacy, destructive data changes, migrations, production incidents, rollback, or bugs that survived repeated fixes. It locks scope, identifies risk and rollback points, requires fact-based debugging, and verifies the smallest safe patch. Do not use for ordinary implementation when scope is already clear, PRD work, code review without edits, simple explanations, or status checks."
 ---
 
 # Vibe Execution Guard
 
 Use this skill only when execution needs a stricter boundary than normal implementation.
 
-Most coding tasks do not need this skill. A good kickoff document plus normal verification is enough. Use this when the cost of accidental scope expansion, guessing, or unsafe edits is high.
+Most coding tasks do not need this skill. A good PRD plus normal verification is enough. Use this when the cost of accidental scope expansion, guessing, or unsafe edits is high.
 
 ## Core Principle
 
@@ -26,7 +26,7 @@ Use this skill when:
 
 Do not use this skill for:
 - Ordinary implementation with clear scope and low risk.
-- New project planning or PRD/architecture work.
+- New project planning or PRD work.
 - Pure code review without edits.
 - Simple command execution, summaries, or explanations.
 - UI polish, copy edits, or documentation-only changes with no behavior risk.
