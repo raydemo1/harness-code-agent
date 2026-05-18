@@ -280,6 +280,58 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertEqual(len(forks), 1)
         self.assertEqual(forks[0]["profile"], "coding-agent")
 
+    def test_resume_context_includes_lineage_and_recent_events(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        source = store.create(
+            profile="coding-agent",
+            cwd=Path(self.temp_dir),
+            model="model-c",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(source).emit(
+            "session_started",
+            agent="main_agent",
+            payload={"profile": "coding-agent"},
+        )
+        fork = store.fork(source.id)
+
+        context = harness._build_resume_context(store, fork.id)
+
+        self.assertIn(f"Resuming session: {fork.id}", context)
+        self.assertIn(f"Lineage: {source.id} -> {fork.id}", context)
+        self.assertIn("session_started", context)
+        self.assertIn("session_forked", context)
+
+    def test_resume_command_runs_in_source_workspace_with_resume_context(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        source = store.create(
+            profile="coding-agent",
+            cwd=Path(self.temp_dir),
+            model="model-c",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(source).emit("session_started", agent="main_agent", payload={})
+
+        with (
+            patch.object(config, "API_KEY", "test-key"),
+            patch.object(sys, "argv", ["harness.py", "resume", source.id, "continue", "work"]),
+            patch("harness.Agent", RecordingAgent),
+        ):
+            harness.main()
+
+        self.assertEqual(RecordingAgent.runs[0][0], "main_agent")
+        task = RecordingAgent.runs[0][1]
+        self.assertIn("Resume context:", task)
+        self.assertIn(f"Resuming session: {source.id}", task)
+        self.assertIn("Task:\ncontinue work", task)
+
+        resumed_sessions = [
+            item for item in store.list_sessions()
+            if item.get("resumed_from") == source.id
+        ]
+        self.assertEqual(len(resumed_sessions), 1)
+        self.assertEqual(resumed_sessions[0]["cwd"], str(Path(self.temp_dir).resolve()))
+
     def test_config_show_prints_runtime_configuration_without_api_key(self):
         with (
             patch.object(config, "API_KEY", ""),

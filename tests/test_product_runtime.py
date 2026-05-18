@@ -85,6 +85,32 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(events[0]["type"], "session_forked")
             self.assertEqual(events[0]["payload"]["source_session_id"], source.id)
 
+    def test_session_store_reads_fork_lineage_and_resumed_metadata(self):
+        from session import SessionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / ".harness")
+            source = store.create(
+                profile="coding-agent",
+                cwd=Path(tmp),
+                model="model-a",
+                permission_mode="workspace-write",
+            )
+            fork = store.fork(source.id)
+            resumed = store.create(
+                profile="coding-agent",
+                cwd=Path(tmp),
+                model="model-a",
+                permission_mode="workspace-write",
+                resumed_from=fork.id,
+            )
+
+            lineage = store.read_lineage(fork.id)
+            resumed_metadata = store.read_metadata(resumed.id)
+
+            self.assertEqual([item["id"] for item in lineage], [source.id, fork.id])
+            self.assertEqual(resumed_metadata["resumed_from"], fork.id)
+
     def test_workspace_service_resolves_paths_and_snapshots_before_write(self):
         from workspace_service import WorkspaceService
 

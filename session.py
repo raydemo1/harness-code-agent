@@ -33,6 +33,7 @@ class SessionStore:
         cwd: str | Path,
         model: str,
         permission_mode: str,
+        resumed_from: str | None = None,
     ) -> Session:
         session_id = self._new_session_id()
         session_root = self.sessions_dir / session_id
@@ -56,6 +57,8 @@ class SessionStore:
             "permission_mode": permission_mode,
             "status": "running",
         }
+        if resumed_from:
+            metadata["resumed_from"] = resumed_from
         session.metadata_path.write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -133,6 +136,20 @@ class SessionStore:
                 continue
             events.append(json.loads(line))
         return events
+
+    def read_lineage(self, session_id: str) -> list[dict[str, Any]]:
+        lineage = []
+        seen = set()
+        current_id = session_id
+        while current_id:
+            if current_id in seen:
+                raise ValueError(f"Session lineage cycle detected: {current_id}")
+            seen.add(current_id)
+            metadata = self.read_metadata(current_id)
+            lineage.append(metadata)
+            current_id = metadata.get("forked_from")
+        lineage.reverse()
+        return lineage
 
     def _session_root(self, session_id: str) -> Path:
         if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:

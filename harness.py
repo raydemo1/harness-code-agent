@@ -92,11 +92,18 @@ class Harness:
         )
         return self.main_agent
 
-    def run(self, user_prompt: str) -> None:
+    def run(
+        self,
+        user_prompt: str,
+        *,
+        resume_context: str | None = None,
+        force_flat_workspace: bool = False,
+        resume_source_id: str | None = None,
+    ) -> None:
         # Create a unique project subdirectory under workspace
         # (skip if HARNESS_FLAT_WORKSPACE is set — used for benchmarks
         #  where outputs must land directly in the workspace root)
-        if os.environ.get("HARNESS_FLAT_WORKSPACE"):
+        if force_flat_workspace or os.environ.get("HARNESS_FLAT_WORKSPACE"):
             Path(config.WORKSPACE).mkdir(parents=True, exist_ok=True)
         else:
             from datetime import datetime
@@ -124,6 +131,7 @@ class Harness:
             cwd=Path(config.WORKSPACE),
             model=config.MODEL,
             permission_mode=permission_mode,
+            resumed_from=resume_source_id,
         )
         event_bus = session_store.event_bus(session)
         tool_context = ToolContext(
@@ -140,7 +148,11 @@ class Harness:
         event_bus.emit(
             "session_started",
             agent="main_agent",
-            payload={"profile": self.profile.name(), "workspace": config.WORKSPACE},
+            payload={
+                "profile": self.profile.name(),
+                "workspace": config.WORKSPACE,
+                "resumed_from": resume_source_id,
+            },
         )
 
         total_start = time.time()
@@ -159,7 +171,12 @@ class Harness:
         log.info("=" * 60)
         run_failed = False
         try:
-            self.main_agent.run(self._format_main_agent_task(user_prompt))
+            self.main_agent.run(
+                self._format_main_agent_task(
+                    user_prompt,
+                    resume_context=resume_context,
+                )
+            )
         except Exception:
             run_failed = True
             raise
@@ -184,10 +201,21 @@ class Harness:
         log.info(f"Output in: {config.WORKSPACE}")
         log.info("=" * 60)
 
-    def _format_main_agent_task(self, user_prompt: str) -> str:
+    def _format_main_agent_task(
+        self,
+        user_prompt: str,
+        *,
+        resume_context: str | None = None,
+    ) -> str:
         criteria = self.profile.acceptance_criteria()
         criteria_text = "\n".join(f"- {item}" for item in criteria) if criteria else "- Verify the task requirements before stopping."
+        resume_text = (
+            f"Resume context:\n{resume_context}\n\n"
+            if resume_context
+            else ""
+        )
         return (
+            resume_text +
             f"Task:\n{user_prompt}\n\n"
             f"Acceptance criteria:\n{criteria_text}\n\n"
             "Main-agent ownership rules:\n"
@@ -350,6 +378,8 @@ def _print_session(session_id: str) -> None:
     print(f"id: {metadata.get('id', session_id)}")
     if metadata.get("forked_from"):
         print(f"forked_from: {metadata.get('forked_from')}")
+    if metadata.get("resumed_from"):
+        print(f"resumed_from: {metadata.get('resumed_from')}")
     print(f"profile: {metadata.get('profile', '')}")
     print(f"model: {metadata.get('model', '')}")
     print(f"permission_mode: {metadata.get('permission_mode', '')}")
@@ -375,6 +405,70 @@ def _fork_session(session_id: str) -> None:
     print(f"forked_from: {metadata.get('forked_from', session_id)}")
     print(f"profile: {metadata.get('profile', '')}")
     print(f"cwd: {metadata.get('cwd', '')}")
+
+
+def _event_summary(event: dict) -> str:
+    payload = event.get("payload") or {}
+    payload_bits = []
+    for key in sorted(payload)[:4]:
+        value = payload[key]
+        text = str(value).replace("\n", " ")
+        if len(text) > 80:
+            text = text[:77] + "..."
+        payload_bits.append(f"{key}={text}")
+    suffix = f" ({', '.join(payload_bits)})" if payload_bits else ""
+    return (
+        f"#{event.get('sequence')} {event.get('type')} "
+        f"agent={event.get('agent')}{suffix}"
+    )
+
+
+def _build_resume_context(
+    store: SessionStore,
+    session_id: str,
+    *,
+    max_recent_events: int = 8,
+) -> str:
+    lineage = store.read_lineage(session_id)
+    current = lineage[-1]
+    lines = [
+        f"Resuming session: {current.get('id', session_id)}",
+        "Lineage: " + " -> ".join(item.get("id", "") for item in lineage),
+        f"Workspace: {current.get('cwd', '')}",
+        f"Profile: {current.get('profile', '')}",
+        f"Permission mode: {current.get('permission_mode', '')}",
+    ]
+    if current.get("forked_from"):
+        lines.append(f"Forked from: {current.get('forked_from')}")
+    lines.append("")
+    lines.append("Recent session events:")
+    for metadata in lineage:
+        events = store.read_events(metadata["id"])
+        if not events:
+            lines.append(f"- {metadata['id']}: no events")
+            continue
+        lines.append(f"- {metadata['id']}:")
+        for event in events[-max_recent_events:]:
+            lines.append(f"  - {_event_summary(event)}")
+    return "\n".join(lines)
+
+
+def _resume_session(session_id: str, follow_up_task: str) -> None:
+    store = _session_store()
+    metadata = store.read_metadata(session_id)
+    resume_context = _build_resume_context(store, session_id)
+    config.WORKSPACE = str(Path(metadata["cwd"]).resolve())
+    profile = get_profile(metadata.get("profile") or PRODUCT_DEFAULT_PROFILE)
+    prompt = follow_up_task.strip() or (
+        "Continue from the resumed session. Inspect the repository state, "
+        "use the resume context as historical evidence, and proceed with the next useful step."
+    )
+    Harness(profile).run(
+        prompt,
+        resume_context=resume_context,
+        force_flat_workspace=True,
+        resume_source_id=session_id,
+    )
 
 
 def _redact_secret(value: str) -> str:
@@ -535,7 +629,7 @@ def main():
     # Parse flags
     args = [a for a in sys.argv[1:] if a not in ("--verbose", "-v")]
 
-    if not (args and args[0] == "run"):
+    if not (args and args[0] in {"run", "resume"}):
         _handle_product_command(args)
 
     # --list-profiles
@@ -545,11 +639,34 @@ def main():
             print(f"  {p['name']:15s} {p['description']}")
         sys.exit(0)
 
-    try:
-        profile_name, args = _parse_profile_and_task(args)
-    except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    resume_session_id = None
+    resume_context = None
+    force_flat_workspace = False
+
+    if args and args[0] == "resume":
+        if len(args) < 2:
+            print("Usage: python harness.py resume <session-id> [follow-up task]")
+            sys.exit(1)
+        resume_session_id = args[1]
+        try:
+            store = _session_store()
+            metadata = store.read_metadata(resume_session_id)
+            resume_context = _build_resume_context(store, resume_session_id)
+        except (FileNotFoundError, ValueError, KeyError) as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        config.WORKSPACE = str(Path(metadata["cwd"]).resolve())
+        profile_name = metadata.get("profile") or PRODUCT_DEFAULT_PROFILE
+        args = args[2:] or [
+            "Continue from the resumed session. Inspect the repository state and proceed with the next useful step."
+        ]
+        force_flat_workspace = True
+    else:
+        try:
+            profile_name, args = _parse_profile_and_task(args)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
 
     if not config.API_KEY:
         print("Error: Set OPENAI_API_KEY in .env or environment.")
@@ -629,7 +746,12 @@ def main():
 
     harness = Harness(profile)
     try:
-        harness.run(user_prompt)
+        harness.run(
+            user_prompt,
+            resume_context=resume_context,
+            force_flat_workspace=force_flat_workspace,
+            resume_source_id=resume_session_id,
+        )
     except KeyboardInterrupt:
         log.warning("Interrupted by user.")
         sys.exit(130)
