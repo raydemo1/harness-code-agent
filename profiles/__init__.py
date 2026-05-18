@@ -2,11 +2,13 @@
 
 from profiles.base import BaseProfile, AgentConfig, ProfileConfig
 from profiles.app_builder import AppBuilderProfile
+from profiles.coding_agent import CodingAgentProfile
 from profiles.terminal import TerminalProfile
 from profiles.swe_bench import SWEBenchProfile
 from profiles.reasoning import ReasoningProfile
 
 PROFILES: dict[str, type[BaseProfile]] = {
+    "coding-agent": CodingAgentProfile,
     "app-builder": AppBuilderProfile,
     "terminal": TerminalProfile,
     "swe-bench": SWEBenchProfile,

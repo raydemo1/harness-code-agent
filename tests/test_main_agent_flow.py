@@ -25,6 +25,7 @@ _install_fake_openai_module()
 
 import config
 from harness import Harness
+import harness
 from session import SessionStore
 from profiles.base import AgentConfig
 
@@ -253,6 +254,32 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertIn("reasoning", output)
         self.assertIn("events: 1", output)
 
+    def test_fork_command_creates_session_fork_without_api_key(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        source = store.create(
+            profile="coding-agent",
+            cwd=Path(self.temp_dir),
+            model="model-c",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(source).emit("session_started", agent="main_agent", payload={})
+
+        with patch.object(sys, "argv", ["harness.py", "fork", source.id]), patch("sys.stdout", new_callable=StringIO) as out:
+            with self.assertRaises(SystemExit) as raised:
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        output = out.getvalue()
+        self.assertIn("forked_session:", output)
+        self.assertIn(f"forked_from: {source.id}", output)
+
+        forks = [
+            item for item in store.list_sessions()
+            if item.get("forked_from") == source.id
+        ]
+        self.assertEqual(len(forks), 1)
+        self.assertEqual(forks[0]["profile"], "coding-agent")
+
     def test_config_show_prints_runtime_configuration_without_api_key(self):
         with (
             patch.object(config, "API_KEY", ""),
@@ -286,6 +313,26 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertIn("API key", output)
         self.assertIn("Python", output)
         self.assertIn("Workspace", output)
+
+    def test_run_command_defaults_to_coding_agent_profile(self):
+        profile_name, task_args = harness._parse_profile_and_task(["run", "fix", "tests"])
+
+        self.assertEqual(profile_name, "coding-agent")
+        self.assertEqual(task_args, ["fix", "tests"])
+
+    def test_legacy_task_invocation_keeps_app_builder_default(self):
+        profile_name, task_args = harness._parse_profile_and_task(["build", "app"])
+
+        self.assertEqual(profile_name, "app-builder")
+        self.assertEqual(task_args, ["build", "app"])
+
+    def test_run_command_allows_profile_override(self):
+        profile_name, task_args = harness._parse_profile_and_task(
+            ["run", "--profile", "terminal", "fix", "shell"]
+        )
+
+        self.assertEqual(profile_name, "terminal")
+        self.assertEqual(task_args, ["fix", "shell"])
 
 
 if __name__ == "__main__":

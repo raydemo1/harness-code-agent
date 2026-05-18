@@ -58,6 +58,33 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(metadata["profile"], "reasoning")
             self.assertEqual(events[0]["type"], "session_finished")
 
+    def test_session_store_forks_session_metadata_and_lineage_event(self):
+        from session import SessionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / ".harness")
+            source = store.create(
+                profile="coding-agent",
+                cwd=Path(tmp),
+                model="model-a",
+                permission_mode="workspace-write",
+            )
+            store.event_bus(source).emit("session_started", agent="main_agent", payload={})
+            store.event_bus(source).emit("session_finished", agent="main_agent", payload={})
+
+            fork = store.fork(source.id)
+            metadata = store.read_metadata(fork.id)
+            events = store.read_events(fork.id)
+
+            self.assertNotEqual(fork.id, source.id)
+            self.assertEqual(metadata["profile"], "coding-agent")
+            self.assertEqual(metadata["model"], "model-a")
+            self.assertEqual(metadata["permission_mode"], "workspace-write")
+            self.assertEqual(metadata["forked_from"], source.id)
+            self.assertEqual(metadata["forked_from_event_count"], 2)
+            self.assertEqual(events[0]["type"], "session_forked")
+            self.assertEqual(events[0]["payload"]["source_session_id"], source.id)
+
     def test_workspace_service_resolves_paths_and_snapshots_before_write(self):
         from workspace_service import WorkspaceService
 

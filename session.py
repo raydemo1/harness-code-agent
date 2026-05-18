@@ -63,6 +63,39 @@ class SessionStore:
         session.events_path.write_text("", encoding="utf-8")
         return session
 
+    def fork(self, source_session_id: str) -> Session:
+        source_metadata = self.read_metadata(source_session_id)
+        source_events = self.read_events(source_session_id)
+        session = self.create(
+            profile=source_metadata["profile"],
+            cwd=source_metadata["cwd"],
+            model=source_metadata["model"],
+            permission_mode=source_metadata["permission_mode"],
+        )
+
+        metadata = json.loads(session.metadata_path.read_text(encoding="utf-8"))
+        metadata.update(
+            {
+                "status": "forked",
+                "forked_from": source_metadata.get("id", source_session_id),
+                "forked_from_event_count": len(source_events),
+                "forked_at": metadata["created_at"],
+            }
+        )
+        session.metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        self.event_bus(session).emit(
+            "session_forked",
+            agent=None,
+            payload={
+                "source_session_id": source_metadata.get("id", source_session_id),
+                "source_event_count": len(source_events),
+            },
+        )
+        return session
+
     def event_bus(self, session: Session) -> EventBus:
         return EventBus(session.events_path)
 

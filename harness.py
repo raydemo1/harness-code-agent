@@ -6,12 +6,15 @@ The core loop is owned by one main agent. Consultation sub-agents are read-only
 helpers for local investigation, parallel search, test design, and review.
 
 Built-in profiles:
+  coding-agent — Work in a local repository with sessions, permissions, and verification
   app-builder  — Build web apps from a prompt (original Anthropic article scenario)
   terminal     — Solve terminal/CLI tasks (Terminal-Bench-2 style)
   swe-bench    — Fix GitHub issues in real repos
   reasoning    — Knowledge-intensive QA (MMMU-Pro style)
 
 Usage:
+  python harness.py run "Fix the failing tests"                    # default: coding-agent
+  python harness.py run --profile terminal "Fix the broken git merge"
   python harness.py "Build a DAW in the browser"                    # default: app-builder
   python harness.py --profile terminal "Fix the broken git merge"
   python harness.py --profile swe-bench "Fix issue #123"
@@ -45,6 +48,8 @@ log = logging.getLogger("harness")
 
 COMMIT_POLICIES = {"none", "checkpoint", "milestone"}
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
+LEGACY_DEFAULT_PROFILE = "app-builder"
+PRODUCT_DEFAULT_PROFILE = "coding-agent"
 
 
 class Harness:
@@ -343,6 +348,8 @@ def _print_session(session_id: str) -> None:
     metadata = store.read_metadata(session_id)
     events = store.read_events(session_id)
     print(f"id: {metadata.get('id', session_id)}")
+    if metadata.get("forked_from"):
+        print(f"forked_from: {metadata.get('forked_from')}")
     print(f"profile: {metadata.get('profile', '')}")
     print(f"model: {metadata.get('model', '')}")
     print(f"permission_mode: {metadata.get('permission_mode', '')}")
@@ -358,6 +365,16 @@ def _print_session(session_id: str) -> None:
                 f"{event.get('type')} "
                 f"agent={event.get('agent')}"
             )
+
+
+def _fork_session(session_id: str) -> None:
+    store = _session_store()
+    session = store.fork(session_id)
+    metadata = store.read_metadata(session.id)
+    print(f"forked_session: {session.id}")
+    print(f"forked_from: {metadata.get('forked_from', session_id)}")
+    print(f"profile: {metadata.get('profile', '')}")
+    print(f"cwd: {metadata.get('cwd', '')}")
 
 
 def _redact_secret(value: str) -> str:
@@ -473,12 +490,38 @@ def _handle_product_command(args: list[str]) -> bool:
             print(f"Error: {e}")
             sys.exit(1)
         sys.exit(0)
+    if args[0] == "fork":
+        if len(args) != 2:
+            print("Usage: python harness.py fork <session-id>")
+            sys.exit(1)
+        try:
+            _fork_session(args[1])
+        except (FileNotFoundError, ValueError, KeyError) as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        sys.exit(0)
     if args[:2] == ["config", "show"]:
         _print_config_show()
         sys.exit(0)
     if args[0] == "doctor":
         sys.exit(_run_doctor())
     return False
+
+
+def _parse_profile_and_task(args: list[str]) -> tuple[str, list[str]]:
+    profile_name = PRODUCT_DEFAULT_PROFILE if args and args[0] == "run" else LEGACY_DEFAULT_PROFILE
+    if args and args[0] == "run":
+        args = args[1:]
+
+    if "--profile" in args:
+        idx = args.index("--profile")
+        if idx + 1 < len(args):
+            profile_name = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+        else:
+            raise ValueError("--profile requires a name")
+
+    return profile_name, args
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +535,8 @@ def main():
     # Parse flags
     args = [a for a in sys.argv[1:] if a not in ("--verbose", "-v")]
 
-    _handle_product_command(args)
+    if not (args and args[0] == "run"):
+        _handle_product_command(args)
 
     # --list-profiles
     if "--list-profiles" in args:
@@ -501,29 +545,27 @@ def main():
             print(f"  {p['name']:15s} {p['description']}")
         sys.exit(0)
 
-    # --profile <name>
-    profile_name = "app-builder"
-    if "--profile" in args:
-        idx = args.index("--profile")
-        if idx + 1 < len(args):
-            profile_name = args[idx + 1]
-            args = args[:idx] + args[idx + 2:]
-        else:
-            print("Error: --profile requires a name")
-            sys.exit(1)
+    try:
+        profile_name, args = _parse_profile_and_task(args)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     if not config.API_KEY:
         print("Error: Set OPENAI_API_KEY in .env or environment.")
         sys.exit(1)
 
     if len(args) < 1:
-        print("Usage: python harness.py [--profile <name>] \"<task>\" [--verbose]")
+        print("Usage: python harness.py run [--profile <name>] \"<task>\" [--verbose]")
+        print("       python harness.py [--profile <name>] \"<task>\" [--verbose]")
         print()
         print("Profiles:")
         for p in list_profiles():
             print(f"  {p['name']:15s} {p['description']}")
         print()
         print("Examples:")
+        print('  python harness.py run "Fix the failing tests"')
+        print('  python harness.py run --profile terminal "Fix the broken symlinks in /tmp"')
         print('  python harness.py "Build a DAW in the browser"')
         print('  python harness.py --profile terminal "Fix the broken symlinks in /tmp"')
         print('  python harness.py --profile swe-bench "Fix the TypeError in parse_config()"')

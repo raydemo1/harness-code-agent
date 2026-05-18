@@ -21,6 +21,15 @@ from profiles.base import AgentConfig, BaseProfile
 
 
 class ProfileInterfaceTests(unittest.TestCase):
+    def test_coding_agent_profile_is_registered_as_product_profile(self):
+        profile_names = [profile["name"] for profile in list_profiles()]
+        profile = get_profile("coding-agent")
+
+        self.assertIn("coding-agent", profile_names)
+        self.assertIn("local repository", profile.description())
+        self.assertIn("durable Harness session", profile.main_agent().system_prompt)
+        self.assertIn("workspace path checks", profile.main_agent().system_prompt)
+
     def test_all_profiles_expose_main_agent_and_subagent_policy(self):
         for profile_meta in list_profiles():
             profile = get_profile(profile_meta["name"])
