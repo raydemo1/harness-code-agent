@@ -233,6 +233,22 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertIn(session.id, output)
         self.assertIn("terminal", output)
 
+    def test_slash_sessions_command_lists_sessions_without_api_key(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = store.create(
+            profile="terminal",
+            cwd=Path(self.temp_dir),
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+
+        with patch.object(sys, "argv", ["harness.py", "/sessions"]), patch("sys.stdout", new_callable=StringIO) as out:
+            with self.assertRaises(SystemExit) as raised:
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn(session.id, out.getvalue())
+
     def test_session_command_shows_session_without_api_key(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
         session = store.create(
@@ -253,6 +269,22 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertIn(session.id, output)
         self.assertIn("reasoning", output)
         self.assertIn("events: 1", output)
+
+    def test_slash_session_command_shows_session_without_api_key(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = store.create(
+            profile="reasoning",
+            cwd=Path(self.temp_dir),
+            model="model-b",
+            permission_mode="read-only",
+        )
+
+        with patch.object(sys, "argv", ["harness.py", "/session", session.id]), patch("sys.stdout", new_callable=StringIO) as out:
+            with self.assertRaises(SystemExit) as raised:
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn(session.id, out.getvalue())
 
     def test_fork_command_creates_session_fork_without_api_key(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
@@ -279,6 +311,22 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         ]
         self.assertEqual(len(forks), 1)
         self.assertEqual(forks[0]["profile"], "coding-agent")
+
+    def test_slash_fork_command_creates_session_fork_without_api_key(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        source = store.create(
+            profile="coding-agent",
+            cwd=Path(self.temp_dir),
+            model="model-c",
+            permission_mode="workspace-write",
+        )
+
+        with patch.object(sys, "argv", ["harness.py", "/fork", source.id]), patch("sys.stdout", new_callable=StringIO) as out:
+            with self.assertRaises(SystemExit) as raised:
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn(f"forked_from: {source.id}", out.getvalue())
 
     def test_resume_context_includes_lineage_and_recent_events(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
@@ -332,6 +380,26 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertEqual(len(resumed_sessions), 1)
         self.assertEqual(resumed_sessions[0]["cwd"], str(Path(self.temp_dir).resolve()))
 
+    def test_slash_resume_command_runs_in_source_workspace_with_resume_context(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        source = store.create(
+            profile="coding-agent",
+            cwd=Path(self.temp_dir),
+            model="model-c",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(source).emit("session_started", agent="main_agent", payload={})
+
+        with (
+            patch.object(config, "API_KEY", "test-key"),
+            patch.object(sys, "argv", ["harness.py", "/resume", source.id, "continue"]),
+            patch("harness.Agent", RecordingAgent),
+        ):
+            harness.main()
+
+        self.assertIn("Resume context:", RecordingAgent.runs[0][1])
+        self.assertIn("Task:\ncontinue", RecordingAgent.runs[0][1])
+
     def test_config_show_prints_runtime_configuration_without_api_key(self):
         with (
             patch.object(config, "API_KEY", ""),
@@ -365,6 +433,18 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertIn("API key", output)
         self.assertIn("Python", output)
         self.assertIn("Workspace", output)
+
+    def test_unknown_slash_command_exits_before_api_preflight(self):
+        with (
+            patch.object(config, "API_KEY", ""),
+            patch.object(sys, "argv", ["harness.py", "/unknown"]),
+            patch("sys.stdout", new_callable=StringIO) as out,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("Unknown slash command", out.getvalue())
 
     def test_run_command_defaults_to_coding_agent_profile(self):
         profile_name, task_args = harness._parse_profile_and_task(["run", "fix", "tests"])

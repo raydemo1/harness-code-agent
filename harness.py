@@ -50,6 +50,14 @@ COMMIT_POLICIES = {"none", "checkpoint", "milestone"}
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 LEGACY_DEFAULT_PROFILE = "app-builder"
 PRODUCT_DEFAULT_PROFILE = "coding-agent"
+SLASH_COMMANDS = {
+    "/sessions": "sessions",
+    "/session": "session",
+    "/fork": "fork",
+    "/resume": "resume",
+    "/doctor": "doctor",
+    "/profiles": "--list-profiles",
+}
 
 
 class Harness:
@@ -602,6 +610,18 @@ def _handle_product_command(args: list[str]) -> bool:
     return False
 
 
+def _normalize_slash_command(args: list[str]) -> list[str]:
+    if not args or not args[0].startswith("/"):
+        return args
+    command = args[0]
+    if command == "/config":
+        return ["config", *args[1:]]
+    mapped = SLASH_COMMANDS.get(command)
+    if mapped is None:
+        raise ValueError(f"Unknown slash command: {command}")
+    return [mapped, *args[1:]]
+
+
 def _parse_profile_and_task(args: list[str]) -> tuple[str, list[str]]:
     profile_name = PRODUCT_DEFAULT_PROFILE if args and args[0] == "run" else LEGACY_DEFAULT_PROFILE
     if args and args[0] == "run":
@@ -628,6 +648,11 @@ def main():
 
     # Parse flags
     args = [a for a in sys.argv[1:] if a not in ("--verbose", "-v")]
+    try:
+        args = _normalize_slash_command(args)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     if not (args and args[0] in {"run", "resume"}):
         _handle_product_command(args)
@@ -673,20 +698,29 @@ def main():
         sys.exit(1)
 
     if len(args) < 1:
-        print("Usage: python harness.py run [--profile <name>] \"<task>\" [--verbose]")
-        print("       python harness.py [--profile <name>] \"<task>\" [--verbose]")
+        print("Usage: python harness.py \"<task>\" [--verbose]")
+        print("       python harness.py run [--profile <name>] \"<task>\" [--verbose]")
+        print("       python harness.py /<command> [args]")
+        print()
+        print("Slash commands:")
+        print("  /sessions")
+        print("  /session <session-id>")
+        print("  /fork <session-id>")
+        print("  /resume <session-id> [follow-up task]")
+        print("  /config show")
+        print("  /doctor")
+        print("  /profiles")
         print()
         print("Profiles:")
         for p in list_profiles():
             print(f"  {p['name']:15s} {p['description']}")
         print()
         print("Examples:")
+        print('  python harness.py "Fix the failing tests"')
+        print('  python harness.py /sessions')
+        print('  python harness.py /resume 20260518-120000-abcd1234 "continue verification"')
         print('  python harness.py run "Fix the failing tests"')
         print('  python harness.py run --profile terminal "Fix the broken symlinks in /tmp"')
-        print('  python harness.py "Build a DAW in the browser"')
-        print('  python harness.py --profile terminal "Fix the broken symlinks in /tmp"')
-        print('  python harness.py --profile swe-bench "Fix the TypeError in parse_config()"')
-        print('  python harness.py --profile reasoning "What is the escape velocity of Mars?"')
         sys.exit(1)
 
     user_prompt = " ".join(args)
