@@ -18,6 +18,11 @@ _install_fake_openai_module()
 
 from profiles import get_profile, list_profiles
 from profiles.base import AgentConfig, BaseProfile
+from middlewares import (
+    PreExitVerificationMiddleware,
+    RecoveryStrategyMiddleware,
+    TaskTrackingEnforcementMiddleware,
+)
 
 
 class ProfileInterfaceTests(unittest.TestCase):
@@ -73,6 +78,15 @@ class ProfileInterfaceTests(unittest.TestCase):
             profile = get_profile(profile_meta["name"])
 
             self.assertNotIn("delegate_task", profile.main_agent().system_prompt)
+
+    def test_app_builder_and_swe_bench_use_core_runtime_guardrails(self):
+        for profile_name in ["app-builder", "swe-bench"]:
+            with self.subTest(profile=profile_name):
+                middlewares = get_profile(profile_name).main_agent().middlewares
+
+                self.assertTrue(any(isinstance(mw, TaskTrackingEnforcementMiddleware) for mw in middlewares))
+                self.assertTrue(any(isinstance(mw, RecoveryStrategyMiddleware) for mw in middlewares))
+                self.assertTrue(any(isinstance(mw, PreExitVerificationMiddleware) for mw in middlewares))
 
 
 if __name__ == "__main__":

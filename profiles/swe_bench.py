@@ -5,9 +5,18 @@ Analyze issue → locate code → write patch → run tests → iterate.
 from __future__ import annotations
 
 from profiles.base import BaseProfile, AgentConfig
+from middlewares import (
+    ErrorGuidanceMiddleware,
+    LoopDetectionMiddleware,
+    PreExitVerificationMiddleware,
+    RecoveryStrategyMiddleware,
+    TaskTrackingEnforcementMiddleware,
+    TimeBudgetMiddleware,
+)
 
 
 class SWEBenchProfile(BaseProfile):
+    _DEFAULT_TASK_BUDGET = 3600
 
     def name(self) -> str:
         return "swe-bench"
@@ -37,6 +46,23 @@ Workflow:
 7. If tests fail, use the output as evidence and fix the root cause.
 8. Before stopping, review the diff and verify the acceptance criteria.
 """,
+            middlewares=[
+                LoopDetectionMiddleware(),
+                ErrorGuidanceMiddleware(),
+                TaskTrackingEnforcementMiddleware(),
+                RecoveryStrategyMiddleware(),
+                PreExitVerificationMiddleware(
+                    verification_prompt=(
+                        "Review the actual diff and run the most relevant tests for the issue. "
+                        "If tests fail, fix the root cause before stopping."
+                    ),
+                    include_task_requirements=True,
+                ),
+                TimeBudgetMiddleware(
+                    budget_seconds=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
+                ),
+            ],
+            time_budget=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
         )
 
     def planner(self) -> AgentConfig:

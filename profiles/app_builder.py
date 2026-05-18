@@ -7,9 +7,18 @@ from __future__ import annotations
 import tools
 import prompts
 from profiles.base import BaseProfile, AgentConfig
+from middlewares import (
+    ErrorGuidanceMiddleware,
+    LoopDetectionMiddleware,
+    PreExitVerificationMiddleware,
+    RecoveryStrategyMiddleware,
+    TaskTrackingEnforcementMiddleware,
+    TimeBudgetMiddleware,
+)
 
 
 class AppBuilderProfile(BaseProfile):
+    _DEFAULT_TASK_BUDGET = 3600
 
     def name(self) -> str:
         return "app-builder"
@@ -21,6 +30,23 @@ class AppBuilderProfile(BaseProfile):
         return AgentConfig(
             system_prompt=prompts.BUILDER_SYSTEM,
             extra_tool_schemas=tools.BROWSER_TOOL_SCHEMAS,
+            middlewares=[
+                LoopDetectionMiddleware(),
+                ErrorGuidanceMiddleware(),
+                TaskTrackingEnforcementMiddleware(),
+                RecoveryStrategyMiddleware(),
+                PreExitVerificationMiddleware(
+                    verification_prompt=(
+                        "Verify the app against the original request. Run concrete checks, "
+                        "and use browser_test when a browser UI is involved."
+                    ),
+                    include_task_requirements=True,
+                ),
+                TimeBudgetMiddleware(
+                    budget_seconds=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
+                ),
+            ],
+            time_budget=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
         )
 
     def planner(self) -> AgentConfig:
