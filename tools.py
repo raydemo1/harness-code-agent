@@ -9,7 +9,9 @@ import json
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import config
 from approvals import ApprovalRequest
@@ -536,7 +538,39 @@ def browser_test(
 # OpenAI function-calling schemas
 # ---------------------------------------------------------------------------
 
-TOOL_SCHEMAS = [
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    schema: dict
+    handler: Callable
+
+
+class ToolRegistry:
+    """Thin registry boundary for built-in and future profile-provided tools."""
+
+    def __init__(self):
+        self._schemas: dict[str, dict] = {}
+        self._handlers: dict[str, Callable] = {}
+
+    def register(self, schema: dict, handler: Callable) -> None:
+        name = schema.get("function", {}).get("name")
+        if not name:
+            raise ValueError("Tool schema missing function.name")
+        self._schemas[name] = schema
+        self._handlers[name] = handler
+
+    def get(self, name: str) -> Callable | None:
+        return self._handlers.get(name)
+
+    def schemas(self) -> list[dict]:
+        return list(self._schemas.values())
+
+    def dispatch(self) -> dict[str, Callable]:
+        return dict(self._handlers)
+
+
+CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
@@ -972,17 +1006,31 @@ def web_fetch(url: str) -> str:
 # Dispatch
 # ---------------------------------------------------------------------------
 
+def _build_builtin_tool_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    handlers = {
+        "read_file": read_file,
+        "read_skill_file": read_skill_file,
+        "write_file": write_file,
+        "update_planning_files": update_planning_files,
+        "list_files": list_files,
+        "run_bash": run_bash,
+        "consult_subagent": consult_subagent,
+        "web_search": web_search,
+        "web_fetch": web_fetch,
+        "browser_test": browser_test,
+    }
+    for schema in CORE_TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS:
+        name = schema["function"]["name"]
+        if name in handlers:
+            registry.register(schema, handlers[name])
+    return registry
+
+
+BUILTIN_TOOL_REGISTRY = _build_builtin_tool_registry()
+TOOL_SCHEMAS = CORE_TOOL_SCHEMAS
 TOOL_DISPATCH = {
-    "read_file": read_file,
-    "read_skill_file": read_skill_file,
-    "write_file": write_file,
-    "update_planning_files": update_planning_files,
-    "list_files": list_files,
-    "run_bash": run_bash,
-    "consult_subagent": consult_subagent,
-    "web_search": web_search,
-    "web_fetch": web_fetch,
-    "browser_test": browser_test,
+    **BUILTIN_TOOL_REGISTRY.dispatch(),
     "stop_dev_server": stop_dev_server,
 }
 
@@ -995,7 +1043,7 @@ def execute_tool(
     tool_context: ToolContext | None = None,
 ) -> str:
     """Execute a tool by name with pre-validation and auto-correction."""
-    fn = TOOL_DISPATCH.get(name)
+    fn = BUILTIN_TOOL_REGISTRY.get(name)
     if fn is None:
         return f"[error] Unknown tool: {name}"
 

@@ -5,6 +5,23 @@ from pathlib import Path
 
 
 class ProductRuntimeTests(unittest.TestCase):
+    def test_builtin_tool_registry_preserves_legacy_schema_and_dispatch_exports(self):
+        import tools
+
+        registry_names = {
+            schema["function"]["name"]
+            for schema in tools.BUILTIN_TOOL_REGISTRY.schemas()
+        }
+        legacy_names = {
+            schema["function"]["name"]
+            for schema in tools.TOOL_SCHEMAS + tools.BROWSER_TOOL_SCHEMAS
+            if schema["function"]["name"] != "stop_dev_server"
+        }
+
+        self.assertEqual(registry_names, legacy_names)
+        self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("read_file"), tools.TOOL_DISPATCH["read_file"])
+        self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
+
     def test_session_store_creates_metadata_and_jsonl_events(self):
         from session import SessionStore
 
