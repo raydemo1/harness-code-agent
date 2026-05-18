@@ -16,9 +16,9 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-from agents import Agent
-from middlewares import RecoveryStrategyMiddleware, TaskTrackingEnforcementMiddleware
-from profiles.terminal import TerminalProfile
+from harness_code_agent.agent.loop import Agent
+from harness_code_agent.runtime.middlewares import RecoveryStrategyMiddleware, TaskTrackingEnforcementMiddleware
+from harness_code_agent.profiles.terminal import TerminalProfile
 
 
 class AgentRuntimeStateTests(unittest.TestCase):
@@ -46,3 +46,5 @@ class AgentRuntimeStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

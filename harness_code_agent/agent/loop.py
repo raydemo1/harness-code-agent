@@ -11,11 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from openai import OpenAI
 
-import config
-import tools
-import context
-from shell_session import PersistentShellSession
-from tool_runtime import ToolContext
+from .. import config
+from . import context
+from ..runtime import tools
+from ..runtime.tool_context import ToolContext
+from ..workspace.shell_session import PersistentShellSession
 
 log = logging.getLogger("harness")
 

@@ -1,11 +1,11 @@
 # Profile registry
 
-from profiles.base import BaseProfile, AgentConfig, ProfileConfig
-from profiles.app_builder import AppBuilderProfile
-from profiles.coding_agent import CodingAgentProfile
-from profiles.terminal import TerminalProfile
-from profiles.swe_bench import SWEBenchProfile
-from profiles.reasoning import ReasoningProfile
+from .base import BaseProfile, AgentConfig, ProfileConfig
+from .app_builder import AppBuilderProfile
+from .coding_agent import CodingAgentProfile
+from .terminal import TerminalProfile
+from .swe_bench import SWEBenchProfile
+from .reasoning import ReasoningProfile
 
 PROFILES: dict[str, type[BaseProfile]] = {
     "coding-agent": CodingAgentProfile,

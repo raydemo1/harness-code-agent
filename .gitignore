@@ -54,6 +54,7 @@ Thumbs.db
 # Local generated knowledge/cache files
 .zread/
 global_plan/
+SPEC.md
 
 # Vendored dependency wheels can be rebuilt/downloaded from requirements.txt
 vendor_wheels/

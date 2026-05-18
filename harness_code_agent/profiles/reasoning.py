@@ -8,7 +8,7 @@ on the model's multimodal capabilities.
 """
 from __future__ import annotations
 
-from profiles.base import BaseProfile, AgentConfig
+from .base import BaseProfile, AgentConfig
 
 
 class ReasoningProfile(BaseProfile):

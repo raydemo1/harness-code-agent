@@ -23,11 +23,11 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-import config
-from harness import Harness
-import harness
-from session import SessionStore
-from profiles.base import AgentConfig
+from harness_code_agent import config
+from harness_code_agent.core.harness import Harness
+from harness_code_agent.core import harness
+from harness_code_agent.sessions.store import SessionStore
+from harness_code_agent.profiles.base import AgentConfig
 
 
 class FakeProfile:
@@ -124,7 +124,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
     def test_harness_runs_only_the_main_agent(self):
         profile = FakeProfile()
 
-        with patch("harness.Agent", RecordingAgent):
+        with patch("harness_code_agent.core.harness.Agent", RecordingAgent):
             Harness(profile).run("fix the issue")
 
         self.assertEqual(profile.legacy_calls, [])
@@ -136,7 +136,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
     def test_harness_injects_acceptance_criteria_into_main_agent_task(self):
         profile = FakeProfile()
 
-        with patch("harness.Agent", RecordingAgent):
+        with patch("harness_code_agent.core.harness.Agent", RecordingAgent):
             Harness(profile).run("fix the issue")
 
         task = RecordingAgent.runs[0][1]
@@ -148,7 +148,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
     def test_main_agent_prompt_owns_edits_integration_and_stop_decision(self):
         profile = FakeProfile()
 
-        with patch("harness.Agent", RecordingAgent):
+        with patch("harness_code_agent.core.harness.Agent", RecordingAgent):
             Harness(profile)
 
         prompt = RecordingAgent.instances[0].system_prompt.lower()
@@ -160,7 +160,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
     def test_harness_injects_prd_skill_routing_policy(self):
         profile = FakeProfile()
 
-        with patch("harness.Agent", RecordingAgent):
+        with patch("harness_code_agent.core.harness.Agent", RecordingAgent):
             Harness(profile)
 
         prompt = RecordingAgent.instances[0].system_prompt
@@ -179,7 +179,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         os.environ["HARNESS_COMMIT_POLICY"] = "checkpoint"
         profile = FakeProfile()
 
-        with patch("harness.Agent", WritingAgent):
+        with patch("harness_code_agent.core.harness.Agent", WritingAgent):
             Harness(profile).run("save generated app")
 
         subjects = self._git("log", "--format=%s").splitlines()
@@ -195,7 +195,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         os.environ["HARNESS_COMMIT_POLICY"] = "none"
         profile = FakeProfile()
 
-        with patch("harness.Agent", WritingAgent):
+        with patch("harness_code_agent.core.harness.Agent", WritingAgent):
             Harness(profile).run("save generated app")
 
         subjects = self._git("log", "--format=%s").splitlines()
@@ -207,7 +207,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         os.environ["HARNESS_COMMIT_POLICY"] = "milestone"
         profile = FakeProfile()
 
-        with patch("harness.Agent", WritingAgent):
+        with patch("harness_code_agent.core.harness.Agent", WritingAgent):
             Harness(profile).run("save generated app")
 
         subjects = self._git("log", "--format=%s").splitlines()
@@ -225,7 +225,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
 
         with patch.object(sys, "argv", ["harness.py", "sessions"]), patch("sys.stdout", new_callable=StringIO) as out:
             with self.assertRaises(SystemExit) as raised:
-                import harness
+                from harness_code_agent.core import harness
                 harness.main()
 
         self.assertEqual(raised.exception.code, 0)
@@ -261,7 +261,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
 
         with patch.object(sys, "argv", ["harness.py", "session", session.id]), patch("sys.stdout", new_callable=StringIO) as out:
             with self.assertRaises(SystemExit) as raised:
-                import harness
+                from harness_code_agent.core import harness
                 harness.main()
 
         self.assertEqual(raised.exception.code, 0)
@@ -384,7 +384,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         with (
             patch.object(config, "API_KEY", "test-key"),
             patch.object(sys, "argv", ["harness.py", "resume", source.id, "continue", "work"]),
-            patch("harness.Agent", RecordingAgent),
+            patch("harness_code_agent.core.harness.Agent", RecordingAgent),
         ):
             harness.main()
 
@@ -414,7 +414,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         with (
             patch.object(config, "API_KEY", "test-key"),
             patch.object(sys, "argv", ["harness.py", "/resume", source.id, "continue"]),
-            patch("harness.Agent", RecordingAgent),
+            patch("harness_code_agent.core.harness.Agent", RecordingAgent),
         ):
             harness.main()
 
@@ -428,7 +428,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
             patch("sys.stdout", new_callable=StringIO) as out,
         ):
             with self.assertRaises(SystemExit) as raised:
-                import harness
+                from harness_code_agent.core import harness
                 harness.main()
 
         self.assertEqual(raised.exception.code, 0)
@@ -445,7 +445,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
             patch("sys.stdout", new_callable=StringIO) as out,
         ):
             with self.assertRaises(SystemExit) as raised:
-                import harness
+                from harness_code_agent.core import harness
                 harness.main()
 
         self.assertEqual(raised.exception.code, 1)
@@ -490,3 +490,5 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

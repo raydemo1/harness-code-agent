@@ -5,7 +5,7 @@ import unittest
 
 from pathlib import Path
 
-from shell_session import PersistentShellSession
+from harness_code_agent.workspace.shell_session import PersistentShellSession
 
 
 def _commands_for_platform(temp_dir: str) -> dict[str, str]:
@@ -83,3 +83,5 @@ class PersistentShellSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

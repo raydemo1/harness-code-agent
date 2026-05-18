@@ -25,7 +25,8 @@ from pathlib import Path
 
 log = logging.getLogger("harness")
 
-SKILLS_DIR = Path(__file__).parent / "skills"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SKILLS_DIR = PROJECT_ROOT / "skills"
 
 
 class SkillRegistry:
@@ -51,7 +52,7 @@ class SkillRegistry:
             if meta:
                 name = meta.get("name", skill_file.parent.name)
                 desc = meta.get("description", "")
-                rel_path = skill_file.relative_to(Path(__file__).parent)
+                rel_path = skill_file.relative_to(PROJECT_ROOT)
                 self.catalog.append({
                     "name": name,
                     "description": desc,

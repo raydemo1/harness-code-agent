@@ -6,7 +6,7 @@ from pathlib import Path
 
 class ProductRuntimeTests(unittest.TestCase):
     def test_builtin_tool_registry_preserves_legacy_schema_and_dispatch_exports(self):
-        import tools
+        from harness_code_agent.runtime import tools
 
         registry_names = {
             schema["function"]["name"]
@@ -23,7 +23,7 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
 
     def test_session_store_creates_metadata_and_jsonl_events(self):
-        from session import SessionStore
+        from harness_code_agent.sessions.store import SessionStore
 
         with tempfile.TemporaryDirectory() as tmp:
             store = SessionStore(Path(tmp) / ".harness")
@@ -49,7 +49,7 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(events[0]["sequence"], 1)
 
     def test_session_store_lists_and_reads_sessions(self):
-        from session import SessionStore
+        from harness_code_agent.sessions.store import SessionStore
 
         with tempfile.TemporaryDirectory() as tmp:
             store = SessionStore(Path(tmp) / ".harness")
@@ -76,7 +76,7 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(events[0]["type"], "session_finished")
 
     def test_session_store_forks_session_metadata_and_lineage_event(self):
-        from session import SessionStore
+        from harness_code_agent.sessions.store import SessionStore
 
         with tempfile.TemporaryDirectory() as tmp:
             store = SessionStore(Path(tmp) / ".harness")
@@ -103,7 +103,7 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(events[0]["payload"]["source_session_id"], source.id)
 
     def test_session_store_reads_fork_lineage_and_resumed_metadata(self):
-        from session import SessionStore
+        from harness_code_agent.sessions.store import SessionStore
 
         with tempfile.TemporaryDirectory() as tmp:
             store = SessionStore(Path(tmp) / ".harness")
@@ -129,7 +129,7 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(resumed_metadata["resumed_from"], fork.id)
 
     def test_workspace_service_resolves_paths_and_snapshots_before_write(self):
-        from workspace_service import WorkspaceService
+        from harness_code_agent.workspace.service import WorkspaceService
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -147,7 +147,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 workspace.resolve("../outside.txt")
 
     def test_workspace_service_applies_unique_text_patch_and_rejects_ambiguous_patch(self):
-        from workspace_service import WorkspaceService
+        from harness_code_agent.workspace.service import WorkspaceService
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -166,7 +166,7 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "same\nsame\n")
 
     def test_workspace_service_rolls_back_latest_snapshot_for_file(self):
-        from workspace_service import WorkspaceService
+        from harness_code_agent.workspace.service import WorkspaceService
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -181,7 +181,7 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertTrue(result.snapshot_path.exists())
 
     def test_permission_policy_uses_codex_sandbox_modes(self):
-        from permissions import PermissionPolicy
+        from harness_code_agent.runtime.permissions import PermissionPolicy
 
         read_only_policy = PermissionPolicy(mode="read-only")
         read_decision = read_only_policy.decide_tool_call("read_file", {"path": "x.txt"})
@@ -218,17 +218,17 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertTrue(full_access_decision.allowed)
 
     def test_permission_policy_rejects_unknown_mode_names(self):
-        from permissions import PermissionPolicy
+        from harness_code_agent.runtime.permissions import PermissionPolicy
 
         with self.assertRaises(ValueError):
             PermissionPolicy(mode="unsupported-mode")
 
     def test_execute_tool_with_context_records_events_snapshots_and_approval_denial(self):
-        from events import EventBus
-        from permissions import PermissionPolicy
-        from tool_runtime import ToolContext
-        from workspace_service import WorkspaceService
-        import tools
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -277,11 +277,11 @@ class ProductRuntimeTests(unittest.TestCase):
             ])
 
     def test_execute_tool_apply_patch_records_snapshot_and_rejects_ambiguous_patch(self):
-        from events import EventBus
-        from permissions import PermissionPolicy
-        from tool_runtime import ToolContext
-        from workspace_service import WorkspaceService
-        import tools
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -317,12 +317,12 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertTrue(any(event["type"] == "file_changed" for event in events))
 
     def test_execute_tool_runs_approved_tool_call(self):
-        from approvals import StaticApprovalProvider
-        from events import EventBus
-        from permissions import PermissionPolicy
-        from tool_runtime import ToolContext
-        from workspace_service import WorkspaceService
-        import tools
+        from harness_code_agent.runtime.approvals import StaticApprovalProvider
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -354,3 +354,5 @@ class ProductRuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

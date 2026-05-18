@@ -4,10 +4,10 @@ Plan a product → write code → browser-test → iterate.
 """
 from __future__ import annotations
 
-import tools
-import prompts
-from profiles.base import BaseProfile, AgentConfig
-from middlewares import (
+from .. import prompts
+from ..runtime import tools
+from .base import BaseProfile, AgentConfig
+from ..runtime.middlewares import (
     ErrorGuidanceMiddleware,
     LoopDetectionMiddleware,
     PreExitVerificationMiddleware,

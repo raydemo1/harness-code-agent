@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from approvals import ApprovalProvider, NoApprovalProvider
-from events import EventBus
-from permissions import PermissionPolicy
-from workspace_service import WorkspaceService
+from .approvals import ApprovalProvider, NoApprovalProvider
+from ..sessions.events import EventBus
+from .permissions import PermissionPolicy
+from ..workspace.service import WorkspaceService
 
 
 @dataclass

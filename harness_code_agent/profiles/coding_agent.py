@@ -8,8 +8,8 @@ benchmark profiles.
 """
 from __future__ import annotations
 
-from profiles.base import BaseProfile, AgentConfig
-from middlewares import (
+from .base import BaseProfile, AgentConfig
+from ..runtime.middlewares import (
     ErrorGuidanceMiddleware,
     LoopDetectionMiddleware,
     PreExitVerificationMiddleware,

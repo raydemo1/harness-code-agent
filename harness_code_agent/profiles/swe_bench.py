@@ -4,8 +4,8 @@ Analyze issue → locate code → write patch → run tests → iterate.
 """
 from __future__ import annotations
 
-from profiles.base import BaseProfile, AgentConfig
-from middlewares import (
+from .base import BaseProfile, AgentConfig
+from ..runtime.middlewares import (
     ErrorGuidanceMiddleware,
     LoopDetectionMiddleware,
     PreExitVerificationMiddleware,

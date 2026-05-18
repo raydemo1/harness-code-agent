@@ -19,10 +19,10 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-import config
-from agents import AgentRuntimeState
-from middlewares import TaskTrackingEnforcementMiddleware
-from tools import execute_tool
+from harness_code_agent import config
+from harness_code_agent.agent.loop import AgentRuntimeState
+from harness_code_agent.runtime.middlewares import TaskTrackingEnforcementMiddleware
+from harness_code_agent.runtime.tools import execute_tool
 
 
 class UpdatePlanningFilesToolTests(unittest.TestCase):
@@ -154,3 +154,5 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

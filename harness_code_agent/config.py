@@ -8,10 +8,12 @@ Setup:
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _load_dotenv():
     """Load .env file if it exists. No third-party dependency needed."""
-    env_path = Path(__file__).parent / ".env"
+    env_path = PROJECT_ROOT / ".env"
     if not env_path.exists():
         return
     for line in env_path.read_text(encoding="utf-8").splitlines():

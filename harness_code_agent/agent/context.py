@@ -17,7 +17,7 @@ import re
 import subprocess
 import logging
 
-import config
+from .. import config
 
 log = logging.getLogger("harness")
 

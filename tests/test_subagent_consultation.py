@@ -18,8 +18,8 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-import tools
-from middlewares import ReadOnlySubagentMiddleware
+from harness_code_agent.runtime import tools
+from harness_code_agent.runtime.middlewares import ReadOnlySubagentMiddleware
 
 
 class CapturingAgent:
@@ -34,7 +34,7 @@ class CapturingAgent:
 
 class SubagentConsultationTests(unittest.TestCase):
     def test_consult_subagent_uses_read_only_tool_schemas(self):
-        with patch("agents.Agent", CapturingAgent):
+        with patch("harness_code_agent.agent.loop.Agent", CapturingAgent):
             result = tools.consult_subagent("inspect auth flow", scope="codebase_investigation")
 
         tool_names = [
@@ -120,3 +120,5 @@ class SubagentConsultationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import config
-from approvals import ApprovalRequest
-from tool_runtime import ToolContext
+from .. import config
+from .approvals import ApprovalRequest
+from .tool_context import ToolContext
 
 # Playwright is optional — only needed for evaluator browser testing
 try:
@@ -59,7 +59,7 @@ def read_file(path: str) -> str:
 
 def read_skill_file(path: str) -> str:
     """Read a file from the skills directory (outside workspace). Path must be relative to project root."""
-    project_root = Path(__file__).parent
+    project_root = Path(__file__).resolve().parents[2]
     p = (project_root / path).resolve()
     # Must stay within the skills directory
     skills_dir = (project_root / "skills").resolve()
@@ -372,8 +372,8 @@ def consult_subagent(task: str, scope: str = "codebase_investigation") -> str:
             + ", ".join(sorted(CONSULTATION_SCOPES))
         )
 
-    from agents import Agent
-    from middlewares import ReadOnlySubagentMiddleware
+    from ..agent.loop import Agent
+    from .middlewares import ReadOnlySubagentMiddleware
 
     sub = Agent(
         name=f"consult_{scope}",

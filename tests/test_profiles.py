@@ -16,9 +16,9 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-from profiles import get_profile, list_profiles
-from profiles.base import AgentConfig, BaseProfile
-from middlewares import (
+from harness_code_agent.profiles import get_profile, list_profiles
+from harness_code_agent.profiles.base import AgentConfig, BaseProfile
+from harness_code_agent.runtime.middlewares import (
     PreExitVerificationMiddleware,
     RecoveryStrategyMiddleware,
     TaskTrackingEnforcementMiddleware,
@@ -91,3 +91,5 @@ class ProfileInterfaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

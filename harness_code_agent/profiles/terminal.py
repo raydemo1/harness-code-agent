@@ -18,14 +18,14 @@ them without touching this file:
   PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.45
 
   # Or via ProfileConfig in code:
-  from profiles.base import ProfileConfig
+  from harness_code_agent.profiles.base import ProfileConfig
   cfg = ProfileConfig(task_budget=1200, pass_threshold=9.0)
   profile = TerminalProfile(cfg=cfg)
 """
 from __future__ import annotations
 
-from profiles.base import BaseProfile, AgentConfig, ProfileConfig
-from middlewares import (
+from .base import BaseProfile, AgentConfig, ProfileConfig
+from ..runtime.middlewares import (
     LoopDetectionMiddleware,
     PreExitVerificationMiddleware,
     TimeBudgetMiddleware,
@@ -157,7 +157,7 @@ AVAILABLE TOOLS:
         if cls._tb2_tasks is None:
             import json
             from pathlib import Path
-            tb2_path = Path(__file__).parent.parent / "benchmarks" / "tb2_tasks.json"
+            tb2_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tb2_tasks.json"
             if tb2_path.exists():
                 cls._tb2_tasks = json.loads(tb2_path.read_text(encoding="utf-8"))
             else:
@@ -171,7 +171,7 @@ AVAILABLE TOOLS:
 
     def _lookup_task_meta(self, user_prompt: str) -> dict | None:
         """Look up full TB2 task metadata (timeout, difficulty, category)."""
-        import config as _cfg
+        from .. import config as _cfg
         tasks = self._load_tb2_tasks()
         if not tasks:
             return None
@@ -436,7 +436,8 @@ Use write_file to save to feedback.md, then stop.
         """Streamlined task prompt with environment bootstrapping and difficulty-aware hints."""
         env_section = ""
         if round_num == 1:
-            import subprocess, config as _cfg
+            import subprocess
+            from .. import config as _cfg
             env_lines = []
             for cmd in ENV_BOOTSTRAP_COMMANDS:
                 try:

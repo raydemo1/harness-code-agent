@@ -16,8 +16,8 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-from agents import AgentRuntimeState
-from middlewares import RecoveryStrategyMiddleware
+from harness_code_agent.agent.loop import AgentRuntimeState
+from harness_code_agent.runtime.middlewares import RecoveryStrategyMiddleware
 
 
 class RecoveryStrategyTests(unittest.TestCase):
@@ -54,3 +54,5 @@ class RecoveryStrategyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
