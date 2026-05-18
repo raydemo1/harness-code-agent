@@ -146,6 +146,40 @@ class ProductRuntimeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 workspace.resolve("../outside.txt")
 
+    def test_workspace_service_applies_unique_text_patch_and_rejects_ambiguous_patch(self):
+        from workspace_service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots")
+            target = root / "app.py"
+            target.write_text("alpha\nbeta\n", encoding="utf-8")
+
+            result = workspace.apply_text_patch("app.py", search="beta\n", replace="gamma\n")
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "alpha\ngamma\n")
+            self.assertTrue(result.snapshot_path.exists())
+
+            target.write_text("same\nsame\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                workspace.apply_text_patch("app.py", search="same\n", replace="once\n")
+            self.assertEqual(target.read_text(encoding="utf-8"), "same\nsame\n")
+
+    def test_workspace_service_rolls_back_latest_snapshot_for_file(self):
+        from workspace_service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots")
+            target = root / "app.py"
+            target.write_text("old\n", encoding="utf-8")
+            workspace.write_text("app.py", "new\n")
+
+            result = workspace.rollback_latest_snapshot("app.py")
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+            self.assertTrue(result.snapshot_path.exists())
+
     def test_permission_policy_uses_codex_sandbox_modes(self):
         from permissions import PermissionPolicy
 
@@ -241,6 +275,46 @@ class ProductRuntimeTests(unittest.TestCase):
                 "approval_decided",
                 "after_tool",
             ])
+
+    def test_execute_tool_apply_patch_records_snapshot_and_rejects_ambiguous_patch(self):
+        from events import EventBus
+        from permissions import PermissionPolicy
+        from tool_runtime import ToolContext
+        from workspace_service import WorkspaceService
+        import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("old\n", encoding="utf-8")
+            events_path = root / ".harness" / "events.jsonl"
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(events_path),
+            )
+
+            result = tools.execute_tool(
+                "apply_patch",
+                {"path": "note.txt", "search": "old\n", "replace": "new\n"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+            ambiguous = tools.execute_tool(
+                "apply_patch",
+                {"path": "note.txt", "search": "", "replace": "x"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+            self.assertIn("Patched note.txt", result)
+            self.assertIn("[error] ValueError", ambiguous)
+            self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "new\n")
+            self.assertTrue(any(event["type"] == "file_changed" for event in events))
 
     def test_execute_tool_runs_approved_tool_call(self):
         from approvals import StaticApprovalProvider

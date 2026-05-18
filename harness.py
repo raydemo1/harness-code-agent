@@ -55,6 +55,7 @@ SLASH_COMMANDS = {
     "/session": "session",
     "/fork": "fork",
     "/resume": "resume",
+    "/rollback": "rollback",
     "/doctor": "doctor",
     "/profiles": "--list-profiles",
 }
@@ -415,6 +416,20 @@ def _fork_session(session_id: str) -> None:
     print(f"cwd: {metadata.get('cwd', '')}")
 
 
+def _rollback_session_file(session_id: str, path: str) -> None:
+    store = _session_store()
+    metadata = store.read_metadata(session_id)
+    workspace = WorkspaceService(
+        root=metadata["cwd"],
+        snapshots_dir=store.sessions_dir / session_id / "snapshots",
+    )
+    result = workspace.rollback_latest_snapshot(path)
+    print(f"rolled_back: {path}")
+    print(f"workspace: {workspace.root}")
+    if result.snapshot_path:
+        print(f"pre_rollback_snapshot: {result.snapshot_path}")
+
+
 def _event_summary(event: dict) -> str:
     payload = event.get("payload") or {}
     payload_bits = []
@@ -602,6 +617,16 @@ def _handle_product_command(args: list[str]) -> bool:
             print(f"Error: {e}")
             sys.exit(1)
         sys.exit(0)
+    if args[0] == "rollback":
+        if len(args) != 3:
+            print("Usage: python harness.py rollback <session-id> <path>")
+            sys.exit(1)
+        try:
+            _rollback_session_file(args[1], args[2])
+        except (FileNotFoundError, ValueError, KeyError) as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        sys.exit(0)
     if args[:2] == ["config", "show"]:
         _print_config_show()
         sys.exit(0)
@@ -707,6 +732,7 @@ def main():
         print("  /session <session-id>")
         print("  /fork <session-id>")
         print("  /resume <session-id> [follow-up task]")
+        print("  /rollback <session-id> <path>")
         print("  /config show")
         print("  /doctor")
         print("  /profiles")

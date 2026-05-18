@@ -328,6 +328,27 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertIn(f"forked_from: {source.id}", out.getvalue())
 
+    def test_slash_rollback_command_restores_latest_session_snapshot_without_api_key(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = store.create(
+            profile="coding-agent",
+            cwd=Path(self.temp_dir),
+            model="model-c",
+            permission_mode="workspace-write",
+        )
+        workspace = harness.WorkspaceService(root=self.temp_dir, snapshots_dir=session.snapshots_dir)
+        target = Path(self.temp_dir) / "app.py"
+        target.write_text("old\n", encoding="utf-8")
+        workspace.write_text("app.py", "new\n")
+
+        with patch.object(sys, "argv", ["harness.py", "/rollback", session.id, "app.py"]), patch("sys.stdout", new_callable=StringIO) as out:
+            with self.assertRaises(SystemExit) as raised:
+                harness.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+        self.assertIn("rolled_back: app.py", out.getvalue())
+
     def test_resume_context_includes_lineage_and_recent_events(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
         source = store.create(

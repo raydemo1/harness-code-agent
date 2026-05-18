@@ -79,6 +79,18 @@ def write_file(path: str, content: str) -> str:
     return f"Wrote {len(content)} chars to {path}"
 
 
+def apply_patch(path: str, search: str, replace: str) -> str:
+    p = _resolve(path)
+    if not p.exists():
+        return f"[error] File not found: {path}"
+    original = p.read_text(encoding="utf-8", errors="replace")
+    count = original.count(search)
+    if count != 1:
+        return f"[error] Patch search text must match exactly once; found {count}"
+    p.write_text(original.replace(search, replace, 1), encoding="utf-8")
+    return f"Patched {path}: replaced 1 occurrence"
+
+
 def update_planning_files(
     mode: str,
     goal: str,
@@ -617,6 +629,22 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "apply_patch",
+            "description": "Apply a safe text patch to one file. The search text must match exactly once, or the patch fails without modifying the file.",
+            "parameters": {
+                "type": "object",
+                "required": ["path", "search", "replace"],
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path inside workspace"},
+                    "search": {"type": "string", "description": "Existing text to replace. Must match exactly once."},
+                    "replace": {"type": "string", "description": "Replacement text"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_planning_files",
             "description": "Set the planning mode and update planning-with-files state. Use skip for <3 estimated tool calls, light for 3-5 tool calls and progress.md only, full for >5 tool calls and task_plan.md/findings.md/progress.md.",
             "parameters": {
@@ -1012,6 +1040,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "read_file": read_file,
         "read_skill_file": read_skill_file,
         "write_file": write_file,
+        "apply_patch": apply_patch,
         "update_planning_files": update_planning_files,
         "list_files": list_files,
         "run_bash": run_bash,
@@ -1139,6 +1168,8 @@ def execute_tool(
             result = _read_file_with_context(arguments, tool_context)
         elif tool_context is not None and name == "write_file":
             result = _write_file_with_context(arguments, tool_context, agent_name)
+        elif tool_context is not None and name == "apply_patch":
+            result = _apply_patch_with_context(arguments, tool_context, agent_name)
         elif name in {"run_bash", "update_planning_files"}:
             result = fn(**arguments, runtime_state=runtime_state, agent_name=agent_name)
         else:
@@ -1201,6 +1232,34 @@ def _write_file_with_context(
         },
     )
     return f"Wrote {len(content)} chars to {path}"
+
+
+def _apply_patch_with_context(
+    arguments: dict,
+    tool_context: ToolContext,
+    agent_name: str | None,
+) -> str:
+    path = arguments.get("path", "")
+    search = arguments.get("search", "")
+    replace = arguments.get("replace", "")
+    if not path or not str(path).strip():
+        return "[error] Empty file path"
+    patch_result = tool_context.workspace.apply_text_patch(
+        path,
+        search=search,
+        replace=replace,
+    )
+    rel = patch_result.path.relative_to(tool_context.workspace.root)
+    tool_context.event_bus.emit(
+        "file_changed",
+        agent=agent_name,
+        payload={
+            "path": str(rel),
+            "snapshot_path": str(patch_result.snapshot_path) if patch_result.snapshot_path else None,
+            "operation": "apply_patch",
+        },
+    )
+    return f"Patched {path}: replaced {patch_result.replacements} occurrence"
 
 
 def _redact_tool_args(arguments: dict) -> dict:

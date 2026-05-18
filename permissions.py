@@ -27,7 +27,7 @@ class PermissionPolicy:
     DANGER_FULL_ACCESS = "danger-full-access"
     VALID_MODES = {READ_ONLY, WORKSPACE_WRITE, DANGER_FULL_ACCESS}
     READ_TOOLS = {"read_file", "read_skill_file", "list_files", "web_search", "web_fetch", "consult_subagent"}
-    EDIT_TOOLS = {"write_file", "update_planning_files"}
+    EDIT_TOOLS = {"write_file", "apply_patch", "update_planning_files"}
 
     def __init__(self, mode: str = WORKSPACE_WRITE):
         if mode not in self.VALID_MODES:

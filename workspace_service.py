@@ -12,6 +12,13 @@ class WorkspaceWriteResult:
     snapshot_path: Path | None
 
 
+@dataclass
+class WorkspacePatchResult:
+    path: Path
+    snapshot_path: Path | None
+    replacements: int
+
+
 class WorkspaceService:
     """Workspace path resolution and file snapshot service."""
 
@@ -53,6 +60,50 @@ class WorkspaceService:
             self.changed_files.append(rel)
         return WorkspaceWriteResult(path=resolved, snapshot_path=snapshot_path)
 
+    def apply_text_patch(
+        self,
+        path: str | Path,
+        *,
+        search: str,
+        replace: str,
+    ) -> WorkspacePatchResult:
+        if not search:
+            raise ValueError("Patch search text must not be empty")
+        resolved = self.resolve(path)
+        self._ensure_writable(resolved)
+        if not resolved.exists() or not resolved.is_file():
+            raise FileNotFoundError(f"File not found: {path}")
+        original = resolved.read_text(encoding="utf-8", errors="replace")
+        count = original.count(search)
+        if count != 1:
+            raise ValueError(f"Patch search text must match exactly once; found {count}")
+        snapshot_path = self.snapshot(path)
+        resolved.write_text(original.replace(search, replace, 1), encoding="utf-8")
+        rel = resolved.relative_to(self.root)
+        if rel not in self.changed_files:
+            self.changed_files.append(rel)
+        return WorkspacePatchResult(path=resolved, snapshot_path=snapshot_path, replacements=1)
+
+    def rollback_latest_snapshot(self, path: str | Path) -> WorkspaceWriteResult:
+        resolved = self.resolve(path)
+        self._ensure_writable(resolved)
+        rel = resolved.relative_to(self.root)
+        snapshot_dir = self.snapshots_dir / rel.parent
+        pattern = f"{resolved.name}.*.bak"
+        snapshots = sorted(
+            snapshot_dir.glob(pattern),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if not snapshots:
+            raise FileNotFoundError(f"No snapshot found for: {rel}")
+        rollback_snapshot = self.snapshot(path) if resolved.exists() else None
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(snapshots[0], resolved)
+        if rel not in self.changed_files:
+            self.changed_files.append(rel)
+        return WorkspaceWriteResult(path=resolved, snapshot_path=rollback_snapshot)
+
     def snapshot(self, path: str | Path) -> Path | None:
         resolved = self.resolve(path)
         if not resolved.exists() or not resolved.is_file():
@@ -93,4 +144,3 @@ class WorkspaceService:
             return True
         except ValueError:
             return False
-
