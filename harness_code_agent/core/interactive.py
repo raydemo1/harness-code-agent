@@ -25,6 +25,13 @@ from .mentions import MentionResolutionError, format_turn_with_mentions, resolve
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 PRODUCT_DEFAULT_PROFILE = "coding-agent"
 CHECKPOINT_EXCLUDES = [".harness", config.PROGRESS_FILE]
+PROFILE_SLASH_ALIASES = {
+    "/code": "coding-agent",
+    "/app": "app-builder",
+    "/terminal": "terminal",
+    "/swe": "swe-bench",
+    "/plan": "plan",
+}
 
 
 @dataclass
@@ -37,6 +44,14 @@ class CheckpointConfig:
 class TurnResult:
     text: str
     checkpoint: str
+    notice: str = ""
+
+
+@dataclass
+class ProfileSwitchEvent:
+    previous: str
+    current: str
+    reason: str
 
 
 class InteractiveSession:
@@ -87,6 +102,10 @@ class InteractiveSession:
         self.conversation: AgentConversation = self.agent.start_conversation()
         self.turn_count = 0
         self.checkpoint = CheckpointConfig()
+        self.pending_plan_markdown: str | None = None
+        self.last_user_task: str = ""
+        self.last_assistant_text: str = ""
+        self.profile_history: list[ProfileSwitchEvent] = []
         self._started_at = time.time()
         self._sync_time_budget()
         self.event_bus.emit(
@@ -139,6 +158,13 @@ class InteractiveSession:
         )
 
     def submit(self, user_prompt: str) -> TurnResult:
+        if self.pending_plan_markdown and self.profile.name() == "plan":
+            if _is_plan_execution_confirmation(user_prompt):
+                return self.execute_pending_plan(_plan_execution_instructions(user_prompt))
+            return self.revise_pending_plan(user_prompt)
+        return self._submit_to_current_agent(user_prompt)
+
+    def _submit_to_current_agent(self, user_prompt: str) -> TurnResult:
         baseline_dirty = git_dirty_paths(self.cwd)
         baseline_staged = git_staged_paths(self.cwd)
         resolved = resolve_mentions(
@@ -158,6 +184,9 @@ class InteractiveSession:
             },
         )
         text = self.conversation.submit(task)
+        self.last_user_task = user_prompt
+        self.last_assistant_text = text
+        notice = self._capture_plan_handoff(text)
         checkpoint = self._maybe_auto_checkpoint(
             baseline_dirty=baseline_dirty,
             baseline_staged=baseline_staged,
@@ -170,7 +199,126 @@ class InteractiveSession:
                 "checkpoint": checkpoint,
             },
         )
-        return TurnResult(text=text, checkpoint=checkpoint)
+        return TurnResult(text=text, checkpoint=checkpoint, notice=notice)
+
+    def execute_pending_plan(self, additional_instructions: str | None = None) -> TurnResult:
+        if not self.pending_plan_markdown:
+            raise ValueError("No pending plan to execute. Switch to /plan and create a plan first.")
+        plan_markdown = self.pending_plan_markdown
+        self.pending_plan_markdown = None
+        self._switch_profile(
+            PRODUCT_DEFAULT_PROFILE,
+            reason="execute approved plan",
+            plan_markdown=plan_markdown,
+        )
+        instructions = (additional_instructions or "").strip()
+        task = (
+            "Execute the approved implementation plan below in coding-agent mode.\n\n"
+            "Use the plan as the source of truth, but still inspect the repository, "
+            "make the smallest appropriate code/test changes, and run verification before stopping."
+        )
+        if instructions:
+            task += f"\n\nAdditional user instructions:\n{instructions}"
+        return self.submit(task)
+
+    def revise_pending_plan(self, feedback: str) -> TurnResult:
+        if not self.pending_plan_markdown:
+            raise ValueError("No pending plan to revise. Switch to /plan and create a plan first.")
+        feedback = feedback.strip()
+        if not feedback:
+            raise ValueError("Provide feedback for the pending plan, or say 'continue' to execute it.")
+        return self._submit_to_current_agent(
+            "Revise the previous Markdown plan using this user feedback. "
+            "Return the complete updated plan in the required structured Markdown format.\n\n"
+            f"User feedback:\n{feedback}"
+        )
+
+    def _capture_plan_handoff(self, text: str) -> str:
+        if self.profile.name() != "plan" or not text.strip():
+            return ""
+        self.pending_plan_markdown = text.strip()
+        self.event_bus.emit(
+            "plan_ready",
+            agent="main_agent",
+            payload={"profile": self.profile.name()},
+        )
+        return (
+            "Plan ready. Say 'continue' to switch to coding-agent mode and implement it, "
+            "or reply with feedback to revise the plan."
+        )
+
+    def _switch_profile(
+        self,
+        profile_name: str,
+        *,
+        reason: str = "slash command",
+        plan_markdown: str | None = None,
+    ) -> None:
+        previous = self.profile.name()
+        if previous == profile_name:
+            return
+        self.conversation.close()
+        self.profile = get_profile(profile_name)
+        self.agent = self._build_agent()
+        self.conversation = self.agent.start_conversation()
+        handoff = self._build_profile_handoff_context(
+            previous_profile=previous,
+            current_profile=self.profile.name(),
+            reason=reason,
+            plan_markdown=plan_markdown,
+        )
+        if handoff:
+            self.conversation.messages.append({
+                "role": "user",
+                "content": handoff,
+            })
+        self._sync_time_budget()
+        self.profile_history.append(ProfileSwitchEvent(
+            previous=previous,
+            current=self.profile.name(),
+            reason=reason,
+        ))
+        self.event_bus.emit(
+            "profile_switched",
+            agent="main_agent",
+            payload={
+                "previous_profile": previous,
+                "profile": self.profile.name(),
+                "reason": reason,
+                "handoff_context": bool(handoff),
+                "plan_included": bool(plan_markdown),
+            },
+        )
+
+    def _build_profile_handoff_context(
+        self,
+        *,
+        previous_profile: str,
+        current_profile: str,
+        reason: str,
+        plan_markdown: str | None,
+    ) -> str:
+        lines = [
+            "Profile handoff context:",
+            f"- Workspace: {self.cwd}",
+            f"- Session: {self.session.id}",
+            f"- Previous profile: {previous_profile}",
+            f"- Current profile: {current_profile}",
+            f"- Switch reason: {reason}",
+        ]
+        if self.last_user_task:
+            lines.append("")
+            lines.append("Most recent user task:")
+            lines.append(_truncate_handoff_text(self.last_user_task))
+        if self.last_assistant_text and not plan_markdown:
+            lines.append("")
+            lines.append("Most recent assistant summary:")
+            lines.append(_truncate_handoff_text(self.last_assistant_text))
+        if plan_markdown:
+            lines.append("")
+            lines.append("Approved Markdown plan:")
+            lines.append(plan_markdown)
+        return "\n".join(lines)
 
     def handle_slash_command(self, line: str) -> bool:
         parts = shlex.split(line)
@@ -200,6 +348,10 @@ class InteractiveSession:
                 rollback_session_file(self.session_store, args[0], args[1])
             elif command == "/profiles":
                 print_profiles()
+            elif command in PROFILE_SLASH_ALIASES:
+                if args:
+                    raise ValueError(f"Usage: {command}")
+                print(self.switch_profile(PROFILE_SLASH_ALIASES[command]))
             elif command == "/doctor":
                 run_doctor(self.cwd)
             elif command == "/config" and args == ["show"]:
@@ -211,6 +363,15 @@ class InteractiveSession:
         except (FileNotFoundError, ValueError, KeyError, MentionResolutionError) as e:
             print(f"Error: {e}")
         return True
+
+    def switch_profile(self, profile_name: str) -> str:
+        previous = self.profile.name()
+        self.pending_plan_markdown = None
+        self._switch_profile(profile_name)
+        current = self.profile.name()
+        if current == previous:
+            return f"profile already active: {current}"
+        return f"profile switched: {previous} -> {current}"
 
     def _inject_resume_context(self, session_id: str) -> None:
         context_text = _build_resume_context(self.session_store, session_id)
@@ -329,6 +490,49 @@ class InteractiveSession:
 def _require_arg(args: list[str], usage: str) -> None:
     if len(args) != 1:
         raise ValueError(usage)
+
+
+def _is_plan_execution_confirmation(text: str) -> bool:
+    normalized = " ".join(text.strip().lower().split())
+    return normalized in {
+        "continue",
+        "go ahead",
+        "proceed",
+        "execute",
+        "implement",
+        "start",
+        "yes",
+        "ok",
+        "继续",
+        "执行",
+        "开始",
+        "实施",
+        "可以",
+        "好",
+        "好的",
+        "按计划执行",
+        "继续执行",
+    }
+
+
+def _plan_execution_instructions(text: str) -> str:
+    return "" if _is_plan_execution_confirmation(text) else text
+
+
+def _truncate_handoff_text(text: str, limit: int = 4000) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]"
+
+
+def print_turn_result(result: TurnResult) -> None:
+    if result.text:
+        print(result.text)
+    if result.notice:
+        print(result.notice)
+    if result.checkpoint:
+        print(result.checkpoint)
 
 
 def _ensure_git_repository(workspace: Path) -> None:
@@ -469,6 +673,7 @@ def print_help() -> None:
     print("  /fork <session-id>")
     print("  /rollback <session-id> <path>")
     print("  /profiles")
+    print("  /code | /plan | /terminal | /swe | /app")
     print("  /doctor")
     print("  /config show")
     print("  /checkpoint [auto on|auto off|every turn|every <N> turns|status]")

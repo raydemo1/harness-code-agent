@@ -38,16 +38,18 @@ from harness_code_agent.profiles.base import AgentConfig
 
 class FakeConversation:
     instances = []
+    response_text = "assistant done"
 
     def __init__(self):
         self.messages = [{"role": "system", "content": "fake"}]
         self.submissions = []
         self.closed = False
+        self.response_text = self.__class__.response_text
         self.__class__.instances.append(self)
 
     def submit(self, task):
         self.submissions.append(task)
-        return "assistant done"
+        return self.response_text
 
     def close(self):
         self.closed = True
@@ -72,6 +74,7 @@ class InteractiveCliTests(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         config.API_KEY = "test-key"
         FakeConversation.instances = []
+        FakeConversation.response_text = "assistant done"
         self._git("init")
         self._git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "init")
         os.chdir(self.temp_dir)
@@ -137,6 +140,150 @@ class InteractiveCliTests(unittest.TestCase):
             )
         finally:
             session.close()
+
+    def test_plan_profile_captures_markdown_and_offers_handoff_choice(self):
+        FakeConversation.response_text = "# Title\n\n## Summary\n\nPlan body"
+        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
+        try:
+            result = session.submit("plan the parser fix")
+
+            self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan body")
+            self.assertIn("Say 'continue'", result.notice)
+            self.assertIn("reply with feedback", result.notice)
+            self.assertEqual(result.checkpoint, "no changes to checkpoint")
+        finally:
+            session.close()
+
+    def test_plan_continue_switches_to_coding_agent_and_injects_markdown(self):
+        plan_conversation = FakeConversation()
+        coding_conversation = FakeConversation()
+        plan_conversation.response_text = "# Title\n\n## Summary\n\nPlan body"
+        coding_conversation.response_text = "implemented"
+
+        with patch(
+            "harness_code_agent.agent.loop.Agent.start_conversation",
+            side_effect=[plan_conversation, coding_conversation],
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
+            try:
+                session.submit("plan the parser fix")
+                result = session.submit("继续")
+
+                self.assertEqual(result.text, "implemented")
+                self.assertEqual(session.profile.name(), "coding-agent")
+                self.assertIsNone(session.pending_plan_markdown)
+                self.assertEqual(len(coding_conversation.submissions), 1)
+                task = coding_conversation.submissions[0]
+                self.assertIn("Execute the approved implementation plan", task)
+                self.assertNotIn("# Title\n\n## Summary\n\nPlan body", task)
+                self.assertEqual(coding_conversation.messages[1]["role"], "user")
+                self.assertIn("Profile handoff context:", coding_conversation.messages[1]["content"])
+                self.assertIn("Previous profile: plan", coding_conversation.messages[1]["content"])
+                self.assertIn("Current profile: coding-agent", coding_conversation.messages[1]["content"])
+                self.assertIn("Approved Markdown plan:", coding_conversation.messages[1]["content"])
+                self.assertIn("# Title\n\n## Summary\n\nPlan body", coding_conversation.messages[1]["content"])
+            finally:
+                session.close()
+
+    def test_plan_feedback_keeps_plan_mode_and_updates_pending_markdown(self):
+        plan_conversation = FakeConversation()
+        plan_conversation.response_text = "# Title\n\n## Summary\n\nPlan v1"
+
+        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=plan_conversation):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
+        try:
+            session.submit("plan the parser fix")
+            plan_conversation.response_text = "# Title\n\n## Summary\n\nPlan v2"
+            result = session.submit("add migration risk")
+
+            self.assertEqual(result.text, "# Title\n\n## Summary\n\nPlan v2")
+            self.assertEqual(session.profile.name(), "plan")
+            self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan v2")
+            self.assertIn("User feedback:\nadd migration risk", plan_conversation.submissions[-1])
+        finally:
+            session.close()
+
+    def test_short_slash_commands_switch_profiles(self):
+        conversations = [FakeConversation() for _ in range(6)]
+        with patch(
+            "harness_code_agent.agent.loop.Agent.start_conversation",
+            side_effect=conversations,
+        ):
+            session = InteractiveSession(cwd=self.temp_dir)
+            try:
+                cases = [
+                    ("/plan", "plan"),
+                    ("/code", "coding-agent"),
+                    ("/terminal", "terminal"),
+                    ("/swe", "swe-bench"),
+                    ("/app", "app-builder"),
+                ]
+                for command, expected in cases:
+                    with self.subTest(command=command):
+                        self.assertTrue(session.handle_slash_command(command))
+                        self.assertEqual(session.profile.name(), expected)
+            finally:
+                session.close()
+
+    def test_profile_switch_uses_handoff_context_without_copying_old_messages(self):
+        coding_conversation = FakeConversation()
+        plan_conversation = FakeConversation()
+        coding_conversation.response_text = "analysis output"
+        with patch(
+            "harness_code_agent.agent.loop.Agent.start_conversation",
+            side_effect=[coding_conversation, plan_conversation],
+        ):
+            session = InteractiveSession(cwd=self.temp_dir)
+            try:
+                session.submit("inspect the auth bug")
+
+                self.assertTrue(session.handle_slash_command("/plan"))
+
+                self.assertEqual(session.profile.name(), "plan")
+                self.assertEqual(len(plan_conversation.messages), 2)
+                handoff = plan_conversation.messages[1]["content"]
+                self.assertIn("Profile handoff context:", handoff)
+                self.assertIn("Previous profile: coding-agent", handoff)
+                self.assertIn("Current profile: plan", handoff)
+                self.assertIn("Most recent user task:", handoff)
+                self.assertIn("inspect the auth bug", handoff)
+                self.assertIn("Most recent assistant summary:", handoff)
+                self.assertIn("analysis output", handoff)
+                self.assertNotIn(coding_conversation.submissions[0], handoff)
+                self.assertEqual(session.profile_history[-1].previous, "coding-agent")
+                self.assertEqual(session.profile_history[-1].current, "plan")
+            finally:
+                session.close()
+
+    def test_long_profile_slash_commands_are_not_supported(self):
+        session = self._session()
+        try:
+            self.assertTrue(session.handle_slash_command("/coding-agent"))
+            self.assertEqual(session.profile.name(), "coding-agent")
+            self.assertTrue(session.handle_slash_command("/swe-bench"))
+            self.assertEqual(session.profile.name(), "coding-agent")
+        finally:
+            session.close()
+
+    def test_switching_profile_clears_pending_plan(self):
+        FakeConversation.response_text = "# Title\n\n## Summary\n\nPlan body"
+        conversations = [FakeConversation(), FakeConversation()]
+        with patch(
+            "harness_code_agent.agent.loop.Agent.start_conversation",
+            side_effect=conversations,
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
+            try:
+                session.submit("plan the parser fix")
+                self.assertIsNotNone(session.pending_plan_markdown)
+
+                self.assertTrue(session.handle_slash_command("/code"))
+
+                self.assertEqual(session.profile.name(), "coding-agent")
+                self.assertIsNone(session.pending_plan_markdown)
+            finally:
+                session.close()
 
     def test_file_mention_is_injected(self):
         Path(self.temp_dir, "README.md").write_text("hello docs\n", encoding="utf-8")

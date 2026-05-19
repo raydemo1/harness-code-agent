@@ -134,6 +134,16 @@ hca --profile swe-bench "Fix the TypeError in parse_config()"
 hca --profile plan "Design the fix for the failing parser tests"
 ```
 
+交互模式里可以用短 slash 命令切换 profile：
+
+```text
+/code      # coding-agent，默认实施模式
+/plan      # 只读方案模式
+/terminal  # CLI / shell 任务
+/swe       # swe-bench issue 修复
+/app       # app-builder Web 应用构建
+```
+
 ## Profile 说明
 
 | Profile | 用途 |
@@ -143,6 +153,20 @@ hca --profile plan "Design the fix for the failing parser tests"
 | `terminal` | 面向 Terminal-Bench 2.0 风格的 CLI / shell 任务 |
 | `swe-bench` | 面向真实仓库 issue 修复任务 |
 | `plan` | 只读调查和方案设计，输出结构化 Markdown 计划 |
+
+`plan` profile 在交互模式下会进入显式 handoff：计划输出后不会自动改代码，而是提示用户选择下一步。
+
+```bash
+hca
+/plan
+设计 parser 修复方案
+# 查看计划后：
+继续
+# 或继续修改计划：
+补充兼容性风险和回滚方案
+```
+
+用户回复“继续”“执行”“开始”等短确认时，CLI 会切换到默认 `coding-agent` profile，并把刚才的 Markdown 计划注入为 approved plan；如果回复的是一段修改建议，则继续停留在 `plan` profile 修改计划。
 
 ## 会话和工作区
 

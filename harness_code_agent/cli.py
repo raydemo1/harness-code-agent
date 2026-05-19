@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import config
-from .core.interactive import InteractiveSession, PRODUCT_DEFAULT_PROFILE
+from .core.interactive import InteractiveSession, PRODUCT_DEFAULT_PROFILE, print_turn_result
 from .core.mentions import MentionResolutionError
 
 
@@ -19,6 +19,11 @@ SLASH_COMMANDS = [
     "/fork",
     "/rollback",
     "/profiles",
+    "/code",
+    "/plan",
+    "/terminal",
+    "/swe",
+    "/app",
     "/doctor",
     "/config show",
     "/checkpoint",
@@ -104,10 +109,7 @@ def _submit_and_print(session: InteractiveSession, line: str) -> None:
     except MentionResolutionError as e:
         print(f"Error: {e}")
         return
-    if result.text:
-        print(result.text)
-    if result.checkpoint:
-        print(result.checkpoint)
+    print_turn_result(result)
 
 
 def _build_prompt(session: InteractiveSession):
@@ -167,6 +169,7 @@ def _iter_file_completions(root: Path, prefix: str):
         if item.is_dir():
             rel += "/"
         yield rel
+
 
 
 if __name__ == "__main__":
