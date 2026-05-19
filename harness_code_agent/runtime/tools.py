@@ -17,7 +17,7 @@ from .. import config
 from .approvals import ApprovalRequest
 from .tool_context import ToolContext
 
-# Playwright is optional — only needed for evaluator browser testing
+# Playwright is optional — only needed for browser UI testing
 try:
     from playwright.sync_api import sync_playwright
     HAS_PLAYWRIGHT = True

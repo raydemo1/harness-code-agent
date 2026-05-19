@@ -31,9 +31,6 @@ from harness_code_agent.profiles.base import AgentConfig
 
 
 class FakeProfile:
-    def __init__(self):
-        self.legacy_calls = []
-
     def name(self):
         return "fake"
 
@@ -53,18 +50,6 @@ class FakeProfile:
 
     def resolve_task_timeout(self, user_prompt):
         return None
-
-    def planner(self):
-        self.legacy_calls.append("planner")
-        return AgentConfig(system_prompt="legacy planner")
-
-    def builder(self):
-        self.legacy_calls.append("builder")
-        return AgentConfig(system_prompt="legacy builder")
-
-    def evaluator(self):
-        self.legacy_calls.append("evaluator")
-        return AgentConfig(system_prompt="legacy evaluator")
 
 
 class RecordingAgent:
@@ -127,7 +112,6 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         with patch("harness_code_agent.core.harness.Agent", RecordingAgent):
             Harness(profile).run("fix the issue")
 
-        self.assertEqual(profile.legacy_calls, [])
         self.assertEqual([agent.name for agent in RecordingAgent.instances], ["main_agent"])
         self.assertEqual(len(RecordingAgent.runs), 1)
         self.assertEqual(RecordingAgent.runs[0][0], "main_agent")
@@ -467,25 +451,29 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 1)
         self.assertIn("Unknown slash command", out.getvalue())
 
-    def test_run_command_defaults_to_coding_agent_profile(self):
-        profile_name, task_args = harness._parse_profile_and_task(["run", "fix", "tests"])
+    def test_task_invocation_defaults_to_coding_agent_profile(self):
+        with (
+            patch.object(config, "API_KEY", "test-key"),
+            patch.object(sys, "argv", ["harness.py", "fix", "tests"]),
+            patch("harness_code_agent.core.harness.Agent", RecordingAgent),
+        ):
+            harness.main()
 
-        self.assertEqual(profile_name, "coding-agent")
-        self.assertEqual(task_args, ["fix", "tests"])
+        self.assertEqual(RecordingAgent.runs[0][0], "main_agent")
+        self.assertIn("Task:\nfix tests", RecordingAgent.runs[0][1])
+        self.assertIn("durable Harness session", RecordingAgent.instances[0].system_prompt)
 
-    def test_legacy_task_invocation_keeps_app_builder_default(self):
-        profile_name, task_args = harness._parse_profile_and_task(["build", "app"])
+    def test_task_invocation_allows_profile_override(self):
+        with (
+            patch.object(config, "API_KEY", "test-key"),
+            patch.object(sys, "argv", ["harness.py", "--profile", "terminal", "fix", "shell"]),
+            patch("harness_code_agent.core.harness.Agent", RecordingAgent),
+        ):
+            harness.main()
 
-        self.assertEqual(profile_name, "app-builder")
-        self.assertEqual(task_args, ["build", "app"])
-
-    def test_run_command_allows_profile_override(self):
-        profile_name, task_args = harness._parse_profile_and_task(
-            ["run", "--profile", "terminal", "fix", "shell"]
-        )
-
-        self.assertEqual(profile_name, "terminal")
-        self.assertEqual(task_args, ["fix", "shell"])
+        self.assertEqual(RecordingAgent.runs[0][0], "main_agent")
+        self.assertIn("Task:\nfix shell", RecordingAgent.runs[0][1])
+        self.assertIn("terminal/CLI task", RecordingAgent.instances[0].system_prompt)
 
 
 if __name__ == "__main__":

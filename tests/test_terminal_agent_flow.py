@@ -23,22 +23,22 @@ from harness_code_agent.profiles.terminal import TerminalProfile
 
 class AgentRuntimeStateTests(unittest.TestCase):
     def test_agent_creates_runtime_state_once_per_run(self):
-        agent = Agent(name="builder", system_prompt="x", use_tools=False)
+        agent = Agent(name="main_agent", system_prompt="x", use_tools=False)
         state = agent._create_runtime_state("goal text")
 
         self.assertEqual(state.task_board.goal, "goal text")
         self.assertEqual(state.recovery.mode, "NORMAL")
         self.assertIsNone(state.shell_session)
 
-    def test_terminal_builder_prompt_mentions_stateful_shell_progress_and_recovery(self):
-        prompt = TerminalProfile().builder().system_prompt
+    def test_terminal_main_agent_prompt_mentions_stateful_shell_progress_and_recovery(self):
+        prompt = TerminalProfile().main_agent().system_prompt
 
         self.assertIn("persistent shell", prompt.lower())
         self.assertIn("update_planning_files", prompt)
-        self.assertIn("recovery mode", prompt.lower())
+        self.assertIn("Planning Mode Self-Check", prompt)
 
-    def test_terminal_builder_uses_enforcement_middlewares(self):
-        middlewares = TerminalProfile().builder().middlewares
+    def test_terminal_main_agent_uses_enforcement_middlewares(self):
+        middlewares = TerminalProfile().main_agent().middlewares
 
         self.assertTrue(any(isinstance(mw, TaskTrackingEnforcementMiddleware) for mw in middlewares))
         self.assertTrue(any(isinstance(mw, RecoveryStrategyMiddleware) for mw in middlewares))

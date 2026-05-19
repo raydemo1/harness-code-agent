@@ -13,9 +13,7 @@ Built-in profiles:
   reasoning    — Knowledge-intensive QA (MMMU-Pro style)
 
 Usage:
-  python harness.py run "Fix the failing tests"                    # default: coding-agent
-  python harness.py run --profile terminal "Fix the broken git merge"
-  python harness.py "Build a DAW in the browser"                    # default: app-builder
+  python harness.py "Fix the failing tests"                         # default: coding-agent
   python harness.py --profile terminal "Fix the broken git merge"
   python harness.py --profile swe-bench "Fix issue #123"
   python harness.py --profile reasoning "Calculate the orbital period of..."
@@ -48,7 +46,6 @@ log = logging.getLogger("harness")
 
 COMMIT_POLICIES = {"none", "checkpoint", "milestone"}
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
-LEGACY_DEFAULT_PROFILE = "app-builder"
 PRODUCT_DEFAULT_PROFILE = "coding-agent"
 SLASH_COMMANDS = {
     "/sessions": "sessions",
@@ -647,22 +644,6 @@ def _normalize_slash_command(args: list[str]) -> list[str]:
     return [mapped, *args[1:]]
 
 
-def _parse_profile_and_task(args: list[str]) -> tuple[str, list[str]]:
-    profile_name = PRODUCT_DEFAULT_PROFILE if args and args[0] == "run" else LEGACY_DEFAULT_PROFILE
-    if args and args[0] == "run":
-        args = args[1:]
-
-    if "--profile" in args:
-        idx = args.index("--profile")
-        if idx + 1 < len(args):
-            profile_name = args[idx + 1]
-            args = args[:idx] + args[idx + 2:]
-        else:
-            raise ValueError("--profile requires a name")
-
-    return profile_name, args
-
-
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -715,10 +696,17 @@ def main():
         ]
         force_flat_workspace = True
     else:
-        try:
-            profile_name, args = _parse_profile_and_task(args)
-        except ValueError as e:
-            print(f"Error: {e}")
+        profile_name = PRODUCT_DEFAULT_PROFILE
+        if "--profile" in args:
+            idx = args.index("--profile")
+            if idx + 1 >= len(args):
+                print("Error: --profile requires a name")
+                sys.exit(1)
+            profile_name = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+
+        if args and args[0] == "run":
+            print("Error: 'run' is no longer supported. Use 'hca \"<task>\"' or start 'hca' interactively.")
             sys.exit(1)
 
     if not config.API_KEY:
@@ -727,7 +715,7 @@ def main():
 
     if len(args) < 1:
         print("Usage: python harness.py \"<task>\" [--verbose]")
-        print("       python harness.py run [--profile <name>] \"<task>\" [--verbose]")
+        print("       python harness.py --profile <name> \"<task>\" [--verbose]")
         print("       python harness.py /<command> [args]")
         print()
         print("Slash commands:")
@@ -748,8 +736,7 @@ def main():
         print('  python harness.py "Fix the failing tests"')
         print('  python harness.py /sessions')
         print('  python harness.py /resume 20260518-120000-abcd1234 "continue verification"')
-        print('  python harness.py run "Fix the failing tests"')
-        print('  python harness.py run --profile terminal "Fix the broken symlinks in /tmp"')
+        print('  python harness.py --profile terminal "Fix the broken symlinks in /tmp"')
         sys.exit(1)
 
     user_prompt = " ".join(args)

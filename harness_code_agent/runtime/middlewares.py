@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 log = logging.getLogger("harness")
 
 
-MAIN_AGENT_NAMES = {"main_agent", "builder"}
+MAIN_AGENT_NAMES = {"main_agent"}
 
 
 class AgentMiddleware(ABC):

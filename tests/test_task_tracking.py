@@ -50,7 +50,7 @@ class UpdatePlanningFilesToolTests(unittest.TestCase):
                 "next_action": "read tests",
             },
             runtime_state=state,
-            agent_name="builder",
+            agent_name="main_agent",
         )
 
         self.assertIn("Updated planning files", result)
@@ -77,7 +77,7 @@ class UpdatePlanningFilesToolTests(unittest.TestCase):
                 "findings": "# Findings\n\n- none yet\n",
             },
             runtime_state=state,
-            agent_name="builder",
+            agent_name="main_agent",
         )
 
         self.assertIn("task_plan.md", result)
@@ -99,7 +99,7 @@ class UpdatePlanningFilesToolTests(unittest.TestCase):
                 "next_action": "run pwd",
             },
             runtime_state=state,
-            agent_name="builder",
+            agent_name="main_agent",
         )
 
         self.assertIn("skip", result)
@@ -108,7 +108,7 @@ class UpdatePlanningFilesToolTests(unittest.TestCase):
 
 
 class TaskTrackingEnforcementTests(unittest.TestCase):
-    def test_builder_cannot_run_bash_before_planning_mode_self_check(self):
+    def test_main_agent_cannot_run_bash_before_planning_mode_self_check(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
 
@@ -117,7 +117,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             {"command": "pwd"},
             messages=[],
             runtime_state=state,
-            agent_name="builder",
+            agent_name="main_agent",
         )
 
         self.assertIsNotNone(blocked)
@@ -134,7 +134,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             {"command": "pwd"},
             messages=[],
             runtime_state=state,
-            agent_name="builder",
+            agent_name="main_agent",
         )
 
         self.assertIsNone(blocked)
@@ -146,7 +146,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         state.task_board.update_count = 1
         state.task_board.needs_final_update = True
 
-        blocked = middleware.pre_exit(messages=[], runtime_state=state, agent_name="builder")
+        blocked = middleware.pre_exit(messages=[], runtime_state=state, agent_name="main_agent")
 
         self.assertIsNotNone(blocked)
         self.assertIn("update_planning_files", blocked)

@@ -125,18 +125,12 @@ def compact_messages(messages: list[dict], llm_call, role: str = "default") -> l
     Summarize the older portion of messages, keep the system prompt
     and recent messages intact.
 
-    Different roles get different compaction strategies:
-    - "evaluator": keeps more history (50%) for cross-round comparison
-    - "builder": aggressive compaction, keeps only 20% + current contract/feedback
-    - "default": balanced at 30%
-
     llm_call: a callable(messages) -> str that calls the LLM for summarization.
     """
     if not messages:
         return messages
 
-    # Role-specific retention ratios
-    retention = {"evaluator": 0.50, "builder": 0.20}.get(role, 0.30)
+    retention = 0.30
 
     system = [messages[0]] if messages[0].get("role") == "system" else []
     non_system = messages[len(system):]
@@ -157,24 +151,10 @@ def compact_messages(messages: list[dict], llm_call, role: str = "default") -> l
 
     old_text = _messages_to_text(old)
 
-    # Role-specific summarization instructions
-    if role == "evaluator":
-        summarize_instruction = (
-            "Summarize the following QA work log. Preserve: all scores given, "
-            "bugs found, quality assessments, and cross-round comparisons. "
-            "The evaluator needs this history to track improvement trends."
-        )
-    elif role == "builder":
-        summarize_instruction = (
-            "Summarize the following build log. Preserve: files created/modified, "
-            "current architecture decisions, and the latest error states. "
-            "Discard intermediate debugging steps and superseded code."
-        )
-    else:
-        summarize_instruction = (
-            "Summarize the following agent work log. Preserve: key decisions, "
-            "files created/modified, current progress, and errors encountered."
-        )
+    summarize_instruction = (
+        "Summarize the following agent work log. Preserve: key decisions, "
+        "files created/modified, current progress, and errors encountered."
+    )
 
     summary = llm_call([
         {"role": "system", "content": f"You are a concise summarizer. {summarize_instruction}"},

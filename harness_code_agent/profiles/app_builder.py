@@ -1,6 +1,5 @@
 """
-App Builder profile — the original scenario from the Anthropic article.
-Plan a product → write code → browser-test → iterate.
+App Builder profile for single-agent web app creation and browser verification.
 """
 from __future__ import annotations
 
@@ -28,7 +27,7 @@ class AppBuilderProfile(BaseProfile):
 
     def main_agent(self) -> AgentConfig:
         return AgentConfig(
-            system_prompt=prompts.BUILDER_SYSTEM,
+            system_prompt=prompts.APP_BUILDER_SYSTEM,
             extra_tool_schemas=tools.BROWSER_TOOL_SCHEMAS,
             middlewares=[
                 LoopDetectionMiddleware(),
@@ -48,21 +47,3 @@ class AppBuilderProfile(BaseProfile):
             ],
             time_budget=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
         )
-
-    def planner(self) -> AgentConfig:
-        return AgentConfig(system_prompt=prompts.PLANNER_SYSTEM)
-
-    def builder(self) -> AgentConfig:
-        return AgentConfig(system_prompt=prompts.BUILDER_SYSTEM)
-
-    def evaluator(self) -> AgentConfig:
-        return AgentConfig(
-            system_prompt=prompts.EVALUATOR_SYSTEM,
-            extra_tool_schemas=tools.BROWSER_TOOL_SCHEMAS,
-        )
-
-    def contract_proposer(self) -> AgentConfig:
-        return AgentConfig(system_prompt=prompts.CONTRACT_BUILDER_SYSTEM)
-
-    def contract_reviewer(self) -> AgentConfig:
-        return AgentConfig(system_prompt=prompts.CONTRACT_REVIEWER_SYSTEM)

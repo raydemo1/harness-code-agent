@@ -58,7 +58,7 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertNotIn("builder", prompt)
         self.assertNotIn("evaluator", prompt)
 
-    def test_profile_can_exist_without_legacy_role_methods(self):
+    def test_profile_interface_exposes_no_legacy_role_methods(self):
         class MinimalProfile(BaseProfile):
             def name(self) -> str:
                 return "minimal"
@@ -69,9 +69,16 @@ class ProfileInterfaceTests(unittest.TestCase):
         profile = MinimalProfile()
 
         self.assertIsInstance(profile.main_agent(), AgentConfig)
-        self.assertFalse(profile.planner().enabled)
-        self.assertFalse(profile.builder().enabled)
-        self.assertFalse(profile.evaluator().enabled)
+        self.assertFalse(hasattr(profile, "planner"))
+        self.assertFalse(hasattr(profile, "builder"))
+        self.assertFalse(hasattr(profile, "evaluator"))
+
+        for profile_meta in list_profiles():
+            builtin = get_profile(profile_meta["name"])
+
+            self.assertFalse(hasattr(builtin, "planner"))
+            self.assertFalse(hasattr(builtin, "builder"))
+            self.assertFalse(hasattr(builtin, "evaluator"))
 
     def test_builtin_profiles_do_not_prompt_for_delegate_task(self):
         for profile_meta in list_profiles():
