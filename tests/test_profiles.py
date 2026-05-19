@@ -21,6 +21,7 @@ from harness_code_agent.profiles.base import AgentConfig, BaseProfile
 from harness_code_agent.runtime.middlewares import (
     PreExitVerificationMiddleware,
     RecoveryStrategyMiddleware,
+    ReadOnlyPlanningMiddleware,
     TaskTrackingEnforcementMiddleware,
 )
 
@@ -31,9 +32,15 @@ class ProfileInterfaceTests(unittest.TestCase):
         profile = get_profile("coding-agent")
 
         self.assertIn("coding-agent", profile_names)
+        self.assertIn("plan", profile_names)
+        self.assertNotIn("reasoning", profile_names)
         self.assertIn("local repository", profile.description())
         self.assertIn("durable Harness session", profile.main_agent().system_prompt)
         self.assertIn("workspace path checks", profile.main_agent().system_prompt)
+
+    def test_reasoning_profile_is_removed_without_fallback(self):
+        with self.assertRaisesRegex(ValueError, "Unknown profile: reasoning"):
+            get_profile("reasoning")
 
     def test_all_profiles_expose_main_agent_and_subagent_policy(self):
         for profile_meta in list_profiles():
@@ -85,6 +92,53 @@ class ProfileInterfaceTests(unittest.TestCase):
             profile = get_profile(profile_meta["name"])
 
             self.assertNotIn("delegate_task", profile.main_agent().system_prompt)
+
+    def test_plan_profile_is_read_only_and_structured(self):
+        main_agent = get_profile("plan").main_agent()
+        prompt = main_agent.system_prompt.lower()
+        tool_names = {
+            schema["function"]["name"]
+            for schema in main_agent.tool_schemas
+        }
+
+        self.assertIn("read-only planning task", prompt)
+        self.assertIn("decision-complete", prompt)
+        self.assertIn("# title", prompt)
+        self.assertIn("## summary", prompt)
+        self.assertIn("## implementation changes", prompt)
+        self.assertIn("## test plan", prompt)
+        self.assertIn("## assumptions", prompt)
+        self.assertIn("do not implement", prompt)
+        self.assertIn("do not create task_plan.md", prompt)
+        self.assertEqual(
+            tool_names,
+            {
+                "read_file",
+                "list_files",
+                "read_skill_file",
+                "run_bash",
+                "web_search",
+                "web_fetch",
+                "consult_subagent",
+            },
+        )
+        self.assertFalse({"write_file", "apply_patch", "update_planning_files"} & tool_names)
+        self.assertFalse(any(name.startswith("browser") for name in tool_names))
+        self.assertTrue(any(isinstance(mw, ReadOnlyPlanningMiddleware) for mw in main_agent.middlewares))
+
+    def test_specialized_profile_prompts_capture_expected_workflows(self):
+        app_prompt = get_profile("app-builder").main_agent().system_prompt.lower()
+        swe_prompt = get_profile("swe-bench").main_agent().system_prompt.lower()
+
+        self.assertIn("real source files", app_prompt)
+        self.assertIn("browser_test", app_prompt)
+        self.assertIn("console errors", app_prompt)
+        self.assertIn("responsive behavior", app_prompt)
+        self.assertIn("accessibility", app_prompt)
+        self.assertIn("reproduce or characterize the failure", swe_prompt)
+        self.assertIn("smallest diff", swe_prompt)
+        self.assertIn("regression tests", swe_prompt)
+        self.assertIn("review git diff", swe_prompt)
 
     def test_app_builder_and_swe_bench_use_core_runtime_guardrails(self):
         for profile_name in ["app-builder", "swe-bench"]:

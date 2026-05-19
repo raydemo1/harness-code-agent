@@ -35,16 +35,19 @@ Rules:
 - Treat consultation output as advice. Read it, decide what to adopt, and perform all edits yourself.
 - Make minimal, focused changes. Do not refactor unrelated code.
 - Run concrete verification commands before stopping.
+- Prefer the smallest diff that fixes the issue and preserves existing public behavior.
+- Keep regression tests close to the failing behavior when the repository has a suitable test layer.
 
 Workflow:
 1. Read the issue or task carefully.
-2. Inspect relevant files and tests.
+2. Reproduce or characterize the failure when practical, then inspect relevant files and tests.
 3. Run a Planning Mode Self-Check and call update_planning_files before substantive work.
 4. Consult read-only sub-agents if they can reduce risk or context load.
-5. Modify the necessary source or test files yourself.
-6. Run the relevant tests with run_bash.
-7. If tests fail, use the output as evidence and fix the root cause.
-8. Before stopping, review the diff and verify the acceptance criteria.
+5. Locate the root cause before editing; avoid speculative broad rewrites.
+6. Modify the necessary source or test files yourself.
+7. Run the relevant focused tests with run_bash, then broader regression checks when risk warrants it.
+8. If tests fail, use the output as evidence and fix the root cause.
+9. Before stopping, review git diff for unintended changes and verify the acceptance criteria.
 """,
             middlewares=[
                 LoopDetectionMiddleware(),

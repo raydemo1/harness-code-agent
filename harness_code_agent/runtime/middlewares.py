@@ -674,6 +674,73 @@ class ReadOnlySubagentMiddleware(AgentMiddleware):
         return None
 
 
+class ReadOnlyPlanningMiddleware(AgentMiddleware):
+    """Restrict the plan profile's main agent to read-only investigation."""
+
+    READ_ONLY_TOOLS = {
+        "read_file",
+        "list_files",
+        "read_skill_file",
+        "run_bash",
+        "web_search",
+        "web_fetch",
+        "consult_subagent",
+    }
+    BLOCKED_TOOLS = {
+        "write_file",
+        "apply_patch",
+        "update_planning_files",
+        "browser_test",
+        "stop_dev_server",
+    }
+    READ_ONLY_PREFIXES = (
+        "cat ", "type ", "ls", "dir", "pwd", "grep ", "rg ", "head ", "tail ",
+        "git status", "git diff", "git log", "git show", "git branch",
+        "python -m unittest", "python -m pytest", "pytest", "test ", "diff ",
+        "wc ", "which ", "where ", "env",
+    )
+    MUTATING_SHELL_PATTERNS = (
+        ">", ">>", "rm ", "del ", "erase ", "move ", "mv ", "cp ", "copy ",
+        "mkdir ", "rmdir ", "touch ", "tee ", "sed -i", "find . -delete",
+        "git add", "git commit", "git checkout", "git switch", "git reset",
+        "git clean", "git merge", "git rebase", "git cherry-pick", "git revert",
+        "npm install", "pip install", "python -m pip install", "uv add",
+        "cargo add", "go get",
+    )
+
+    def _is_read_only_command(self, command: str) -> bool:
+        lowered = command.strip().lower()
+        if not lowered:
+            return False
+        if any(pattern in lowered for pattern in self.MUTATING_SHELL_PATTERNS):
+            return False
+        return any(lowered.startswith(prefix) for prefix in self.READ_ONLY_PREFIXES)
+
+    def before_tool(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        messages: list[dict],
+        runtime_state=None,
+        agent_name: str | None = None,
+    ) -> str | None:
+        if agent_name not in MAIN_AGENT_NAMES:
+            return None
+        if tool_name in self.BLOCKED_TOOLS or tool_name not in self.READ_ONLY_TOOLS:
+            return (
+                "[blocked] The plan profile is read-only. Investigate and produce a structured "
+                "Markdown plan; do not write files, update planning files, use browser tools, "
+                "or perform implementation."
+            )
+        if tool_name == "run_bash" and not self._is_read_only_command(tool_args.get("command", "")):
+            return (
+                "[blocked] The plan profile may only run read-only shell commands for investigation "
+                "or verification. Do not modify files, install dependencies, start services, "
+                "or change git state."
+            )
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Error Guidance (structured recovery for weak models)
 # ---------------------------------------------------------------------------

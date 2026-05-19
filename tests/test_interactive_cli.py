@@ -33,6 +33,7 @@ from harness_code_agent.core.mentions import (
     resolve_mentions,
 )
 from harness_code_agent.sessions.store import SessionStore
+from harness_code_agent.profiles.base import AgentConfig
 
 
 class FakeConversation:
@@ -50,6 +51,17 @@ class FakeConversation:
 
     def close(self):
         self.closed = True
+
+
+class RecordingInteractiveAgent:
+    init_kwargs = None
+
+    def __init__(self, *args, **kwargs):
+        self.__class__.init_kwargs = kwargs
+        self.middlewares = kwargs.get("middlewares") or []
+
+    def start_conversation(self):
+        return FakeConversation()
 
 
 class InteractiveCliTests(unittest.TestCase):
@@ -99,6 +111,30 @@ class InteractiveCliTests(unittest.TestCase):
             self.assertEqual(result.text, "assistant done")
             self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
             self.assertIn("fix the tests", FakeConversation.instances[0].submissions[0])
+        finally:
+            session.close()
+
+    def test_interactive_session_passes_profile_tool_schemas_to_agent(self):
+        class FakeToolProfile:
+            def name(self):
+                return "fake-tools"
+
+            def main_agent(self):
+                return AgentConfig(
+                    system_prompt="fake",
+                    tool_schemas=[{"type": "function", "function": {"name": "read_file"}}],
+                )
+
+        with (
+            patch("harness_code_agent.core.interactive.get_profile", return_value=FakeToolProfile()),
+            patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
+        try:
+            self.assertEqual(
+                RecordingInteractiveAgent.init_kwargs["tool_schemas"],
+                [{"type": "function", "function": {"name": "read_file"}}],
+            )
         finally:
             session.close()
 

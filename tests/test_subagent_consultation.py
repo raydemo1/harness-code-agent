@@ -19,7 +19,7 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent.runtime import tools
-from harness_code_agent.runtime.middlewares import ReadOnlySubagentMiddleware
+from harness_code_agent.runtime.middlewares import ReadOnlyPlanningMiddleware, ReadOnlySubagentMiddleware
 
 
 class CapturingAgent:
@@ -116,6 +116,95 @@ class SubagentConsultationTests(unittest.TestCase):
         self.assertNotIn("delegate_task", tool_names)
         self.assertNotIn("delegate_task", tools.TOOL_DISPATCH)
         self.assertIn("Unknown tool", tools.execute_tool("delegate_task", {"task": "do work"}))
+
+    def test_plan_tool_schemas_are_read_only(self):
+        tool_names = {
+            schema["function"]["name"]
+            for schema in tools.planning_tool_schemas()
+        }
+
+        self.assertEqual(
+            tool_names,
+            {
+                "read_file",
+                "list_files",
+                "read_skill_file",
+                "run_bash",
+                "web_search",
+                "web_fetch",
+                "consult_subagent",
+            },
+        )
+        self.assertNotIn("write_file", tool_names)
+        self.assertNotIn("apply_patch", tool_names)
+        self.assertNotIn("update_planning_files", tool_names)
+        self.assertNotIn("browser_test", tool_names)
+
+    def test_read_only_planning_blocks_write_tools_and_browser_tools(self):
+        middleware = ReadOnlyPlanningMiddleware()
+
+        for tool_name in ["write_file", "apply_patch", "update_planning_files", "browser_test"]:
+            with self.subTest(tool_name=tool_name):
+                blocked = middleware.before_tool(
+                    tool_name,
+                    {},
+                    messages=[],
+                    agent_name="main_agent",
+                )
+
+                self.assertIsNotNone(blocked)
+                self.assertIn("read-only", blocked.lower())
+
+    def test_read_only_planning_blocks_mutating_shell_commands(self):
+        middleware = ReadOnlyPlanningMiddleware()
+
+        dangerous_commands = [
+            "rm -rf build",
+            "echo hacked > file.txt",
+            "printf hacked >> file.txt",
+            "git add .",
+            "python -m pip install pytest",
+        ]
+
+        for command in dangerous_commands:
+            with self.subTest(command=command):
+                blocked = middleware.before_tool(
+                    "run_bash",
+                    {"command": command},
+                    messages=[],
+                    agent_name="main_agent",
+                )
+
+                self.assertIsNotNone(blocked)
+                self.assertIn("read-only shell", blocked.lower())
+
+    def test_read_only_planning_allows_investigation_and_test_commands(self):
+        middleware = ReadOnlyPlanningMiddleware()
+
+        read_only_calls = [
+            ("read_file", {"path": "app.py"}),
+            ("list_files", {"directory": "."}),
+            ("read_skill_file", {"path": "skills/x/SKILL.md"}),
+            ("web_search", {"query": "docs"}),
+            ("web_fetch", {"url": "https://example.com"}),
+            ("consult_subagent", {"task": "inspect", "scope": "review"}),
+            ("run_bash", {"command": "rg consult_subagent ."}),
+            ("run_bash", {"command": "git diff -- tests"}),
+            ("run_bash", {"command": "cat harness_code_agent/runtime/tools.py"}),
+            ("run_bash", {"command": "python -m unittest discover -s tests"}),
+            ("run_bash", {"command": "pytest tests"}),
+        ]
+
+        for tool_name, args in read_only_calls:
+            with self.subTest(tool_name=tool_name, args=args):
+                blocked = middleware.before_tool(
+                    tool_name,
+                    args,
+                    messages=[],
+                    agent_name="main_agent",
+                )
+
+                self.assertIsNone(blocked)
 
 
 if __name__ == "__main__":

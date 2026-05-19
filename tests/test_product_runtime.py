@@ -60,7 +60,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 permission_mode="workspace-write",
             )
             second = store.create(
-                profile="reasoning",
+                profile="plan",
                 cwd=Path(tmp),
                 model="model-b",
                 permission_mode="read-only",
@@ -72,7 +72,7 @@ class ProductRuntimeTests(unittest.TestCase):
             events = store.read_events(second.id)
 
             self.assertEqual([item["id"] for item in sessions], [second.id, first.id])
-            self.assertEqual(metadata["profile"], "reasoning")
+            self.assertEqual(metadata["profile"], "plan")
             self.assertEqual(events[0]["type"], "session_finished")
 
     def test_session_store_forks_session_metadata_and_lineage_event(self):

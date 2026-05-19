@@ -330,6 +330,20 @@ def consultation_tool_schemas() -> list[dict]:
     return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
 
 
+def planning_tool_schemas() -> list[dict]:
+    """Return the read-only tool surface for the plan profile."""
+    names = {
+        "read_file",
+        "list_files",
+        "read_skill_file",
+        "run_bash",
+        "web_search",
+        "web_fetch",
+        "consult_subagent",
+    }
+    return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
+
+
 def _as_consultation_report(scope: str, raw_result: str) -> str:
     raw_result = raw_result or ""
     try:

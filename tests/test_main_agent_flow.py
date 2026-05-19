@@ -57,11 +57,12 @@ class RecordingAgent:
     runs = []
 
     def __init__(self, name, system_prompt, use_tools=True, extra_tool_schemas=None,
-                 middlewares=None, time_budget=None, **kwargs):
+                 middlewares=None, time_budget=None, tool_schemas=None, **kwargs):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
         self.extra_tool_schemas = extra_tool_schemas or []
+        self.tool_schemas = tool_schemas
         self.middlewares = middlewares or []
         self.time_budget = time_budget
         self.tool_context = kwargs.get("tool_context")
@@ -159,6 +160,21 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertIn("planning-with-files", prompt)
         self.assertIn("Treat `prd` and `planning-with-files` as collaborators", prompt)
 
+    def test_harness_passes_profile_tool_schemas_to_main_agent(self):
+        profile = FakeProfile()
+        profile.main_agent = lambda: AgentConfig(
+            system_prompt="Main agent owns all code changes.",
+            tool_schemas=[{"type": "function", "function": {"name": "read_file"}}],
+        )
+
+        with patch("harness_code_agent.core.harness.Agent", RecordingAgent):
+            Harness(profile)
+
+        self.assertEqual(
+            RecordingAgent.instances[0].tool_schemas,
+            [{"type": "function", "function": {"name": "read_file"}}],
+        )
+
     def test_checkpoint_policy_commits_workspace_changes_after_session(self):
         os.environ["HARNESS_COMMIT_POLICY"] = "checkpoint"
         profile = FakeProfile()
@@ -236,7 +252,7 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
     def test_session_command_shows_session_without_api_key(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
         session = store.create(
-            profile="reasoning",
+            profile="plan",
             cwd=Path(self.temp_dir),
             model="model-b",
             permission_mode="read-only",
@@ -251,13 +267,13 @@ class HarnessMainAgentFlowTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         output = out.getvalue()
         self.assertIn(session.id, output)
-        self.assertIn("reasoning", output)
+        self.assertIn("plan", output)
         self.assertIn("events: 1", output)
 
     def test_slash_session_command_shows_session_without_api_key(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
         session = store.create(
-            profile="reasoning",
+            profile="plan",
             cwd=Path(self.temp_dir),
             model="model-b",
             permission_mode="read-only",

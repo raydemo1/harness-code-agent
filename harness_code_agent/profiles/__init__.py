@@ -3,16 +3,16 @@
 from .base import BaseProfile, AgentConfig, ProfileConfig
 from .app_builder import AppBuilderProfile
 from .coding_agent import CodingAgentProfile
+from .plan import PlanProfile
 from .terminal import TerminalProfile
 from .swe_bench import SWEBenchProfile
-from .reasoning import ReasoningProfile
 
 PROFILES: dict[str, type[BaseProfile]] = {
     "coding-agent": CodingAgentProfile,
     "app-builder": AppBuilderProfile,
     "terminal": TerminalProfile,
     "swe-bench": SWEBenchProfile,
-    "reasoning": ReasoningProfile,
+    "plan": PlanProfile,
 }
 
 

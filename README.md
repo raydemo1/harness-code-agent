@@ -11,7 +11,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 
 ## 功能特点
 
-- **Profile 驱动**：内置 `coding-agent`、`app-builder`、`terminal`、`swe-bench`、`reasoning` 五种任务模式。
+- **Profile 驱动**：内置 `coding-agent`、`app-builder`、`terminal`、`swe-bench`、`plan` 五种任务模式。
 - **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
 - **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
 - **工作区隔离**：默认在 `workspace/` 下创建独立任务目录，文件读写会经过路径检查。
@@ -131,7 +131,7 @@ hca "Fix the failing tests"
 ```bash
 hca --profile terminal "Fix the broken symlinks in /tmp"
 hca --profile swe-bench "Fix the TypeError in parse_config()"
-hca --profile reasoning "Calculate the escape velocity of Mars"
+hca --profile plan "Design the fix for the failing parser tests"
 ```
 
 ## Profile 说明
@@ -142,7 +142,7 @@ hca --profile reasoning "Calculate the escape velocity of Mars"
 | `app-builder` | 从 prompt 构建完整 Web 应用，可使用浏览器测试工具 |
 | `terminal` | 面向 Terminal-Bench 2.0 风格的 CLI / shell 任务 |
 | `swe-bench` | 面向真实仓库 issue 修复任务 |
-| `reasoning` | 面向知识密集型推理、计算或问答任务 |
+| `plan` | 只读调查和方案设计，输出结构化 Markdown 计划 |
 
 ## 会话和工作区
 

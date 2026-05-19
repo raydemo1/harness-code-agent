@@ -36,6 +36,9 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertIn("persistent shell", prompt.lower())
         self.assertIn("update_planning_files", prompt)
         self.assertIn("Planning Mode Self-Check", prompt)
+        self.assertIn("exact output", prompt)
+        self.assertIn("switch strategy", prompt)
+        self.assertIn("background services", prompt)
 
     def test_terminal_main_agent_uses_enforcement_middlewares(self):
         middlewares = TerminalProfile().main_agent().middlewares

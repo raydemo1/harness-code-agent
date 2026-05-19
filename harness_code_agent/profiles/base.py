@@ -23,6 +23,7 @@ class AgentConfig:
     """Configuration for the main agent."""
     system_prompt: str
     extra_tool_schemas: list[dict] = field(default_factory=list)
+    tool_schemas: list[dict] | None = None
     enabled: bool = True
     middlewares: list = field(default_factory=list)  # list[AgentMiddleware]
     time_budget: float | None = None  # seconds; None = no limit

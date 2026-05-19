@@ -115,6 +115,7 @@ class InteractiveSession:
             cfg.system_prompt + catalog,
             use_tools=True,
             extra_tool_schemas=cfg.extra_tool_schemas,
+            tool_schemas=cfg.tool_schemas,
             middlewares=cfg.middlewares,
             time_budget=cfg.time_budget,
             tool_context=self.tool_context,

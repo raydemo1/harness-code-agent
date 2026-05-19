@@ -10,13 +10,13 @@ Built-in profiles:
   app-builder  — Build web apps from a prompt (original Anthropic article scenario)
   terminal     — Solve terminal/CLI tasks (Terminal-Bench-2 style)
   swe-bench    — Fix GitHub issues in real repos
-  reasoning    — Knowledge-intensive QA (MMMU-Pro style)
+  plan         — Read-only investigation and implementation planning
 
 Usage:
   python harness.py "Fix the failing tests"                         # default: coding-agent
   python harness.py --profile terminal "Fix the broken git merge"
   python harness.py --profile swe-bench "Fix issue #123"
-  python harness.py --profile reasoning "Calculate the orbital period of..."
+  python harness.py --profile plan "Design the fix for failing tests"
   python harness.py --list-profiles
 """
 from __future__ import annotations
@@ -86,6 +86,7 @@ class Harness:
         kwargs = {
             "use_tools": True,
             "extra_tool_schemas": main_cfg.extra_tool_schemas,
+            "tool_schemas": main_cfg.tool_schemas,
             "middlewares": main_cfg.middlewares,
             "time_budget": main_cfg.time_budget,
         }
