@@ -673,6 +673,9 @@ def main():
 
     # Parse flags
     args = [a for a in sys.argv[1:] if a not in ("--verbose", "-v")]
+    if args and args[0] == "run":
+        print("Error: 'run' is no longer supported. Use 'hca \"<task>\"' or start 'hca' interactively.")
+        sys.exit(1)
     try:
         args = _normalize_slash_command(args)
     except ValueError as e:

@@ -95,39 +95,43 @@ HARNESS_COMMIT_POLICY=checkpoint
 运行环境诊断：
 
 ```bash
-python harness.py doctor
+hca
+# 然后在交互提示符中输入：
+/doctor
 ```
 
 查看当前配置：
 
 ```bash
-python harness.py config show
+hca
+/config show
 ```
 
 查看可用 profile：
 
 ```bash
-python harness.py --list-profiles
+hca --list-profiles
 ```
 
-执行默认本地代码任务。`run` 命令默认使用 `coding-agent` profile：
+进入交互式本地开发助手。默认 profile 是 `coding-agent`，工作区就是启动 `hca` 时所在的当前目录：
 
 ```bash
-python harness.py run "Fix the failing tests"
+hca
+hca> Fix the failing tests
+```
+
+也可以启动后立即提交第一个任务，然后继续留在交互模式：
+
+```bash
+hca "Fix the failing tests"
 ```
 
 指定 profile：
 
 ```bash
-python harness.py run --profile terminal "Fix the broken symlinks in /tmp"
-python harness.py run --profile swe-bench "Fix the TypeError in parse_config()"
-python harness.py run --profile reasoning "Calculate the escape velocity of Mars"
-```
-
-兼容旧用法：不带 `run` 时默认使用 `app-builder` profile：
-
-```bash
-python harness.py "Build a simple kanban app in the browser"
+hca --profile terminal "Fix the broken symlinks in /tmp"
+hca --profile swe-bench "Fix the TypeError in parse_config()"
+hca --profile reasoning "Calculate the escape velocity of Mars"
 ```
 
 ## Profile 说明
@@ -142,25 +146,25 @@ python harness.py "Build a simple kanban app in the browser"
 
 ## 会话和工作区
 
-默认情况下，每次运行会在 `HARNESS_WORKSPACE` 下创建一个带时间戳的任务目录，例如：
+交互模式默认直接在当前目录工作，不再为开发任务创建带时间戳的工作区。该目录会自动初始化 Git 仓库，并在 `.harness/` 中记录 session metadata、events 和文件快照。
 
-```text
-workspace/20260518-193000_fix-the-failing-tests/
-```
-
-该目录会自动初始化 Git 仓库，并在 `.harness/` 中记录 session metadata、events 和文件快照。任务结束后会根据 `HARNESS_COMMIT_POLICY` 决定是否写入 checkpoint commit。
+自动 checkpoint 默认在每个完成的 turn 后运行，但只有存在未提交代码变更时才会创建 commit；如果工作区是 clean 的，会提示没有需要 checkpoint 的内容。
 
 常用会话命令：
 
 ```bash
-python harness.py sessions
-python harness.py session <session-id>
+hca
+/sessions
+/session <session-id>
+/resume <session-id>
+/checkpoint status
 ```
 
-如果 benchmark 或外部 runner 需要直接在工作区根目录执行，可设置：
+可以用 `@` mention 把文件或历史 session 作为上下文注入当前 turn：
 
 ```bash
-HARNESS_FLAT_WORKSPACE=1
+hca> 根据 @README.md 修复文档里的启动示例
+hca> 继续 @session:20260518-120000-abcd1234 里的工作
 ```
 
 ## 配置项

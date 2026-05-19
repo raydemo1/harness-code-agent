@@ -1,6 +1,6 @@
 ---
 name: prd
-description: "Use this skill before Vibe Coding implementation when the user needs to define or refine product requirements, MVP scope, non-goals, acceptance criteria, user workflows, constraints, or the first implementation slice. This skill owns PRD.md only. Do not create ARCH.md or PROJECT_STATE.md; use planning-with-files for execution plans, findings, and progress logs."
+description: "Use this skill before Vibe Coding implementation when the user needs to define or refine product requirements, MVP scope, non-goals, acceptance criteria, user workflows, constraints, or the first implementation slice. This skill owns PRD.md only. PRD.md is user-facing and must be written in Chinese by default. Do not create ARCH.md or PROJECT_STATE.md; use planning-with-files for execution plans, findings, and progress logs."
 ---
 
 # PRD
@@ -8,6 +8,14 @@ description: "Use this skill before Vibe Coding implementation when the user nee
 Use this skill when a project or feature needs a clear product requirements document before code is written.
 
 The job is simple: turn a fuzzy idea into `PRD.md` with clear scope, boundaries, acceptance criteria, and the first verifiable implementation slice.
+
+## Language Policy
+
+`PRD.md` 是给用户看的产品文档。默认使用中文撰写，包括标题、要点、示例、假设、验收标准、风险和建议验证方式。
+
+只有在产品名、API 名、命令、文件路径、代码符号、库、框架、协议或用户原话需要保留字面值时，才使用英文。
+
+如果用户明确要求其他语言，按用户要求执行。否则不要在 `PRD.md` 里使用 "Goal"、"MVP Scope"、"Acceptance Criteria"、"First Implementation Slice" 等英文标题；使用下方中文模板。
 
 ## Core Principle
 
@@ -22,28 +30,28 @@ Do not create `ARCH.md` or `PROJECT_STATE.md` from this skill. Put only lightwei
 Use `prd` and `planning-with-files` as a pair when a task moves from fuzzy product intent into multi-step execution.
 
 `prd` owns:
-- Product goal and background.
-- Target users and core scenarios.
-- MVP scope and non-goals.
-- Acceptance criteria.
-- User workflow and constraints.
-- First implementation slice and suggested verification.
+- 产品目标和背景。
+- 目标用户和核心场景。
+- MVP 范围和非目标。
+- 验收标准。
+- 用户工作流和约束。
+- 第一阶段实现切片和建议验证方式。
 
 `planning-with-files` owns:
-- `task_plan.md` phase breakdown and current status.
-- `findings.md` research and codebase discoveries.
-- `progress.md` session log, tool-level progress, errors, and verification results.
-- Retry history and next actions.
+- `task_plan.md` 阶段拆解和当前状态。
+- `findings.md` 研究记录和代码库发现。
+- `progress.md` 会话日志、工具级进展、错误和验证结果。
+- 重试历史和下一步行动。
 
 After writing or updating `PRD.md`, hand off to `planning-with-files` when execution is complex, multi-step, research-heavy, or likely to take more than a few tool calls. The handoff should include:
 
 ```md
-PRD goal:
-Current slice:
-Acceptance criteria:
-Execution phases:
-Suggested verification:
-Known risks:
+PRD 目标：
+当前切片：
+验收标准：
+执行阶段：
+建议验证方式：
+已知风险：
 ```
 
 If implementation reveals a product decision changed, return to `PRD.md` and update the requirement source of truth before changing the execution plan. If only status, discovered facts, errors, or verification results changed, update the planning files only.
@@ -85,13 +93,13 @@ If the user wants to skip planning, do the shortest useful PRD pass: record assu
 Use for small features or existing projects with limited uncertainty.
 
 Output inside `PRD.md`:
-- Goal.
-- Assumptions.
-- In scope.
-- Out of scope.
-- Acceptance criteria.
-- First slice.
-- Open questions, only if blocking.
+- 目标。
+- 假设。
+- 范围内。
+- 范围外。
+- 验收标准。
+- 第一阶段实现切片。
+- 待确认问题，仅保留阻塞项。
 
 If execution will continue immediately, choose `skip`, `light`, or `full` with `planning-with-files` after the brief is written.
 
@@ -101,8 +109,8 @@ Use for new projects, major features, or fuzzy MVPs.
 
 Output:
 - `PRD.md` only.
-- First execution slice.
-- Suggested verification.
+- 第一阶段执行切片。
+- 建议验证方式。
 
 If planning or progress tracking is needed, create or update the planning-with-files documents separately. Do not duplicate those logs in `PRD.md`.
 
@@ -111,76 +119,76 @@ If planning or progress tracking is needed, create or update the planning-with-f
 Use for public products, multi-user systems, auth, payment, privacy, sensitive data, destructive data handling, production rollout, or expensive integrations.
 
 Also include in `PRD.md`:
-- Security and data boundaries.
-- Non-functional requirements.
-- Rollout and rollback expectations.
-- Explicit deferrals.
+- 安全和数据边界。
+- 非功能需求。
+- 发布与回滚预期。
+- 明确延后事项。
 
 ## Workflow
 
-### 1. Capture Intent
+### 1. 捕捉意图
 
-Identify:
-- Target user.
-- Problem or job to be done.
-- Primary scenario.
-- Core value.
-- Desired MVP outcome.
+识别：
+- 目标用户。
+- 要解决的问题或用户任务。
+- 主要使用场景。
+- 核心价值。
+- 期望的 MVP 结果。
 
 Ask only questions that change scope, risk, architecture, or user-visible behavior.
 
-### 2. Draw Boundaries
+### 2. 划定边界
 
-Separate:
-- Must-have for the first usable version.
-- Later enhancements.
-- Non-goals.
-- Open decisions.
+区分：
+- 第一版必须具备的能力。
+- 后续增强能力。
+- 非目标。
+- 尚未确定的决策。
 
 Keep the MVP small enough to implement as one or more verifiable slices.
 
-### 3. Define Acceptance Criteria
+### 3. 定义验收标准
 
 Write criteria as observable behavior.
 
-Weak:
-- "Supports login."
+弱示例：
+- “支持登录。”
 
-Strong:
-- "A user can enter a valid email code, become authenticated, and land on the dashboard. Invalid or expired codes show a clear error. Rate limiting is either implemented or explicitly deferred."
+强示例：
+- “用户可以输入有效邮箱验证码完成认证并进入仪表盘。无效或过期验证码会显示清晰错误。限流要么已实现，要么明确延后。”
 
-### 4. Shape UX And Workflow
+### 4. 梳理体验和工作流
 
-For UI products, define:
-- Page or screen list.
-- Main sections.
-- Primary user flow.
-- Navigation shape.
-- Visual direction only as much as needed to avoid guessing.
+如果是 UI 产品，定义：
+- 页面或屏幕清单。
+- 主要区块。
+- 主要用户流程。
+- 导航结构。
+- 必要的视觉方向，只写到足以避免实现者猜测即可。
 
-### 5. Capture Constraints
+### 5. 记录约束
 
-Record constraints that affect implementation:
-- Security, auth, privacy, payment, secrets.
-- Data volume and performance.
-- Local-only, internal, or public deployment.
-- Cost limits and third-party services.
-- Reliability and recovery expectations.
+记录会影响实现的约束：
+- 安全、认证、隐私、支付、密钥。
+- 数据量和性能。
+- 本地使用、内部使用或公开部署。
+- 成本限制和第三方服务。
+- 可靠性和恢复预期。
 
-### 6. Choose A Practical Tech Direction
+### 6. 选择务实的技术方向
 
 Prefer boring, inspectable, testable choices.
 
-Consider:
-- Existing repository conventions.
-- Official docs and examples.
-- Testing support.
-- Deployment fit.
-- Project size.
+考虑：
+- 现有仓库约定。
+- 官方文档和示例。
+- 测试支持。
+- 部署匹配度。
+- 项目规模。
 
 Avoid architecture for speculative future features. Keep this section lightweight unless the user asks for architecture work.
 
-### 7. Write Or Update PRD.md
+### 7. 编写或更新 PRD.md
 
 For substantial work, create or update `PRD.md`.
 
@@ -188,78 +196,78 @@ Keep the PRD concise. It is product context, not an execution diary.
 
 Update it when scope, requirements, acceptance criteria, risks, or major product decisions change.
 
-### 8. End With An Execution Contract
+### 8. 以执行约定收尾
 
 Every PRD pass should end with:
-- Goal.
-- In scope.
-- Out of scope.
-- Acceptance criteria.
-- First implementation slice.
-- Suggested verification.
-- Known risks.
-- Whether `planning-with-files` should be used next.
-- Suggested planning mode for the first execution slice: `skip`, `light`, or `full`.
+- 目标。
+- 范围内。
+- 范围外。
+- 验收标准。
+- 第一阶段实现切片。
+- 建议验证方式。
+- 已知风险。
+- 是否接下来使用 `planning-with-files`。
+- 第一阶段执行切片建议使用的 planning mode：`skip`、`light` 或 `full`。
 
 Default execution contract:
-- Work one verifiable slice at a time.
-- Do not expand scope without updating `PRD.md`.
-- Preserve existing project conventions.
-- Use planning-with-files for task plans, findings, progress, and retry logs when the task is long or complex.
-- Verify with concrete commands or manual checks before claiming done.
-- Report any verification that could not be run.
+- 一次只推进一个可验证切片。
+- 未更新 `PRD.md` 前不要扩展范围。
+- 保持现有项目约定。
+- 任务较长或复杂时，用 planning-with-files 记录 task plan、findings、progress 和重试日志。
+- 声称完成前，用具体命令或人工检查验证。
+- 如有无法运行的验证，必须说明。
 
-When handing off to `planning-with-files`, do not restate the entire PRD in planning files. Copy only the goal, current slice, acceptance criteria, verification target, and known risks needed to execute the slice.
+交接给 `planning-with-files` 时，不要在 planning files 里复述整份 PRD。只复制执行当前切片所需的目标、当前切片、验收标准、验证目标和已知风险。
 
 ## PRD.md Template
 
 ```md
-# Project / Feature Name
+# 项目 / 功能名称
 
-## Goal And Background
+## 目标与背景
 
-## Target Users
+## 目标用户
 
-## Core Scenarios
+## 核心场景
 
-## MVP Scope
+## MVP 范围
 
-## Feature List
+## 功能清单
 
-## Page / Workflow Map
+## 页面 / 工作流地图
 
-## Acceptance Criteria
+## 验收标准
 
-## Non-Goals
+## 非目标
 
-## Technical Direction
+## 技术方向
 
-## Risks And Dependencies
+## 风险与依赖
 
-## First Implementation Slice
+## 第一阶段实现切片
 ```
 
-## Done Criteria
+## 完成标准
 
-PRD work is done when:
-- The goal is clear.
-- MVP and non-goals are separated.
-- Acceptance criteria are testable.
-- Important constraints are named or explicitly deferred.
-- `PRD.md` is written or updated when useful.
-- The first execution slice is ready.
-- For complex execution, the handoff to `planning-with-files` is explicit.
+PRD 工作完成的标准：
+- 目标清楚。
+- MVP 和非目标已区分。
+- 验收标准可测试。
+- 重要约束已写明或明确延后。
+- 需要时已经写入或更新 `PRD.md`。
+- 第一阶段执行切片已经明确。
+- 对复杂执行，已经明确交接给 `planning-with-files`。
 
-## Examples
+## 示例
 
-**New internal tool**
-Input: "I want to build an internal knowledge-base search app. Help me plan it first."
-Behavior: Define users, sources, access boundary, MVP, PRD, and first slice.
+**新的内部工具**
+输入："I want to build an internal knowledge-base search app. Help me plan it first."
+行为：用中文定义用户、数据来源、访问边界、MVP、PRD 和第一阶段切片。
 
-**Fuzzy MVP**
-Input: "Let's make a tiny SaaS for invoice reminders, but I'm not sure what the MVP should be."
-Behavior: Separate first-version workflows from later billing, templates, analytics, and admin features.
+**模糊 MVP**
+输入："Let's make a tiny SaaS for invoice reminders, but I'm not sure what the MVP should be."
+行为：用中文区分第一版工作流和后续的计费、模板、分析、管理后台等能力。
 
-**Planning plus implementation**
-Input: "Plan a local habit tracker and then start building it."
-Behavior: Create a concise PRD, define the first slice, then proceed to implementation.
+**规划加实现**
+输入："Plan a local habit tracker and then start building it."
+行为：用中文创建简洁 PRD，定义第一阶段切片，然后进入实现。

@@ -59,6 +59,11 @@ class AgentMiddleware(ABC):
         """Called at the start of each iteration. Return a message to inject, or None."""
         return None
 
+    def begin_turn(self, task: str, messages: list[dict], runtime_state=None,
+                   agent_name: str | None = None) -> None:
+        """Called before a new user turn is appended in a live conversation."""
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Loop Detection
@@ -177,11 +182,16 @@ class PreExitVerificationMiddleware(AgentMiddleware):
         self._verification_prompt = verification_prompt
         self._include_task_requirements = include_task_requirements
 
+    def begin_turn(self, task: str, messages: list[dict], runtime_state=None,
+                   agent_name: str | None = None) -> None:
+        self._exit_attempts = 0
+
     @staticmethod
-    def _has_done_work(messages: list[dict]) -> bool:
+    def _has_done_work(messages: list[dict], runtime_state=None) -> bool:
         """Check if the agent has called any action tools."""
         action_tools = {"run_bash", "write_file", "consult_subagent"}
-        for msg in messages:
+        start = getattr(runtime_state, "current_turn_start_index", 0) if runtime_state is not None else 0
+        for msg in messages[start:]:
             if msg.get("role") == "assistant":
                 for tc in msg.get("tool_calls", []):
                     fn_name = tc.get("function", {}).get("name", "")
@@ -190,9 +200,10 @@ class PreExitVerificationMiddleware(AgentMiddleware):
         return False
 
     @staticmethod
-    def _extract_task_requirements(messages: list[dict]) -> str | None:
-        """Extract the original task requirements from the conversation."""
-        for msg in messages:
+    def _extract_task_requirements(messages: list[dict], runtime_state=None) -> str | None:
+        """Extract the current turn's task requirements from the conversation."""
+        start = getattr(runtime_state, "current_turn_start_index", 0) if runtime_state is not None else 0
+        for msg in reversed(messages[start:]):
             if msg.get("role") == "user":
                 content = msg.get("content", "")
                 if isinstance(content, str) and len(content) > 20:
@@ -204,7 +215,7 @@ class PreExitVerificationMiddleware(AgentMiddleware):
     def pre_exit(self, messages: list[dict], runtime_state=None,
                  agent_name: str | None = None) -> str | None:
         self._exit_attempts += 1
-        has_worked = self._has_done_work(messages)
+        has_worked = self._has_done_work(messages, runtime_state)
 
         # Gate 1: Agent hasn't done ANY work — force it to start
         if not has_worked:
@@ -232,7 +243,7 @@ class PreExitVerificationMiddleware(AgentMiddleware):
             )
 
             if self._include_task_requirements:
-                task_text = self._extract_task_requirements(messages)
+                task_text = self._extract_task_requirements(messages, runtime_state)
                 if task_text:
                     parts.append(
                         "\n--- ORIGINAL TASK REQUIREMENTS (verify against these, not your memory) ---\n"

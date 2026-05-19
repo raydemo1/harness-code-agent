@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for Harness Code Agent."""
+"""Legacy script wrapper for the hca CLI."""
 
 from harness_code_agent.cli import main
 
