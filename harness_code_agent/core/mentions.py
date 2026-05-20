@@ -4,12 +4,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
 
 
 MENTION_RE = re.compile(r"(?<!\S)@([^\s]+)")
 FILE_CONTEXT_LIMIT = 60_000
-SESSION_EVENT_LIMIT = 8
 
 
 @dataclass(frozen=True)
@@ -124,50 +124,16 @@ def _resolve_session_mention(
     if not mention.target:
         raise MentionResolutionError(f"Empty session mention: {mention.raw}")
     try:
-        metadata = session_store.read_metadata(mention.target)
-        events = session_store.read_events(mention.target)
+        content = load_session_summary(session_store, mention.target)
     except (FileNotFoundError, ValueError) as e:
         raise MentionResolutionError(f"Session mention not found: {mention.raw}") from e
-
-    lines = [
-        f"id: {metadata.get('id', mention.target)}",
-        f"profile: {metadata.get('profile', '')}",
-        f"model: {metadata.get('model', '')}",
-        f"permission_mode: {metadata.get('permission_mode', '')}",
-        f"status: {metadata.get('status', '')}",
-        f"cwd: {metadata.get('cwd', '')}",
-        f"created_at: {metadata.get('created_at', '')}",
-        f"events: {len(events)}",
-    ]
-    if metadata.get("forked_from"):
-        lines.append(f"forked_from: {metadata.get('forked_from')}")
-    if metadata.get("resumed_from"):
-        lines.append(f"resumed_from: {metadata.get('resumed_from')}")
-    lines.append("recent_events:")
-    for event in events[-SESSION_EVENT_LIMIT:]:
-        lines.append(f"- {_event_summary(event)}")
-    if not events:
-        lines.append("- none")
     return ResolvedMention(
         raw=mention.raw,
         kind="session",
         target=mention.target,
         resolved=mention.target,
-        content="\n".join(lines),
+        content=content,
     )
-
-
-def _event_summary(event: dict) -> str:
-    payload = event.get("payload") or {}
-    payload_bits = []
-    for key in sorted(payload)[:4]:
-        value = payload[key]
-        text = str(value).replace("\n", " ")
-        if len(text) > 80:
-            text = text[:77] + "..."
-        payload_bits.append(f"{key}={text}")
-    suffix = f" ({', '.join(payload_bits)})" if payload_bits else ""
-    return f"#{event.get('sequence')} {event.get('type')} agent={event.get('agent')}{suffix}"
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

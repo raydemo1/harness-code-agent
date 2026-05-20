@@ -17,6 +17,7 @@ class Session:
     metadata_path: Path
     events_path: Path
     snapshots_dir: Path
+    summary_path: Path
 
 
 class SessionStore:
@@ -47,6 +48,7 @@ class SessionStore:
             metadata_path=session_root / "session.json",
             events_path=session_root / "events.jsonl",
             snapshots_dir=snapshots_dir,
+            summary_path=session_root / "summary.md",
         )
         metadata = {
             "id": session.id,
@@ -118,6 +120,12 @@ class SessionStore:
         sessions.sort(key=lambda item: item.get("created_at", ""), reverse=True)
         return sessions
 
+    def latest_session(self) -> dict[str, Any]:
+        sessions = self.list_sessions()
+        if not sessions:
+            raise FileNotFoundError("No sessions found.")
+        return sessions[0]
+
     def read_metadata(self, session_id: str) -> dict[str, Any]:
         session_root = self._session_root(session_id)
         metadata_path = session_root / "session.json"
@@ -137,6 +145,22 @@ class SessionStore:
             events.append(json.loads(line))
         return events
 
+    def write_summary(self, session_id: str) -> str:
+        from .summary import format_session_summary
+
+        metadata = self.read_metadata(session_id)
+        events = self.read_events(session_id)
+        summary = format_session_summary(metadata, events, session_id=session_id)
+        summary_path = self._summary_path(session_id)
+        summary_path.write_text(summary + "\n", encoding="utf-8")
+        return summary
+
+    def read_summary(self, session_id: str) -> str:
+        summary_path = self._summary_path(session_id)
+        if not summary_path.exists():
+            raise FileNotFoundError(f"Session summary not found: {session_id}")
+        return summary_path.read_text(encoding="utf-8")
+
     def read_lineage(self, session_id: str) -> list[dict[str, Any]]:
         lineage = []
         seen = set()
@@ -155,6 +179,9 @@ class SessionStore:
         if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
             raise ValueError(f"Invalid session id: {session_id}")
         return self.sessions_dir / session_id
+
+    def _summary_path(self, session_id: str) -> Path:
+        return self._session_root(session_id) / "summary.md"
 
     @staticmethod
     def _new_session_id() -> str:

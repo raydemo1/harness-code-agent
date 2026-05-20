@@ -6,6 +6,7 @@ Agents operate inside config.WORKSPACE to keep generated code isolated.
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import subprocess
 import time
@@ -14,8 +15,10 @@ from pathlib import Path
 from typing import Callable
 
 from .. import config
+from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent
 from .approvals import ApprovalRequest
 from .tool_context import ToolContext
+from .tool_result import ToolResult, unstructured_tool_result_from_text
 
 # Playwright is optional — only needed for browser UI testing
 try:
@@ -41,10 +44,16 @@ def _resolve(path: str) -> Path:
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-def read_file(path: str) -> str:
-    p = _resolve(path)
+def read_file(path: str, tool_context: ToolContext | None = None) -> ToolResult:
+    p = tool_context.workspace.resolve(path) if tool_context is not None else _resolve(path)
     if not p.exists():
-        return f"[error] File not found: {path}"
+        return ToolResult(
+            tool="read_file",
+            status="failed",
+            output=f"[error] File not found: {path}",
+            error=f"File not found: {path}",
+            metadata={"path": path, "status_source": "native"},
+        )
     content = p.read_text(encoding="utf-8", errors="replace")
     limit = 60_000
     if len(content) > limit:
@@ -54,41 +63,145 @@ def read_file(path: str) -> str:
             f"The remaining {total - limit} characters are NOT shown above. "
             f"You MUST use run_bash with head/tail/sed to read the rest if needed."
         )
-    return content
+    return ToolResult(
+        tool="read_file",
+        status="success",
+        output=content,
+        metadata={"path": path, "status_source": "native"},
+    )
 
 
-def read_skill_file(path: str) -> str:
+def read_skill_file(path: str) -> ToolResult:
     """Read a file from the skills directory (outside workspace). Path must be relative to project root."""
     project_root = Path(__file__).resolve().parents[2]
     p = (project_root / path).resolve()
     # Must stay within the skills directory
     skills_dir = (project_root / "skills").resolve()
     if not str(p).startswith(str(skills_dir)):
-        return f"[error] Path must be inside skills/ directory: {path}"
+        return ToolResult(
+            tool="read_skill_file",
+            status="failed",
+            output=f"[error] Path must be inside skills/ directory: {path}",
+            error=f"Path must be inside skills/ directory: {path}",
+            metadata={"path": path, "status_source": "validation"},
+        )
     if not p.exists():
-        return f"[error] Skill file not found: {path}"
-    return p.read_text(encoding="utf-8", errors="replace")[:60_000]
+        return ToolResult(
+            tool="read_skill_file",
+            status="failed",
+            output=f"[error] Skill file not found: {path}",
+            error=f"Skill file not found: {path}",
+            metadata={"path": path, "status_source": "native"},
+        )
+    return ToolResult(
+        tool="read_skill_file",
+        status="success",
+        output=p.read_text(encoding="utf-8", errors="replace")[:60_000],
+        metadata={"path": path, "status_source": "native"},
+    )
 
 
-def write_file(path: str, content: str) -> str:
+def write_file(
+    path: str,
+    content: str,
+    tool_context: ToolContext | None = None,
+) -> ToolResult:
     if not path or not path.strip():
-        return "[error] Empty file path"
-    p = _resolve(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    return f"Wrote {len(content)} chars to {path}"
+        return ToolResult(
+            tool="write_file",
+            status="failed",
+            output="[error] Empty file path",
+            error="Empty file path",
+            metadata={"path": path, "status_source": "validation"},
+        )
+    metadata = {"path": path, "status_source": "native"}
+    if tool_context is not None:
+        write_result = tool_context.workspace.write_text(path, content)
+        rel = write_result.path.relative_to(tool_context.workspace.root)
+        metadata["file_changes"] = [
+            {
+                "path": str(rel),
+                "operation": "write_file",
+                "snapshot_path": str(write_result.snapshot_path) if write_result.snapshot_path else None,
+            }
+        ]
+    else:
+        p = _resolve(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    return ToolResult(
+        tool="write_file",
+        status="success",
+        output=f"Wrote {len(content)} chars to {path}",
+        metadata=metadata,
+    )
 
 
-def apply_patch(path: str, search: str, replace: str) -> str:
+def apply_patch(
+    path: str,
+    search: str,
+    replace: str,
+    tool_context: ToolContext | None = None,
+) -> ToolResult:
+    if not path or not str(path).strip():
+        return ToolResult(
+            tool="apply_patch",
+            status="failed",
+            output="[error] Empty file path",
+            error="Empty file path",
+            metadata={"path": path, "status_source": "validation"},
+        )
+    if tool_context is not None:
+        patch_result = tool_context.workspace.apply_text_patch(
+            path,
+            search=search,
+            replace=replace,
+        )
+        rel = patch_result.path.relative_to(tool_context.workspace.root)
+        return ToolResult(
+            tool="apply_patch",
+            status="success",
+            output=f"Patched {path}: replaced {patch_result.replacements} occurrence",
+            metadata={
+                "path": path,
+                "replacements": patch_result.replacements,
+                "status_source": "native",
+                "file_changes": [
+                    {
+                        "path": str(rel),
+                        "operation": "apply_patch",
+                        "snapshot_path": str(patch_result.snapshot_path) if patch_result.snapshot_path else None,
+                    }
+                ],
+            },
+        )
+
     p = _resolve(path)
     if not p.exists():
-        return f"[error] File not found: {path}"
+        return ToolResult(
+            tool="apply_patch",
+            status="failed",
+            output=f"[error] File not found: {path}",
+            error=f"File not found: {path}",
+            metadata={"path": path, "status_source": "native"},
+        )
     original = p.read_text(encoding="utf-8", errors="replace")
     count = original.count(search)
     if count != 1:
-        return f"[error] Patch search text must match exactly once; found {count}"
+        return ToolResult(
+            tool="apply_patch",
+            status="failed",
+            output=f"[error] Patch search text must match exactly once; found {count}",
+            error=f"Patch search text must match exactly once; found {count}",
+            metadata={"path": path, "status_source": "validation"},
+        )
     p.write_text(original.replace(search, replace, 1), encoding="utf-8")
-    return f"Patched {path}: replaced 1 occurrence"
+    return ToolResult(
+        tool="apply_patch",
+        status="success",
+        output=f"Patched {path}: replaced 1 occurrence",
+        metadata={"path": path, "replacements": 1, "status_source": "native"},
+    )
 
 
 def update_planning_files(
@@ -103,10 +216,16 @@ def update_planning_files(
     findings: str | None = None,
     runtime_state=None,
     agent_name: str | None = None,
-) -> str:
+) -> ToolResult:
     """Update planning-with-files state and write the files required by the selected mode."""
     if runtime_state is None:
-        return "[error] update_planning_files requires runtime state"
+        return ToolResult(
+            tool="update_planning_files",
+            status="failed",
+            output="[error] update_planning_files requires runtime state",
+            error="update_planning_files requires runtime state",
+            metadata={"status_source": "runtime"},
+        )
 
     mode = (mode or "").strip().lower()
     goal = (goal or "").strip()
@@ -117,17 +236,53 @@ def update_planning_files(
     blockers = [str(item).strip() for item in (blockers or []) if str(item).strip()]
 
     if mode not in {"skip", "light", "full"}:
-        return "[error] mode must be one of: skip, light, full"
+        return ToolResult(
+            tool="update_planning_files",
+            status="failed",
+            output="[error] mode must be one of: skip, light, full",
+            error="mode must be one of: skip, light, full",
+            metadata={"status_source": "validation"},
+        )
     if not goal:
-        return "[error] update_planning_files requires a non-empty goal"
+        return ToolResult(
+            tool="update_planning_files",
+            status="failed",
+            output="[error] update_planning_files requires a non-empty goal",
+            error="update_planning_files requires a non-empty goal",
+            metadata={"status_source": "validation"},
+        )
     if not steps:
-        return "[error] update_planning_files requires at least one step"
+        return ToolResult(
+            tool="update_planning_files",
+            status="failed",
+            output="[error] update_planning_files requires at least one step",
+            error="update_planning_files requires at least one step",
+            metadata={"status_source": "validation"},
+        )
     if current_step not in steps:
-        return "[error] current_step must be one of the declared steps"
+        return ToolResult(
+            tool="update_planning_files",
+            status="failed",
+            output="[error] current_step must be one of the declared steps",
+            error="current_step must be one of the declared steps",
+            metadata={"status_source": "validation"},
+        )
     if any(step not in steps for step in completed_steps):
-        return "[error] completed_steps must be a subset of steps"
+        return ToolResult(
+            tool="update_planning_files",
+            status="failed",
+            output="[error] completed_steps must be a subset of steps",
+            error="completed_steps must be a subset of steps",
+            metadata={"status_source": "validation"},
+        )
     if not next_action:
-        return "[error] update_planning_files requires a non-empty next_action"
+        return ToolResult(
+            tool="update_planning_files",
+            status="failed",
+            output="[error] update_planning_files requires a non-empty next_action",
+            error="update_planning_files requires a non-empty next_action",
+            metadata={"status_source": "validation"},
+        )
 
     board = runtime_state.task_board
     board.goal = goal
@@ -184,30 +339,74 @@ def update_planning_files(
         plan_text = (task_plan or "").strip()
         findings_text = (findings or "").strip()
         if not plan_text:
-            return "[error] full mode requires task_plan content"
+            return ToolResult(
+                tool="update_planning_files",
+                status="failed",
+                output="[error] full mode requires task_plan content",
+                error="full mode requires task_plan content",
+                metadata={"status_source": "validation"},
+            )
         if not findings_text:
-            return "[error] full mode requires findings content"
+            return ToolResult(
+                tool="update_planning_files",
+                status="failed",
+                output="[error] full mode requires findings content",
+                error="full mode requires findings content",
+                metadata={"status_source": "validation"},
+            )
         (workspace / "task_plan.md").write_text(plan_text + "\n", encoding="utf-8")
         (workspace / "findings.md").write_text(findings_text + "\n", encoding="utf-8")
         written.extend(["task_plan.md", "findings.md"])
 
     if mode == "skip":
-        return "Planning mode set to skip; no planning files required"
-    return "Updated planning files: " + ", ".join(written)
+        return ToolResult(
+            tool="update_planning_files",
+            status="success",
+            output="Planning mode set to skip; no planning files required",
+            metadata={"status_source": "native"},
+        )
+    return ToolResult(
+        tool="update_planning_files",
+        status="success",
+        output="Updated planning files: " + ", ".join(written),
+        metadata={
+            "status_source": "native",
+            "file_changes": [
+                {"path": path, "operation": "write_file", "snapshot_path": None}
+                for path in written
+            ],
+        },
+    )
 
 
-def list_files(directory: str = ".") -> str:
+def list_files(directory: str = ".") -> ToolResult:
     p = _resolve(directory)
     if not p.is_dir():
-        return f"[error] Not a directory: {directory}"
+        return ToolResult(
+            tool="list_files",
+            status="failed",
+            output=f"[error] Not a directory: {directory}",
+            error=f"Not a directory: {directory}",
+            metadata={"directory": directory, "status_source": "native"},
+        )
     entries = []
     for item in sorted(p.rglob("*")):
         if item.is_file():
             rel = item.relative_to(Path(config.WORKSPACE).resolve())
             entries.append(str(rel))
     if not entries:
-        return "(empty)"
-    return "\n".join(entries[:200])
+        return ToolResult(
+            tool="list_files",
+            status="success",
+            output="(empty)",
+            metadata={"directory": directory, "status_source": "native"},
+        )
+    return ToolResult(
+        tool="list_files",
+        status="success",
+        output="\n".join(entries[:200]),
+        metadata={"directory": directory, "status_source": "native", "count": len(entries)},
+    )
 
 
 def run_bash(
@@ -215,22 +414,51 @@ def run_bash(
     timeout: int = 300,
     runtime_state=None,
     agent_name: str | None = None,
-) -> str:
+) -> ToolResult:
     """Run a shell command inside the agent's persistent shell session."""
     if runtime_state is None or runtime_state.shell_session is None:
-        return "[error] No active shell session for run_bash"
+        return ToolResult(
+            tool="run_bash",
+            status="failed",
+            output="[error] No active shell session for run_bash",
+            error="No active shell session for run_bash",
+            metadata={"status_source": "runtime"},
+        )
     try:
         shell_result = runtime_state.shell_session.run(command, timeout=timeout)
         if shell_result.timed_out:
-            return (
+            output = (
                 f"[error] Command timed out after {timeout}s. "
                 f"If this command legitimately needs more time (e.g. compilation, training), "
                 f"retry with a larger timeout parameter."
             )
+            return ToolResult(
+                tool="run_bash",
+                status="failed",
+                output=output,
+                error=f"Command timed out after {timeout}s",
+                return_code=shell_result.exit_code,
+                metadata={"timed_out": True, "status_source": "shell"},
+            )
         output = _smart_truncate_output(shell_result.stdout, shell_result.stderr)
-        return output or "(no output)"
+        output = output or "(no output)"
+        ok = shell_result.exit_code == 0
+        return ToolResult(
+            tool="run_bash",
+            status="success" if ok else "failed",
+            output=output,
+            error=None if ok else f"Command exited with code {shell_result.exit_code}",
+            return_code=shell_result.exit_code,
+            metadata={"timed_out": False, "status_source": "shell"},
+        )
     except Exception as e:
-        return f"[error] {e}"
+        return ToolResult(
+            tool="run_bash",
+            status="failed",
+            output=f"[error] {e}",
+            error=str(e),
+            metadata={"status_source": "exception"},
+        )
 
 
 def _smart_truncate_output(stdout: str, stderr: str, limit: int = 30_000) -> str:
@@ -372,7 +600,7 @@ def _as_consultation_report(scope: str, raw_result: str) -> str:
     return text
 
 
-def consult_subagent(task: str, scope: str = "codebase_investigation") -> str:
+def consult_subagent(task: str, scope: str = "codebase_investigation") -> ToolResult:
     """
     Ask a read-only consultation sub-agent for local findings.
 
@@ -381,9 +609,13 @@ def consult_subagent(task: str, scope: str = "codebase_investigation") -> str:
     suggest tests, or review; they return a structured report.
     """
     if scope not in CONSULTATION_SCOPES:
-        return (
-            "[error] Invalid consultation scope. Use one of: "
-            + ", ".join(sorted(CONSULTATION_SCOPES))
+        output = "[error] Invalid consultation scope. Use one of: " + ", ".join(sorted(CONSULTATION_SCOPES))
+        return ToolResult(
+            tool="consult_subagent",
+            status="failed",
+            output=output,
+            error=output.removeprefix("[error] "),
+            metadata={"scope": scope, "status_source": "validation"},
         )
 
     from ..agent.loop import Agent
@@ -413,7 +645,12 @@ def consult_subagent(task: str, scope: str = "codebase_investigation") -> str:
     )
 
     result = sub.run(task)
-    return _as_consultation_report(scope, result)
+    return ToolResult(
+        tool="consult_subagent",
+        status="success",
+        output=_as_consultation_report(scope, result),
+        metadata={"scope": scope, "status_source": "native"},
+    )
 
 # ---------------------------------------------------------------------------
 # Playwright browser testing
@@ -442,18 +679,28 @@ def _ensure_dev_server(start_command: str, port: int, startup_wait: int = 8) -> 
     return f"Dev server started (pid={_dev_server_proc.pid}, port={port})"
 
 
-def stop_dev_server() -> str:
+def stop_dev_server() -> ToolResult:
     """Stop the background dev server."""
     global _dev_server_proc
     if _dev_server_proc is None:
-        return "No dev server running"
+        return ToolResult(
+            tool="stop_dev_server",
+            status="success",
+            output="No dev server running",
+            metadata={"status_source": "native"},
+        )
     _dev_server_proc.terminate()
     try:
         _dev_server_proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         _dev_server_proc.kill()
     _dev_server_proc = None
-    return "Dev server stopped"
+    return ToolResult(
+        tool="stop_dev_server",
+        status="success",
+        output="Dev server stopped",
+        metadata={"status_source": "native"},
+    )
 
 
 def browser_test(
@@ -463,7 +710,7 @@ def browser_test(
     start_command: str | None = None,
     port: int = 5173,
     startup_wait: int = 8,
-) -> str:
+) -> ToolResult:
     """
     Launch a headless browser, navigate to a URL, perform actions, and
     optionally take a screenshot. Returns a text report of what happened.
@@ -477,17 +724,29 @@ def browser_test(
     If start_command is provided, starts a dev server first.
     """
     if not HAS_PLAYWRIGHT:
-        return (
+        output = (
             "[error] Playwright not installed. "
             "Install with: pip install playwright && python -m playwright install chromium"
         )
+        return ToolResult(
+            tool="browser_test",
+            status="failed",
+            output=output,
+            error="Playwright not installed",
+            metadata={"status_source": "runtime"},
+        )
 
     report_lines = []
+    failed = False
+    error_message = None
 
     # Optionally start dev server
     if start_command:
         srv_result = _ensure_dev_server(start_command, port, startup_wait)
         report_lines.append(f"Server: {srv_result}")
+        if srv_result.startswith("[error]"):
+            failed = True
+            error_message = srv_result.removeprefix("[error] ")
 
     try:
         with sync_playwright() as p:
@@ -501,7 +760,13 @@ def browser_test(
             except Exception as e:
                 report_lines.append(f"[error] Navigation failed: {e}")
                 browser.close()
-                return "\n".join(report_lines)
+                return ToolResult(
+                    tool="browser_test",
+                    status="failed",
+                    output="\n".join(report_lines),
+                    error=f"Navigation failed: {e}",
+                    metadata={"url": url, "status_source": "browser"},
+                )
 
             # Check for console errors
             console_errors = []
@@ -534,6 +799,8 @@ def browser_test(
                         report_lines.append(f"[warn] Unknown action type: {action_type}")
                 except Exception as e:
                     report_lines.append(f"[error] Action {action_type}('{selector}'): {e}")
+                    failed = True
+                    error_message = f"Action {action_type}('{selector}'): {e}"
 
                 page.wait_for_timeout(300)  # brief pause between actions
 
@@ -556,8 +823,16 @@ def browser_test(
 
     except Exception as e:
         report_lines.append(f"[error] Browser test failed: {e}")
+        failed = True
+        error_message = f"Browser test failed: {e}"
 
-    return "\n".join(report_lines)
+    return ToolResult(
+        tool="browser_test",
+        status="failed" if failed else "success",
+        output="\n".join(report_lines),
+        error=error_message,
+        metadata={"url": url, "status_source": "browser"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -963,7 +1238,7 @@ def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
 # Web search (lightweight, no external deps)
 # ---------------------------------------------------------------------------
 
-def web_search(query: str, max_results: int = 5) -> str:
+def web_search(query: str, max_results: int = 5) -> ToolResult:
     """Search the web using DuckDuckGo and return text results.
     Uses DDG's lite HTML endpoint — no API key needed, works in any container.
     """
@@ -1007,15 +1282,31 @@ def web_search(query: str, max_results: int = 5) -> str:
             results.append(f"{i+1}. {title}\n   {real_url}\n   {snippet[:200]}\n")
 
         if results:
-            return f"Search results for: {query}\n\n" + "\n".join(results)
+            return ToolResult(
+                tool="web_search",
+                status="success",
+                output=f"Search results for: {query}\n\n" + "\n".join(results),
+                metadata={"query": query, "result_count": len(results), "status_source": "native"},
+            )
 
-        return f"No results found for: {query}"
+        return ToolResult(
+            tool="web_search",
+            status="success",
+            output=f"No results found for: {query}",
+            metadata={"query": query, "result_count": 0, "status_source": "native"},
+        )
 
     except Exception as e:
-        return f"[error] Web search failed: {e}"
+        return ToolResult(
+            tool="web_search",
+            status="failed",
+            output=f"[error] Web search failed: {e}",
+            error=f"Web search failed: {e}",
+            metadata={"query": query, "status_source": "exception"},
+        )
 
 
-def web_fetch(url: str) -> str:
+def web_fetch(url: str) -> ToolResult:
     """Fetch the content of a web page and return as text."""
     import urllib.request
     import re
@@ -1038,10 +1329,21 @@ def web_fetch(url: str) -> str:
         if len(text) > 10000:
             text = text[:10000] + "\n\n[TRUNCATED]"
 
-        return text or "(empty page)"
+        return ToolResult(
+            tool="web_fetch",
+            status="success",
+            output=text or "(empty page)",
+            metadata={"url": url, "status_source": "native"},
+        )
 
     except Exception as e:
-        return f"[error] Web fetch failed: {e}"
+        return ToolResult(
+            tool="web_fetch",
+            status="failed",
+            output=f"[error] Web fetch failed: {e}",
+            error=f"Web fetch failed: {e}",
+            metadata={"url": url, "status_source": "exception"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1062,6 +1364,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "web_search": web_search,
         "web_fetch": web_fetch,
         "browser_test": browser_test,
+        "stop_dev_server": stop_dev_server,
     }
     for schema in CORE_TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS:
         name = schema["function"]["name"]
@@ -1072,10 +1375,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
 
 BUILTIN_TOOL_REGISTRY = _build_builtin_tool_registry()
 TOOL_SCHEMAS = CORE_TOOL_SCHEMAS
-TOOL_DISPATCH = {
-    **BUILTIN_TOOL_REGISTRY.dispatch(),
-    "stop_dev_server": stop_dev_server,
-}
+TOOL_DISPATCH = BUILTIN_TOOL_REGISTRY.dispatch()
 
 
 def execute_tool(
@@ -1086,9 +1386,7 @@ def execute_tool(
     tool_context: ToolContext | None = None,
 ) -> str:
     """Execute a tool by name with pre-validation and auto-correction."""
-    fn = BUILTIN_TOOL_REGISTRY.get(name)
-    if fn is None:
-        return f"[error] Unknown tool: {name}"
+    arguments = dict(arguments or {})
 
     if tool_context is not None:
         tool_context.event_bus.emit(
@@ -1096,15 +1394,56 @@ def execute_tool(
             agent=agent_name,
             payload={"tool": name, "args": _redact_tool_args(arguments)},
         )
+        tool_context.event_bus.emit_event(
+            ToolCallEvent(
+                tool=name,
+                args=_redact_tool_args(arguments),
+                agent=agent_name,
+            ).to_event()
+        )
+
+    fn = BUILTIN_TOOL_REGISTRY.get(name)
+    if fn is None:
+        return _finalize_tool_result(
+            ToolResult(
+                tool=name,
+                status="failed",
+                output=f"[error] Unknown tool: {name}",
+                error=f"Unknown tool: {name}",
+                metadata={"status_source": "registry"},
+            ),
+            tool_context=tool_context,
+            agent_name=agent_name,
+        )
 
     # Pre-validate and auto-correct arguments
     arguments, fix_warning = _validate_and_fix(name, arguments)
 
-    # If validation returned a blocking error (no fix possible), return it
+    # If validation returned a blocking error (no fix possible), return it.
     if fix_warning and fix_warning.startswith("[auto-fix] Empty"):
-        return fix_warning
+        return _finalize_tool_result(
+            ToolResult(
+                tool=name,
+                status="failed",
+                output=fix_warning,
+                error=fix_warning,
+                metadata={"status_source": "validation"},
+            ),
+            tool_context=tool_context,
+            agent_name=agent_name,
+        )
     if fix_warning and "interactive command" in fix_warning:
-        return fix_warning
+        return _finalize_tool_result(
+            ToolResult(
+                tool=name,
+                status="failed",
+                output=fix_warning,
+                error=fix_warning,
+                metadata={"status_source": "validation"},
+            ),
+            tool_context=tool_context,
+            agent_name=agent_name,
+        )
 
     if tool_context is not None:
         decision = tool_context.permission_policy.decide_tool_call(name, arguments)
@@ -1152,128 +1491,175 @@ def execute_tool(
             )
             if not approval_result.approved:
                 result = f"[approval_denied] {approval_result.reason}"
-                tool_context.event_bus.emit(
-                    "after_tool",
-                    agent=agent_name,
-                    payload={
-                        "tool": name,
-                        "ok": False,
-                        "requires_approval": True,
-                        "result": result[:500],
-                    },
+                return _finalize_tool_result(
+                    ToolResult(
+                        tool=name,
+                        status="failed",
+                        output=result,
+                        error=approval_result.reason,
+                        metadata={"requires_approval": True, "status_source": "approval"},
+                    ),
+                    tool_context=tool_context,
+                    agent_name=agent_name,
                 )
-                return result
         elif not decision.allowed:
             result = f"[blocked] {decision.reason}"
-            tool_context.event_bus.emit(
-                "after_tool",
-                agent=agent_name,
-                payload={
-                    "tool": name,
-                    "ok": False,
-                    "requires_approval": decision.requires_approval,
-                    "result": result[:500],
-                },
+            return _finalize_tool_result(
+                ToolResult(
+                    tool=name,
+                    status="failed",
+                    output=result,
+                    error=decision.reason,
+                    metadata={
+                        "requires_approval": decision.requires_approval,
+                        "status_source": "permission",
+                    },
+                ),
+                tool_context=tool_context,
+                agent_name=agent_name,
             )
-            return result
 
     try:
-        if tool_context is not None and name == "read_file":
-            result = _read_file_with_context(arguments, tool_context)
-        elif tool_context is not None and name == "write_file":
-            result = _write_file_with_context(arguments, tool_context, agent_name)
-        elif tool_context is not None and name == "apply_patch":
-            result = _apply_patch_with_context(arguments, tool_context, agent_name)
-        elif name in {"run_bash", "update_planning_files"}:
-            result = fn(**arguments, runtime_state=runtime_state, agent_name=agent_name)
-        else:
-            result = fn(**arguments)
+        result = _invoke_registered_tool(
+            fn,
+            arguments,
+            runtime_state=runtime_state,
+            agent_name=agent_name,
+            tool_context=tool_context,
+        )
     except Exception as e:
-        result = f"[error] {type(e).__name__}: {e}"
+        error = f"{type(e).__name__}: {e}"
+        tool_result = ToolResult(
+            tool=name,
+            status="failed",
+            output=f"[error] {error}",
+            error=error,
+            metadata={"status_source": "exception"},
+        )
+    else:
+        tool_result = _coerce_tool_result(name, result)
 
     # Prepend the auto-fix warning so the model knows what was corrected
     if fix_warning:
-        result = f"{fix_warning}\n\n{result}"
+        tool_result = tool_result.with_output_prefix(fix_warning)
 
+    return _finalize_tool_result(
+        tool_result,
+        tool_context=tool_context,
+        agent_name=agent_name,
+    )
+
+
+def _invoke_registered_tool(
+    fn: Callable,
+    arguments: dict,
+    *,
+    runtime_state,
+    agent_name: str | None,
+    tool_context: ToolContext | None,
+):
+    kwargs = dict(arguments)
+    parameters = inspect.signature(fn).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    extras = {
+        "runtime_state": runtime_state,
+        "agent_name": agent_name,
+        "tool_context": tool_context,
+    }
+    for key, value in extras.items():
+        if key not in kwargs and (key in parameters or accepts_kwargs):
+            kwargs[key] = value
+    return fn(**kwargs)
+
+
+def _finalize_tool_result(
+    tool_result: ToolResult,
+    *,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+) -> str:
+    result_text = tool_result.to_text()
     if tool_context is not None:
-        tool_context.event_bus.emit(
-            "after_tool",
+        _emit_structured_tool_result(tool_result, tool_context=tool_context, agent_name=agent_name)
+        _emit_file_change_events(tool_result, tool_context=tool_context, agent_name=agent_name)
+        payload = {
+            "tool": tool_result.tool,
+            "status": tool_result.status,
+            "ok": tool_result.ok,
+            "result": result_text[:500],
+        }
+        if "requires_approval" in tool_result.metadata:
+            payload["requires_approval"] = tool_result.metadata["requires_approval"]
+        tool_context.event_bus.emit("after_tool", agent=agent_name, payload=payload)
+    return result_text
+
+
+def _coerce_tool_result(name: str, result) -> ToolResult:
+    if isinstance(result, ToolResult):
+        return result
+    return unstructured_tool_result_from_text(tool=name, text=str(result))
+
+
+def _emit_structured_tool_result(
+    tool_result: ToolResult,
+    *,
+    tool_context: ToolContext,
+    agent_name: str | None,
+) -> None:
+    tool_context.event_bus.emit_event(
+        ToolResultEvent(
+            tool=tool_result.tool,
+            status=tool_result.status,
+            output=tool_result.output,
+            error=tool_result.error,
+            return_code=tool_result.return_code,
+            metadata=tool_result.metadata,
             agent=agent_name,
-            payload={
-                "tool": name,
-                "ok": not result.startswith("[error]") and not result.startswith("[blocked]"),
-                "result": result[:500],
-            },
+        ).to_event()
+    )
+    if tool_result.status == "failed":
+        tool_context.event_bus.emit_event(
+            FailureEvent(
+                category="tool_error",
+                message=tool_result.error or tool_result.output,
+                agent=agent_name,
+            ).to_event()
         )
 
-    return result
 
-
-def _read_file_with_context(arguments: dict, tool_context: ToolContext) -> str:
-    path = arguments.get("path", "")
-    p = tool_context.workspace.resolve(path)
-    if not p.exists():
-        return f"[error] File not found: {path}"
-    content = p.read_text(encoding="utf-8", errors="replace")
-    limit = 60_000
-    if len(content) > limit:
-        total = len(content)
-        content = content[:limit] + (
-            f"\n\n[TRUNCATED] You are seeing {limit} of {total} total characters. "
-            f"The remaining {total - limit} characters are NOT shown above. "
-            f"You MUST use run_bash with head/tail/sed to read the rest if needed."
+def _emit_file_change_events(
+    tool_result: ToolResult,
+    *,
+    tool_context: ToolContext,
+    agent_name: str | None,
+) -> None:
+    file_changes = tool_result.metadata.get("file_changes")
+    if not isinstance(file_changes, list):
+        return
+    for change in file_changes:
+        if not isinstance(change, dict):
+            continue
+        path = change.get("path")
+        if not path:
+            continue
+        payload = {
+            "path": str(path),
+            "snapshot_path": change.get("snapshot_path"),
+        }
+        if change.get("operation"):
+            payload["operation"] = change["operation"]
+        tool_context.event_bus.emit("file_changed", agent=agent_name, payload=payload)
+        tool_context.event_bus.emit_event(
+            FileChangeEvent(
+                path=str(path),
+                operation=change.get("operation"),
+                snapshot_path=change.get("snapshot_path"),
+                agent=agent_name,
+            ).to_event()
         )
-    return content
-
-
-def _write_file_with_context(
-    arguments: dict,
-    tool_context: ToolContext,
-    agent_name: str | None,
-) -> str:
-    path = arguments.get("path", "")
-    content = arguments.get("content", "")
-    if not path or not str(path).strip():
-        return "[error] Empty file path"
-    write_result = tool_context.workspace.write_text(path, content)
-    rel = write_result.path.relative_to(tool_context.workspace.root)
-    tool_context.event_bus.emit(
-        "file_changed",
-        agent=agent_name,
-        payload={
-            "path": str(rel),
-            "snapshot_path": str(write_result.snapshot_path) if write_result.snapshot_path else None,
-        },
-    )
-    return f"Wrote {len(content)} chars to {path}"
-
-
-def _apply_patch_with_context(
-    arguments: dict,
-    tool_context: ToolContext,
-    agent_name: str | None,
-) -> str:
-    path = arguments.get("path", "")
-    search = arguments.get("search", "")
-    replace = arguments.get("replace", "")
-    if not path or not str(path).strip():
-        return "[error] Empty file path"
-    patch_result = tool_context.workspace.apply_text_patch(
-        path,
-        search=search,
-        replace=replace,
-    )
-    rel = patch_result.path.relative_to(tool_context.workspace.root)
-    tool_context.event_bus.emit(
-        "file_changed",
-        agent=agent_name,
-        payload={
-            "path": str(rel),
-            "snapshot_path": str(patch_result.snapshot_path) if patch_result.snapshot_path else None,
-            "operation": "apply_patch",
-        },
-    )
-    return f"Patched {path}: replaced {patch_result.replacements} occurrence"
 
 
 def _redact_tool_args(arguments: dict) -> dict:

@@ -15,12 +15,230 @@ class ProductRuntimeTests(unittest.TestCase):
         legacy_names = {
             schema["function"]["name"]
             for schema in tools.TOOL_SCHEMAS + tools.BROWSER_TOOL_SCHEMAS
-            if schema["function"]["name"] != "stop_dev_server"
         }
 
         self.assertEqual(registry_names, legacy_names)
         self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("read_file"), tools.TOOL_DISPATCH["read_file"])
+        self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("stop_dev_server"), tools.TOOL_DISPATCH["stop_dev_server"])
         self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
+
+    def test_structured_event_schema_covers_mvp_event_types(self):
+        from harness_code_agent.sessions.events import (
+            AssistantMessageEvent,
+            FailureEvent,
+            FileChangeEvent,
+            SessionFinishedEvent,
+            TaskOutcomeEvent,
+            ToolCallEvent,
+            ToolResultEvent,
+            UserInputEvent,
+        )
+
+        event_types = {
+            UserInputEvent(text="fix").to_event().type,
+            AssistantMessageEvent(text="done").to_event().type,
+            ToolCallEvent(tool="read_file", args={"path": "README.md"}).to_event().type,
+            ToolResultEvent(tool="read_file", status="success", output="ok").to_event().type,
+            FileChangeEvent(path="app.py").to_event().type,
+            FailureEvent(category="tool_error", message="boom").to_event().type,
+            SessionFinishedEvent(reason="user_exit", status="closed").to_event().type,
+            TaskOutcomeEvent(status="success", evidence=["tests_passed"], summary="done").to_event().type,
+        }
+
+        self.assertEqual(event_types, {
+            "user_input",
+            "assistant_message",
+            "tool_call",
+            "tool_result",
+            "file_change",
+            "failure",
+            "session_finished",
+            "task_outcome",
+        })
+
+    def test_tool_result_serializes_and_tool_execution_records_structured_events(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.runtime.tool_result import ToolResult
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        result = ToolResult(
+            tool="read_file",
+            status="failed",
+            output="",
+            error="missing",
+            return_code=2,
+            metadata={"path": "missing.txt"},
+        )
+
+        self.assertEqual(result.to_dict()["tool"], "read_file")
+        self.assertEqual(result.to_dict()["status"], "failed")
+        self.assertFalse(result.to_dict()["ok"])
+        self.assertEqual(result.to_dict()["error"], "missing")
+        self.assertEqual(result.to_text(), "[error] missing")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("hello", encoding="utf-8")
+            events_path = root / ".harness" / "events.jsonl"
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(events_path),
+            )
+
+            output = tools.execute_tool(
+                "read_file",
+                {"path": "note.txt"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+            self.assertEqual(output, "hello")
+            self.assertIn("tool_call", [event["type"] for event in events])
+            self.assertIn("tool_result", [event["type"] for event in events])
+            tool_result = next(event for event in events if event["type"] == "tool_result")
+            self.assertEqual(tool_result["payload"]["tool"], "read_file")
+            self.assertEqual(tool_result["payload"]["status"], "success")
+            self.assertTrue(tool_result["payload"]["ok"])
+            self.assertEqual(tool_result["payload"]["output"], "hello")
+
+    def test_tool_result_does_not_infer_status_from_raw_tool_text(self):
+        from unittest.mock import patch
+
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / ".harness" / "events.jsonl"
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(events_path),
+            )
+
+            with patch.object(
+                tools.BUILTIN_TOOL_REGISTRY,
+                "get",
+                return_value=lambda **kwargs: "[error] this is domain output, not execution status",
+            ):
+                output = tools.execute_tool(
+                    "custom_tool",
+                    {},
+                    tool_context=context,
+                    agent_name="main_agent",
+                )
+
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            tool_result = [event for event in events if event["type"] == "tool_result"][0]
+
+            self.assertEqual(output, "[error] this is domain output, not execution status")
+            self.assertEqual(tool_result["payload"]["status"], "unknown")
+            self.assertIsNone(tool_result["payload"]["ok"])
+            self.assertEqual(tool_result["payload"]["metadata"]["status_source"], "unstructured")
+            self.assertFalse(any(event["type"] == "failure" for event in events))
+
+    def test_unknown_tool_records_structured_failure_events(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / ".harness" / "events.jsonl"
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(events_path),
+            )
+
+            output = tools.execute_tool(
+                "missing_tool",
+                {"secret": "nope"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            event_types = [event["type"] for event in events]
+            tool_result = next(event for event in events if event["type"] == "tool_result")
+            after_tool = next(event for event in events if event["type"] == "after_tool")
+
+            self.assertEqual(output, "[error] Unknown tool: missing_tool")
+            self.assertIn("tool_call", event_types)
+            self.assertIn("failure", event_types)
+            self.assertEqual(tool_result["payload"]["status"], "failed")
+            self.assertFalse(tool_result["payload"]["ok"])
+            self.assertEqual(after_tool["payload"]["status"], "failed")
+
+    def test_tool_validation_failures_return_typed_failed_results(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / ".harness" / "events.jsonl"
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(events_path),
+            )
+
+            missing = tools.execute_tool(
+                "read_file",
+                {"path": "missing.txt"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+            empty_write = tools.execute_tool(
+                "write_file",
+                {"path": "", "content": "x"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+            empty_patch = tools.execute_tool(
+                "apply_patch",
+                {"path": "", "search": "x", "replace": "y"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            failed_results = [
+                event for event in events
+                if event["type"] == "tool_result"
+                and event["payload"].get("status") == "failed"
+            ]
+
+            self.assertIn("[error] File not found: missing.txt", missing)
+            self.assertIn("[auto-fix] Empty file path", empty_write)
+            self.assertIn("[error] Empty file path", empty_patch)
+            self.assertEqual(len(failed_results), 3)
+            self.assertEqual(len([event for event in events if event["type"] == "failure"]), 3)
 
     def test_session_store_creates_metadata_and_jsonl_events(self):
         from harness_code_agent.sessions.store import SessionStore
@@ -127,6 +345,95 @@ class ProductRuntimeTests(unittest.TestCase):
 
             self.assertEqual([item["id"] for item in lineage], [source.id, fork.id])
             self.assertEqual(resumed_metadata["resumed_from"], fork.id)
+
+    def test_session_store_reads_latest_session_and_persisted_summary(self):
+        from harness_code_agent.sessions.store import SessionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / ".harness")
+            first = store.create(
+                profile="coding-agent",
+                cwd=Path(tmp),
+                model="model-a",
+                permission_mode="workspace-write",
+            )
+            second = store.create(
+                profile="plan",
+                cwd=Path(tmp),
+                model="model-b",
+                permission_mode="read-only",
+            )
+            store.event_bus(second).emit("user_input", agent="main_agent", payload={"text": "plan it"})
+            summary = store.write_summary(second.id)
+
+            latest = store.latest_session()
+
+            self.assertEqual(latest["id"], second.id)
+            self.assertIn("Session summary", summary)
+            self.assertIn("profile: plan", store.read_summary(second.id))
+            with self.assertRaises(FileNotFoundError):
+                store.read_summary(first.id)
+
+    def test_session_summary_formats_human_readable_event_overview(self):
+        from harness_code_agent.sessions.summary import format_session_summary
+
+        metadata = {
+            "id": "session-a",
+            "profile": "coding-agent",
+            "model": "model-a",
+            "permission_mode": "workspace-write",
+            "status": "running",
+            "cwd": "C:/workspace",
+            "created_at": "2026-05-20T00:00:00+00:00",
+            "forked_from": "session-parent",
+        }
+        events = [
+            {"sequence": 1, "type": "session_started", "agent": "main_agent", "payload": {}},
+            {"sequence": 2, "type": "turn_started", "agent": "main_agent", "payload": {"turn": 1}},
+            {"sequence": 3, "type": "after_tool", "agent": "main_agent", "payload": {"tool": "write_file", "ok": True}},
+            {"sequence": 4, "type": "file_changed", "agent": "main_agent", "payload": {"path": "app.py"}},
+            {"sequence": 5, "type": "approval_requested", "agent": "main_agent", "payload": {"tool": "run_bash"}},
+            {"sequence": 6, "type": "approval_decided", "agent": "main_agent", "payload": {"tool": "run_bash", "approved": False}},
+            {
+                "sequence": 7,
+                "type": "profile_switched",
+                "agent": "main_agent",
+                "payload": {"previous_profile": "coding-agent", "profile": "plan", "reason": "slash command"},
+            },
+            {"sequence": 8, "type": "plan_ready", "agent": "main_agent", "payload": {"profile": "plan"}},
+            {"sequence": 9, "type": "task_outcome", "agent": "main_agent", "payload": {"status": "success", "summary": "done"}},
+            {"sequence": 10, "type": "session_finished", "agent": "main_agent", "payload": {"status": "closed", "reason": "user_exit"}},
+        ]
+
+        summary = format_session_summary(metadata, events)
+
+        self.assertIn("Session summary", summary)
+        self.assertIn("id: session-a", summary)
+        self.assertIn("status: closed", summary)
+        self.assertIn("forked_from: session-parent", summary)
+        self.assertIn("turns: 1 started, 0 finished", summary)
+        self.assertIn("tools: 1 call(s): write_file=1", summary)
+        self.assertIn("changed_files: app.py", summary)
+        self.assertIn("approvals: 1 requested, 0 approved, 1 denied", summary)
+        self.assertIn("profile_switches: coding-agent -> plan (slash command)", summary)
+        self.assertIn("plans_ready: 1", summary)
+        self.assertIn("task_outcome: success - done", summary)
+        self.assertIn("recent_events:", summary)
+
+    def test_session_summary_handles_empty_or_sparse_events(self):
+        from harness_code_agent.sessions.summary import format_session_summary
+
+        summary = format_session_summary(
+            {"id": "empty-session", "profile": "plan", "status": "running"},
+            [{"type": "after_tool", "payload": None}],
+        )
+
+        self.assertIn("id: empty-session", summary)
+        self.assertIn("profile: plan", summary)
+        self.assertIn("events: 1", summary)
+        self.assertIn("tools: 1 call(s): unknown=1", summary)
+        self.assertIn("changed_files: unknown", summary)
+        self.assertIn("task_outcome: unknown", summary)
 
     def test_workspace_service_resolves_paths_and_snapshots_before_write(self):
         from harness_code_agent.workspace.service import WorkspaceService
@@ -263,18 +570,23 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "new")
             self.assertEqual(len(list((root / ".harness" / "snapshots").rglob("*.*"))), 1)
             self.assertIn("[approval_denied]", approval_denied)
-            self.assertTrue(events[5]["payload"]["requires_approval"])
-            self.assertEqual([event["type"] for event in events], [
-                "before_tool",
-                "permission_decided",
-                "file_changed",
-                "after_tool",
-                "before_tool",
-                "permission_decided",
-                "approval_requested",
-                "approval_decided",
-                "after_tool",
-            ])
+            event_types = [event["type"] for event in events]
+            self.assertIn("tool_call", event_types)
+            self.assertIn("tool_result", event_types)
+            self.assertIn("file_changed", event_types)
+            self.assertIn("file_change", event_types)
+            self.assertIn("failure", event_types)
+            denied_result = [
+                event for event in events
+                if event["type"] == "tool_result" and event["payload"].get("tool") == "run_bash"
+            ][0]
+            self.assertEqual(denied_result["payload"]["status"], "failed")
+            self.assertFalse(denied_result["payload"]["ok"])
+            approval = [
+                event for event in events
+                if event["type"] == "approval_decided" and event["payload"].get("tool") == "run_bash"
+            ][0]
+            self.assertFalse(approval["payload"]["approved"])
 
     def test_execute_tool_apply_patch_records_snapshot_and_rejects_ambiguous_patch(self):
         from harness_code_agent.sessions.events import EventBus
@@ -347,9 +659,14 @@ class ProductRuntimeTests(unittest.TestCase):
 
             self.assertIn("Wrote", result)
             self.assertEqual((root / "approved.txt").read_text(encoding="utf-8"), "ok")
-            self.assertEqual(events[2]["type"], "approval_requested")
-            self.assertEqual(events[3]["type"], "approval_decided")
-            self.assertTrue(events[3]["payload"]["approved"])
+            requested = [event for event in events if event["type"] == "approval_requested"][0]
+            decided = [event for event in events if event["type"] == "approval_decided"][0]
+            tool_result = [event for event in events if event["type"] == "tool_result"][0]
+            self.assertEqual(requested["payload"]["tool"], "write_file")
+            self.assertEqual(decided["payload"]["tool"], "write_file")
+            self.assertTrue(decided["payload"]["approved"])
+            self.assertEqual(tool_result["payload"]["status"], "success")
+            self.assertTrue(tool_result["payload"]["ok"])
 
 
 if __name__ == "__main__":

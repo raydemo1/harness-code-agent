@@ -5,6 +5,8 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -348,7 +350,87 @@ class InteractiveCliTests(unittest.TestCase):
 
         self.assertEqual(resolved[0].kind, "session")
         self.assertIn(session.id, resolved[0].content)
+        self.assertIn("Session summary", resolved[0].content)
+        self.assertIn("profile: coding-agent", resolved[0].content)
+        self.assertIn("recent_events:", resolved[0].content)
         self.assertIn("session_started", resolved[0].content)
+
+    def test_print_session_uses_human_readable_summary(self):
+        from harness_code_agent.core.interactive import print_session
+
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = store.create(
+            profile="coding-agent",
+            cwd=self.temp_dir,
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+        bus = store.event_bus(session)
+        bus.emit("turn_started", agent="main_agent", payload={"turn": 1})
+        bus.emit("after_tool", agent="main_agent", payload={"tool": "read_file", "ok": True})
+        bus.emit("file_changed", agent="main_agent", payload={"path": "app.py"})
+
+        output = StringIO()
+        with redirect_stdout(output):
+            print_session(store, session.id)
+
+        text = output.getvalue()
+        self.assertIn("Session summary", text)
+        self.assertIn(f"id: {session.id}", text)
+        self.assertIn("tools: 1 call(s): read_file=1", text)
+        self.assertIn("changed_files: app.py", text)
+
+    def test_interactive_close_writes_session_summary(self):
+        session = self._session()
+        session_id = session.session.id
+        try:
+            session.submit("summarize this session")
+        finally:
+            session.close()
+
+        summary_path = Path(self.temp_dir) / ".harness" / "sessions" / session_id / "summary.md"
+        text = summary_path.read_text(encoding="utf-8")
+        self.assertIn("Session summary", text)
+        self.assertIn(f"id: {session_id}", text)
+        self.assertIn("status: closed", text)
+        self.assertIn("task_outcome: unknown", text)
+
+        events = session.session_store.read_events(session_id)
+        self.assertEqual(events[-1]["type"], "session_finished")
+        self.assertEqual(events[-1]["payload"]["reason"], "user_exit")
+        self.assertEqual(events[-1]["payload"]["status"], "closed")
+        self.assertNotIn("task_outcome", [event["type"] for event in events])
+
+    def test_hca_session_show_latest_prints_latest_summary_without_api_key(self):
+        from harness_code_agent import cli
+
+        config.API_KEY = ""
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        older = store.create(
+            profile="coding-agent",
+            cwd=self.temp_dir,
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+        latest = store.create(
+            profile="plan",
+            cwd=self.temp_dir,
+            model="model-b",
+            permission_mode="read-only",
+        )
+        store.event_bus(older).emit("user_input", agent="main_agent", payload={"text": "old"})
+        store.event_bus(latest).emit("user_input", agent="main_agent", payload={"text": "new"})
+        store.write_summary(latest.id)
+
+        output = StringIO()
+        with redirect_stdout(output):
+            result = cli.main(["session", "show", "latest"])
+
+        text = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("Session summary", text)
+        self.assertIn(f"id: {latest.id}", text)
+        self.assertNotIn(f"id: {older.id}", text)
 
     def test_clean_checkpoint_is_skipped(self):
         session = self._session()

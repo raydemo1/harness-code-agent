@@ -16,6 +16,8 @@ from ..runtime.approvals import ConsoleApprovalProvider
 from ..runtime.middlewares import TimeBudgetMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.tool_context import ToolContext
+from ..sessions.events import AssistantMessageEvent, SessionFinishedEvent, UserInputEvent
+from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
@@ -175,6 +177,13 @@ class InteractiveSession:
         prompt_with_mentions = format_turn_with_mentions(user_prompt, resolved)
         task = self.format_task(prompt_with_mentions)
         self.turn_count += 1
+        self.event_bus.emit_event(
+            UserInputEvent(
+                text=user_prompt,
+                turn=self.turn_count,
+                mentions=[item.raw for item in resolved],
+            ).to_event()
+        )
         self.event_bus.emit(
             "turn_started",
             agent="main_agent",
@@ -184,6 +193,12 @@ class InteractiveSession:
             },
         )
         text = self.conversation.submit(task)
+        self.event_bus.emit_event(
+            AssistantMessageEvent(
+                text=text,
+                turn=self.turn_count,
+            ).to_event()
+        )
         self.last_user_task = user_prompt
         self.last_assistant_text = text
         notice = self._capture_plan_handoff(text)
@@ -477,11 +492,13 @@ class InteractiveSession:
     def close(self) -> None:
         tools.stop_dev_server()
         self.conversation.close()
-        self.event_bus.emit(
-            "session_finished",
-            agent="main_agent",
-            payload={"profile": self.profile.name(), "interactive": True},
+        self.event_bus.emit_event(
+            SessionFinishedEvent(
+                reason="user_exit",
+                status="closed",
+            ).to_event()
         )
+        self.session_store.write_summary(self.session.id)
 
 
 def _require_arg(args: list[str], usage: str) -> None:
@@ -686,24 +703,7 @@ def print_sessions(store: SessionStore) -> None:
 
 
 def print_session(store: SessionStore, session_id: str) -> None:
-    metadata = store.read_metadata(session_id)
-    events = store.read_events(session_id)
-    print(f"id: {metadata.get('id', session_id)}")
-    if metadata.get("forked_from"):
-        print(f"forked_from: {metadata.get('forked_from')}")
-    if metadata.get("resumed_from"):
-        print(f"resumed_from: {metadata.get('resumed_from')}")
-    print(f"profile: {metadata.get('profile', '')}")
-    print(f"model: {metadata.get('model', '')}")
-    print(f"permission_mode: {metadata.get('permission_mode', '')}")
-    print(f"status: {metadata.get('status', '')}")
-    print(f"cwd: {metadata.get('cwd', '')}")
-    print(f"created_at: {metadata.get('created_at', '')}")
-    print(f"events: {len(events)}")
-    if events:
-        print("recent_events:")
-        for event in events[-5:]:
-            print(f"- {_event_summary(event)}")
+    print(load_session_summary(store, session_id))
 
 
 def print_fork(store: SessionStore, session_id: str) -> None:

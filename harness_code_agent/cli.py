@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 
 from . import config
-from .core.interactive import InteractiveSession, PRODUCT_DEFAULT_PROFILE, print_turn_result
+from .core.interactive import InteractiveSession, PRODUCT_DEFAULT_PROFILE, print_session, print_turn_result
 from .core.mentions import MentionResolutionError
+from .sessions.store import SessionStore
 
 
 SLASH_COMMANDS = [
@@ -36,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "run":
         print("Error: 'run' is no longer supported. Use 'hca \"<task>\"' or start 'hca' interactively.")
         return 1
+    if argv == ["session", "show", "latest"]:
+        return show_latest_session(Path.cwd())
 
     parser = argparse.ArgumentParser(prog="hca", description="Interactive local coding agent")
     parser.add_argument("task", nargs="*", help="Optional first task to submit after startup")
@@ -81,6 +84,17 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     finally:
         session.close()
+    return 0
+
+
+def show_latest_session(cwd: Path) -> int:
+    store = SessionStore(cwd / ".harness")
+    try:
+        latest = store.latest_session()
+        print_session(store, latest["id"])
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        print(f"Error: {e}")
+        return 1
     return 0
 
 
