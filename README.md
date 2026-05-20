@@ -1,6 +1,6 @@
 # Harness Code Agent
 
-Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本地 autonomous coding agent 框架。它把“主 agent 负责完整执行闭环、只读子 agent 负责咨询”的模式封装成可复用的 profile，并提供工作区隔离、权限策略、会话记录、工具调用、浏览器测试、规划文件和 benchmark 适配能力。
+Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本地 autonomous coding agent 框架。它把“主 agent 负责完整执行闭环、只读子 agent 负责咨询”的模式封装成可复用的 profile，并提供本地仓库分析、权限策略、会话记录、工具调用、浏览器测试、规划文件和 benchmark 适配能力。
 
 项目适合用于：
 
@@ -14,7 +14,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 - **Profile 驱动**：内置 `coding-agent`、`app-builder`、`terminal`、`swe-bench`、`plan` 五种任务模式。
 - **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
 - **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
-- **工作区隔离**：默认在 `workspace/` 下创建独立任务目录，文件读写会经过路径检查。
+- **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
 - **运行时权限策略**：支持 `read-only`、`workspace-write`、`danger-full-access` 三种权限模式。
 - **会话与事件记录**：每次运行会写入 `.harness/` 元数据、事件和文件快照。
 - **工具系统**：支持文件读写、持久 shell、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
@@ -25,9 +25,8 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 
 ```text
 .
-├── harness.py              # CLI 入口，转发到 harness_code_agent.cli
 ├── harness_code_agent/     # 核心 Python 包
-│   ├── cli.py              # 命令行入口胶水
+│   ├── cli.py              # `hca` 命令行入口
 │   ├── core/               # Harness 控制器、CLI 命令处理、日志配置
 │   ├── agent/              # Agent loop、运行状态、上下文压缩/恢复
 │   ├── runtime/            # 工具、权限、审批、middleware 和 tool context
@@ -83,10 +82,9 @@ Copy-Item .env.template .env
 然后编辑 `.env`：
 
 ```env
-OPENAI_API_KEY=sk-your-key-here
-OPENAI_BASE_URL=https://api.openai.com/v1
-HARNESS_MODEL=gpt-4o
-HARNESS_WORKSPACE=./workspace
+OPENAI_API_KEY=sk-your-deepseek-key-here
+OPENAI_BASE_URL=https://api.deepseek.com
+HARNESS_MODEL=deepseek-v4-flash
 HARNESS_COMMIT_POLICY=checkpoint
 ```
 
@@ -172,7 +170,7 @@ hca
 
 交互模式默认直接在当前目录工作，不再为开发任务创建带时间戳的工作区。该目录会自动初始化 Git 仓库，并在 `.harness/` 中记录 session metadata、events 和文件快照。
 
-自动 checkpoint 默认在每个完成的 turn 后运行，但只有存在未提交代码变更时才会创建 commit；如果工作区是 clean 的，会提示没有需要 checkpoint 的内容。
+自动 checkpoint 默认在每个完成的 turn 后运行，但只会尝试提交本轮新增的可提交变更；如果没有本轮新增变更，会提示没有需要 checkpoint 的内容。本轮开始前已经存在的 dirty 文件不会被自动提交；如果本轮开始前已有 staged changes，自动 checkpoint 会跳过，避免混入用户已暂存内容。
 
 常用会话命令：
 
@@ -200,12 +198,13 @@ hca> 继续 @session:20260518-120000-abcd1234 里的工作
 | `OPENAI_API_KEY` | 空 | API key，必填 |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API 地址 |
 | `HARNESS_MODEL` | `gpt-4o` | 使用的模型名 |
-| `HARNESS_WORKSPACE` | `./workspace` | agent 输出和会话目录 |
 | `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式：`read-only` / `workspace-write` / `danger-full-access` |
-| `HARNESS_COMMIT_POLICY` | `checkpoint` | Git checkpoint 策略：`none` / `checkpoint` / `milestone` |
+| `HARNESS_COMMIT_POLICY` | `checkpoint` | Git 自动保存策略。交互式模式下 `checkpoint` 表示每轮完成后把本轮新增的可提交变更提交成可回退的本地 checkpoint commit；`none` 关闭自动提交；`milestone` 主要用于旧的单任务/benchmark 流程 |
 | `MAX_AGENT_ITERATIONS` | `60` | 单次 agent loop 最大迭代数 |
 | `COMPRESS_THRESHOLD` | `80000` | 上下文压缩阈值 |
 | `RESET_THRESHOLD` | `150000` | 上下文重置阈值 |
+
+交互式模式会把启动 `hca` 时所在的目录作为当前工作目录，不需要在 `.env` 中配置 `HARNESS_WORKSPACE`。代码中的 `config.WORKSPACE` 仍作为运行时内部字段使用，用来告诉工具、会话记录和权限检查“当前项目根目录”在哪里。
 
 Profile 参数也可通过环境变量覆盖，格式为：
 

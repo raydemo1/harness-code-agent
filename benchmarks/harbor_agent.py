@@ -5,8 +5,8 @@ Harbor has two agent types:
   - External (BaseAgent): agent runs outside container, sends commands via environment.exec()
   - Installed (BaseInstalledAgent): agent is installed inside the container
 
-We use Installed agent — our harness.py runs natively inside the container,
-so run_bash just works as subprocess without any bridging.
+We use Installed agent — the hca CLI module runs natively inside the
+container, so run_bash just works as subprocess without any bridging.
 
 Usage:
   # Install harbor
@@ -192,17 +192,16 @@ class HarnessAgent(BaseInstalledAgent):
             if val:
                 env_vars.append(f"{key}={shlex.quote(val)}")
 
-        env_vars.append("HARNESS_WORKSPACE=/app")
-        env_vars.append("HARNESS_FLAT_WORKSPACE=1")
         env_prefix = " ".join(env_vars)
 
-        # Run harness with system python3
+        # Run hca from the task workspace while importing the cloned agent code.
         await self.exec_as_agent(
             environment,
             command=(
-                f"cd /home/user/harness-agent && "
+                f"cd /app && "
+                f"PYTHONPATH=/home/user/harness-agent "
                 f"{env_prefix} "
-                f"python3 harness.py --profile terminal {escaped}"
+                f"python3 -m harness_code_agent.cli --profile terminal {escaped}"
             ),
         )
 

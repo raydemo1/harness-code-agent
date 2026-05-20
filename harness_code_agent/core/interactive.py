@@ -160,7 +160,7 @@ class InteractiveSession:
     def submit(self, user_prompt: str) -> TurnResult:
         if self.pending_plan_markdown and self.profile.name() == "plan":
             if _is_plan_execution_confirmation(user_prompt):
-                return self.execute_pending_plan(_plan_execution_instructions(user_prompt))
+                return self.execute_pending_plan()
             return self.revise_pending_plan(user_prompt)
         return self._submit_to_current_agent(user_prompt)
 
@@ -201,7 +201,7 @@ class InteractiveSession:
         )
         return TurnResult(text=text, checkpoint=checkpoint, notice=notice)
 
-    def execute_pending_plan(self, additional_instructions: str | None = None) -> TurnResult:
+    def execute_pending_plan(self) -> TurnResult:
         if not self.pending_plan_markdown:
             raise ValueError("No pending plan to execute. Switch to /plan and create a plan first.")
         plan_markdown = self.pending_plan_markdown
@@ -211,15 +211,12 @@ class InteractiveSession:
             reason="execute approved plan",
             plan_markdown=plan_markdown,
         )
-        instructions = (additional_instructions or "").strip()
         task = (
             "Execute the approved implementation plan below in coding-agent mode.\n\n"
             "Use the plan as the source of truth, but still inspect the repository, "
             "make the smallest appropriate code/test changes, and run verification before stopping."
         )
-        if instructions:
-            task += f"\n\nAdditional user instructions:\n{instructions}"
-        return self.submit(task)
+        return self._submit_to_current_agent(task)
 
     def revise_pending_plan(self, feedback: str) -> TurnResult:
         if not self.pending_plan_markdown:
@@ -515,9 +512,6 @@ def _is_plan_execution_confirmation(text: str) -> bool:
     }
 
 
-def _plan_execution_instructions(text: str) -> str:
-    return "" if _is_plan_execution_confirmation(text) else text
-
 
 def _truncate_handoff_text(text: str, limit: int = 4000) -> str:
     text = (text or "").strip()
@@ -536,16 +530,12 @@ def print_turn_result(result: TurnResult) -> None:
 
 
 def _ensure_git_repository(workspace: Path) -> None:
-    created = False
     if (workspace / ".git").exists():
         _git_add_runtime_exclude(workspace)
         return
-    created = True
     subprocess.run(["git", "init"], cwd=workspace, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     _git_add_runtime_exclude(workspace)
     subprocess.run(git_commit_command("init", allow_empty=True), cwd=workspace, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    if created:
-        return
 
 
 def _git_add_runtime_exclude(workspace: Path) -> None:

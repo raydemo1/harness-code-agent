@@ -107,6 +107,11 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_legacy_core_harness_controller_is_removed(self):
+        project_root = Path(__file__).resolve().parents[1]
+
+        self.assertFalse((project_root / "harness_code_agent" / "core" / "harness.py").exists())
+
     def test_initial_task_path_submits_to_live_conversation(self):
         session = self._session()
         try:
@@ -385,14 +390,10 @@ class InteractiveCliTests(unittest.TestCase):
 
         self.assertEqual(cli.main(["run", "fix tests"]), 1)
 
-    def test_harness_core_main_rejects_old_run_command(self):
-        from harness_code_agent.core import harness
+    def test_top_level_harness_py_wrapper_is_removed(self):
+        project_root = Path(__file__).resolve().parents[1]
 
-        with patch.object(sys, "argv", ["harness.py", "run", "fix tests"]):
-            with self.assertRaises(SystemExit) as raised:
-                harness.main()
-
-        self.assertEqual(raised.exception.code, 1)
+        self.assertFalse((project_root / "harness.py").exists())
 
     def test_hca_first_task_submits_then_repl_can_exit(self):
         from harness_code_agent import cli
@@ -407,6 +408,20 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
         self.assertIn("fix tests", FakeConversation.instances[0].submissions[0])
+
+    def test_hca_profile_override_submits_first_task_through_interactive_session(self):
+        from harness_code_agent import cli
+
+        with (
+            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.cli._build_prompt", return_value=lambda: "/exit"),
+            patch.object(sys, "argv", ["hca", "--profile", "terminal", "fix", "shell"]),
+        ):
+            result = cli.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
+        self.assertIn("fix shell", FakeConversation.instances[0].submissions[0])
 
 
 if __name__ == "__main__":

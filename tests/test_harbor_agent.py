@@ -1,7 +1,9 @@
 import importlib
+import os
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 def _install_fake_harbor_modules() -> None:
@@ -76,6 +78,31 @@ class HarnessAgentInstallTests(unittest.IsolatedAsyncioTestCase):
             "https://github.com/lyxhnu/multi-agent/archive/refs/heads/main.tar.gz",
             all_commands,
         )
+
+    async def test_run_invokes_hca_cli_from_task_workspace(self):
+        commands = []
+
+        class RecordingAgent(self.module.HarnessAgent):
+            async def exec_as_agent(self, environment, command):
+                commands.append(command)
+
+        agent = RecordingAgent()
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "test-key",
+                "OPENAI_BASE_URL": "https://api.example.test",
+                "HARNESS_MODEL": "test-model",
+            },
+        ):
+            await agent.run("fix shell", environment=object(), context=object())
+
+        command = commands[-1]
+        self.assertIn("cd /app &&", command)
+        self.assertIn("PYTHONPATH=/home/user/harness-agent", command)
+        self.assertIn("python3 -m harness_code_agent.cli --profile terminal", command)
+        self.assertNotIn("python3 harness.py", command)
+        self.assertNotIn("HARNESS_WORKSPACE=/app", command)
 
 
 if __name__ == "__main__":

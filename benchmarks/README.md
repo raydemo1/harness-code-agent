@@ -43,5 +43,5 @@ python benchmarks/run_terminal_bench.py --task fix-git --force-build
 2. It rewrites each task's `docker_image` to `ghcr.io/laude-institute/terminal-bench/<task>:2.0`
 3. Harbor runs against the local dataset via `--path`, avoiding registry task metadata drift
 4. `HarnessAgent.install()` clones our repo inside the task container
-5. Harbor runs `python3 harness.py --profile terminal "<task>"` in the container
+5. Harbor runs `python3 -m harness_code_agent.cli --profile terminal "<task>"` from `/app` in the container, with `PYTHONPATH` pointing at the cloned agent code
 6. Harbor evaluates the result using the task's `tests/test.sh`
