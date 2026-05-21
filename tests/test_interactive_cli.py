@@ -518,40 +518,53 @@ class InteractiveCliTests(unittest.TestCase):
 
         self.assertFalse((project_root / "harness.py").exists())
 
-    def test_hca_first_task_submits_then_repl_can_exit(self):
+    def test_hca_first_task_starts_tui_with_first_task(self):
         from harness_code_agent import cli
 
+        class TtyBuffer(StringIO):
+            def isatty(self):
+                return True
+
         with (
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
-            patch("harness_code_agent.cli._build_prompt", return_value=lambda: "/exit"),
+            patch("harness_code_agent.cli.TuiApp") as tui_app,
+            patch.object(sys, "stdin", TtyBuffer()),
+            patch.object(sys, "stdout", TtyBuffer()),
             patch.object(sys, "argv", ["hca", "fix", "tests"]),
         ):
+            tui_app.return_value.run.return_value = 0
             result = cli.main()
 
         self.assertEqual(result, 0)
-        self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
-        self.assertIn("fix tests", FakeConversation.instances[0].submissions[0])
+        tui_app.assert_called_once()
+        self.assertEqual(tui_app.call_args.kwargs["first_task"], "fix tests")
 
-    def test_hca_profile_override_submits_first_task_through_interactive_session(self):
+    def test_hca_profile_override_starts_tui_with_profile(self):
         from harness_code_agent import cli
 
+        class TtyBuffer(StringIO):
+            def isatty(self):
+                return True
+
         with (
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
-            patch("harness_code_agent.cli._build_prompt", return_value=lambda: "/exit"),
+            patch("harness_code_agent.cli.TuiApp") as tui_app,
+            patch.object(sys, "stdin", TtyBuffer()),
+            patch.object(sys, "stdout", TtyBuffer()),
             patch.object(sys, "argv", ["hca", "--profile", "terminal", "fix", "shell"]),
         ):
+            tui_app.return_value.run.return_value = 0
             result = cli.main()
 
         self.assertEqual(result, 0)
-        self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
-        self.assertIn("fix shell", FakeConversation.instances[0].submissions[0])
+        tui_app.assert_called_once()
+        self.assertEqual(tui_app.call_args.kwargs["profile_name"], "terminal")
+        self.assertEqual(tui_app.call_args.kwargs["first_task"], "fix shell")
 
-    def test_hca_exit_after_task_submits_without_repl(self):
+    def test_hca_exit_after_task_submits_without_tui(self):
         from harness_code_agent import cli
 
         with (
             patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
-            patch("harness_code_agent.cli.repl") as repl_mock,
+            patch("harness_code_agent.cli.TuiApp") as tui_app,
             patch.object(sys, "argv", ["hca", "--exit-after-task", "fix", "tests"]),
         ):
             result = cli.main()
@@ -559,21 +572,21 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
         self.assertIn("fix tests", FakeConversation.instances[0].submissions[0])
-        repl_mock.assert_not_called()
+        tui_app.assert_not_called()
 
-    def test_hca_no_repl_alias_submits_without_repl(self):
+    def test_hca_no_repl_alias_submits_without_tui(self):
         from harness_code_agent import cli
 
         with (
             patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
-            patch("harness_code_agent.cli.repl") as repl_mock,
+            patch("harness_code_agent.cli.TuiApp") as tui_app,
             patch.object(sys, "argv", ["hca", "--no-repl", "fix", "tests"]),
         ):
             result = cli.main()
 
         self.assertEqual(result, 0)
         self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
-        repl_mock.assert_not_called()
+        tui_app.assert_not_called()
 
     def test_hca_exit_after_task_requires_task(self):
         from harness_code_agent import cli
@@ -622,36 +635,18 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertNotIn("already streamed", output.getvalue())
         self.assertIn("checkpoint", output.getvalue())
 
-    def test_prompt_builder_falls_back_when_prompt_toolkit_cannot_create_output(self):
+    def test_hca_interactive_requires_tty(self):
         from harness_code_agent import cli
 
-        class BrokenPromptSession:
-            def __init__(self, *args, **kwargs):
-                raise RuntimeError("no console")
-
-        class Completer:
-            pass
-
-        class Completion:
-            def __init__(self, *args, **kwargs):
-                pass
-
-        prompt_toolkit = types.ModuleType("prompt_toolkit")
-        prompt_toolkit.PromptSession = BrokenPromptSession
-        completion = types.ModuleType("prompt_toolkit.completion")
-        completion.Completer = Completer
-        completion.Completion = Completion
-
-        with patch.dict(
-            sys.modules,
-            {
-                "prompt_toolkit": prompt_toolkit,
-                "prompt_toolkit.completion": completion,
-            },
+        output = StringIO()
+        with (
+            redirect_stdout(output),
+            patch.object(sys, "argv", ["hca"]),
         ):
-            prompt = cli._build_prompt(types.SimpleNamespace())
+            result = cli.main()
 
-        self.assertIs(prompt, cli._simple_prompt)
+        self.assertEqual(result, 2)
+        self.assertIn("requires a TTY", output.getvalue())
 
 
 if __name__ == "__main__":

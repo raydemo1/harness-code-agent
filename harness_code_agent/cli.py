@@ -10,30 +10,7 @@ from . import config
 from .core.interactive import InteractiveSession, PRODUCT_DEFAULT_PROFILE, print_session, print_turn_result
 from .core.mentions import MentionResolutionError
 from .sessions.store import SessionStore
-
-
-SLASH_COMMANDS = [
-    "/help",
-    "/sessions",
-    "/session",
-    "/resume",
-    "/fork",
-    "/rollback",
-    "/profiles",
-    "/code",
-    "/plan",
-    "/terminal",
-    "/swe",
-    "/app",
-    "/doctor",
-    "/config show",
-    "/checkpoint",
-    "/exit",
-]
-
-
-def _simple_prompt() -> str:
-    return input("hca> ")
+from .tui import TuiApp
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,22 +49,55 @@ def main(argv: list[str] | None = None) -> int:
         print("Error: --exit-after-task/--no-repl requires a task.")
         return 2
 
-    try:
-        stream_callback = _build_stream_callback()
-    except ValueError as e:
-        print(f"Error: {e}")
-        return 2
-
     if not config.API_KEY:
         print("Error: Set OPENAI_API_KEY in .env or environment.")
         return 1
 
-    try:
-        session = InteractiveSession(
+    if args.exit_after_task:
+        try:
+            stream_sink = _build_stream_callback()
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 2
+        return run_batch(
             cwd=Path.cwd(),
             profile_name=args.profile,
             resume_session_id=args.resume,
-            stream_callback=stream_callback,
+            first_task=first_task,
+            stream_sink=stream_sink,
+        )
+
+    if not _is_interactive_tty():
+        print("Error: hca interactive mode requires a TTY. Use --exit-after-task/--no-repl for batch execution.")
+        return 2
+
+    try:
+        app = TuiApp(
+            cwd=Path.cwd(),
+            profile_name=args.profile,
+            resume_session_id=args.resume,
+            first_task=first_task,
+        )
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
+    return app.run()
+
+
+def run_batch(
+    *,
+    cwd: Path,
+    profile_name: str,
+    resume_session_id: str | None,
+    first_task: str,
+    stream_sink=None,
+) -> int:
+    try:
+        session = InteractiveSession(
+            cwd=cwd,
+            profile_name=profile_name,
+            resume_session_id=resume_session_id,
+            stream_sink=stream_sink,
         )
     except Exception as e:
         print(f"Error: {e}")
@@ -95,20 +105,22 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"hca session: {session.session.id}")
     print(f"workspace: {session.cwd}")
-    print("Type /help for commands, /exit to quit.")
 
     try:
-        if first_task:
-            _submit_and_print(session, first_task)
-            if args.exit_after_task:
-                return 0
-        repl(session)
+        _submit_and_print(session, first_task)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130
     finally:
         session.close()
     return 0
+
+
+def _is_interactive_tty() -> bool:
+    return bool(
+        getattr(sys.stdin, "isatty", lambda: False)()
+        and getattr(sys.stdout, "isatty", lambda: False)()
+    )
 
 
 def _build_stream_callback():
@@ -142,25 +154,6 @@ def show_latest_session(cwd: Path) -> int:
     return 0
 
 
-def repl(session: InteractiveSession) -> None:
-    prompt = _build_prompt(session)
-    while True:
-        try:
-            line = prompt()
-        except EOFError:
-            print()
-            break
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("/"):
-            should_continue = session.handle_slash_command(line)
-            if not should_continue:
-                break
-            continue
-        _submit_and_print(session, line)
-
-
 def _submit_and_print(session: InteractiveSession, line: str) -> None:
     try:
         result = session.submit(line)
@@ -168,66 +161,6 @@ def _submit_and_print(session: InteractiveSession, line: str) -> None:
         print(f"Error: {e}")
         return
     print_turn_result(result)
-
-
-def _build_prompt(session: InteractiveSession):
-    try:
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.completion import Completer, Completion
-    except ImportError:
-        return _simple_prompt
-
-    class HcaCompleter(Completer):
-        def get_completions(self, document, complete_event):
-            text = document.text_before_cursor
-            word = document.get_word_before_cursor(WORD=True)
-            if text.lstrip().startswith("/"):
-                prefix = text.strip()
-                for command in SLASH_COMMANDS:
-                    if command.startswith(prefix):
-                        yield Completion(command, start_position=-len(prefix))
-                return
-            if "@session:" in text:
-                prefix = word.removeprefix("@session:")
-                for item in session.session_store.list_sessions()[:20]:
-                    session_id = item.get("id", "")
-                    if session_id.startswith(prefix):
-                        yield Completion(session_id, start_position=-len(prefix))
-                return
-            if word.startswith("@"):
-                prefix = word[1:]
-                for path in _iter_file_completions(session.cwd, prefix):
-                    yield Completion(path, start_position=-len(prefix))
-
-    try:
-        prompt_session = PromptSession(completer=HcaCompleter())
-    except Exception:
-        return _simple_prompt
-
-    def prompt() -> str:
-        return prompt_session.prompt("hca> ")
-
-    return prompt
-
-
-def _iter_file_completions(root: Path, prefix: str):
-    base = root / prefix
-    parent = base.parent if prefix else root
-    if not parent.exists() or not parent.is_dir():
-        return
-    stem = base.name
-    for item in sorted(parent.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-        if item.name.startswith(".") and item.name != ".env.template":
-            continue
-        if not item.name.startswith(stem):
-            continue
-        try:
-            rel = item.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        if item.is_dir():
-            rel += "/"
-        yield rel
 
 
 

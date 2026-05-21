@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import os
 import logging
-import shlex
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .. import config
 from ..agent.loop import AgentConversation
 from ..profiles import get_profile, list_profiles
 from ..profiles.base import BaseProfile
 from ..runtime import tools
-from ..runtime.approvals import ConsoleApprovalProvider
+from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider
 from ..runtime.middlewares import TimeBudgetMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.tool_context import ToolContext
@@ -68,11 +68,18 @@ class InteractiveSession:
         cwd: str | Path,
         profile_name: str = PRODUCT_DEFAULT_PROFILE,
         resume_session_id: str | None = None,
+        stream_sink: Callable[[str], None] | None = None,
+        event_listener: Callable[[object], None] | None = None,
+        approval_provider: ApprovalProvider | None = None,
+        output_sink: Callable[[str], None] | None = None,
         stream_callback=None,
     ):
         self.cwd = Path(cwd).resolve()
         config.WORKSPACE = str(self.cwd)
-        self.stream_callback = stream_callback
+        self.stream_sink = stream_sink or stream_callback
+        self.event_listener = event_listener
+        self.approval_provider = approval_provider or ConsoleApprovalProvider()
+        self.output_sink = output_sink or print
         self.profile = get_profile(profile_name)
         self.skill_registry = SkillRegistry()
         self.session_store = SessionStore(self.cwd / ".harness")
@@ -96,7 +103,7 @@ class InteractiveSession:
             permission_mode=self.permission_mode,
             resumed_from=resume_session_id,
         )
-        self.event_bus = self.session_store.event_bus(self.session)
+        self.event_bus = self.session_store.event_bus(self.session, listener=self.event_listener)
         self.tool_context = ToolContext(
             workspace=WorkspaceService(
                 root=self.cwd,
@@ -105,7 +112,7 @@ class InteractiveSession:
             permission_policy=PermissionPolicy(mode=self.permission_mode),
             event_bus=self.event_bus,
             session_id=self.session.id,
-            approval_provider=ConsoleApprovalProvider(),
+            approval_provider=self.approval_provider,
         )
         self.agent = self._build_agent()
         self.conversation: AgentConversation = self.agent.start_conversation()
@@ -147,7 +154,7 @@ class InteractiveSession:
             middlewares=cfg.middlewares,
             time_budget=cfg.time_budget,
             tool_context=self.tool_context,
-            stream_callback=self.stream_callback,
+            stream_callback=self.stream_sink,
         )
 
     def _sync_time_budget(self) -> None:
@@ -342,48 +349,12 @@ class InteractiveSession:
         return "\n".join(lines)
 
     def handle_slash_command(self, line: str) -> bool:
-        parts = shlex.split(line)
-        if not parts:
-            return True
-        command = parts[0]
-        args = parts[1:]
-        try:
-            if command in {"/exit", "/quit"}:
-                return False
-            if command == "/help":
-                print_help()
-            elif command == "/sessions":
-                print_sessions(self.session_store)
-            elif command == "/session":
-                _require_arg(args, "Usage: /session <session-id>")
-                print_session(self.session_store, args[0])
-            elif command == "/fork":
-                _require_arg(args, "Usage: /fork <session-id>")
-                print_fork(self.session_store, args[0])
-            elif command == "/resume":
-                _require_arg(args, "Usage: /resume <session-id>")
-                self._inject_resume_context(args[0])
-            elif command == "/rollback":
-                if len(args) != 2:
-                    raise ValueError("Usage: /rollback <session-id> <path>")
-                rollback_session_file(self.session_store, args[0], args[1])
-            elif command == "/profiles":
-                print_profiles()
-            elif command in PROFILE_SLASH_ALIASES:
-                if args:
-                    raise ValueError(f"Usage: {command}")
-                print(self.switch_profile(PROFILE_SLASH_ALIASES[command]))
-            elif command == "/doctor":
-                run_doctor(self.cwd)
-            elif command == "/config" and args == ["show"]:
-                print_config_show(self.cwd)
-            elif command == "/checkpoint":
-                self._handle_checkpoint_command(args)
-            else:
-                print(f"Unknown slash command: {command}")
-        except (FileNotFoundError, ValueError, KeyError, MentionResolutionError) as e:
-            print(f"Error: {e}")
-        return True
+        from ..tui.commands import default_command_registry
+
+        result = default_command_registry().execute(line, self)
+        if result.text:
+            self.output_sink(result.text)
+        return result.should_continue
 
     def switch_profile(self, profile_name: str) -> str:
         previous = self.profile.name()
@@ -394,30 +365,26 @@ class InteractiveSession:
             return f"profile already active: {current}"
         return f"profile switched: {previous} -> {current}"
 
-    def _inject_resume_context(self, session_id: str) -> None:
+    def _inject_resume_context(self, session_id: str) -> str:
         context_text = _build_resume_context(self.session_store, session_id)
         self.conversation.messages.append({
             "role": "user",
             "content": f"Resume context:\n{context_text}",
         })
-        print(f"Resumed context injected for session: {session_id}")
+        return f"Resumed context injected for session: {session_id}"
 
-    def _handle_checkpoint_command(self, args: list[str]) -> None:
+    def _handle_checkpoint_command(self, args: list[str]) -> str:
         if not args:
-            print(self.create_checkpoint(manual=True))
-            return
+            return self.create_checkpoint(manual=True)
         if args[:2] == ["auto", "on"]:
             self.checkpoint.auto = True
-            print("checkpoint auto: on")
-            return
+            return "checkpoint auto: on"
         if args[:2] == ["auto", "off"]:
             self.checkpoint.auto = False
-            print("checkpoint auto: off")
-            return
+            return "checkpoint auto: off"
         if args[:2] == ["every", "turn"]:
             self.checkpoint.every_turns = 1
-            print("checkpoint cadence: every turn")
-            return
+            return "checkpoint cadence: every turn"
         if len(args) == 2 and args[0] == "every":
             try:
                 turns = int(args[1])
@@ -426,8 +393,7 @@ class InteractiveSession:
             if turns < 1:
                 raise ValueError("Checkpoint cadence must be at least 1 turn")
             self.checkpoint.every_turns = turns
-            print(f"checkpoint cadence: every {turns} turns")
-            return
+            return f"checkpoint cadence: every {turns} turns"
         if len(args) == 3 and args[0] == "every" and args[2] == "turns":
             try:
                 turns = int(args[1])
@@ -436,14 +402,12 @@ class InteractiveSession:
             if turns < 1:
                 raise ValueError("Checkpoint cadence must be at least 1 turn")
             self.checkpoint.every_turns = turns
-            print(f"checkpoint cadence: every {turns} turns")
-            return
+            return f"checkpoint cadence: every {turns} turns"
         if args == ["status"]:
-            print(
+            return (
                 f"checkpoint auto: {'on' if self.checkpoint.auto else 'off'}; "
                 f"cadence: every {self.checkpoint.every_turns} turn(s)"
             )
-            return
         raise ValueError("Usage: /checkpoint [auto on|auto off|every turn|every <N> turns|status]")
 
     def _maybe_auto_checkpoint(
@@ -703,100 +667,128 @@ def git_commit_command(message: str, *, allow_empty: bool = False) -> list[str]:
 
 
 def print_help() -> None:
-    print("hca commands:")
-    print("  /help")
-    print("  /sessions")
-    print("  /session <session-id>")
-    print("  /resume <session-id>")
-    print("  /fork <session-id>")
-    print("  /rollback <session-id> <path>")
-    print("  /profiles")
-    print("  /code | /plan | /terminal | /swe | /app")
-    print("  /doctor")
-    print("  /config show")
-    print("  /checkpoint [auto on|auto off|every turn|every <N> turns|status]")
-    print("  /exit")
+    from ..tui.commands import default_command_registry
+
+    print(default_command_registry().format_help())
 
 
-def print_sessions(store: SessionStore) -> None:
+def format_sessions(store: SessionStore) -> str:
     sessions = store.list_sessions()
     if not sessions:
-        print("No sessions found.")
-        return
-    print(f"{'ID':28s} {'PROFILE':15s} {'MODE':18s} CREATED")
+        return "No sessions found."
+    lines = [f"{'ID':28s} {'PROFILE':15s} {'MODE':18s} CREATED"]
     for item in sessions:
-        print(
+        lines.append(
             f"{item.get('id', ''):28s} "
             f"{item.get('profile', ''):15s} "
             f"{item.get('permission_mode', ''):18s} "
             f"{item.get('created_at', '')}"
         )
+    return "\n".join(lines)
+
+
+def print_sessions(store: SessionStore) -> None:
+    print(format_sessions(store))
 
 
 def print_session(store: SessionStore, session_id: str) -> None:
     print(load_session_summary(store, session_id))
 
 
-def print_fork(store: SessionStore, session_id: str) -> None:
+def format_fork(store: SessionStore, session_id: str) -> str:
     session = store.fork(session_id)
     metadata = store.read_metadata(session.id)
-    print(f"forked_session: {session.id}")
-    print(f"forked_from: {metadata.get('forked_from', session_id)}")
-    print(f"profile: {metadata.get('profile', '')}")
-    print(f"cwd: {metadata.get('cwd', '')}")
+    return "\n".join([
+        f"forked_session: {session.id}",
+        f"forked_from: {metadata.get('forked_from', session_id)}",
+        f"profile: {metadata.get('profile', '')}",
+        f"cwd: {metadata.get('cwd', '')}",
+    ])
 
 
-def rollback_session_file(store: SessionStore, session_id: str, path: str) -> None:
+def print_fork(store: SessionStore, session_id: str) -> None:
+    print(format_fork(store, session_id))
+
+
+def format_rollback_session_file(store: SessionStore, session_id: str, path: str) -> str:
     metadata = store.read_metadata(session_id)
     workspace = WorkspaceService(
         root=metadata["cwd"],
         snapshots_dir=store.sessions_dir / session_id / "snapshots",
     )
     result = workspace.rollback_latest_snapshot(path)
-    print(f"rolled_back: {path}")
-    print(f"workspace: {workspace.root}")
+    lines = [
+        f"rolled_back: {path}",
+        f"workspace: {workspace.root}",
+    ]
     if result.snapshot_path:
-        print(f"pre_rollback_snapshot: {result.snapshot_path}")
+        lines.append(f"pre_rollback_snapshot: {result.snapshot_path}")
+    return "\n".join(lines)
+
+
+def rollback_session_file(store: SessionStore, session_id: str, path: str) -> None:
+    print(format_rollback_session_file(store, session_id, path))
+
+
+def format_profiles() -> str:
+    lines = ["Available profiles:", ""]
+    for profile in list_profiles():
+        lines.append(f"  {profile['name']:15s} {profile['description']}")
+    return "\n".join(lines)
 
 
 def print_profiles() -> None:
-    print("Available profiles:\n")
-    for profile in list_profiles():
-        print(f"  {profile['name']:15s} {profile['description']}")
+    print(format_profiles())
+
+
+def format_config_show(workspace: Path) -> str:
+    lines = [
+        "Harness config",
+        f"api_key: {_redact_secret(config.API_KEY)}",
+        f"base_url: {config.BASE_URL}",
+        f"model: {config.MODEL}",
+        f"workspace: {workspace}",
+        f"permission_mode: {os.environ.get('HARNESS_PERMISSION_MODE', 'workspace-write')}",
+        f"provider: {config.PROVIDER}",
+        f"stream: {config.STREAM}",
+    ]
+    if os.name == "nt":
+        lines.append(f"windows_shell: {config.WINDOWS_SHELL} ({windows_shell_hint()})")
+    lines.extend([
+        "checkpoint_auto: interactive default",
+        f"compress_threshold: {config.COMPRESS_THRESHOLD}",
+        f"reset_threshold: {config.RESET_THRESHOLD}",
+        f"max_agent_iterations: {config.MAX_AGENT_ITERATIONS}",
+    ])
+    return "\n".join(lines)
 
 
 def print_config_show(workspace: Path) -> None:
-    print("Harness config")
-    print(f"api_key: {_redact_secret(config.API_KEY)}")
-    print(f"base_url: {config.BASE_URL}")
-    print(f"model: {config.MODEL}")
-    print(f"workspace: {workspace}")
-    print(f"permission_mode: {os.environ.get('HARNESS_PERMISSION_MODE', 'workspace-write')}")
-    print(f"provider: {config.PROVIDER}")
-    print(f"stream: {config.STREAM}")
-    if os.name == "nt":
-        print(f"windows_shell: {config.WINDOWS_SHELL} ({windows_shell_hint()})")
-    print(f"checkpoint_auto: interactive default")
-    print(f"compress_threshold: {config.COMPRESS_THRESHOLD}")
-    print(f"reset_threshold: {config.RESET_THRESHOLD}")
-    print(f"max_agent_iterations: {config.MAX_AGENT_ITERATIONS}")
+    print(format_config_show(workspace))
+
+
+def format_doctor(workspace: Path) -> tuple[str, int]:
+    rows = []
+    rows.append(("API key", bool(config.API_KEY), "configured" if config.API_KEY else "missing OPENAI_API_KEY"))
+    rows.append(("API base URL", bool(config.BASE_URL), config.BASE_URL or "missing OPENAI_BASE_URL"))
+    rows.append(("Workspace", workspace.exists() and workspace.is_dir(), str(workspace)))
+    rows.append(("Git", shutil_which("git") is not None, shutil_which("git") or "not installed"))
+    shell = shell_path()
+    rows.append(("Shell", shell is not None, shell or "no shell found"))
+    failures = sum(0 if ok else 1 for _, ok, _ in rows)
+    lines = ["Harness doctor"]
+    lines.extend(_format_doctor_line(label, ok, detail) for label, ok, detail in rows)
+    return "\n".join(lines), failures
 
 
 def run_doctor(workspace: Path) -> int:
-    failures = 0
-    print("Harness doctor")
-    failures += _doctor_line("API key", bool(config.API_KEY), "configured" if config.API_KEY else "missing OPENAI_API_KEY")
-    failures += _doctor_line("API base URL", bool(config.BASE_URL), config.BASE_URL or "missing OPENAI_BASE_URL")
-    failures += _doctor_line("Workspace", workspace.exists() and workspace.is_dir(), str(workspace))
-    failures += _doctor_line("Git", shutil_which("git") is not None, shutil_which("git") or "not installed")
-    shell = shell_path()
-    failures += _doctor_line("Shell", shell is not None, shell or "no shell found")
+    text, failures = format_doctor(workspace)
+    print(text)
     return 0 if failures == 0 else 1
 
 
-def _doctor_line(label: str, ok: bool, detail: str) -> int:
-    print(f"{'OK' if ok else 'FAIL':4s} {label:18s} {detail}")
-    return 0 if ok else 1
+def _format_doctor_line(label: str, ok: bool, detail: str) -> str:
+    return f"{'OK' if ok else 'FAIL':4s} {label:18s} {detail}"
 
 
 def shutil_which(name: str) -> str | None:

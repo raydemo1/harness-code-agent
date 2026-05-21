@@ -111,12 +111,13 @@ hca
 hca --list-profiles
 ```
 
-进入交互式本地开发助手。默认 profile 是 `coding-agent`，工作区就是启动 `hca` 时所在的当前目录：
+进入交互式本地开发助手。默认 profile 是 `coding-agent`，工作区就是启动 `hca` 时所在的当前目录；TTY 中会打开 Claude Code 风格的 inline TUI：
 
 ```bash
 hca
-hca> Fix the failing tests
 ```
+
+然后在 TUI 输入栏中提交任务，例如 `Fix the failing tests`。
 
 也可以启动后立即提交第一个任务，然后继续留在交互模式：
 
@@ -191,9 +192,10 @@ hca
 
 可以用 `@` mention 把文件或历史 session 作为上下文注入当前 turn：
 
-```bash
-hca> 根据 @README.md 修复文档里的启动示例
-hca> 继续 @session:20260518-120000-abcd1234 里的工作
+```text
+根据 @README.md 修复文档里的启动示例
+继续 @session:20260518-120000-abcd1234 里的工作
+根据 @"docs/path with spaces.md" 补充测试说明
 ```
 
 ## 配置项

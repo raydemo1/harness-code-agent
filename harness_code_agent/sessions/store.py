@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .events import EventBus
 
@@ -101,8 +101,13 @@ class SessionStore:
         )
         return session
 
-    def event_bus(self, session: Session) -> EventBus:
-        return EventBus(session.events_path)
+    def event_bus(
+        self,
+        session: Session,
+        *,
+        listener: Callable[[Any], None] | None = None,
+    ) -> EventBus:
+        return EventBus(session.events_path, listener=listener)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         sessions = []

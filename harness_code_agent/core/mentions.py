@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,7 +7,6 @@ from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
 
 
-MENTION_RE = re.compile(r"(?<!\S)@([^\s]+)")
 FILE_CONTEXT_LIMIT = 60_000
 
 
@@ -35,11 +33,9 @@ class MentionResolutionError(ValueError):
 def parse_mentions(text: str) -> list[Mention]:
     mentions: list[Mention] = []
     seen: set[tuple[str, str]] = set()
-    for match in MENTION_RE.finditer(text):
-        token = match.group(1).rstrip(".,;:!?)]}")
+    for raw, token in _iter_mention_tokens(text):
         if not token:
             continue
-        raw = f"@{token}"
         if token.startswith("session:"):
             target = token.removeprefix("session:")
             kind = "session"
@@ -52,6 +48,48 @@ def parse_mentions(text: str) -> list[Mention]:
         seen.add(key)
         mentions.append(Mention(raw=raw, kind=kind, target=target))
     return mentions
+
+
+def _iter_mention_tokens(text: str):
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "@" or (i > 0 and not text[i - 1].isspace()):
+            i += 1
+            continue
+        start = i
+        i += 1
+        if i < n and text[i] == '"':
+            i += 1
+            chars = []
+            escaped = False
+            while i < n:
+                ch = text[i]
+                if escaped:
+                    chars.append(ch)
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    i += 1
+                    break
+                else:
+                    chars.append(ch)
+                i += 1
+            token = "".join(chars).strip()
+            raw = text[start:i]
+            if token:
+                yield raw, token
+            continue
+
+        token_start = i
+        while i < n and not text[i].isspace():
+            i += 1
+        token = text[token_start:i].rstrip(".,;:!?)]}")
+        if not token:
+            continue
+        raw = "@" + token
+        yield raw, token
 
 
 def resolve_mentions(
