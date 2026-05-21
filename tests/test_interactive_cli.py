@@ -522,6 +522,113 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
         self.assertIn("fix shell", FakeConversation.instances[0].submissions[0])
 
+    def test_hca_exit_after_task_submits_without_repl(self):
+        from harness_code_agent import cli
+
+        with (
+            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.cli.repl") as repl_mock,
+            patch.object(sys, "argv", ["hca", "--exit-after-task", "fix", "tests"]),
+        ):
+            result = cli.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
+        self.assertIn("fix tests", FakeConversation.instances[0].submissions[0])
+        repl_mock.assert_not_called()
+
+    def test_hca_no_repl_alias_submits_without_repl(self):
+        from harness_code_agent import cli
+
+        with (
+            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.cli.repl") as repl_mock,
+            patch.object(sys, "argv", ["hca", "--no-repl", "fix", "tests"]),
+        ):
+            result = cli.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
+        repl_mock.assert_not_called()
+
+    def test_hca_exit_after_task_requires_task(self):
+        from harness_code_agent import cli
+
+        output = StringIO()
+        with (
+            redirect_stdout(output),
+            patch.object(sys, "argv", ["hca", "--exit-after-task"]),
+        ):
+            result = cli.main()
+
+        self.assertEqual(result, 2)
+        self.assertIn("requires a task", output.getvalue())
+
+    def test_stream_callback_auto_uses_tty_and_writes_deltas(self):
+        from harness_code_agent import cli
+
+        class TtyBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        output = TtyBuffer()
+        with (
+            patch("harness_code_agent.cli.config.STREAM", "auto"),
+            patch.object(sys, "stdout", output),
+        ):
+            callback = cli._build_stream_callback()
+            callback("hel")
+            callback("lo")
+
+        self.assertEqual(output.getvalue(), "hello")
+
+    def test_stream_callback_auto_is_disabled_for_non_tty(self):
+        from harness_code_agent import cli
+
+        with patch("harness_code_agent.cli.config.STREAM", "auto"):
+            self.assertIsNone(cli._build_stream_callback())
+
+    def test_print_turn_result_does_not_duplicate_streamed_text(self):
+        from harness_code_agent.core.interactive import TurnResult, print_turn_result
+
+        output = StringIO()
+        with redirect_stdout(output):
+            print_turn_result(TurnResult(text="already streamed", checkpoint="checkpoint", streamed=True))
+
+        self.assertNotIn("already streamed", output.getvalue())
+        self.assertIn("checkpoint", output.getvalue())
+
+    def test_prompt_builder_falls_back_when_prompt_toolkit_cannot_create_output(self):
+        from harness_code_agent import cli
+
+        class BrokenPromptSession:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("no console")
+
+        class Completer:
+            pass
+
+        class Completion:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        prompt_toolkit = types.ModuleType("prompt_toolkit")
+        prompt_toolkit.PromptSession = BrokenPromptSession
+        completion = types.ModuleType("prompt_toolkit.completion")
+        completion.Completer = Completer
+        completion.Completion = Completion
+
+        with patch.dict(
+            sys.modules,
+            {
+                "prompt_toolkit": prompt_toolkit,
+                "prompt_toolkit.completion": completion,
+            },
+        ):
+            prompt = cli._build_prompt(types.SimpleNamespace())
+
+        self.assertIs(prompt, cli._simple_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

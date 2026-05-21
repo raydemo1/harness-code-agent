@@ -2,14 +2,26 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from pathlib import Path
 
-from harness_code_agent.workspace.shell_session import PersistentShellSession
+from harness_code_agent import config
+from harness_code_agent.workspace.shell_session import PersistentShellSession, windows_shell_kind
 
 
 def _commands_for_platform(temp_dir: str) -> dict[str, str]:
     if os.name == "nt":
+        if windows_shell_kind() in {"pwsh", "powershell"}:
+            return {
+                "make_and_cd": "Set-Location ..",
+                "pwd": "(Get-Location).Path",
+                "pwd_expected": str(Path(temp_dir).resolve().parent),
+                "set_env": "$env:FOO='bar'",
+                "get_env": "$env:FOO",
+                "sleep": "Start-Sleep -Seconds 5",
+                "alive": "'alive'",
+            }
         return {
             "make_and_cd": "cd ..",
             "pwd": "cd",
@@ -76,6 +88,52 @@ class PersistentShellSessionTests(unittest.TestCase):
             self.assertIn("alive", follow_up.stdout)
             if os.name != "nt":
                 self.assertEqual(follow_up.exit_code, 0)
+        finally:
+            shell.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_windows_shell_auto_prefers_pwsh_then_powershell_then_cmd(self):
+        if os.name != "nt":
+            self.skipTest("Windows-only shell selection")
+        from harness_code_agent.workspace import shell_session
+
+        def fake_which(name):
+            return {
+                "pwsh": "C:/bin/pwsh.exe",
+                "powershell": "C:/bin/powershell.exe",
+                "cmd.exe": "C:/Windows/System32/cmd.exe",
+            }.get(name)
+
+        with (
+            patch.object(config, "WINDOWS_SHELL", "auto"),
+            patch("harness_code_agent.workspace.shell_session.shutil.which", side_effect=fake_which),
+        ):
+            self.assertEqual(shell_session.windows_shell_path(), "C:/bin/pwsh.exe")
+            self.assertEqual(shell_session.windows_shell_kind(), "pwsh")
+
+        def fake_which_without_pwsh(name):
+            return {
+                "powershell": "C:/bin/powershell.exe",
+                "cmd.exe": "C:/Windows/System32/cmd.exe",
+            }.get(name)
+
+        with (
+            patch.object(config, "WINDOWS_SHELL", "auto"),
+            patch("harness_code_agent.workspace.shell_session.shutil.which", side_effect=fake_which_without_pwsh),
+        ):
+            self.assertEqual(shell_session.windows_shell_path(), "C:/bin/powershell.exe")
+            self.assertEqual(shell_session.windows_shell_kind(), "powershell")
+
+    def test_windows_powershell_backend_preserves_utf8_output(self):
+        if os.name != "nt" or windows_shell_kind() not in {"pwsh", "powershell"}:
+            self.skipTest("PowerShell backend not active")
+        temp_dir = self._make_temp_dir()
+        shell = PersistentShellSession(cwd=temp_dir)
+        try:
+            result = shell.run("'中文 output'")
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("中文 output", result.stdout)
         finally:
             shell.close()
             shutil.rmtree(temp_dir, ignore_errors=True)

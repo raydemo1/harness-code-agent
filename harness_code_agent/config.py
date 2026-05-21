@@ -35,6 +35,8 @@ _load_dotenv()
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
+PROVIDER = os.environ.get("HARNESS_PROVIDER", "auto")
+STREAM = os.environ.get("HARNESS_STREAM", "auto")
 
 # --- Token budgets ---
 COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", "80000"))
@@ -47,6 +49,8 @@ PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 # --- Agent limits ---
 MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "60"))
 MAX_TOOL_ERRORS = 5           # consecutive tool errors before abort
+TRACE_STDERR = os.environ.get("HARNESS_TRACE_STDERR", "").lower() in {"1", "true", "yes", "on"}
+WINDOWS_SHELL = os.environ.get("HARNESS_WINDOWS_SHELL", "auto")
 
 # --- Paths ---
 WORKSPACE = os.path.abspath(os.environ.get("HARNESS_WORKSPACE", "./workspace"))

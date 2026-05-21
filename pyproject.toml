@@ -16,3 +16,6 @@ dependencies = [
 
 [project.scripts]
 hca = "harness_code_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["harness_code_agent*"]

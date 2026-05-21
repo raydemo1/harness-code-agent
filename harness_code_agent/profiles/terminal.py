@@ -71,7 +71,7 @@ CRITICAL RULES:
 - Use skip for <3 estimated tool calls, light for 3-5, full for >5. Only mention the mode to the user for light/full.
 - In light mode, keep progress.md current. In full mode, keep task_plan.md, findings.md, and progress.md current.
 - Follow task specifications literally: exact paths, exact output, exact formats, exact filenames.
-- Prefer command-driven evidence. Use cat/rg/ls/git diff/test commands to prove the current state before claiming completion.
+- Prefer command-driven evidence. Use commands that match the active shell. On Windows, run_bash uses PowerShell by default; prefer PowerShell cmdlets/syntax, and use cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd.
 - If a command fails, read the actual stderr/stdout, identify the failure class, and switch strategy instead of retrying blindly.
 - For background services or long-running jobs, keep them alive deliberately, verify readiness with a separate command, and capture the exact port/path/process evidence.
 

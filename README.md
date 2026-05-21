@@ -124,6 +124,13 @@ hca> Fix the failing tests
 hca "Fix the failing tests"
 ```
 
+如果需要给 E2E 或脚本使用，可以提交第一个任务后直接退出：
+
+```bash
+hca --exit-after-task "Fix the failing tests"
+hca --no-repl "Fix the failing tests"
+```
+
 指定 profile：
 
 ```bash
@@ -198,6 +205,9 @@ hca> 继续 @session:20260518-120000-abcd1234 里的工作
 | `OPENAI_API_KEY` | 空 | API key，必填 |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API 地址 |
 | `HARNESS_MODEL` | `gpt-4o` | 使用的模型名 |
+| `HARNESS_PROVIDER` | `auto` | Provider adapter：`auto` / `openai` / `deepseek` / `openai-compatible` |
+| `HARNESS_STREAM` | `auto` | CLI streaming：`auto` 表示仅 TTY 实时输出，`1` 强制开启，`0` 关闭 |
+| `HARNESS_WINDOWS_SHELL` | `auto` | Windows shell 后端：`auto` / `pwsh` / `powershell` / `cmd` |
 | `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式：`read-only` / `workspace-write` / `danger-full-access` |
 | `HARNESS_COMMIT_POLICY` | `checkpoint` | Git 自动保存策略。交互式模式下 `checkpoint` 表示每轮完成后把本轮新增的可提交变更提交成可回退的本地 checkpoint commit；`none` 关闭自动提交；`milestone` 主要用于旧的单任务/benchmark 流程 |
 | `MAX_AGENT_ITERATIONS` | `60` | 单次 agent loop 最大迭代数 |

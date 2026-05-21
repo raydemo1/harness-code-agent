@@ -1,10 +1,227 @@
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
+from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 class ProductRuntimeTests(unittest.TestCase):
+    def test_deepseek_reasoning_content_round_trips_on_tool_call_assistant_message(self):
+        from harness_code_agent.agent.loop import _assistant_message_from_response
+
+        msg = SimpleNamespace(
+            content=None,
+            reasoning_content="think carefully",
+            tool_calls=[
+                SimpleNamespace(
+                    id="call_1",
+                    function=SimpleNamespace(name="read_file", arguments='{"path":"README.md"}'),
+                ),
+            ],
+        )
+
+        with (
+            patch("harness_code_agent.agent.loop.config.BASE_URL", "https://api.deepseek.com"),
+            patch("harness_code_agent.agent.loop.config.MODEL", "deepseek-v4-flash"),
+        ):
+            assistant_msg = _assistant_message_from_response(msg)
+
+        self.assertEqual(assistant_msg["reasoning_content"], "think carefully")
+        self.assertEqual(assistant_msg["tool_calls"][0]["function"]["name"], "read_file")
+
+    def test_deepseek_reasoning_content_round_trips_from_model_extra(self):
+        from harness_code_agent.agent.loop import _assistant_message_from_response
+
+        msg = SimpleNamespace(
+            content=None,
+            model_extra={"reasoning_content": "provider extra thinking"},
+            tool_calls=[],
+        )
+
+        with (
+            patch("harness_code_agent.agent.loop.config.BASE_URL", "https://api.deepseek.com"),
+            patch("harness_code_agent.agent.loop.config.MODEL", "deepseek-v4-flash"),
+        ):
+            assistant_msg = _assistant_message_from_response(msg)
+
+        self.assertEqual(assistant_msg["reasoning_content"], "provider extra thinking")
+
+    def test_non_deepseek_assistant_message_omits_reasoning_content(self):
+        from harness_code_agent.agent.loop import _assistant_message_from_response
+
+        msg = SimpleNamespace(content="ok", reasoning_content="hidden", tool_calls=None)
+
+        with (
+            patch("harness_code_agent.agent.loop.config.BASE_URL", "https://api.openai.com/v1"),
+            patch("harness_code_agent.agent.loop.config.MODEL", "gpt-4o"),
+        ):
+            assistant_msg = _assistant_message_from_response(msg)
+
+        self.assertNotIn("reasoning_content", assistant_msg)
+
+    def test_provider_auto_detection_distinguishes_openai_deepseek_and_compatible(self):
+        from harness_code_agent.agent.providers import resolve_provider_name
+
+        self.assertEqual(
+            resolve_provider_name(provider="auto", base_url="https://api.openai.com/v1", model="gpt-4o"),
+            "openai",
+        )
+        self.assertEqual(
+            resolve_provider_name(provider="auto", base_url="https://api.deepseek.com", model="deepseek-chat"),
+            "deepseek",
+        )
+        self.assertEqual(
+            resolve_provider_name(provider="auto", base_url="https://example.invalid/v1", model="custom"),
+            "openai-compatible",
+        )
+
+    def test_provider_streaming_normalizes_content_reasoning_and_tool_calls(self):
+        from harness_code_agent.agent.providers import ProviderAdapter
+
+        def chunk(delta, finish_reason=None):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=delta,
+                        finish_reason=finish_reason,
+                    )
+                ]
+            )
+
+        deltas = []
+        chunks = [
+            chunk(SimpleNamespace(content="hel")),
+            chunk(SimpleNamespace(content="lo", reasoning_content="think ")),
+            chunk(
+                SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=0,
+                            id="call_1",
+                            type="function",
+                            function=SimpleNamespace(name="read_file", arguments='{"pa'),
+                        )
+                    ]
+                )
+            ),
+            chunk(
+                SimpleNamespace(
+                    reasoning_content="carefully",
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=0,
+                            function=SimpleNamespace(arguments='th":"README.md"}'),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+
+        result = ProviderAdapter("deepseek").assistant_message_from_stream(chunks, on_text_delta=deltas.append)
+
+        self.assertEqual(deltas, ["hel", "lo"])
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(result.assistant_message["content"], "hello")
+        self.assertEqual(result.assistant_message["reasoning_content"], "think carefully")
+        self.assertEqual(result.assistant_message["tool_calls"][0]["function"]["name"], "read_file")
+        self.assertEqual(result.assistant_message["tool_calls"][0]["function"]["arguments"], '{"path":"README.md"}')
+
+    def test_streaming_request_falls_back_to_non_stream_before_first_chunk(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("stream"):
+                    raise RuntimeError("stream unavailable")
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="fallback", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        fake_client = FakeClient()
+        with patch("harness_code_agent.agent.loop.get_client", return_value=fake_client):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=lambda _: None))
+            completion = conversation._request_assistant_message(
+                conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10)
+            )
+
+        self.assertEqual(completion[0]["content"], "fallback")
+        self.assertTrue(fake_client.chat.completions.calls[0]["stream"])
+        self.assertNotIn("stream", fake_client.chat.completions.calls[1])
+
+    def test_streaming_request_collects_text_deltas_without_non_stream_fallback(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+
+        def chunk(text, finish_reason=None):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=text),
+                        finish_reason=finish_reason,
+                    )
+                ]
+            )
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return [chunk("hel"), chunk("lo", finish_reason="stop")]
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        deltas = []
+        fake_client = FakeClient()
+        with patch("harness_code_agent.agent.loop.get_client", return_value=fake_client):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=deltas.append))
+            completion = conversation._request_assistant_message(
+                conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10)
+            )
+
+        self.assertEqual(completion[0]["content"], "hello")
+        self.assertEqual(completion[1], "stop")
+        self.assertEqual(deltas, ["hel", "lo"])
+        self.assertTrue(conversation.last_run_streamed_text)
+        self.assertEqual(len(fake_client.chat.completions.calls), 1)
+
+    def test_trace_writer_stores_traces_under_harness_directory_without_stderr_by_default(self):
+        from harness_code_agent.agent.loop import TraceWriter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stderr = StringIO()
+            with (
+                patch("harness_code_agent.agent.loop.config.WORKSPACE", tmp),
+                patch("harness_code_agent.agent.loop.config.TRACE_STDERR", False),
+            ):
+                with redirect_stderr(stderr):
+                    writer = TraceWriter("main_agent")
+                    writer.iteration(1, 42)
+
+            trace_path = Path(tmp) / ".harness" / "traces" / "trace_main_agent.jsonl"
+            self.assertTrue(trace_path.exists())
+            self.assertFalse((Path(tmp) / "_trace_main_agent.jsonl").exists())
+            self.assertEqual(stderr.getvalue(), "")
+
     def test_builtin_tool_registry_preserves_legacy_schema_and_dispatch_exports(self):
         from harness_code_agent.runtime import tools
 

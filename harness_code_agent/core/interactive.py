@@ -22,6 +22,7 @@ from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
+from ..workspace.shell_session import windows_shell_hint, windows_shell_path
 from .mentions import MentionResolutionError, format_turn_with_mentions, resolve_mentions
 
 
@@ -48,6 +49,7 @@ class TurnResult:
     text: str
     checkpoint: str
     notice: str = ""
+    streamed: bool = False
 
 
 @dataclass
@@ -64,9 +66,11 @@ class InteractiveSession:
         cwd: str | Path,
         profile_name: str = PRODUCT_DEFAULT_PROFILE,
         resume_session_id: str | None = None,
+        stream_callback=None,
     ):
         self.cwd = Path(cwd).resolve()
         config.WORKSPACE = str(self.cwd)
+        self.stream_callback = stream_callback
         self.profile = get_profile(profile_name)
         self.skill_registry = SkillRegistry()
         self.session_store = SessionStore(self.cwd / ".harness")
@@ -141,6 +145,7 @@ class InteractiveSession:
             middlewares=cfg.middlewares,
             time_budget=cfg.time_budget,
             tool_context=self.tool_context,
+            stream_callback=self.stream_callback,
         )
 
     def _sync_time_budget(self) -> None:
@@ -194,6 +199,7 @@ class InteractiveSession:
             },
         )
         text = self.conversation.submit(task)
+        streamed = bool(getattr(self.conversation, "last_run_streamed_text", False))
         self.event_bus.emit_event(
             AssistantMessageEvent(
                 text=text,
@@ -215,7 +221,7 @@ class InteractiveSession:
                 "checkpoint": checkpoint,
             },
         )
-        return TurnResult(text=text, checkpoint=checkpoint, notice=notice)
+        return TurnResult(text=text, checkpoint=checkpoint, notice=notice, streamed=streamed)
 
     def execute_pending_plan(self) -> TurnResult:
         if not self.pending_plan_markdown:
@@ -553,7 +559,9 @@ def _truncate_handoff_text(text: str, limit: int = 4000) -> str:
 
 
 def print_turn_result(result: TurnResult) -> None:
-    if result.text:
+    if result.streamed:
+        print()
+    elif result.text:
         print(result.text)
     if result.notice:
         print(result.notice)
@@ -756,6 +764,10 @@ def print_config_show(workspace: Path) -> None:
     print(f"model: {config.MODEL}")
     print(f"workspace: {workspace}")
     print(f"permission_mode: {os.environ.get('HARNESS_PERMISSION_MODE', 'workspace-write')}")
+    print(f"provider: {config.PROVIDER}")
+    print(f"stream: {config.STREAM}")
+    if os.name == "nt":
+        print(f"windows_shell: {config.WINDOWS_SHELL} ({windows_shell_hint()})")
     print(f"checkpoint_auto: interactive default")
     print(f"compress_threshold: {config.COMPRESS_THRESHOLD}")
     print(f"reset_threshold: {config.RESET_THRESHOLD}")
@@ -769,7 +781,8 @@ def run_doctor(workspace: Path) -> int:
     failures += _doctor_line("API base URL", bool(config.BASE_URL), config.BASE_URL or "missing OPENAI_BASE_URL")
     failures += _doctor_line("Workspace", workspace.exists() and workspace.is_dir(), str(workspace))
     failures += _doctor_line("Git", shutil_which("git") is not None, shutil_which("git") or "not installed")
-    failures += _doctor_line("Shell", shell_path() is not None, shell_path() or "no shell found")
+    shell = shell_path()
+    failures += _doctor_line("Shell", shell is not None, shell or "no shell found")
     return 0 if failures == 0 else 1
 
 
@@ -785,6 +798,8 @@ def shutil_which(name: str) -> str | None:
 
 
 def shell_path() -> str | None:
+    if os.name == "nt":
+        return windows_shell_path()
     return shutil_which("pwsh") or shutil_which("powershell") or os.environ.get("ComSpec")
 
 

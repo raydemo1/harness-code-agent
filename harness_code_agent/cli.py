@@ -32,6 +32,10 @@ SLASH_COMMANDS = [
 ]
 
 
+def _simple_prompt() -> str:
+    return input("hca> ")
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "run":
@@ -44,6 +48,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("task", nargs="*", help="Optional first task to submit after startup")
     parser.add_argument("--profile", default=PRODUCT_DEFAULT_PROFILE, help="Profile name to use before the session starts")
     parser.add_argument("--resume", help="Session id to resume as context")
+    parser.add_argument(
+        "--exit-after-task",
+        "--no-repl",
+        dest="exit_after_task",
+        action="store_true",
+        help="Submit the task and exit instead of entering the REPL",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--list-profiles", action="store_true", help="List profiles and exit")
     args = parser.parse_args(argv)
@@ -56,6 +67,17 @@ def main(argv: list[str] | None = None) -> int:
         print_profiles()
         return 0
 
+    first_task = " ".join(args.task).strip()
+    if args.exit_after_task and not first_task:
+        print("Error: --exit-after-task/--no-repl requires a task.")
+        return 2
+
+    try:
+        stream_callback = _build_stream_callback()
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 2
+
     if not config.API_KEY:
         print("Error: Set OPENAI_API_KEY in .env or environment.")
         return 1
@@ -65,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             cwd=Path.cwd(),
             profile_name=args.profile,
             resume_session_id=args.resume,
+            stream_callback=stream_callback,
         )
     except Exception as e:
         print(f"Error: {e}")
@@ -74,10 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"workspace: {session.cwd}")
     print("Type /help for commands, /exit to quit.")
 
-    first_task = " ".join(args.task).strip()
     try:
         if first_task:
             _submit_and_print(session, first_task)
+            if args.exit_after_task:
+                return 0
         repl(session)
     except KeyboardInterrupt:
         print("\nInterrupted.")
@@ -85,6 +109,26 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         session.close()
     return 0
+
+
+def _build_stream_callback():
+    value = (config.STREAM or "auto").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        enabled = True
+    elif value in {"0", "false", "no", "off"}:
+        enabled = False
+    elif value == "auto":
+        enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    else:
+        raise ValueError("HARNESS_STREAM must be auto, 1, or 0")
+    if not enabled:
+        return None
+
+    def stream_callback(delta: str) -> None:
+        sys.stdout.write(delta)
+        sys.stdout.flush()
+
+    return stream_callback
 
 
 def show_latest_session(cwd: Path) -> int:
@@ -131,9 +175,7 @@ def _build_prompt(session: InteractiveSession):
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import Completer, Completion
     except ImportError:
-        def simple_prompt() -> str:
-            return input("hca> ")
-        return simple_prompt
+        return _simple_prompt
 
     class HcaCompleter(Completer):
         def get_completions(self, document, complete_event):
@@ -157,7 +199,10 @@ def _build_prompt(session: InteractiveSession):
                 for path in _iter_file_completions(session.cwd, prefix):
                     yield Completion(path, start_position=-len(prefix))
 
-    prompt_session = PromptSession(completer=HcaCompleter())
+    try:
+        prompt_session = PromptSession(completer=HcaCompleter())
+    except Exception:
+        return _simple_prompt
 
     def prompt() -> str:
         return prompt_session.prompt("hca> ")

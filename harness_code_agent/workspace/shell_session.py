@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import threading
@@ -9,6 +11,8 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from .. import config
 
 
 @dataclass
@@ -26,7 +30,7 @@ class PersistentShellSession:
         self.cwd = str(Path(cwd).resolve())
         self._backend: _BaseShellBackend
         if os.name == "nt":
-            self._backend = _WindowsShellBackend(self.cwd)
+            self._backend = _make_windows_shell_backend(self.cwd)
         else:
             self._backend = _PosixShellBackend(self.cwd)
 
@@ -94,8 +98,11 @@ class _BaseShellBackend:
                     break
                 continue
             buffer.extend(chunk)
-            if token_bytes in buffer:
-                return buffer.decode("utf-8", errors="replace")
+            token_idx = buffer.find(token_bytes)
+            if token_idx != -1:
+                tail = buffer[token_idx + len(token_bytes):]
+                if b"\n" in tail or b"\r" in tail:
+                    return buffer.decode("utf-8", errors="replace")
 
         return None
 
@@ -177,11 +184,66 @@ class _BaseShellBackend:
         )
 
 
-class _WindowsShellBackend(_BaseShellBackend):
+def windows_shell_path() -> str | None:
+    requested = (config.WINDOWS_SHELL or "auto").strip().lower()
+    if requested == "auto":
+        return shutil.which("pwsh") or shutil.which("powershell") or shutil.which("cmd.exe") or os.environ.get("ComSpec")
+    if requested == "pwsh":
+        return shutil.which("pwsh")
+    if requested == "powershell":
+        return shutil.which("powershell")
+    if requested == "cmd":
+        return shutil.which("cmd.exe") or os.environ.get("ComSpec")
+    raise ValueError("HARNESS_WINDOWS_SHELL must be auto, pwsh, powershell, or cmd")
+
+
+def windows_shell_kind() -> str:
+    requested = (config.WINDOWS_SHELL or "auto").strip().lower()
+    if requested == "auto":
+        path = windows_shell_path()
+        if not path:
+            return "missing"
+        name = Path(path).name.lower()
+        if name.startswith("pwsh"):
+            return "pwsh"
+        if name.startswith("powershell"):
+            return "powershell"
+        return "cmd"
+    if requested in {"pwsh", "powershell", "cmd"}:
+        return requested
+    raise ValueError("HARNESS_WINDOWS_SHELL must be auto, pwsh, powershell, or cmd")
+
+
+def windows_shell_hint() -> str:
+    if os.name != "nt":
+        return "POSIX shell"
+    kind = windows_shell_kind()
+    if kind in {"pwsh", "powershell"}:
+        return "PowerShell"
+    if kind == "cmd":
+        return "cmd.exe"
+    return "no Windows shell"
+
+
+def _make_windows_shell_backend(cwd: str) -> "_BaseShellBackend":
+    path = windows_shell_path()
+    if not path:
+        raise RuntimeError("No Windows shell found")
+    kind = windows_shell_kind()
+    if kind in {"pwsh", "powershell"}:
+        return _PowerShellBackend(cwd, executable=path)
+    return _CmdShellBackend(cwd, executable=path)
+
+
+class _CmdShellBackend(_BaseShellBackend):
+    def __init__(self, cwd: str, *, executable: str):
+        self.executable = executable
+        super().__init__(cwd)
+
     def _start(self) -> None:
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         self._process = subprocess.Popen(
-            ["cmd.exe", "/Q", "/V:ON", "/D", "/K", "prompt="],
+            [self.executable, "/Q", "/V:ON", "/D", "/K", "prompt="],
             cwd=self.cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -264,6 +326,109 @@ class _WindowsShellBackend(_BaseShellBackend):
             return "\n".join(lines).strip()
 
         return strip_prompts(stdout), strip_prompts(stderr)
+
+
+class _PowerShellBackend(_BaseShellBackend):
+    def __init__(self, cwd: str, *, executable: str):
+        self.executable = executable
+        super().__init__(cwd)
+
+    def _start(self) -> None:
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        self._process = subprocess.Popen(
+            [self.executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _powershell_host_command()],
+            cwd=self.cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+        )
+        if self._process.stdin is None or self._process.stdout is None:
+            raise RuntimeError("Failed to create persistent Windows shell")
+
+    def _reader_loop(self) -> None:
+        assert self._process.stdout is not None
+        while not self._closed:
+            chunk = self._process.stdout.read(1)
+            if not chunk:
+                return
+            self._queue.put(chunk)
+
+    def _send(self, script: str) -> None:
+        assert self._process.stdin is not None
+        self._process.stdin.write(script.encode("utf-8"))
+        self._process.stdin.flush()
+
+    def _interrupt_impl(self) -> None:
+        if self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+        if self._process.stdout is not None:
+            self._process.stdout.close()
+        self._start()
+        self._start_reader()
+
+    def _cleanup_impl(self) -> None:
+        if self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+        if self._process.stdout is not None:
+            self._process.stdout.close()
+
+    def _build_sync_command(self, marker: str) -> str:
+        return f"Write-Output '{marker}'\n"
+
+    def _build_script(self, command: str, marker: str) -> str:
+        stdout_marker = f"__CODEX_STDOUT_{marker}__"
+        stderr_marker = f"__CODEX_STDERR_{marker}__"
+        exit_marker = f"__CODEX_EXIT_{marker}__"
+        encoded_command = base64.b64encode(command.encode("utf-8")).decode("ascii")
+        return (
+            f"$__hca_out = Join-Path ([System.IO.Path]::GetTempPath()) '{marker}.out'; "
+            f"$__hca_err = Join-Path ([System.IO.Path]::GetTempPath()) '{marker}.err'; "
+            f"$__hca_command = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded_command}')); "
+            "$global:LASTEXITCODE = $null; "
+            "try { "
+            "$__hca_script = [scriptblock]::Create($__hca_command); "
+            "$__hca_error_count = $Error.Count; "
+            "& $__hca_script 1> $__hca_out 2> $__hca_err; "
+            "$__hca_native_status = $global:LASTEXITCODE; "
+            "if ($__hca_native_status -is [int]) { $__hca_status = $__hca_native_status } "
+            "elseif ($Error.Count -eq $__hca_error_count) { $__hca_status = 0 } "
+            "else { $__hca_status = 1 } "
+            "} catch { $_ | Out-String | Set-Content -LiteralPath $__hca_err -Encoding utf8NoBOM; $__hca_status = 1 }; "
+            f"Write-Output '{stdout_marker}'; "
+            "if (Test-Path -LiteralPath $__hca_out) { Get-Content -LiteralPath $__hca_out -Raw -Encoding utf8 -ErrorAction SilentlyContinue }; "
+            f"Write-Output '{stderr_marker}'; "
+            "if (Test-Path -LiteralPath $__hca_err) { Get-Content -LiteralPath $__hca_err -Raw -Encoding utf8 -ErrorAction SilentlyContinue }; "
+            f"Write-Output ('{exit_marker}:' + $__hca_status); "
+            "Remove-Item -LiteralPath $__hca_out, $__hca_err -Force -ErrorAction SilentlyContinue\n"
+        )
+
+
+def _powershell_host_command() -> str:
+    return (
+        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
+        "$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
+        "chcp 65001 > $null\n"
+        "$ProgressPreference = 'SilentlyContinue'\n"
+        "function global:prompt { '' }\n"
+        "while (($__hca_line = [Console]::In.ReadLine()) -ne $null) {\n"
+        "  try { Invoke-Expression $__hca_line }\n"
+        "  catch { Write-Error $_ }\n"
+        "}\n"
+    )
 
 
 class _PosixShellBackend(_BaseShellBackend):

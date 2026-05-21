@@ -996,7 +996,18 @@ CORE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Execute a shell command in the workspace directory. Use for installing deps, running builds, starting servers, running tests, etc. For long-running commands (compilation, training), increase the timeout parameter. For background services (VMs, servers), use '... &' and a separate command to check readiness. Stderr is preserved separately in output for easier debugging.",
+            "description": (
+                "Execute a shell command in the workspace directory. "
+                + (
+                    "On Windows this runs PowerShell by default; prefer PowerShell syntax, or cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd. "
+                    if os.name == "nt"
+                    else "On POSIX this runs a shell suitable for standard Bash-style commands. "
+                )
+                + "Use for installing deps, running builds, starting servers, running tests, etc. "
+                "For long-running commands (compilation, training), increase the timeout parameter. "
+                "For background services (VMs, servers), use an OS-appropriate background command and a separate command to check readiness. "
+                "Stderr is preserved separately in output for easier debugging."
+            ),
             "parameters": {
                 "type": "object",
                 "required": ["command"],
@@ -1219,7 +1230,7 @@ def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
             return arguments, (
                 f"[auto-fix] '{first_word}' is an interactive command that will hang. "
                 f"Use non-interactive alternatives: "
-                f"for editing use write_file, for viewing use cat/head/tail."
+                f"for editing use write_file, for viewing use {'type/more' if os.name == 'nt' else 'cat/head/tail'}."
             )
 
     elif name == "list_files":

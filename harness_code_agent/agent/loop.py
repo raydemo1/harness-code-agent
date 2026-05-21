@@ -9,10 +9,10 @@ import time
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from openai import OpenAI
 
 from .. import config
 from . import context
+from .providers import ProviderAdapter, current_adapter, get_client
 from ..runtime import tools
 from ..runtime.tool_context import ToolContext
 from ..workspace.shell_session import PersistentShellSession
@@ -25,26 +25,25 @@ log = logging.getLogger("harness")
 # ---------------------------------------------------------------------------
 
 class TraceWriter:
-    """Appends structured events to a JSONL trace file in the workspace.
+    """Appends structured events to a JSONL trace file in the harness directory.
 
     Each line is a JSON object with: timestamp, agent, event_type, and data.
-    Trace file: {WORKSPACE}/_trace_{agent_name}.jsonl
+    Trace file: {WORKSPACE}/.harness/traces/trace_{agent_name}.jsonl
     """
 
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
         self._start_time = time.time()
-        # Write trace to workspace first; fall back to harness-agent dir
-        trace_dir = Path(config.WORKSPACE)
+        trace_dir = Path(config.WORKSPACE) / ".harness" / "traces"
         try:
             trace_dir.mkdir(parents=True, exist_ok=True)
-            test_file = trace_dir / f"_trace_test_{agent_name}"
+            test_file = trace_dir / f"trace_test_{agent_name}"
             test_file.write_text("test")
             test_file.unlink()
-            self._path = trace_dir / f"_trace_{agent_name}.jsonl"
+            self._path = trace_dir / f"trace_{agent_name}.jsonl"
         except Exception:
             # Workspace not writable, use harness-agent dir
-            self._path = Path(__file__).parent / f"_trace_{agent_name}.jsonl"
+            self._path = Path(__file__).parent / f"trace_{agent_name}.jsonl"
 
     def _write(self, event_type: str, data: dict):
         try:
@@ -58,9 +57,9 @@ class TraceWriter:
             # Write to file
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
-            # Also print to stderr so Harbor logs capture it
-            import sys
-            print(f"[TRACE] {line}", file=sys.stderr)
+            if config.TRACE_STDERR:
+                import sys
+                print(f"[TRACE] {line}", file=sys.stderr)
         except Exception:
             pass  # never let tracing break the agent
 
@@ -96,25 +95,6 @@ class TraceWriter:
 
     def finish(self, reason: str, iterations: int):
         self._write("finish", {"reason": reason, "iterations": iterations})
-
-# ---------------------------------------------------------------------------
-# LLM client (singleton)
-# ---------------------------------------------------------------------------
-
-_client: OpenAI | None = None
-
-
-def get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(
-            api_key=config.API_KEY,
-            base_url=config.BASE_URL,
-            timeout=300.0,        # 5 min per request
-            max_retries=2,
-        )
-    return _client
-
 
 def llm_call_simple(messages: list[dict]) -> str:
     """Simple LLM call without tools — used for summarization.
@@ -203,7 +183,8 @@ class Agent:
                  middlewares: list | None = None,
                  time_budget: float | None = None,
                  tool_schemas: list[dict] | None = None,
-                 tool_context: ToolContext | None = None):
+                  tool_context: ToolContext | None = None,
+                  stream_callback=None):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
@@ -212,6 +193,7 @@ class Agent:
         self.time_budget = time_budget
         self.tool_schemas = tool_schemas
         self.tool_context = tool_context
+        self.stream_callback = stream_callback
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
         return AgentRuntimeState(task_board=TaskBoard(goal=task))
@@ -222,7 +204,7 @@ class Agent:
         or we hit the iteration limit.
 
         Returns the final assistant text response.
-        Writes a JSONL trace file to {WORKSPACE}/_trace_{name}.jsonl
+        Writes a JSONL trace file to {WORKSPACE}/.harness/traces/trace_{name}.jsonl
         """
         conversation = self.start_conversation(task)
         try:
@@ -243,8 +225,10 @@ class AgentConversation:
         self.runtime_state = agent._create_runtime_state(initial_task or "")
         self.messages: list[dict] = [{"role": "system", "content": agent.system_prompt}]
         self.client = get_client()
+        self.provider: ProviderAdapter = current_adapter()
         self.consecutive_errors = 0
         self.last_text = ""
+        self.last_run_streamed_text = False
         self._closed = False
         self._iteration_offset = 0
         if initial_task is not None:
@@ -267,8 +251,41 @@ class AgentConversation:
         self.add_user_turn(task)
         return self.run_until_idle()
 
+    def _request_assistant_message(self, kwargs: dict) -> tuple[dict, str | None] | None:
+        if self.agent.stream_callback is not None:
+            stream_kwargs = dict(kwargs)
+            stream_kwargs["stream"] = True
+            saw_chunk = False
+
+            def on_chunk() -> None:
+                nonlocal saw_chunk
+                saw_chunk = True
+
+            def on_text_delta(delta: str) -> None:
+                self.last_run_streamed_text = True
+                self.agent.stream_callback(delta)
+
+            try:
+                stream = self.client.chat.completions.create(**stream_kwargs)
+                result = self.provider.assistant_message_from_stream(
+                    stream,
+                    on_text_delta=on_text_delta,
+                    on_chunk=on_chunk,
+                )
+                return result.assistant_message, result.finish_reason
+            except Exception:
+                if saw_chunk:
+                    raise
+
+        response = self.client.chat.completions.create(**kwargs)
+        if not response.choices:
+            return None
+        choice = response.choices[0]
+        return self.provider.assistant_message_from_response(choice.message), choice.finish_reason
+
     def run_until_idle(self) -> str:
         agent = self.agent
+        self.last_run_streamed_text = False
 
         for local_iteration in range(1, config.MAX_AGENT_ITERATIONS + 1):
             iteration = self._iteration_offset + local_iteration
@@ -303,20 +320,26 @@ class AgentConversation:
                 self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
 
             # --- LLM call ---
-            kwargs = dict(
+            kwargs = self.provider.chat_kwargs(
                 model=config.MODEL,
                 messages=self.messages,
                 max_tokens=32768,
             )
             if agent.use_tools:
                 if agent.tool_schemas is not None:
-                    kwargs["tools"] = agent.tool_schemas
+                    tool_schemas = agent.tool_schemas
                 else:
-                    kwargs["tools"] = tools.TOOL_SCHEMAS + agent.extra_tool_schemas
-                kwargs["tool_choice"] = "auto"
+                    tool_schemas = tools.TOOL_SCHEMAS + agent.extra_tool_schemas
+                kwargs = self.provider.chat_kwargs(
+                    model=config.MODEL,
+                    messages=self.messages,
+                    max_tokens=32768,
+                    tools=tool_schemas,
+                    tool_choice="auto",
+                )
 
             try:
-                response = self.client.chat.completions.create(**kwargs)
+                completion = self._request_assistant_message(kwargs)
             except Exception as e:
                 err_str = str(e)
                 self.trace.error("api_error", err_str)
@@ -341,7 +364,7 @@ class AgentConversation:
             self.consecutive_errors = 0
 
             # --- Guard against empty choices ---
-            if not response.choices:
+            if completion is None:
                 log.warning(f"[{agent.name}] API returned empty choices. Retrying...")
                 self.trace.error("empty_choices", "API returned no choices")
                 self.consecutive_errors += 1
@@ -352,35 +375,23 @@ class AgentConversation:
                 time.sleep(2)
                 continue
 
-            choice = response.choices[0]
-            msg = choice.message
+            assistant_msg, finish_reason = completion
+            content = assistant_msg.get("content")
+            tool_calls = assistant_msg.get("tool_calls") or []
 
             # --- Append assistant message to history ---
-            assistant_msg = {"role": "assistant", "content": msg.content}
-            if msg.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ]
             self.messages.append(assistant_msg)
 
             # --- Trace the LLM response ---
-            self.trace.llm_response(msg.content, assistant_msg.get("tool_calls"), choice.finish_reason)
+            self.trace.llm_response(content, tool_calls, finish_reason)
 
             # --- If model produced text, capture it ---
-            if msg.content:
-                self.last_text = msg.content
-                log.info(f"[{agent.name}] assistant: {msg.content[:200]}...")
+            if content:
+                self.last_text = content
+                log.info(f"[{agent.name}] assistant: {content[:200]}...")
 
             # --- If no tool calls, check pre-exit middlewares ---
-            if not msg.tool_calls:
+            if not tool_calls:
                 forced_continue = False
                 for mw in agent.middlewares:
                     inject = mw.pre_exit(
@@ -400,17 +411,18 @@ class AgentConversation:
                 break
 
             # --- Execute tool calls ---
-            for tc in msg.tool_calls:
-                fn_name = tc.function.name
+            for tc in tool_calls:
+                fn_name = tc["function"]["name"]
+                fn_arguments = tc["function"].get("arguments") or "{}"
                 try:
-                    fn_args = json.loads(tc.function.arguments)
+                    fn_args = json.loads(fn_arguments)
                 except json.JSONDecodeError:
-                    log.warning(f"[{agent.name}] Bad JSON in tool call {fn_name}: {tc.function.arguments[:200]}")
-                    self.trace.error("bad_json", f"{fn_name}: {tc.function.arguments[:200]}")
+                    log.warning(f"[{agent.name}] Bad JSON in tool call {fn_name}: {fn_arguments[:200]}")
+                    self.trace.error("bad_json", f"{fn_name}: {fn_arguments[:200]}")
                     self.messages.append({
                         "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": f"[error] Invalid JSON arguments: {tc.function.arguments[:200]}",
+                        "tool_call_id": tc["id"],
+                        "content": f"[error] Invalid JSON arguments: {fn_arguments[:200]}",
                     })
                     continue
 
@@ -426,7 +438,7 @@ class AgentConversation:
                     if blocked:
                         self.messages.append({
                             "role": "tool",
-                            "tool_call_id": tc.id,
+                            "tool_call_id": tc["id"],
                             "content": blocked,
                         })
                         self.trace.middleware_inject(type(mw).__name__, "before_tool", blocked)
@@ -450,7 +462,7 @@ class AgentConversation:
 
                 self.messages.append({
                     "role": "tool",
-                    "tool_call_id": tc.id,
+                    "tool_call_id": tc["id"],
                     "content": result,
                 })
 
@@ -470,18 +482,18 @@ class AgentConversation:
                         break
 
             # --- Check finish reason ---
-            if choice.finish_reason == "stop":
+            if finish_reason == "stop":
                 log.info(f"[{agent.name}] Finished (stop).")
                 self.trace.finish("stop", iteration)
                 break
 
-            if choice.finish_reason == "length":
+            if finish_reason == "length":
                 log.warning(f"[{agent.name}] Output truncated (max_tokens hit).")
                 self.trace.error("length_truncated", "max_tokens hit")
                 # If tool calls were present, they were already executed above.
                 # Only tell the model they weren't executed if none were parsed
                 # (i.e. the truncation cut off the tool call JSON itself).
-                if msg.tool_calls:
+                if tool_calls:
                     self.messages.append({
                         "role": "user",
                         "content": (
@@ -521,3 +533,11 @@ class AgentConversation:
 
 def _truncate(s: str, n: int) -> str:
     return s[:n] + "..." if len(s) > n else s
+
+
+def _assistant_message_from_response(msg) -> dict:
+    return current_adapter().assistant_message_from_response(msg)
+
+
+def _requires_reasoning_content_roundtrip() -> bool:
+    return current_adapter().requires_reasoning_content_roundtrip
