@@ -241,7 +241,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ```bash
 python -m unittest tests.test_profiles
-python -m unittest tests.test_main_agent_flow
+python -m unittest tests.test_product_runtime
 ```
 
 ## Terminal-Bench 运行

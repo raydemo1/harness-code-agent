@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import config
-from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent
+from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent, classify_tool_failure
 from .approvals import ApprovalRequest
 from .tool_context import ToolContext
 from .tool_result import ToolResult, unstructured_tool_result_from_text
@@ -1389,11 +1389,6 @@ def execute_tool(
     arguments = dict(arguments or {})
 
     if tool_context is not None:
-        tool_context.event_bus.emit(
-            "before_tool",
-            agent=agent_name,
-            payload={"tool": name, "args": _redact_tool_args(arguments)},
-        )
         tool_context.event_bus.emit_event(
             ToolCallEvent(
                 tool=name,
@@ -1447,18 +1442,6 @@ def execute_tool(
 
     if tool_context is not None:
         decision = tool_context.permission_policy.decide_tool_call(name, arguments)
-        tool_context.event_bus.emit(
-            "permission_decided",
-            agent=agent_name,
-            payload={
-                "tool": name,
-                "allowed": decision.allowed,
-                "risk": decision.risk,
-                "action": decision.action,
-                "requires_approval": decision.requires_approval,
-                "reason": decision.reason,
-            },
-        )
         if decision.requires_approval:
             approval_request = ApprovalRequest(
                 tool_name=name,
@@ -1585,15 +1568,6 @@ def _finalize_tool_result(
     if tool_context is not None:
         _emit_structured_tool_result(tool_result, tool_context=tool_context, agent_name=agent_name)
         _emit_file_change_events(tool_result, tool_context=tool_context, agent_name=agent_name)
-        payload = {
-            "tool": tool_result.tool,
-            "status": tool_result.status,
-            "ok": tool_result.ok,
-            "result": result_text[:500],
-        }
-        if "requires_approval" in tool_result.metadata:
-            payload["requires_approval"] = tool_result.metadata["requires_approval"]
-        tool_context.event_bus.emit("after_tool", agent=agent_name, payload=payload)
     return result_text
 
 
@@ -1603,28 +1577,54 @@ def _coerce_tool_result(name: str, result) -> ToolResult:
     return unstructured_tool_result_from_text(tool=name, text=str(result))
 
 
+TOOL_EVENT_OUTPUT_LIMIT = 2_000
+
+
+def _event_safe_tool_output(tool_result: ToolResult) -> tuple[str, dict]:
+    metadata = dict(tool_result.metadata)
+    output = tool_result.output or ""
+    metadata["output_length"] = len(output)
+    if tool_result.tool == "read_file" and output:
+        metadata["output_redacted"] = True
+        return f"[redacted read_file output: {len(output)} chars]", metadata
+    if len(output) > TOOL_EVENT_OUTPUT_LIMIT:
+        metadata["output_truncated"] = True
+        metadata["output_preview_chars"] = TOOL_EVENT_OUTPUT_LIMIT
+        return (
+            output[:TOOL_EVENT_OUTPUT_LIMIT]
+            + f"\n\n[TRUNCATED in session event: {len(output) - TOOL_EVENT_OUTPUT_LIMIT} chars omitted]",
+            metadata,
+        )
+    return output, metadata
+
+
 def _emit_structured_tool_result(
     tool_result: ToolResult,
     *,
     tool_context: ToolContext,
     agent_name: str | None,
 ) -> None:
+    event_output, event_metadata = _event_safe_tool_output(tool_result)
     tool_context.event_bus.emit_event(
         ToolResultEvent(
             tool=tool_result.tool,
             status=tool_result.status,
-            output=tool_result.output,
+            output=event_output,
             error=tool_result.error,
             return_code=tool_result.return_code,
-            metadata=tool_result.metadata,
+            metadata=event_metadata,
             agent=agent_name,
         ).to_event()
     )
     if tool_result.status == "failed":
+        source = tool_result.metadata.get("status_source")
+        message = tool_result.error or event_output
         tool_context.event_bus.emit_event(
             FailureEvent(
-                category="tool_error",
-                message=tool_result.error or tool_result.output,
+                category=classify_tool_failure(tool_result),
+                message=message,
+                tool=tool_result.tool,
+                source=str(source) if source else None,
                 agent=agent_name,
             ).to_event()
         )
@@ -1651,7 +1651,6 @@ def _emit_file_change_events(
         }
         if change.get("operation"):
             payload["operation"] = change["operation"]
-        tool_context.event_bus.emit("file_changed", agent=agent_name, payload=payload)
         tool_context.event_bus.emit_event(
             FileChangeEvent(
                 path=str(path),

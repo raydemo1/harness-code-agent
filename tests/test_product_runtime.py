@@ -27,6 +27,7 @@ class ProductRuntimeTests(unittest.TestCase):
             AssistantMessageEvent,
             FailureEvent,
             FileChangeEvent,
+            FinalReportEvent,
             SessionFinishedEvent,
             TaskOutcomeEvent,
             ToolCallEvent,
@@ -41,6 +42,7 @@ class ProductRuntimeTests(unittest.TestCase):
             ToolResultEvent(tool="read_file", status="success", output="ok").to_event().type,
             FileChangeEvent(path="app.py").to_event().type,
             FailureEvent(category="tool_error", message="boom").to_event().type,
+            FinalReportEvent(status="success", reason="completed", summary="done").to_event().type,
             SessionFinishedEvent(reason="user_exit", status="closed").to_event().type,
             TaskOutcomeEvent(status="success", evidence=["tests_passed"], summary="done").to_event().type,
         }
@@ -52,9 +54,41 @@ class ProductRuntimeTests(unittest.TestCase):
             "tool_result",
             "file_change",
             "failure",
+            "final_report",
             "session_finished",
             "task_outcome",
         })
+
+    def test_failure_classification_uses_stable_sources_before_text(self):
+        from harness_code_agent.runtime.tool_result import ToolResult
+        from harness_code_agent.sessions.events import classify_tool_failure
+
+        cases = [
+            (
+                ToolResult(tool="read_file", status="failed", error="missing", metadata={"status_source": "native"}),
+                "tool_error",
+            ),
+            (
+                ToolResult(tool="write_file", status="failed", error="empty path", metadata={"status_source": "validation"}),
+                "validation_error",
+            ),
+            (
+                ToolResult(tool="run_bash", status="failed", error="Command exited with code 1", metadata={"status_source": "shell"}),
+                "runtime_error",
+            ),
+            (
+                ToolResult(tool="write_file", status="failed", error="user said no", metadata={"status_source": "approval"}),
+                "user_cancelled",
+            ),
+            (
+                ToolResult(tool="custom", status="failed", error="", metadata={}),
+                "unknown",
+            ),
+        ]
+
+        for result, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(classify_tool_failure(result), expected)
 
     def test_tool_result_serializes_and_tool_execution_records_structured_events(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
@@ -101,13 +135,15 @@ class ProductRuntimeTests(unittest.TestCase):
             ]
 
             self.assertEqual(output, "hello")
-            self.assertIn("tool_call", [event["type"] for event in events])
-            self.assertIn("tool_result", [event["type"] for event in events])
+            event_types = [event["type"] for event in events]
+            self.assertEqual(event_types, ["tool_call", "tool_result"])
             tool_result = next(event for event in events if event["type"] == "tool_result")
             self.assertEqual(tool_result["payload"]["tool"], "read_file")
             self.assertEqual(tool_result["payload"]["status"], "success")
             self.assertTrue(tool_result["payload"]["ok"])
-            self.assertEqual(tool_result["payload"]["output"], "hello")
+            self.assertEqual(tool_result["payload"]["output"], "[redacted read_file output: 5 chars]")
+            self.assertTrue(tool_result["payload"]["metadata"]["output_redacted"])
+            self.assertEqual(tool_result["payload"]["metadata"]["output_length"], 5)
 
     def test_tool_result_does_not_infer_status_from_raw_tool_text(self):
         from unittest.mock import patch
@@ -180,14 +216,15 @@ class ProductRuntimeTests(unittest.TestCase):
             ]
             event_types = [event["type"] for event in events]
             tool_result = next(event for event in events if event["type"] == "tool_result")
-            after_tool = next(event for event in events if event["type"] == "after_tool")
 
             self.assertEqual(output, "[error] Unknown tool: missing_tool")
             self.assertIn("tool_call", event_types)
             self.assertIn("failure", event_types)
             self.assertEqual(tool_result["payload"]["status"], "failed")
             self.assertFalse(tool_result["payload"]["ok"])
-            self.assertEqual(after_tool["payload"]["status"], "failed")
+            failure = next(event for event in events if event["type"] == "failure")
+            self.assertEqual(failure["payload"]["category"], "tool_error")
+            self.assertEqual(failure["payload"]["tool"], "missing_tool")
 
     def test_tool_validation_failures_return_typed_failed_results(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
@@ -238,7 +275,12 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertIn("[auto-fix] Empty file path", empty_write)
             self.assertIn("[error] Empty file path", empty_patch)
             self.assertEqual(len(failed_results), 3)
-            self.assertEqual(len([event for event in events if event["type"] == "failure"]), 3)
+            failures = [event for event in events if event["type"] == "failure"]
+            self.assertEqual(len(failures), 3)
+            self.assertEqual(
+                [event["payload"]["category"] for event in failures],
+                ["tool_error", "validation_error", "validation_error"],
+            )
 
     def test_session_store_creates_metadata_and_jsonl_events(self):
         from harness_code_agent.sessions.store import SessionStore
@@ -390,8 +432,8 @@ class ProductRuntimeTests(unittest.TestCase):
         events = [
             {"sequence": 1, "type": "session_started", "agent": "main_agent", "payload": {}},
             {"sequence": 2, "type": "turn_started", "agent": "main_agent", "payload": {"turn": 1}},
-            {"sequence": 3, "type": "after_tool", "agent": "main_agent", "payload": {"tool": "write_file", "ok": True}},
-            {"sequence": 4, "type": "file_changed", "agent": "main_agent", "payload": {"path": "app.py"}},
+            {"sequence": 3, "type": "tool_result", "agent": "main_agent", "payload": {"tool": "write_file", "status": "success", "ok": True}},
+            {"sequence": 4, "type": "file_change", "agent": "main_agent", "payload": {"path": "app.py"}},
             {"sequence": 5, "type": "approval_requested", "agent": "main_agent", "payload": {"tool": "run_bash"}},
             {"sequence": 6, "type": "approval_decided", "agent": "main_agent", "payload": {"tool": "run_bash", "approved": False}},
             {
@@ -420,12 +462,49 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIn("task_outcome: success - done", summary)
         self.assertIn("recent_events:", summary)
 
+    def test_session_summary_uses_final_report_for_phase_two_status_and_categories(self):
+        from harness_code_agent.sessions.summary import format_session_summary
+
+        metadata = {"id": "session-final", "profile": "coding-agent", "status": "running"}
+        events = [
+            {"sequence": 1, "type": "user_input", "agent": "main_agent", "payload": {"text": "fix"}},
+            {"sequence": 2, "type": "tool_result", "agent": "main_agent", "payload": {"tool": "read_file", "status": "failed"}},
+            {"sequence": 3, "type": "failure", "agent": "main_agent", "payload": {"category": "tool_error", "message": "missing"}},
+            {
+                "sequence": 4,
+                "type": "final_report",
+                "agent": "main_agent",
+                "payload": {
+                    "status": "failed",
+                    "reason": "verification_failed",
+                    "summary": "tests still fail",
+                    "statistics": {
+                        "events": 3,
+                        "user_inputs": 1,
+                        "assistant_messages": 0,
+                        "tool_calls": 1,
+                        "failures": 1,
+                        "file_changes": 0,
+                    },
+                    "failure_categories": {"tool_error": 1},
+                    "tool_counts": {"read_file": 1},
+                    "changed_files": [],
+                },
+            },
+        ]
+
+        summary = format_session_summary(metadata, events)
+
+        self.assertIn("status: failed", summary)
+        self.assertIn("final_report: failed - tests still fail", summary)
+        self.assertIn("failure_categories: tool_error=1", summary)
+
     def test_session_summary_handles_empty_or_sparse_events(self):
         from harness_code_agent.sessions.summary import format_session_summary
 
         summary = format_session_summary(
             {"id": "empty-session", "profile": "plan", "status": "running"},
-            [{"type": "after_tool", "payload": None}],
+            [{"type": "tool_result", "payload": None}],
         )
 
         self.assertIn("id: empty-session", summary)
@@ -434,6 +513,46 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIn("tools: 1 call(s): unknown=1", summary)
         self.assertIn("changed_files: unknown", summary)
         self.assertIn("task_outcome: unknown", summary)
+
+    def test_final_report_payload_is_statistics_ready_for_replay_and_evaluation(self):
+        from harness_code_agent.sessions.events import FinalReportEvent
+        from harness_code_agent.sessions.report import build_final_report
+
+        metadata = {"id": "session-a", "created_at": "2026-05-21T00:00:00+00:00"}
+        events = [
+            {"sequence": 1, "type": "user_input", "agent": "main_agent", "payload": {"text": "fix"}},
+            {"sequence": 2, "type": "assistant_message", "agent": "main_agent", "payload": {"text": "I changed app.py"}},
+            {"sequence": 3, "type": "tool_result", "agent": "main_agent", "payload": {"tool": "write_file", "status": "success"}},
+            {"sequence": 4, "type": "file_change", "agent": "main_agent", "payload": {"path": "app.py"}},
+            {"sequence": 5, "type": "failure", "agent": "main_agent", "payload": {"category": "validation_error", "message": "empty"}},
+        ]
+
+        report = build_final_report(
+            metadata,
+            events,
+            status="closed",
+            reason="user_exit",
+            summary="I changed app.py",
+        )
+        event = FinalReportEvent(**report).to_event()
+
+        self.assertEqual(event.type, "final_report")
+        self.assertEqual(event.payload["session_id"], "session-a")
+        self.assertEqual(event.payload["status"], "closed")
+        self.assertEqual(event.payload["reason"], "user_exit")
+        self.assertEqual(event.payload["summary"], "I changed app.py")
+        self.assertEqual(event.payload["statistics"]["user_inputs"], 1)
+        self.assertEqual(event.payload["statistics"]["assistant_messages"], 1)
+        self.assertEqual(event.payload["statistics"]["tool_calls"], 1)
+        self.assertEqual(event.payload["statistics"]["failures"], 1)
+        self.assertEqual(event.payload["failure_categories"], {"validation_error": 1})
+        self.assertEqual(event.payload["tool_counts"], {"write_file": 1})
+        self.assertEqual(event.payload["changed_files"], ["app.py"])
+
+    def test_readme_does_not_reference_removed_main_agent_flow_test(self):
+        readme = Path(__file__).resolve().parents[1] / "README.md"
+
+        self.assertNotIn("tests.test_main_agent_flow", readme.read_text(encoding="utf-8"))
 
     def test_workspace_service_resolves_paths_and_snapshots_before_write(self):
         from harness_code_agent.workspace.service import WorkspaceService
@@ -573,9 +692,12 @@ class ProductRuntimeTests(unittest.TestCase):
             event_types = [event["type"] for event in events]
             self.assertIn("tool_call", event_types)
             self.assertIn("tool_result", event_types)
-            self.assertIn("file_changed", event_types)
             self.assertIn("file_change", event_types)
             self.assertIn("failure", event_types)
+            self.assertNotIn("before_tool", event_types)
+            self.assertNotIn("permission_decided", event_types)
+            self.assertNotIn("after_tool", event_types)
+            self.assertNotIn("file_changed", event_types)
             denied_result = [
                 event for event in events
                 if event["type"] == "tool_result" and event["payload"].get("tool") == "run_bash"
@@ -626,7 +748,8 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertIn("Patched note.txt", result)
             self.assertIn("[error] ValueError", ambiguous)
             self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "new\n")
-            self.assertTrue(any(event["type"] == "file_changed" for event in events))
+            self.assertTrue(any(event["type"] == "file_change" for event in events))
+            self.assertFalse(any(event["type"] == "file_changed" for event in events))
 
     def test_execute_tool_runs_approved_tool_call(self):
         from harness_code_agent.runtime.approvals import StaticApprovalProvider

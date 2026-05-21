@@ -7,6 +7,15 @@ from pathlib import Path
 from typing import Any
 
 
+FAILURE_CATEGORIES = {
+    "tool_error",
+    "runtime_error",
+    "user_cancelled",
+    "validation_error",
+    "unknown",
+}
+
+
 @dataclass
 class SessionEvent:
     sequence: int
@@ -128,10 +137,54 @@ class FileChangeEvent:
 class FailureEvent:
     category: str
     message: str
+    tool: str | None = None
+    source: str | None = None
+    metadata: dict[str, Any] | None = None
     agent: str | None = "main_agent"
 
     def to_event(self) -> StructuredEvent:
-        return StructuredEvent("failure", {"category": self.category, "message": self.message}, self.agent)
+        category = self.category if self.category in FAILURE_CATEGORIES else "unknown"
+        payload: dict[str, Any] = {"category": category, "message": self.message}
+        if self.tool:
+            payload["tool"] = self.tool
+        if self.source:
+            payload["source"] = self.source
+        if self.metadata:
+            payload["metadata"] = self.metadata
+        return StructuredEvent("failure", payload, self.agent)
+
+
+@dataclass(frozen=True)
+class FinalReportEvent:
+    status: str
+    reason: str
+    summary: str
+    session_id: str | None = None
+    statistics: dict[str, Any] | None = None
+    failure_categories: dict[str, int] | None = None
+    tool_counts: dict[str, int] | None = None
+    changed_files: list[str] | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        payload: dict[str, Any] = {
+            "status": self.status,
+            "reason": self.reason,
+            "summary": self.summary,
+            "statistics": dict(self.statistics or {}),
+            "failure_categories": dict(self.failure_categories or {}),
+            "tool_counts": dict(self.tool_counts or {}),
+            "changed_files": list(self.changed_files or []),
+        }
+        if self.session_id:
+            payload["session_id"] = self.session_id
+        if self.started_at:
+            payload["started_at"] = self.started_at
+        if self.ended_at:
+            payload["ended_at"] = self.ended_at
+        return StructuredEvent("final_report", payload, self.agent)
 
 
 @dataclass(frozen=True)
@@ -221,3 +274,31 @@ def _ok_from_tool_status(status: str) -> bool | None:
     if status == "failed":
         return False
     return None
+
+
+def classify_tool_failure(tool_result: Any) -> str:
+    """Classify failed tool results into the phase-two taxonomy."""
+    status = str(getattr(tool_result, "status", "") or "")
+    if status and status != "failed":
+        return "unknown"
+
+    metadata = getattr(tool_result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    source = str(metadata.get("status_source", "") or "").lower()
+    output = str(getattr(tool_result, "output", "") or "")
+    error = str(getattr(tool_result, "error", "") or "")
+    combined = f"{output}\n{error}".lower()
+
+    if source == "validation" or "validation" in combined or "empty file path" in combined:
+        return "validation_error"
+    if source == "approval" or "approval_denied" in combined or "cancelled" in combined or "canceled" in combined:
+        return "user_cancelled"
+    if source in {"runtime", "exception", "shell"}:
+        return "runtime_error"
+    if source in {"native", "registry", "permission", "browser"}:
+        return "tool_error"
+    if "traceback" in combined or "exception" in combined or "command exited with code" in combined:
+        return "runtime_error"
+    if str(getattr(tool_result, "tool", "") or ""):
+        return "unknown"
+    return "unknown"

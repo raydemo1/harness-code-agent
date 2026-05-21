@@ -16,7 +16,8 @@ from ..runtime.approvals import ConsoleApprovalProvider
 from ..runtime.middlewares import TimeBudgetMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.tool_context import ToolContext
-from ..sessions.events import AssistantMessageEvent, SessionFinishedEvent, UserInputEvent
+from ..sessions.events import AssistantMessageEvent, FinalReportEvent, SessionFinishedEvent, UserInputEvent
+from ..sessions.report import build_final_report
 from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
 from ..skills import SkillRegistry
@@ -492,12 +493,26 @@ class InteractiveSession:
     def close(self) -> None:
         tools.stop_dev_server()
         self.conversation.close()
+        metadata = self.session_store.read_metadata(self.session.id)
+        events = self.session_store.read_events(self.session.id)
+        self.event_bus.emit_event(
+            FinalReportEvent(
+                **build_final_report(
+                    metadata,
+                    events,
+                    status="closed",
+                    reason="user_exit",
+                    summary=self.last_assistant_text,
+                )
+            ).to_event()
+        )
         self.event_bus.emit_event(
             SessionFinishedEvent(
                 reason="user_exit",
                 status="closed",
             ).to_event()
         )
+        self.session_store.update_status(self.session.id, "closed")
         self.session_store.write_summary(self.session.id)
 
 

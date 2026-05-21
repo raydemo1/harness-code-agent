@@ -34,6 +34,8 @@ def format_session_summary(
     approvals = _approval_counts(events)
     switches = _profile_switches(events)
     failures = _count_events(events, "failure")
+    failure_categories = _failure_categories(events)
+    final_report = _latest_final_report(events)
     plans_ready = _count_events(events, "plan_ready")
     task_outcome = _latest_task_outcome(events)
 
@@ -60,6 +62,7 @@ def format_session_summary(
         f"tools: {_format_tool_counts(tool_counts)}",
         f"changed_files: {_format_list(changed_files)} ({len(changed_files)})",
         f"failures: {failures}",
+        f"failure_categories: {_format_counts(failure_categories)}",
         (
             "approvals: "
             f"{approvals['requested']} requested, "
@@ -68,6 +71,10 @@ def format_session_summary(
         ),
         f"profile_switches: {_format_list(switches)}",
         f"plans_ready: {plans_ready}",
+    ])
+    if final_report:
+        lines.append(f"final_report: {_format_final_report(final_report)}")
+    lines.extend([
         f"task_outcome: {task_outcome}",
         "recent_events:",
     ])
@@ -84,6 +91,9 @@ def _derived_status(metadata: dict[str, Any], events: list[dict[str, Any]]) -> s
     latest_finished = _latest_session_finished_payload(events)
     if latest_finished.get("status"):
         return str(latest_finished["status"])
+    latest_report = _latest_final_report(events)
+    if latest_report.get("status"):
+        return str(latest_report["status"])
     return str(metadata.get("status", ""))
 
 
@@ -93,20 +103,19 @@ def _count_events(events: list[dict[str, Any]], event_type: str) -> int:
 
 def _tool_counts(events: list[dict[str, Any]]) -> Counter[str]:
     counts: Counter[str] = Counter()
-    structured = [event for event in events if _event_type(event) == "tool_result"]
-    source = structured or [event for event in events if _event_type(event) == "after_tool"]
-    for event in source:
+    for event in events:
+        if _event_type(event) != "tool_result":
+            continue
         tool = _payload(event).get("tool") or "unknown"
         counts[str(tool)] += 1
     return counts
-
 
 
 def _changed_files(events: list[dict[str, Any]]) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
     for event in events:
-        if _event_type(event) not in {"file_changed", "file_change"}:
+        if _event_type(event) != "file_change":
             continue
         path = _payload(event).get("path")
         if path is None:
@@ -129,6 +138,21 @@ def _approval_counts(events: list[dict[str, Any]]) -> dict[str, int]:
                 counts["approved"] += 1
             else:
                 counts["denied"] += 1
+    return counts
+
+
+def _failure_categories(events: list[dict[str, Any]]) -> Counter[str]:
+    latest_report = _latest_final_report(events)
+    report_categories = latest_report.get("failure_categories")
+    if isinstance(report_categories, dict) and report_categories:
+        return Counter({str(key): int(value) for key, value in report_categories.items()})
+
+    counts: Counter[str] = Counter()
+    for event in events:
+        if _event_type(event) != "failure":
+            continue
+        category = _payload(event).get("category") or "unknown"
+        counts[str(category)] += 1
     return counts
 
 
@@ -166,6 +190,13 @@ def _latest_task_outcome_payload(events: list[dict[str, Any]]) -> dict[str, Any]
     return {}
 
 
+def _latest_final_report(events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in reversed(events):
+        if _event_type(event) == "final_report":
+            return _payload(event)
+    return {}
+
+
 def _latest_session_finished_payload(events: list[dict[str, Any]]) -> dict[str, Any]:
     for event in reversed(events):
         if _event_type(event) == "session_finished":
@@ -179,6 +210,24 @@ def _format_tool_counts(counts: Counter[str]) -> str:
         return "0 call(s)"
     details = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
     return f"{total} call(s): {details}"
+
+
+def _format_counts(counts: Counter[str]) -> str:
+    if not counts:
+        return "unknown"
+    return ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+
+
+def _format_final_report(payload: dict[str, Any]) -> str:
+    status = str(payload.get("status", "")).strip()
+    summary = str(payload.get("summary", "")).strip()
+    if status and summary:
+        return f"{status} - {summary}"
+    if status:
+        return status
+    if summary:
+        return summary
+    return "unknown"
 
 
 def _format_list(items: list[str]) -> str:

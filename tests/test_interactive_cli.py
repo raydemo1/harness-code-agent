@@ -34,6 +34,7 @@ from harness_code_agent.core.mentions import (
     format_turn_with_mentions,
     resolve_mentions,
 )
+from harness_code_agent.sessions.events import FileChangeEvent, ToolResultEvent
 from harness_code_agent.sessions.store import SessionStore
 from harness_code_agent.profiles.base import AgentConfig
 
@@ -367,8 +368,8 @@ class InteractiveCliTests(unittest.TestCase):
         )
         bus = store.event_bus(session)
         bus.emit("turn_started", agent="main_agent", payload={"turn": 1})
-        bus.emit("after_tool", agent="main_agent", payload={"tool": "read_file", "ok": True})
-        bus.emit("file_changed", agent="main_agent", payload={"path": "app.py"})
+        bus.emit_event(ToolResultEvent(tool="read_file", status="success", output="ok").to_event())
+        bus.emit_event(FileChangeEvent(path="app.py").to_event())
 
         output = StringIO()
         with redirect_stdout(output):
@@ -390,16 +391,32 @@ class InteractiveCliTests(unittest.TestCase):
 
         summary_path = Path(self.temp_dir) / ".harness" / "sessions" / session_id / "summary.md"
         text = summary_path.read_text(encoding="utf-8")
+        metadata = session.session_store.read_metadata(session_id)
+        listed = [
+            item for item in session.session_store.list_sessions()
+            if item.get("id") == session_id
+        ][0]
         self.assertIn("Session summary", text)
         self.assertIn(f"id: {session_id}", text)
         self.assertIn("status: closed", text)
+        self.assertEqual(metadata["status"], "closed")
+        self.assertEqual(listed["status"], "closed")
+        self.assertIn("final_report: closed - assistant done", text)
         self.assertIn("task_outcome: unknown", text)
 
         events = session.session_store.read_events(session_id)
+        event_types = [event["type"] for event in events]
+        final_report = next(event for event in events if event["type"] == "final_report")
+        self.assertEqual(final_report["payload"]["session_id"], session_id)
+        self.assertEqual(final_report["payload"]["status"], "closed")
+        self.assertEqual(final_report["payload"]["reason"], "user_exit")
+        self.assertEqual(final_report["payload"]["summary"], "assistant done")
+        self.assertEqual(final_report["payload"]["statistics"]["user_inputs"], 1)
+        self.assertEqual(final_report["payload"]["statistics"]["assistant_messages"], 1)
         self.assertEqual(events[-1]["type"], "session_finished")
         self.assertEqual(events[-1]["payload"]["reason"], "user_exit")
         self.assertEqual(events[-1]["payload"]["status"], "closed")
-        self.assertNotIn("task_outcome", [event["type"] for event in events])
+        self.assertNotIn("task_outcome", event_types)
 
     def test_hca_session_show_latest_prints_latest_summary_without_api_key(self):
         from harness_code_agent import cli

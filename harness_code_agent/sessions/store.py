@@ -133,6 +133,16 @@ class SessionStore:
             raise FileNotFoundError(f"Session not found: {session_id}")
         return json.loads(metadata_path.read_text(encoding="utf-8"))
 
+    def update_status(self, session_id: str, status: str) -> dict[str, Any]:
+        metadata = self.read_metadata(session_id)
+        metadata["status"] = status
+        metadata_path = self._session_root(session_id) / "session.json"
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return metadata
+
     def read_events(self, session_id: str) -> list[dict[str, Any]]:
         session_root = self._session_root(session_id)
         events_path = session_root / "events.jsonl"
