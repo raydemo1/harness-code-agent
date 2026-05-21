@@ -273,9 +273,10 @@ class AgentConversation:
                     on_chunk=on_chunk,
                 )
                 return result.assistant_message, result.finish_reason
-            except Exception:
+            except Exception as exc:
                 if saw_chunk:
                     raise
+                self.trace.error("stream_fallback", str(exc))
 
         response = self.client.chat.completions.create(**kwargs)
         if not response.choices:
@@ -320,23 +321,19 @@ class AgentConversation:
                 self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
 
             # --- LLM call ---
-            kwargs = self.provider.chat_kwargs(
-                model=config.MODEL,
-                messages=self.messages,
-                max_tokens=32768,
-            )
+            chat_args = {
+                "model": config.MODEL,
+                "messages": self.messages,
+                "max_tokens": 32768,
+            }
             if agent.use_tools:
                 if agent.tool_schemas is not None:
                     tool_schemas = agent.tool_schemas
                 else:
                     tool_schemas = tools.TOOL_SCHEMAS + agent.extra_tool_schemas
-                kwargs = self.provider.chat_kwargs(
-                    model=config.MODEL,
-                    messages=self.messages,
-                    max_tokens=32768,
-                    tools=tool_schemas,
-                    tool_choice="auto",
-                )
+                chat_args["tools"] = tool_schemas
+                chat_args["tool_choice"] = "auto"
+            kwargs = self.provider.chat_kwargs(**chat_args)
 
             try:
                 completion = self._request_assistant_message(kwargs)

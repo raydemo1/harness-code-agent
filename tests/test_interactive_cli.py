@@ -418,6 +418,30 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertEqual(events[-1]["payload"]["status"], "closed")
         self.assertNotIn("task_outcome", event_types)
 
+    def test_interactive_close_finishes_session_when_final_report_event_read_fails(self):
+        session = self._session()
+        session_id = session.session.id
+        original_read_events = session.session_store.read_events
+        calls = 0
+
+        def flaky_read_events(read_session_id):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("events unreadable")
+            return original_read_events(read_session_id)
+
+        with patch.object(session.session_store, "read_events", side_effect=flaky_read_events):
+            session.close()
+
+        metadata = session.session_store.read_metadata(session_id)
+        events = session.session_store.read_events(session_id)
+
+        self.assertEqual(metadata["status"], "closed")
+        self.assertEqual(events[-1]["type"], "session_finished")
+        self.assertEqual(events[-1]["payload"]["reason"], "user_exit")
+        self.assertNotIn("final_report", [event["type"] for event in events])
+
     def test_hca_session_show_latest_prints_latest_summary_without_api_key(self):
         from harness_code_agent import cli
 

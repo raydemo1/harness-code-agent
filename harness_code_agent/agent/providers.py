@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 from typing import Callable, Iterable
 
 from openai import OpenAI
@@ -14,23 +15,35 @@ ChunkCallback = Callable[[], None]
 
 
 _client: OpenAI | None = None
+_client_config: tuple[str | None, str | None, float, int] | None = None
+_client_lock = Lock()
 
 
 def get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(
-            api_key=config.API_KEY,
-            base_url=config.BASE_URL,
-            timeout=300.0,
-            max_retries=2,
-        )
+    global _client, _client_config
+    client_config = _current_client_config()
+    if _client is None or _client_config != client_config:
+        with _client_lock:
+            client_config = _current_client_config()
+            if _client is None or _client_config != client_config:
+                _client = OpenAI(
+                    api_key=client_config[0],
+                    base_url=client_config[1],
+                    timeout=client_config[2],
+                    max_retries=client_config[3],
+                )
+                _client_config = client_config
     return _client
 
 
 def reset_client() -> None:
-    global _client
+    global _client, _client_config
     _client = None
+    _client_config = None
+
+
+def _current_client_config() -> tuple[str | None, str | None, float, int]:
+    return (config.API_KEY, config.BASE_URL, 300.0, 2)
 
 
 def current_adapter() -> "ProviderAdapter":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import shlex
 import subprocess
 import time
@@ -36,6 +37,7 @@ PROFILE_SLASH_ALIASES = {
     "/swe": "swe-bench",
     "/plan": "plan",
 }
+log = logging.getLogger("harness")
 
 
 @dataclass
@@ -499,19 +501,22 @@ class InteractiveSession:
     def close(self) -> None:
         tools.stop_dev_server()
         self.conversation.close()
-        metadata = self.session_store.read_metadata(self.session.id)
-        events = self.session_store.read_events(self.session.id)
-        self.event_bus.emit_event(
-            FinalReportEvent(
-                **build_final_report(
-                    metadata,
-                    events,
-                    status="closed",
-                    reason="user_exit",
-                    summary=self.last_assistant_text,
-                )
-            ).to_event()
-        )
+        try:
+            metadata = self.session_store.read_metadata(self.session.id)
+            events = self.session_store.read_events(self.session.id)
+            self.event_bus.emit_event(
+                FinalReportEvent(
+                    **build_final_report(
+                        metadata,
+                        events,
+                        status="closed",
+                        reason="user_exit",
+                        summary=self.last_assistant_text,
+                    )
+                ).to_event()
+            )
+        except Exception as exc:
+            log.warning("Failed to write final report for session %s: %s", self.session.id, exc)
         self.event_bus.emit_event(
             SessionFinishedEvent(
                 reason="user_exit",
@@ -519,7 +524,10 @@ class InteractiveSession:
             ).to_event()
         )
         self.session_store.update_status(self.session.id, "closed")
-        self.session_store.write_summary(self.session.id)
+        try:
+            self.session_store.write_summary(self.session.id)
+        except Exception as exc:
+            log.warning("Failed to write summary for session %s: %s", self.session.id, exc)
 
 
 def _require_arg(args: list[str], usage: str) -> None:

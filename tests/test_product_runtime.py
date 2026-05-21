@@ -78,6 +78,39 @@ class ProductRuntimeTests(unittest.TestCase):
             "openai-compatible",
         )
 
+    def test_cached_provider_client_refreshes_when_config_changes(self):
+        from harness_code_agent.agent import providers
+
+        providers.reset_client()
+        created = []
+
+        def fake_openai(**kwargs):
+            client = SimpleNamespace(kwargs=kwargs)
+            created.append(client)
+            return client
+
+        try:
+            with (
+                patch("harness_code_agent.agent.providers.OpenAI", side_effect=fake_openai),
+                patch.object(providers.config, "API_KEY", "key-a"),
+                patch.object(providers.config, "BASE_URL", "https://one.example/v1"),
+            ):
+                first = providers.get_client()
+
+            with (
+                patch("harness_code_agent.agent.providers.OpenAI", side_effect=fake_openai),
+                patch.object(providers.config, "API_KEY", "key-a"),
+                patch.object(providers.config, "BASE_URL", "https://two.example/v1"),
+            ):
+                second = providers.get_client()
+        finally:
+            providers.reset_client()
+
+        self.assertIsNot(first, second)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(created[0].kwargs["base_url"], "https://one.example/v1")
+        self.assertEqual(created[1].kwargs["base_url"], "https://two.example/v1")
+
     def test_provider_streaming_normalizes_content_reasoning_and_tool_calls(self):
         from harness_code_agent.agent.providers import ProviderAdapter
 
@@ -165,6 +198,39 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertTrue(fake_client.chat.completions.calls[0]["stream"])
         self.assertNotIn("stream", fake_client.chat.completions.calls[1])
 
+    def test_streaming_request_traces_pre_chunk_fallback_reason(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                if kwargs.get("stream"):
+                    raise RuntimeError("stream unavailable")
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="fallback", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=lambda _: None))
+
+        with patch.object(conversation.trace, "error") as trace_error:
+            completion = conversation._request_assistant_message(
+                conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10)
+            )
+
+        self.assertEqual(completion[0]["content"], "fallback")
+        trace_error.assert_called_once()
+        self.assertEqual(trace_error.call_args.args[0], "stream_fallback")
+        self.assertIn("stream unavailable", trace_error.call_args.args[1])
+
     def test_streaming_request_collects_text_deltas_without_non_stream_fallback(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
 
@@ -203,6 +269,54 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(deltas, ["hel", "lo"])
         self.assertTrue(conversation.last_run_streamed_text)
         self.assertEqual(len(fake_client.chat.completions.calls), 1)
+
+    def test_tool_enabled_agent_builds_chat_kwargs_once(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.agent.providers import ProviderAdapter
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="done", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        class CountingProvider:
+            def __init__(self):
+                self.calls = []
+                self.delegate = ProviderAdapter("openai")
+
+            def chat_kwargs(self, **kwargs):
+                self.calls.append(kwargs)
+                return self.delegate.chat_kwargs(**kwargs)
+
+            def assistant_message_from_response(self, msg):
+                return self.delegate.assistant_message_from_response(msg)
+
+        schema = [{"type": "function", "function": {"name": "read_file"}}]
+        provider = CountingProvider()
+        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            conversation = AgentConversation(Agent("test", "system", use_tools=True, tool_schemas=schema))
+        conversation.provider = provider
+
+        with (
+            patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+        ):
+            result = conversation.run_until_idle()
+
+        self.assertEqual(result, "done")
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(provider.calls[0]["tools"], schema)
+        self.assertEqual(provider.calls[0]["tool_choice"], "auto")
 
     def test_trace_writer_stores_traces_under_harness_directory_without_stderr_by_default(self):
         from harness_code_agent.agent.loop import TraceWriter
@@ -765,6 +879,23 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(event.payload["failure_categories"], {"validation_error": 1})
         self.assertEqual(event.payload["tool_counts"], {"write_file": 1})
         self.assertEqual(event.payload["changed_files"], ["app.py"])
+
+    def test_session_report_and_summary_share_event_helpers(self):
+        from harness_code_agent.sessions import _event_helpers
+        from harness_code_agent.sessions import report, summary
+
+        self.assertIs(report._count_events, _event_helpers.count_events)
+        self.assertIs(report._tool_counts, _event_helpers.tool_counts)
+        self.assertIs(report._failure_categories, _event_helpers.failure_categories)
+        self.assertIs(report._changed_files, _event_helpers.changed_files)
+        self.assertIs(report._event_type, _event_helpers.event_type)
+        self.assertIs(report._payload, _event_helpers.payload)
+        self.assertIs(summary._count_events, _event_helpers.count_events)
+        self.assertIs(summary._tool_counts, _event_helpers.tool_counts)
+        self.assertIs(summary._event_failure_categories, _event_helpers.failure_categories)
+        self.assertIs(summary._changed_files, _event_helpers.changed_files)
+        self.assertIs(summary._event_type, _event_helpers.event_type)
+        self.assertIs(summary._payload, _event_helpers.payload)
 
     def test_readme_does_not_reference_removed_main_agent_flow_test(self):
         readme = Path(__file__).resolve().parents[1] / "README.md"

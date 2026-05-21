@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from collections import Counter
+from typing import Any
+
+
+def count_events(events: list[dict[str, Any]], event_type_name: str) -> int:
+    return sum(1 for event in events if event_type(event) == event_type_name)
+
+
+def tool_counts(events: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for event in events:
+        if event_type(event) != "tool_result":
+            continue
+        tool = payload(event).get("tool") or "unknown"
+        counts[str(tool)] += 1
+    return counts
+
+
+def failure_categories(events: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for event in events:
+        if event_type(event) != "failure":
+            continue
+        category = payload(event).get("category") or "unknown"
+        counts[str(category)] += 1
+    return counts
+
+
+def changed_files(events: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for event in events:
+        if event_type(event) != "file_change":
+            continue
+        path = payload(event).get("path")
+        if path is None:
+            continue
+        text = str(path)
+        if text and text not in seen:
+            seen.add(text)
+            paths.append(text)
+    return paths
+
+
+def event_type(event: dict[str, Any]) -> str:
+    return str((event or {}).get("type", ""))
+
+
+def payload(event: dict[str, Any]) -> dict[str, Any]:
+    event_payload = (event or {}).get("payload")
+    return event_payload if isinstance(event_payload, dict) else {}

@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
+
+from ._event_helpers import (
+    changed_files as _changed_files,
+    count_events as _count_events,
+    event_type as _event_type,
+    failure_categories as _failure_categories,
+    payload as _payload,
+    tool_counts as _tool_counts,
+)
 
 
 def build_final_report(
@@ -37,48 +45,8 @@ def build_final_report(
     }
 
 
-def _count_events(events: list[dict[str, Any]], event_type: str) -> int:
-    return sum(1 for event in events if _event_type(event) == event_type)
-
-
 def _tool_result_count(events: list[dict[str, Any]]) -> int:
     return _count_events(events, "tool_result")
-
-
-def _tool_counts(events: list[dict[str, Any]]) -> Counter[str]:
-    counts: Counter[str] = Counter()
-    for event in events:
-        if _event_type(event) != "tool_result":
-            continue
-        tool = _payload(event).get("tool") or "unknown"
-        counts[str(tool)] += 1
-    return counts
-
-
-def _failure_categories(events: list[dict[str, Any]]) -> Counter[str]:
-    counts: Counter[str] = Counter()
-    for event in events:
-        if _event_type(event) != "failure":
-            continue
-        category = _payload(event).get("category") or "unknown"
-        counts[str(category)] += 1
-    return counts
-
-
-def _changed_files(events: list[dict[str, Any]]) -> list[str]:
-    paths: list[str] = []
-    seen: set[str] = set()
-    for event in events:
-        if _event_type(event) != "file_change":
-            continue
-        path = _payload(event).get("path")
-        if path is None:
-            continue
-        text = str(path)
-        if text and text not in seen:
-            seen.add(text)
-            paths.append(text)
-    return paths
 
 
 def _report_summary(summary: str, events: list[dict[str, Any]]) -> str:
@@ -100,12 +68,3 @@ def _latest_assistant_message(events: list[dict[str, Any]]) -> str:
             if text:
                 return str(text)
     return ""
-
-
-def _event_type(event: dict[str, Any]) -> str:
-    return str((event or {}).get("type", ""))
-
-
-def _payload(event: dict[str, Any]) -> dict[str, Any]:
-    payload = (event or {}).get("payload")
-    return payload if isinstance(payload, dict) else {}

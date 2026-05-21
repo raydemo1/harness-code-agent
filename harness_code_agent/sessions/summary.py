@@ -3,6 +3,15 @@ from __future__ import annotations
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
+from ._event_helpers import (
+    changed_files as _changed_files,
+    count_events as _count_events,
+    event_type as _event_type,
+    failure_categories as _event_failure_categories,
+    payload as _payload,
+    tool_counts as _tool_counts,
+)
+
 if TYPE_CHECKING:
     from .store import SessionStore
 
@@ -97,36 +106,6 @@ def _derived_status(metadata: dict[str, Any], events: list[dict[str, Any]]) -> s
     return str(metadata.get("status", ""))
 
 
-def _count_events(events: list[dict[str, Any]], event_type: str) -> int:
-    return sum(1 for event in events if _event_type(event) == event_type)
-
-
-def _tool_counts(events: list[dict[str, Any]]) -> Counter[str]:
-    counts: Counter[str] = Counter()
-    for event in events:
-        if _event_type(event) != "tool_result":
-            continue
-        tool = _payload(event).get("tool") or "unknown"
-        counts[str(tool)] += 1
-    return counts
-
-
-def _changed_files(events: list[dict[str, Any]]) -> list[str]:
-    paths: list[str] = []
-    seen: set[str] = set()
-    for event in events:
-        if _event_type(event) != "file_change":
-            continue
-        path = _payload(event).get("path")
-        if path is None:
-            continue
-        text = str(path)
-        if text and text not in seen:
-            seen.add(text)
-            paths.append(text)
-    return paths
-
-
 def _approval_counts(events: list[dict[str, Any]]) -> dict[str, int]:
     counts = {"requested": 0, "approved": 0, "denied": 0}
     for event in events:
@@ -147,13 +126,7 @@ def _failure_categories(events: list[dict[str, Any]]) -> Counter[str]:
     if isinstance(report_categories, dict) and report_categories:
         return Counter({str(key): int(value) for key, value in report_categories.items()})
 
-    counts: Counter[str] = Counter()
-    for event in events:
-        if _event_type(event) != "failure":
-            continue
-        category = _payload(event).get("category") or "unknown"
-        counts[str(category)] += 1
-    return counts
+    return _event_failure_categories(events)
 
 
 def _profile_switches(events: list[dict[str, Any]]) -> list[str]:
@@ -245,12 +218,3 @@ def _event_summary(event: dict[str, Any]) -> str:
         payload_bits.append(f"{key}={text}")
     suffix = f" ({', '.join(payload_bits)})" if payload_bits else ""
     return f"#{event.get('sequence')} {_event_type(event)} agent={event.get('agent')}{suffix}"
-
-
-def _event_type(event: dict[str, Any]) -> str:
-    return str((event or {}).get("type", ""))
-
-
-def _payload(event: dict[str, Any]) -> dict[str, Any]:
-    payload = (event or {}).get("payload")
-    return payload if isinstance(payload, dict) else {}
