@@ -57,7 +57,12 @@ def bottom_toolbar(snapshot: SessionStatusSnapshot) -> HTML:
 
 def prompt_message(snapshot: SessionStatusSnapshot) -> HTML:
     if snapshot.pending_plan:
-        return HTML("<ansiblue>plan ready</ansiblue> <ansigray>继续/continue executes, any other text revises</ansigray>\n<ansicyan>hca</ansicyan> › ")
+        return HTML(
+            "<ansiblue>计划已就绪</ansiblue> "
+            "<ansigreen>[执行计划]</ansigreen> "
+            "<ansigray>[修改计划: 输入修改理由或补充要求]</ansigray>\n"
+            "<ansicyan>hca</ansicyan> › "
+        )
     return HTML("<ansicyan>hca</ansicyan> › ")
 
 

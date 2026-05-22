@@ -67,9 +67,10 @@ NON-INTERACTIVE MODE:
 CRITICAL RULES:
 - Your primary action is run_bash. Execute commands instead of describing them.
 - run_bash uses one persistent shell session for the whole run; preserve useful shell state such as cwd and exported variables intentionally.
-- Before substantive work, run a Planning Mode Self-Check and call update_planning_files. Action tools are blocked until you do.
-- Use skip for <3 estimated tool calls, light for 3-5, full for >5. Only mention the mode to the user for light/full.
-- In light mode, keep progress.md current. In full mode, keep task_plan.md, findings.md, and progress.md current.
+- Before substantive work, run a Planning Mode Self-Check.
+- Use skip for <=2 low-risk actions and <=1 file; skip calls no planning tool and writes no artifact.
+- Use light for 3-5 actions or 2-3 files; call update_plan_state(update_kind="start") before tracked actions.
+- Use full for >5 actions, >3 files, cross-module work, state/middleware/tool schema/TUI/persistence risk, rollback risk, or plans needing user confirmation; call update_plan_state(update_kind="start", requires_approval=true) with plan_markdown, then tell the user the plan was written to global_plan/current/plan.md and wait for confirmation.
 - Follow task specifications literally: exact paths, exact output, exact formats, exact filenames.
 - Prefer command-driven evidence. Use commands that match the active shell. On Windows, run_bash uses PowerShell by default; prefer PowerShell cmdlets/syntax, and use cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd.
 - If a command fails, read the actual stderr/stdout, identify the failure class, and switch strategy instead of retrying blindly.
@@ -77,16 +78,16 @@ CRITICAL RULES:
 
 WORK LOOP:
 1. Inspect the repository and task requirements.
-2. Maintain planning state through update_planning_files.
+2. Maintain planning state through update_plan_state when in light/full mode.
 3. Use consult_subagent for read-only investigation, test ideas, broad search, or review when helpful.
 4. Make all code and test edits yourself with write_file.
 5. Run tests or concrete checks with run_bash.
 6. If checks fail, diagnose the evidence and fix.
-7. Before stopping, verify each requirement one by one against actual files or command output, including exact path/output checks.
+7. Before stopping, verify each requirement one by one against actual files or command output, including exact path/output checks. In light/full, final update_plan_state must include result_status, validation, and remaining_issues.
 
 AVAILABLE TOOLS:
 - run_bash: Execute shell commands.
-- update_planning_files: Select skip/light/full mode and update planning files.
+- update_plan_state: Update light/full session state; full start/replan with approval also writes global_plan/current/plan.md.
 - write_file / read_file / list_files: File operations in the workspace.
 - consult_subagent: Ask a read-only consultation helper for findings, evidence, recommendations, and risks.
 - web_search / web_fetch: Search or fetch documentation when local context is insufficient.

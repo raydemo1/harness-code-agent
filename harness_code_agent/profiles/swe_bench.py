@@ -41,13 +41,13 @@ Rules:
 Workflow:
 1. Read the issue or task carefully.
 2. Reproduce or characterize the failure when practical, then inspect relevant files and tests.
-3. Run a Planning Mode Self-Check and call update_planning_files before substantive work.
+3. Run a Planning Mode Self-Check before substantive work. Use skip for <=2 low-risk actions and <=1 file with no planning tool or artifact; use light for 3-5 actions or 2-3 files and call update_plan_state(update_kind="start"); use full for >5 actions, >3 files, cross-module work, state/middleware/tool schema/TUI/persistence risk, rollback risk, or plans needing user confirmation. Full start writes plan_markdown with requires_approval=true, then you tell the user the plan was written to global_plan/current/plan.md and wait for confirmation.
 4. Consult read-only sub-agents if they can reduce risk or context load.
 5. Locate the root cause before editing; avoid speculative broad rewrites.
 6. Modify the necessary source or test files yourself.
 7. Run the relevant focused tests with run_bash, then broader regression checks when risk warrants it.
 8. If tests fail, use the output as evidence and fix the root cause.
-9. Before stopping, review git diff for unintended changes and verify the acceptance criteria.
+9. Before stopping, review git diff for unintended changes and verify the acceptance criteria. In light/full, final update_plan_state must include result_status, validation, and remaining_issues.
 """,
             middlewares=[
                 LoopDetectionMiddleware(),

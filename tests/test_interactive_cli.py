@@ -157,9 +157,14 @@ class InteractiveCliTests(unittest.TestCase):
             result = session.submit("plan the parser fix")
 
             self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan body")
-            self.assertIn("Say 'continue'", result.notice)
-            self.assertIn("reply with feedback", result.notice)
+            self.assertIn("执行计划", result.notice)
+            self.assertIn("修改计划", result.notice)
             self.assertEqual(result.checkpoint, "no changes to checkpoint")
+            plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
+            self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Title\n\n## Summary\n\nPlan body\n")
+            self.assertFalse(Path(self.temp_dir, ".harness", "sessions", session.session.id, "planning", "state.json").exists())
+            self.assertFalse(Path(self.temp_dir, "global_plan", "current", "status.md").exists())
+            self.assertFalse(Path(self.temp_dir, "global_plan", "current", "final.md").exists())
         finally:
             session.close()
 
@@ -181,6 +186,7 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertEqual(result.text, "implemented")
                 self.assertEqual(session.profile.name(), "coding-agent")
                 self.assertIsNone(session.pending_plan_markdown)
+                self.assertEqual(session.pending_plan_revision, 0)
                 self.assertEqual(len(coding_conversation.submissions), 1)
                 task = coding_conversation.submissions[0]
                 self.assertIn("Execute the approved implementation plan", task)
@@ -208,6 +214,9 @@ class InteractiveCliTests(unittest.TestCase):
             self.assertEqual(result.text, "# Title\n\n## Summary\n\nPlan v2")
             self.assertEqual(session.profile.name(), "plan")
             self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan v2")
+            self.assertEqual(session.pending_plan_revision, 2)
+            plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
+            self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Title\n\n## Summary\n\nPlan v2\n")
             self.assertIn("User feedback:\nadd migration risk", plan_conversation.submissions[-1])
         finally:
             session.close()
@@ -290,6 +299,7 @@ class InteractiveCliTests(unittest.TestCase):
 
                 self.assertEqual(session.profile.name(), "coding-agent")
                 self.assertIsNone(session.pending_plan_markdown)
+                self.assertEqual(session.pending_plan_revision, 0)
             finally:
                 session.close()
 

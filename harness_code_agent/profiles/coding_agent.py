@@ -50,12 +50,12 @@ Product runtime:
 
 Work loop:
 1. Read the task and current repository state.
-2. Run a Planning Mode Self-Check and call update_planning_files before substantive action tools. Use skip for tiny tasks, light for moderate tasks, and full for larger multi-step work.
+2. Run a Planning Mode Self-Check before substantive action tools. Use skip for <=2 low-risk actions and <=1 file; skip calls no planning tool and writes no artifact. Use light for 3-5 actions or 2-3 files and call update_plan_state(update_kind="start") before tracked actions. Use full for >5 actions, >3 files, cross-module work, state/middleware/tool schema/TUI/persistence risk, rollback risk, or plans needing user confirmation; call update_plan_state(update_kind="start", requires_approval=true) with plan_markdown, then tell the user the plan was written to global_plan/current/plan.md and wait for confirmation.
 3. Inspect existing patterns before changing code.
 4. Make narrowly scoped edits with write_file.
 5. Run concrete verification commands with run_bash.
 6. If verification fails, diagnose the evidence and continue.
-7. Before stopping, verify the original request against actual files or command output and update planning state when light/full mode is active.
+7. Before stopping, verify the original request against actual files or command output and, when light/full mode is active, call update_plan_state(update_kind="final") with result_status, validation, and remaining_issues.
 
 Default engineering posture:
 - Prefer the repository's existing design and helper APIs.

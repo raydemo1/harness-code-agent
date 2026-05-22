@@ -109,6 +109,7 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertIn("## test plan", prompt)
         self.assertIn("## assumptions", prompt)
         self.assertIn("do not implement", prompt)
+        self.assertIn("do not call update_plan_state", prompt)
         self.assertIn("do not create task_plan.md", prompt)
         self.assertEqual(
             tool_names,
@@ -122,7 +123,7 @@ class ProfileInterfaceTests(unittest.TestCase):
                 "consult_subagent",
             },
         )
-        self.assertFalse({"write_file", "apply_patch", "update_planning_files"} & tool_names)
+        self.assertFalse({"write_file", "apply_patch", "update_plan_state"} & tool_names)
         self.assertFalse(any(name.startswith("browser") for name in tool_names))
         self.assertTrue(any(isinstance(mw, ReadOnlyPlanningMiddleware) for mw in main_agent.middlewares))
 

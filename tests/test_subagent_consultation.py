@@ -46,7 +46,7 @@ class SubagentConsultationTests(unittest.TestCase):
         self.assertIn("run_bash", tool_names)
         self.assertIn("web_search", tool_names)
         self.assertNotIn("write_file", tool_names)
-        self.assertNotIn("update_planning_files", tool_names)
+        self.assertNotIn("update_plan_state", tool_names)
         self.assertEqual(result.status, "success")
         self.assertLessEqual(len(result.output), 8200)
         parsed = json.loads(result.output)
@@ -138,13 +138,13 @@ class SubagentConsultationTests(unittest.TestCase):
         )
         self.assertNotIn("write_file", tool_names)
         self.assertNotIn("apply_patch", tool_names)
-        self.assertNotIn("update_planning_files", tool_names)
+        self.assertNotIn("update_plan_state", tool_names)
         self.assertNotIn("browser_test", tool_names)
 
     def test_read_only_planning_blocks_write_tools_and_browser_tools(self):
         middleware = ReadOnlyPlanningMiddleware()
 
-        for tool_name in ["write_file", "apply_patch", "update_planning_files", "browser_test"]:
+        for tool_name in ["write_file", "apply_patch", "update_plan_state", "browser_test"]:
             with self.subTest(tool_name=tool_name):
                 blocked = middleware.before_tool(
                     tool_name,

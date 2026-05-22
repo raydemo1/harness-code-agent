@@ -10,6 +10,7 @@ import inspect
 import os
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -204,64 +205,85 @@ def apply_patch(
     )
 
 
-def update_planning_files(
+def update_plan_state(
     mode: str,
+    update_kind: str,
     goal: str,
     steps: list[str],
     current_step: str,
     completed_steps: list[str],
     blockers: list[str],
     next_action: str,
-    task_plan: str | None = None,
-    findings: str | None = None,
+    plan_markdown: str | None = None,
+    replan_reason: str | None = None,
+    requires_approval: bool = False,
+    result_status: str | None = None,
+    validation: str | None = None,
+    remaining_issues: list[str] | None = None,
     runtime_state=None,
     agent_name: str | None = None,
+    tool_context: ToolContext | None = None,
 ) -> ToolResult:
-    """Update planning-with-files state and write the files required by the selected mode."""
+    """Update light/full planning state and write the required artifacts."""
     if runtime_state is None:
         return ToolResult(
-            tool="update_planning_files",
+            tool="update_plan_state",
             status="failed",
-            output="[error] update_planning_files requires runtime state",
-            error="update_planning_files requires runtime state",
+            output="[error] update_plan_state requires runtime state",
+            error="update_plan_state requires runtime state",
             metadata={"status_source": "runtime"},
         )
 
     mode = (mode or "").strip().lower()
+    update_kind = (update_kind or "").strip().lower()
     goal = (goal or "").strip()
     current_step = (current_step or "").strip()
     next_action = (next_action or "").strip()
+    plan_markdown = (plan_markdown or "").strip()
+    replan_reason = (replan_reason or "").strip()
+    result_status = (result_status or "").strip()
+    validation = (validation or "").strip()
+    remaining_issues_provided = remaining_issues is not None
     steps = [str(step).strip() for step in (steps or []) if str(step).strip()]
     completed_steps = [str(step).strip() for step in (completed_steps or []) if str(step).strip()]
     blockers = [str(item).strip() for item in (blockers or []) if str(item).strip()]
+    remaining_issues = [str(item).strip() for item in (remaining_issues or []) if str(item).strip()]
 
-    if mode not in {"skip", "light", "full"}:
+    if mode not in {"light", "full"}:
         return ToolResult(
-            tool="update_planning_files",
+            tool="update_plan_state",
             status="failed",
-            output="[error] mode must be one of: skip, light, full",
-            error="mode must be one of: skip, light, full",
+            output="[error] mode must be one of: light, full",
+            error="mode must be one of: light, full",
+            metadata={"status_source": "validation"},
+        )
+    if update_kind not in {"start", "progress", "replan", "final"}:
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] update_kind must be one of: start, progress, replan, final",
+            error="update_kind must be one of: start, progress, replan, final",
             metadata={"status_source": "validation"},
         )
     if not goal:
         return ToolResult(
-            tool="update_planning_files",
+            tool="update_plan_state",
             status="failed",
-            output="[error] update_planning_files requires a non-empty goal",
-            error="update_planning_files requires a non-empty goal",
+            output="[error] update_plan_state requires a non-empty goal",
+            error="update_plan_state requires a non-empty goal",
             metadata={"status_source": "validation"},
         )
     if not steps:
         return ToolResult(
-            tool="update_planning_files",
+            tool="update_plan_state",
             status="failed",
-            output="[error] update_planning_files requires at least one step",
-            error="update_planning_files requires at least one step",
+            output="[error] update_plan_state requires at least one step",
+            error="update_plan_state requires at least one step",
             metadata={"status_source": "validation"},
         )
-    if current_step not in steps:
+    if update_kind != "final" and current_step not in steps:
         return ToolResult(
-            tool="update_planning_files",
+            tool="update_plan_state",
             status="failed",
             output="[error] current_step must be one of the declared steps",
             error="current_step must be one of the declared steps",
@@ -269,106 +291,137 @@ def update_planning_files(
         )
     if any(step not in steps for step in completed_steps):
         return ToolResult(
-            tool="update_planning_files",
+            tool="update_plan_state",
             status="failed",
             output="[error] completed_steps must be a subset of steps",
             error="completed_steps must be a subset of steps",
             metadata={"status_source": "validation"},
         )
-    if not next_action:
+    if update_kind != "final" and not next_action:
         return ToolResult(
-            tool="update_planning_files",
+            tool="update_plan_state",
             status="failed",
-            output="[error] update_planning_files requires a non-empty next_action",
-            error="update_planning_files requires a non-empty next_action",
+            output="[error] update_plan_state requires a non-empty next_action",
+            error="update_plan_state requires a non-empty next_action",
+            metadata={"status_source": "validation"},
+        )
+    if update_kind == "final" and (not result_status or not validation or not remaining_issues_provided):
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] final update requires result_status, validation, and remaining_issues",
+            error="final update requires result_status, validation, and remaining_issues",
+            metadata={"status_source": "validation"},
+        )
+    if update_kind == "replan" and not replan_reason:
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] replan update requires replan_reason",
+            error="replan update requires replan_reason",
+            metadata={"status_source": "validation"},
+        )
+    if mode == "full" and update_kind == "start" and not plan_markdown:
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] full start requires plan_markdown",
+            error="full start requires plan_markdown",
+            metadata={"status_source": "validation"},
+        )
+    if requires_approval and not plan_markdown:
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] requires_approval=true requires plan_markdown",
+            error="requires_approval=true requires plan_markdown",
+            metadata={"status_source": "validation"},
+        )
+    if requires_approval and mode != "full":
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] requires_approval=true is only valid in full mode",
+            error="requires_approval=true is only valid in full mode",
             metadata={"status_source": "validation"},
         )
 
+    workspace = tool_context.workspace.root if tool_context is not None else Path(config.WORKSPACE)
     board = runtime_state.task_board
+    previous_revision = int(getattr(board, "plan_revision", 0) or 0)
+    will_write_plan = mode == "full" and bool(plan_markdown) and (
+        update_kind == "start" or requires_approval
+    )
+    plan_revision = previous_revision + 1 if will_write_plan else previous_revision
+    changed_files = _planning_changed_files(runtime_state, tool_context)
+
+    payload = {
+        "mode": mode,
+        "update_kind": update_kind,
+        "goal": goal,
+        "steps": steps,
+        "current_step": current_step,
+        "completed_steps": completed_steps,
+        "blockers": blockers,
+        "next_action": next_action,
+        "update_count": board.update_count + 1,
+        "action_count": int(getattr(board, "action_count", runtime_state.action_tool_count) or 0),
+        "changed_file_count": len(changed_files),
+        "requires_approval": bool(requires_approval),
+        "requires_update": False,
+        "needs_final_update": update_kind != "final" and bool(getattr(board, "needs_final_update", False)),
+        "replan_required": False,
+        "replan_reason": replan_reason,
+        "plan_revision": plan_revision,
+        "result_status": result_status,
+        "validation": validation,
+        "remaining_issues": remaining_issues,
+        "updated_at": _utc_timestamp(),
+    }
+    state_path = _planning_state_path(workspace, runtime_state, tool_context)
+    ok, error = _atomic_write_json(state_path, payload)
+    if not ok:
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output=f"[error] Failed to write state.json atomically: {error}",
+            error=f"Failed to write state.json atomically: {error}",
+            metadata={"status_source": "native"},
+        )
+
+    written = [str(state_path.relative_to(workspace))]
+    if will_write_plan:
+        plan_path = workspace / "global_plan" / "current" / "plan.md"
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_content = plan_markdown.rstrip() + "\n"
+        plan_path.write_text(plan_content, encoding="utf-8")
+        written.append(str(plan_path.relative_to(workspace)))
+
     board.goal = goal
     board.steps = steps
     board.current_step = current_step
     board.completed_steps = completed_steps
     board.blockers = blockers
     board.next_action = next_action
-    board.update_count += 1
+    board.update_count = payload["update_count"]
+    board.action_count = payload["action_count"]
+    board.changed_files = changed_files
+    board.requires_approval = bool(requires_approval)
     board.requires_update = False
-    board.needs_final_update = False
+    board.needs_final_update = False if update_kind == "final" else bool(getattr(board, "needs_final_update", False))
+    board.replan_required = False
+    board.replan_reason = replan_reason
+    board.plan_revision = plan_revision
+    board.result_status = result_status
+    board.validation = validation
+    board.remaining_issues = remaining_issues
+    board.actions_since_progress = 0
     board.planning_mode = mode
 
-    progress_lines = [
-        "# Progress",
-        "",
-        "## Planning Mode",
-        mode,
-        "",
-        f"## Goal",
-        goal,
-        "",
-        "## Steps",
-    ]
-    for step in steps:
-        marker = "x" if step in completed_steps else " "
-        current = " (current)" if step == current_step else ""
-        progress_lines.append(f"- [{marker}] {step}{current}")
-    progress_lines.extend([
-        "",
-        "## Blockers",
-    ])
-    if blockers:
-        progress_lines.extend(f"- {item}" for item in blockers)
-    else:
-        progress_lines.append("- (none)")
-    progress_lines.extend([
-        "",
-        "## Next Action",
-        next_action,
-        "",
-        f"## Updates",
-        str(board.update_count),
-    ])
-
-    workspace = Path(config.WORKSPACE)
-    written: list[str] = []
-    if mode in {"light", "full"}:
-        progress_path = workspace / config.PROGRESS_FILE
-        progress_path.write_text("\n".join(progress_lines) + "\n", encoding="utf-8")
-        written.append(config.PROGRESS_FILE)
-
-    if mode == "full":
-        plan_text = (task_plan or "").strip()
-        findings_text = (findings or "").strip()
-        if not plan_text:
-            return ToolResult(
-                tool="update_planning_files",
-                status="failed",
-                output="[error] full mode requires task_plan content",
-                error="full mode requires task_plan content",
-                metadata={"status_source": "validation"},
-            )
-        if not findings_text:
-            return ToolResult(
-                tool="update_planning_files",
-                status="failed",
-                output="[error] full mode requires findings content",
-                error="full mode requires findings content",
-                metadata={"status_source": "validation"},
-            )
-        (workspace / "task_plan.md").write_text(plan_text + "\n", encoding="utf-8")
-        (workspace / "findings.md").write_text(findings_text + "\n", encoding="utf-8")
-        written.extend(["task_plan.md", "findings.md"])
-
-    if mode == "skip":
-        return ToolResult(
-            tool="update_planning_files",
-            status="success",
-            output="Planning mode set to skip; no planning files required",
-            metadata={"status_source": "native"},
-        )
     return ToolResult(
-        tool="update_planning_files",
+        tool="update_plan_state",
         status="success",
-        output="Updated planning files: " + ", ".join(written),
+        output="Updated plan state: " + ", ".join(written),
         metadata={
             "status_source": "native",
             "file_changes": [
@@ -377,6 +430,49 @@ def update_planning_files(
             ],
         },
     )
+
+
+def _utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _planning_state_path(workspace: Path, runtime_state, tool_context: ToolContext | None) -> Path:
+    session_id = (
+        (tool_context.session_id if tool_context is not None else None)
+        or getattr(runtime_state, "session_id", None)
+        or "default"
+    )
+    safe_session_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
+    return workspace / ".harness" / "sessions" / safe_session_id / "planning" / "state.json"
+
+
+def _planning_changed_files(runtime_state, tool_context: ToolContext | None) -> list[str]:
+    if tool_context is not None:
+        return [str(path) for path in getattr(tool_context.workspace, "changed_files", [])]
+    board = runtime_state.task_board
+    return [str(path) for path in getattr(board, "changed_files", [])]
+
+
+def _atomic_write_json(path: Path, payload: dict) -> tuple[bool, str | None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    json.loads(text)
+    temp_path = path.parent / f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    try:
+        with open(temp_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        json.loads(temp_path.read_text(encoding="utf-8"))
+        os.replace(temp_path, path)
+        return True, None
+    except Exception as exc:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
+        return False, str(exc)
 
 
 def list_files(directory: str = ".") -> ToolResult:
@@ -934,16 +1030,21 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "update_planning_files",
-            "description": "Set the planning mode and update planning-with-files state. Use skip for <3 estimated tool calls, light for 3-5 tool calls and progress.md only, full for >5 tool calls and task_plan.md/findings.md/progress.md.",
+            "name": "update_plan_state",
+            "description": "Update light/full planning state. skip mode does not call this tool. light writes only session state.json; full also writes global_plan/current/plan.md when approval is required.",
             "parameters": {
                 "type": "object",
-                "required": ["mode", "goal", "steps", "current_step", "completed_steps", "blockers", "next_action"],
+                "required": ["mode", "update_kind", "goal", "steps", "current_step", "completed_steps", "blockers", "next_action", "requires_approval"],
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "description": "Planning mode selected by the agent self-check: skip, light, or full",
-                        "enum": ["skip", "light", "full"],
+                        "description": "Planning mode selected by the agent self-check. skip is the direct execution path and must not call this tool.",
+                        "enum": ["light", "full"],
+                    },
+                    "update_kind": {
+                        "type": "string",
+                        "description": "Planning update kind.",
+                        "enum": ["start", "progress", "replan", "final"],
                     },
                     "goal": {"type": "string", "description": "Overall task goal"},
                     "steps": {
@@ -962,14 +1063,31 @@ CORE_TOOL_SCHEMAS = [
                         "description": "Current blockers, if any",
                         "items": {"type": "string"},
                     },
-                    "next_action": {"type": "string", "description": "The exact next action to take"},
-                    "task_plan": {
+                    "next_action": {"type": "string", "description": "The exact next action to take. May be empty or 'none' for final updates."},
+                    "plan_markdown": {
                         "type": "string",
-                        "description": "Full task_plan.md content. Required in full mode; ignored otherwise.",
+                        "description": "Full plan.md content. Required for full start and for requires_approval=true replan.",
                     },
-                    "findings": {
+                    "replan_reason": {
                         "type": "string",
-                        "description": "Full findings.md content. Required in full mode; ignored otherwise.",
+                        "description": "Required when update_kind is replan.",
+                    },
+                    "requires_approval": {
+                        "type": "boolean",
+                        "description": "true writes plan.md and waits for user confirmation; false only updates state.json and continues.",
+                    },
+                    "result_status": {
+                        "type": "string",
+                        "description": "Required for final updates: success, partial, blocked, failed, or another concise status.",
+                    },
+                    "validation": {
+                        "type": "string",
+                        "description": "Required for final updates. Summarize validation commands/results or why validation could not run.",
+                    },
+                    "remaining_issues": {
+                        "type": "array",
+                        "description": "Required for final updates. Empty list means no known remaining issues.",
+                        "items": {"type": "string"},
                     },
                 },
             },
@@ -1368,7 +1486,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "read_skill_file": read_skill_file,
         "write_file": write_file,
         "apply_patch": apply_patch,
-        "update_planning_files": update_planning_files,
+        "update_plan_state": update_plan_state,
         "list_files": list_files,
         "run_bash": run_bash,
         "consult_subagent": consult_subagent,

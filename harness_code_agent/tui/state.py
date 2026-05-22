@@ -90,7 +90,15 @@ class TuiState:
         if event_type == "plan_ready":
             self.snapshot.pending_plan = True
             self.snapshot.status = "plan ready"
-            return TranscriptBlock("plan", "plan ready", "Type continue/继续 to execute it, or type feedback to revise.", "pending")
+            path = str(payload.get("plan_path") or "global_plan/current/plan.md")
+            revision = payload.get("plan_revision")
+            suffix = f" rev {revision}" if revision is not None else ""
+            return TranscriptBlock(
+                "plan",
+                "plan ready",
+                f"{path}{suffix}\n[执行计划]  [修改计划: 输入修改理由或补充要求]",
+                "pending",
+            )
         if event_type == "turn_finished":
             self.snapshot.status = "idle"
             self.snapshot.running_tool = ""

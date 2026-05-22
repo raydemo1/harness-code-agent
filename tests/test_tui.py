@@ -12,6 +12,7 @@ from harness_code_agent.sessions.store import SessionStore
 from harness_code_agent.tui.approval import TuiApprovalProvider
 from harness_code_agent.tui.commands import default_command_registry
 from harness_code_agent.tui.completion import current_mention_query, mention_candidates
+from harness_code_agent.tui.render import prompt_message
 from harness_code_agent.tui.state import SessionStatusSnapshot, TuiState
 
 
@@ -97,7 +98,16 @@ class TuiTests(unittest.TestCase):
 
         bus.emit("tool_call", agent="main_agent", payload={"tool": "read_file", "args": {"path": "README.md"}})
         bus.emit("tool_result", agent="main_agent", payload={"tool": "read_file", "status": "success", "output": "ok"})
-        bus.emit("plan_ready", agent="main_agent", payload={"profile": "plan"})
+        bus.emit(
+            "plan_ready",
+            agent="main_agent",
+            payload={
+                "profile": "plan",
+                "plan_path": "global_plan/current/plan.md",
+                "plan_revision": 1,
+                "approval_source": "/plan",
+            },
+        )
         bus.emit("profile_switched", agent="main_agent", payload={"previous_profile": "plan", "profile": "coding-agent", "reason": "execute"})
         bus.emit("turn_finished", agent="main_agent", payload={"turn": 1, "checkpoint": "checkpoint created: abc"})
 
@@ -109,6 +119,23 @@ class TuiTests(unittest.TestCase):
         self.assertEqual(state.snapshot.checkpoint, "checkpoint created: abc")
         self.assertEqual(state.snapshot.running_tool, "")
         self.assertGreaterEqual(len(state.blocks), 5)
+
+    def test_pending_plan_prompt_renders_action_bar_labels(self):
+        snapshot = SessionStatusSnapshot(
+            profile="plan",
+            model="model-a",
+            provider="auto",
+            permission_mode="workspace-write",
+            session_id="s1",
+            cwd=self.root,
+            pending_plan=True,
+        )
+
+        prompt = str(prompt_message(snapshot))
+
+        self.assertIn("执行计划", prompt)
+        self.assertIn("修改计划", prompt)
+        self.assertIn("输入修改理由", prompt)
 
     def test_tui_approval_provider_approve_and_deny(self):
         class FakePromptSession:

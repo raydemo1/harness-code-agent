@@ -136,8 +136,18 @@ class TaskBoard:
     next_action: str = ""
     planning_mode: str = "unset"
     update_count: int = 0
+    action_count: int = 0
+    changed_files: list[str] = field(default_factory=list)
+    requires_approval: bool = False
     requires_update: bool = False
     needs_final_update: bool = False
+    replan_required: bool = False
+    replan_reason: str = ""
+    plan_revision: int = 0
+    result_status: str = ""
+    validation: str = ""
+    remaining_issues: list[str] = field(default_factory=list)
+    actions_since_progress: int = 0
 
 
 @dataclass
@@ -156,6 +166,7 @@ class AgentRuntimeState:
     recovery: RecoveryState = field(default_factory=RecoveryState)
     action_tool_count: int = 0
     current_turn_start_index: int = 0
+    session_id: str = "default"
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +234,8 @@ class AgentConversation:
         self.agent = agent
         self.trace = TraceWriter(agent.name)
         self.runtime_state = agent._create_runtime_state(initial_task or "")
+        if agent.tool_context is not None and agent.tool_context.session_id:
+            self.runtime_state.session_id = agent.tool_context.session_id
         self.messages: list[dict] = [{"role": "system", "content": agent.system_prompt}]
         self.client = get_client()
         self.provider: ProviderAdapter = current_adapter()

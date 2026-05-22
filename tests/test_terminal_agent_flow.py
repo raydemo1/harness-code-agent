@@ -34,7 +34,7 @@ class AgentRuntimeStateTests(unittest.TestCase):
         prompt = TerminalProfile().main_agent().system_prompt
 
         self.assertIn("persistent shell", prompt.lower())
-        self.assertIn("update_planning_files", prompt)
+        self.assertIn("update_plan_state", prompt)
         self.assertIn("Planning Mode Self-Check", prompt)
         self.assertIn("exact output", prompt)
         self.assertIn("switch strategy", prompt)

@@ -75,6 +75,8 @@ class TuiApp:
                         break
                     line = line.strip()
                     if not line:
+                        if self.state.snapshot.pending_plan:
+                            self._submit("continue")
                         continue
                     if line.startswith("/"):
                         if not self.session.handle_slash_command(line):

@@ -29,7 +29,7 @@ from .mentions import MentionResolutionError, format_turn_with_mentions, resolve
 
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 PRODUCT_DEFAULT_PROFILE = "coding-agent"
-CHECKPOINT_EXCLUDES = [".harness", config.PROGRESS_FILE]
+CHECKPOINT_EXCLUDES = [".harness", "global_plan", config.PROGRESS_FILE]
 PROFILE_SLASH_ALIASES = {
     "/code": "coding-agent",
     "/app": "app-builder",
@@ -119,6 +119,7 @@ class InteractiveSession:
         self.turn_count = 0
         self.checkpoint = CheckpointConfig()
         self.pending_plan_markdown: str | None = None
+        self.pending_plan_revision = 0
         self.last_user_task: str = ""
         self.last_assistant_text: str = ""
         self.profile_history: list[ProfileSwitchEvent] = []
@@ -237,6 +238,7 @@ class InteractiveSession:
             raise ValueError("No pending plan to execute. Switch to /plan and create a plan first.")
         plan_markdown = self.pending_plan_markdown
         self.pending_plan_markdown = None
+        self.pending_plan_revision = 0
         self._switch_profile(
             PRODUCT_DEFAULT_PROFILE,
             reason="execute approved plan",
@@ -265,15 +267,29 @@ class InteractiveSession:
         if self.profile.name() != "plan" or not text.strip():
             return ""
         self.pending_plan_markdown = text.strip()
+        self.pending_plan_revision += 1
+        plan_path = self._write_pending_plan_artifact(self.pending_plan_markdown)
         self.event_bus.emit(
             "plan_ready",
             agent="main_agent",
-            payload={"profile": self.profile.name()},
+            payload={
+                "profile": self.profile.name(),
+                "plan_path": str(plan_path.relative_to(self.cwd)),
+                "plan_revision": self.pending_plan_revision,
+                "approval_source": "/plan",
+            },
         )
         return (
-            "Plan ready. Say 'continue' to switch to coding-agent mode and implement it, "
-            "or reply with feedback to revise the plan."
+            "计划已写入 `global_plan/current/plan.md`。"
+            "在 TUI 中选择 `执行计划` 继续，或在 `修改计划` 输入框中输入修改理由。"
+            "非 TUI 入口可回复 continue/继续 执行，其他文本会作为修改理由。"
         )
+
+    def _write_pending_plan_artifact(self, plan_markdown: str) -> Path:
+        plan_path = self.cwd / "global_plan" / "current" / "plan.md"
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(plan_markdown.rstrip() + "\n", encoding="utf-8")
+        return plan_path
 
     def _switch_profile(
         self,
@@ -359,6 +375,7 @@ class InteractiveSession:
     def switch_profile(self, profile_name: str) -> str:
         previous = self.profile.name()
         self.pending_plan_markdown = None
+        self.pending_plan_revision = 0
         self._switch_profile(profile_name)
         current = self.profile.name()
         if current == previous:
@@ -548,7 +565,7 @@ def _git_add_runtime_exclude(workspace: Path) -> None:
     info_exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = info_exclude.read_text(encoding="utf-8", errors="replace") if info_exclude.exists() else ""
     lines = set(existing.splitlines())
-    additions = [item for item in [".harness/", config.PROGRESS_FILE] if item not in lines]
+    additions = [item for item in [".harness/", "global_plan/", config.PROGRESS_FILE] if item not in lines]
     if additions:
         with info_exclude.open("a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
@@ -566,7 +583,7 @@ def git_add_runtime_excluded(workspace: Path) -> None:
         check=True,
     )
     subprocess.run(
-        ["git", "reset", "-q", "--", ".harness", config.PROGRESS_FILE],
+        ["git", "reset", "-q", "--", ".harness", "global_plan", config.PROGRESS_FILE],
         cwd=workspace,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
