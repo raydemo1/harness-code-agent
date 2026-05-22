@@ -86,10 +86,11 @@ def _iter_mention_tokens(text: str):
         while i < n and not text[i].isspace():
             i += 1
         token = text[token_start:i].rstrip(".,;:!?)]}")
-        if not token:
+        if not token or token.startswith("@"):
             continue
         raw = "@" + token
         yield raw, token
+
 
 
 def resolve_mentions(

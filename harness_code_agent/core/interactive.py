@@ -385,24 +385,17 @@ class InteractiveSession:
         if args[:2] == ["every", "turn"]:
             self.checkpoint.every_turns = 1
             return "checkpoint cadence: every turn"
-        if len(args) == 2 and args[0] == "every":
-            try:
-                turns = int(args[1])
-            except ValueError as e:
-                raise ValueError("Usage: /checkpoint every <N> turns") from e
-            if turns < 1:
-                raise ValueError("Checkpoint cadence must be at least 1 turn")
-            self.checkpoint.every_turns = turns
-            return f"checkpoint cadence: every {turns} turns"
-        if len(args) == 3 and args[0] == "every" and args[2] == "turns":
-            try:
-                turns = int(args[1])
-            except ValueError as e:
-                raise ValueError("Usage: /checkpoint every <N> turns") from e
-            if turns < 1:
-                raise ValueError("Checkpoint cadence must be at least 1 turn")
-            self.checkpoint.every_turns = turns
-            return f"checkpoint cadence: every {turns} turns"
+        if args and args[0] == "every":
+            if len(args) in (2, 3) and (len(args) == 2 or args[2] in ("turn", "turns")):
+                try:
+                    turns = int(args[1])
+                except ValueError as e:
+                    raise ValueError("Usage: /checkpoint every <N> turns") from e
+                if turns < 1:
+                    raise ValueError("Checkpoint cadence must be at least 1 turn")
+                self.checkpoint.every_turns = turns
+                return f"checkpoint cadence: every {turns} turns"
+
         if args == ["status"]:
             return (
                 f"checkpoint auto: {'on' if self.checkpoint.auto else 'off'}; "

@@ -480,6 +480,30 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_handle_checkpoint_every_cadence(self):
+        session = self._session()
+        try:
+            res = session._handle_checkpoint_command(["every", "3", "turns"])
+            self.assertEqual(session.checkpoint.every_turns, 3)
+            self.assertIn("every 3 turns", res)
+
+            res = session._handle_checkpoint_command(["every", "5"])
+            self.assertEqual(session.checkpoint.every_turns, 5)
+            self.assertIn("every 5 turns", res)
+
+            res = session._handle_checkpoint_command(["every", "1", "turn"])
+            self.assertEqual(session.checkpoint.every_turns, 1)
+            self.assertIn("every 1 turns", res)
+
+            with self.assertRaises(ValueError):
+                session._handle_checkpoint_command(["every", "abc"])
+
+            with self.assertRaises(ValueError):
+                session._handle_checkpoint_command(["every", "-1"])
+        finally:
+            session.close()
+
+
     def test_dirty_checkpoint_commits_changes(self):
         session = self._session()
         try:

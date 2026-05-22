@@ -20,13 +20,21 @@ class TuiApprovalProvider:
         else:
             print_formatted_text(f"args: {_summarize_args(request.args)}")
         while True:
-            answer = self.prompt_session.prompt("Approve? [y/N/detail] ").strip().lower()
+            try:
+                answer = self.prompt_session.prompt("Approve? [y/N/detail] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print_formatted_text(HTML("\n<ansired>Approval cancelled/interrupted.</ansired>"))
+                return ApprovalResult(False, "interrupted in TUI", {"ui": "tui"})
+            
             if answer in {"y", "yes"}:
                 return ApprovalResult(True, "approved in TUI", {"ui": "tui"})
             if answer in {"", "n", "no"}:
                 return ApprovalResult(False, "denied in TUI", {"ui": "tui"})
             if answer in {"d", "detail", "details"}:
                 print_formatted_text(repr(request.args))
+            else:
+                print_formatted_text("Invalid input. Please enter 'y', 'n', or 'detail'.")
+
 
 
 def _summarize_args(args: dict) -> dict:

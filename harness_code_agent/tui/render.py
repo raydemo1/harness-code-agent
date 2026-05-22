@@ -48,10 +48,10 @@ def bottom_toolbar(snapshot: SessionStatusSnapshot) -> HTML:
     tool = f" tool:{snapshot.running_tool}" if snapshot.running_tool else ""
     checkpoint = f" checkpoint:{snapshot.checkpoint}" if snapshot.checkpoint else ""
     return HTML(
-        "<ansiblack bg:ansigray>"
+        '<style fg="ansiblack" bg="ansigray">'
         f" {escape_html(snapshot.profile)} | turn {snapshot.turn} | {escape_html(snapshot.permission_mode)} "
         f"| {escape_html(snapshot.status)}{escape_html(tool)}{escape_html(plan)}{escape_html(checkpoint)} "
-        "</ansiblack bg:ansigray>"
+        "</style>"
     )
 
 

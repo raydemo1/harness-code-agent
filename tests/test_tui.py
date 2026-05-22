@@ -134,6 +134,124 @@ class TuiTests(unittest.TestCase):
         self.assertTrue(approved.approved)
         self.assertFalse(denied.approved)
 
+    def test_double_at_mention_is_ignored(self):
+        mentions = parse_mentions("use @@file please")
+        self.assertEqual(len(mentions), 0)
+
+    def test_event_bus_listener_exception_logged(self):
+        def bad_listener(event):
+            raise ValueError("rendering error")
+        
+        bus = EventBus(listener=bad_listener)
+        with patch("harness_code_agent.sessions.events.log") as mock_log:
+            bus.emit("user_input", payload={"text": "hello"})
+            mock_log.debug.assert_called_once()
+            args, _ = mock_log.debug.call_args
+            self.assertIn("EventBus listener error", args[0])
+
+    def test_tui_approval_provider_eof_error(self):
+        class FakePromptSessionEOF:
+            def prompt(self, *_args, **_kwargs):
+                raise EOFError()
+
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "echo hi"},
+            risk="high",
+            reason="test",
+        )
+        with (
+            patch("harness_code_agent.tui.approval.PromptSession", FakePromptSessionEOF),
+            patch("harness_code_agent.tui.approval.print_formatted_text"),
+        ):
+            provider = TuiApprovalProvider()
+            result = provider.request(request)
+
+        self.assertFalse(result.approved)
+        self.assertEqual(result.reason, "interrupted in TUI")
+
+    def test_tui_approval_provider_keyboard_interrupt(self):
+        class FakePromptSessionKI:
+            def prompt(self, *_args, **_kwargs):
+                raise KeyboardInterrupt()
+
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "echo hi"},
+            risk="high",
+            reason="test",
+        )
+        with (
+            patch("harness_code_agent.tui.approval.PromptSession", FakePromptSessionKI),
+            patch("harness_code_agent.tui.approval.print_formatted_text"),
+        ):
+            provider = TuiApprovalProvider()
+            result = provider.request(request)
+
+        self.assertFalse(result.approved)
+        self.assertEqual(result.reason, "interrupted in TUI")
+
+    def test_tui_approval_provider_invalid_input_hint(self):
+        class FakePromptSessionInvalid:
+            answers = ["invalid_arg", "y"]
+            def prompt(self, *_args, **_kwargs):
+                return self.answers.pop(0)
+
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "echo hi"},
+            risk="high",
+            reason="test",
+        )
+        with (
+            patch("harness_code_agent.tui.approval.PromptSession", FakePromptSessionInvalid),
+            patch("harness_code_agent.tui.approval.print_formatted_text") as mock_print,
+        ):
+            provider = TuiApprovalProvider()
+            result = provider.request(request)
+
+        self.assertTrue(result.approved)
+        printed = [arg[0] for arg, _ in mock_print.call_args_list]
+        self.assertTrue(any("Invalid input" in str(p) for p in printed))
+
+    def test_iter_workspace_paths_skips_excluded_dirs_traversal(self):
+        import os
+        from harness_code_agent.tui.completion import iter_workspace_paths
+        
+        node_modules_dir = Path(self.temp_dir) / "node_modules"
+        node_modules_dir.mkdir()
+        (node_modules_dir / "hidden.js").write_text("console.log('hi')", encoding="utf-8")
+        
+        src_dir = Path(self.temp_dir) / "src"
+        src_dir.mkdir()
+        (src_dir / "app.js").write_text("console.log('app')", encoding="utf-8")
+        
+        scanned_dirs = []
+        original_scandir = os.scandir
+        
+        def spy_scandir(path):
+            scanned_dirs.append(Path(path).resolve())
+            return original_scandir(path)
+            
+        with patch("os.scandir", side_effect=spy_scandir):
+            paths = list(iter_workspace_paths(Path(self.temp_dir)))
+            
+        # Verify src is in the returned list
+        rel_paths = [p[0] for p in paths]
+        self.assertIn("src", rel_paths)
+        self.assertIn("src/app.js", rel_paths)
+        
+        # Verify node_modules content is NOT in the returned list
+        self.assertNotIn("node_modules/hidden.js", rel_paths)
+        
+        # Verify os.scandir was never called on the node_modules directory!
+        node_modules_resolved = node_modules_dir.resolve()
+        self.assertNotIn(node_modules_resolved, scanned_dirs)
+
+
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

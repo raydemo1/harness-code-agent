@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+log = logging.getLogger("harness")
+
 
 
 FAILURE_CATEGORIES = {
@@ -258,8 +262,9 @@ class EventBus:
         if self.listener is not None:
             try:
                 self.listener(event)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("EventBus listener error: %s", exc)
+
         return event
 
     def emit_event(self, structured_event: StructuredEvent) -> SessionEvent:

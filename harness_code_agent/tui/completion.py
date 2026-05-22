@@ -43,6 +43,8 @@ class HcaCompleter(Completer):
         text = document.text_before_cursor
         stripped = text.lstrip()
         if stripped.startswith("/"):
+            if " " in stripped:
+                return
             token = stripped.split(maxsplit=1)[0]
             for spec in fuzzy_command_candidates(self.registry, token):
                 yield Completion(
@@ -137,21 +139,34 @@ def mention_candidates(root: Path, prefix: str, session_store, *, limit: int = 5
 
 
 def iter_workspace_paths(root: Path, *, limit: int = 2000) -> Iterable[tuple[str, bool]]:
+    import os
     root = Path(root)
-    count = 0
-    for path in sorted(root.rglob("*"), key=lambda p: p.as_posix().lower()):
-        if count >= limit:
-            return
-        if any(part in EXCLUDED_DIRS for part in path.relative_to(root).parts):
-            continue
+    results = []
+
+    def walk(curr_dir: Path):
         try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        if not rel:
-            continue
-        count += 1
-        yield rel, path.is_dir()
+            for entry in os.scandir(curr_dir):
+                if entry.name in EXCLUDED_DIRS:
+                    continue
+                is_dir = entry.is_dir(follow_symlinks=False)
+                entry_path = Path(entry.path)
+                try:
+                    rel = entry_path.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                if not rel:
+                    continue
+                results.append((rel, is_dir))
+                if is_dir:
+                    walk(entry_path)
+        except OSError:
+            pass
+
+    walk(root)
+    results.sort(key=lambda item: item[0].lower())
+    for rel, is_dir in results[:limit]:
+        yield rel, is_dir
+
 
 
 def quote_mention_path(path: str) -> str:
