@@ -75,7 +75,7 @@ class TuiState:
             return TranscriptBlock("failure", "failure", _payload_summary(payload), "failed")
         if event_type == "approval_requested":
             self.pending_approval = payload
-            return TranscriptBlock("approval", "approval requested", _payload_summary(payload), "pending")
+            return TranscriptBlock("approval", "approval requested", _approval_summary(payload), "pending")
         if event_type == "approval_decided":
             self.pending_approval = None
             status = "approved" if payload.get("approved") else "denied"
@@ -124,6 +124,17 @@ def _payload_summary(payload: dict[str, Any]) -> str:
         if len(text) > 160:
             text = text[:157] + "..."
         parts.append(f"{key}={text}")
+    return ", ".join(parts)
+
+
+def _approval_summary(payload: dict[str, Any]) -> str:
+    parts = []
+    for key in ("tool", "risk", "reason"):
+        if key in payload:
+            text = str(payload[key]).replace("\n", " ")
+            if len(text) > 160:
+                text = text[:157] + "..."
+            parts.append(f"{key}={text}")
     return ", ".join(parts)
 
 

@@ -1,3 +1,4 @@
+import json
 import shutil
 import tempfile
 import unittest
@@ -9,7 +10,13 @@ from harness_code_agent.core.mentions import parse_mentions, resolve_mentions
 from harness_code_agent.runtime.approvals import ApprovalRequest
 from harness_code_agent.sessions.events import EventBus
 from harness_code_agent.sessions.store import SessionStore
-from harness_code_agent.tui.approval import TuiApprovalProvider
+from harness_code_agent.tui.approval import (
+    ApprovalAllowlist,
+    ApprovalChoiceBar,
+    TuiApprovalProvider,
+    _derive_persistent_prefix,
+    _format_approval_body,
+)
 from harness_code_agent.tui.commands import default_command_registry
 from harness_code_agent.tui.completion import current_mention_query, mention_candidates
 from harness_code_agent.tui.render import prompt_message
@@ -120,6 +127,38 @@ class TuiTests(unittest.TestCase):
         self.assertEqual(state.snapshot.running_tool, "")
         self.assertGreaterEqual(len(state.blocks), 5)
 
+    def test_approval_requested_summary_omits_repeated_args_blob(self):
+        state = TuiState(
+            SessionStatusSnapshot(
+                profile="coding-agent",
+                model="model-a",
+                provider="auto",
+                permission_mode="workspace-write",
+                session_id="s1",
+                cwd=self.root,
+            )
+        )
+
+        block = state.apply_event(
+            {
+                "type": "approval_requested",
+                "payload": {
+                    "tool": "run_bash",
+                    "risk": "shell_dangerous",
+                    "reason": "workspace-write mode requires user approval for high-risk shell commands",
+                    "args": {"command": "rm -rf build", "content": "x" * 500},
+                },
+            }
+        )
+
+        self.assertIsNotNone(block)
+        self.assertEqual(block.status, "pending")
+        self.assertIn("tool=run_bash", block.body)
+        self.assertIn("risk=shell_dangerous", block.body)
+        self.assertIn("reason=workspace-write mode requires user approval", block.body)
+        self.assertNotIn("args=", block.body)
+        self.assertNotIn("content=", block.body)
+
     def test_pending_plan_prompt_renders_action_bar_labels(self):
         snapshot = SessionStatusSnapshot(
             profile="plan",
@@ -138,10 +177,14 @@ class TuiTests(unittest.TestCase):
         self.assertIn("输入修改理由", prompt)
 
     def test_tui_approval_provider_approve_and_deny(self):
-        class FakePromptSession:
-            answers = ["y", "n"]
+        class FakeChoiceBar:
+            answers = ["approve", "deny"]
 
-            def prompt(self, *_args, **_kwargs):
+            def __init__(self, request, *, show_details=False, **_kwargs):
+                self.request = request
+                self.show_details = show_details
+
+            def run(self):
                 return self.answers.pop(0)
 
         request = ApprovalRequest(
@@ -150,16 +193,66 @@ class TuiTests(unittest.TestCase):
             risk="high",
             reason="test",
         )
-        with (
-            patch("harness_code_agent.tui.approval.PromptSession", FakePromptSession),
-            patch("harness_code_agent.tui.approval.print_formatted_text"),
-        ):
-            provider = TuiApprovalProvider()
-            approved = provider.request(request)
-            denied = provider.request(request)
+        provider = TuiApprovalProvider(choice_bar_factory=FakeChoiceBar)
+        approved = provider.request(request)
+        denied = provider.request(request)
 
         self.assertTrue(approved.approved)
         self.assertFalse(denied.approved)
+
+    def test_tui_approval_provider_persists_project_prefix_rule_and_reuses_it(self):
+        class FakeChoiceBar:
+            calls = 0
+
+            def __init__(self, request, *, show_details=False, persistent_prefix=None, **_kwargs):
+                self.request = request
+                self.show_details = show_details
+                self.persistent_prefix = persistent_prefix
+
+            def run(self):
+                self.__class__.calls += 1
+                return "persist"
+
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "npm run test -- --watch"},
+            risk="shell_risky",
+            reason="read-only mode requires user approval",
+        )
+        provider = TuiApprovalProvider(project_root=self.root, choice_bar_factory=FakeChoiceBar)
+
+        first = provider.request(request)
+        second = provider.request(
+            ApprovalRequest(
+                tool_name="run_bash",
+                args={"command": "npm run test -- tests/test_tui.py"},
+                risk="shell_risky",
+                reason="read-only mode requires user approval",
+            )
+        )
+        data = json.loads((self.root / ".harness" / "approval_allowlist.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(first.approved)
+        self.assertTrue(second.approved)
+        self.assertEqual(FakeChoiceBar.calls, 1)
+        self.assertEqual(data["rules"][0]["prefix"], ["npm", "run", "test"])
+        self.assertEqual(second.metadata["approval_source"], "project_allowlist")
+
+    def test_python_command_does_not_persist_bare_prefix(self):
+        self.assertIsNone(_derive_persistent_prefix("python"))
+        self.assertIsNone(_derive_persistent_prefix("python script.py"))
+        self.assertEqual(_derive_persistent_prefix("python -m unittest tests.test_tui"), ["python", "-m", "unittest"])
+
+    def test_project_allowlist_does_not_match_other_project(self):
+        allowlist = ApprovalAllowlist(self.root)
+        allowlist.add_prefix_rule(["npm", "run", "test"], command="npm run test -- --watch")
+        other_project = Path(tempfile.mkdtemp())
+        try:
+            other_allowlist = ApprovalAllowlist(other_project)
+
+            self.assertFalse(other_allowlist.matches("npm run test -- tests/test_tui.py"))
+        finally:
+            shutil.rmtree(other_project, ignore_errors=True)
 
     def test_double_at_mention_is_ignored(self):
         mentions = parse_mentions("use @@file please")
@@ -177,8 +270,12 @@ class TuiTests(unittest.TestCase):
             self.assertIn("EventBus listener error", args[0])
 
     def test_tui_approval_provider_eof_error(self):
-        class FakePromptSessionEOF:
-            def prompt(self, *_args, **_kwargs):
+        class FakeChoiceBarEOF:
+            def __init__(self, request, *, show_details=False, **_kwargs):
+                self.request = request
+                self.show_details = show_details
+
+            def run(self):
                 raise EOFError()
 
         request = ApprovalRequest(
@@ -187,19 +284,20 @@ class TuiTests(unittest.TestCase):
             risk="high",
             reason="test",
         )
-        with (
-            patch("harness_code_agent.tui.approval.PromptSession", FakePromptSessionEOF),
-            patch("harness_code_agent.tui.approval.print_formatted_text"),
-        ):
-            provider = TuiApprovalProvider()
+        with patch("harness_code_agent.tui.approval.print_formatted_text"):
+            provider = TuiApprovalProvider(choice_bar_factory=FakeChoiceBarEOF)
             result = provider.request(request)
 
         self.assertFalse(result.approved)
         self.assertEqual(result.reason, "interrupted in TUI")
 
     def test_tui_approval_provider_keyboard_interrupt(self):
-        class FakePromptSessionKI:
-            def prompt(self, *_args, **_kwargs):
+        class FakeChoiceBarKI:
+            def __init__(self, request, *, show_details=False, **_kwargs):
+                self.request = request
+                self.show_details = show_details
+
+            def run(self):
                 raise KeyboardInterrupt()
 
         request = ApprovalRequest(
@@ -208,38 +306,81 @@ class TuiTests(unittest.TestCase):
             risk="high",
             reason="test",
         )
-        with (
-            patch("harness_code_agent.tui.approval.PromptSession", FakePromptSessionKI),
-            patch("harness_code_agent.tui.approval.print_formatted_text"),
-        ):
-            provider = TuiApprovalProvider()
+        with patch("harness_code_agent.tui.approval.print_formatted_text"):
+            provider = TuiApprovalProvider(choice_bar_factory=FakeChoiceBarKI)
             result = provider.request(request)
 
         self.assertFalse(result.approved)
         self.assertEqual(result.reason, "interrupted in TUI")
 
-    def test_tui_approval_provider_invalid_input_hint(self):
-        class FakePromptSessionInvalid:
-            answers = ["invalid_arg", "y"]
-            def prompt(self, *_args, **_kwargs):
+    def test_tui_approval_provider_details_then_approve(self):
+        class FakeChoiceBarDetails:
+            answers = ["details", "approve"]
+            detail_states = []
+
+            def __init__(self, request, *, show_details=False, **_kwargs):
+                self.request = request
+                self.show_details = show_details
+                self.detail_states.append(show_details)
+
+            def run(self):
                 return self.answers.pop(0)
 
         request = ApprovalRequest(
             tool_name="run_bash",
-            args={"command": "echo hi"},
+            args={"command": "rm -rf build", "content": "secret text"},
             risk="high",
             reason="test",
         )
-        with (
-            patch("harness_code_agent.tui.approval.PromptSession", FakePromptSessionInvalid),
-            patch("harness_code_agent.tui.approval.print_formatted_text") as mock_print,
-        ):
-            provider = TuiApprovalProvider()
-            result = provider.request(request)
+        provider = TuiApprovalProvider(choice_bar_factory=FakeChoiceBarDetails)
+        result = provider.request(request)
 
         self.assertTrue(result.approved)
-        printed = [arg[0] for arg, _ in mock_print.call_args_list]
-        self.assertTrue(any("Invalid input" in str(p) for p in printed))
+        self.assertEqual(FakeChoiceBarDetails.detail_states, [False, True])
+
+    def test_tui_approval_panel_includes_risk_reason_and_command(self):
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "rm -rf build"},
+            risk="shell_dangerous",
+            reason="workspace-write mode requires user approval",
+        )
+
+        body = _format_approval_body(request, show_details=False)
+
+        self.assertIn("Approval required", body)
+        self.assertIn("tool: run_bash", body)
+        self.assertIn("risk: shell_dangerous", body)
+        self.assertIn("reason: workspace-write mode requires user approval", body)
+        self.assertIn("command: rm -rf build", body)
+
+    def test_tui_approval_choice_bar_defaults_to_approve(self):
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "rm -rf build"},
+            risk="shell_dangerous",
+            reason="workspace-write mode requires user approval",
+        )
+
+        choice_bar = ApprovalChoiceBar(request)
+
+        self.assertEqual(choice_bar.selected_index, 0)
+
+    def test_tui_approval_panel_details_expands_args(self):
+        request = ApprovalRequest(
+            tool_name="write_file",
+            args={"path": "note.txt", "content": "hello"},
+            risk="edit",
+            reason="read-only mode requires user approval",
+        )
+
+        collapsed = _format_approval_body(request, show_details=False)
+        expanded = _format_approval_body(request, show_details=True)
+
+        self.assertIn("content: [5 chars]", collapsed)
+        self.assertNotIn("'content': 'hello'", collapsed)
+        self.assertIn("'content': 'hello'", expanded)
+        self.assertIn("'path': 'note.txt'", expanded)
 
     def test_iter_workspace_paths_skips_excluded_dirs_traversal(self):
         import os

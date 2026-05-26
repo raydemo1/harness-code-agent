@@ -42,7 +42,7 @@ class TuiApp:
             resume_session_id=resume_session_id,
             stream_sink=self._stream_delta,
             event_listener=self._event_listener,
-            approval_provider=TuiApprovalProvider(),
+            approval_provider=TuiApprovalProvider(project_root=self.cwd),
             output_sink=self._output,
         )
         self.state = TuiState(
