@@ -13,6 +13,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
 from ..runtime.questions import (
+    QuestionOption,
     QuestionRequest,
     QuestionResult,
     question_result_from_option,
@@ -172,7 +173,7 @@ def _format_question_body(request: QuestionRequest) -> str:
 
 
 def _format_question_choice_bar(
-    options,
+    options: list[QuestionOption],
     *,
     selected_index: int,
     other_text: str = "",

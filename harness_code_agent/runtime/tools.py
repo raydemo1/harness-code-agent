@@ -46,7 +46,13 @@ def _resolve(path: str) -> Path:
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-def read_file(path: str, tool_context: ToolContext | None = None) -> ToolResult:
+def read_file(
+    path: str,
+    start_line: int | None = None,
+    max_lines: int | None = None,
+    include_line_numbers: bool = False,
+    tool_context: ToolContext | None = None,
+) -> ToolResult:
     p = tool_context.workspace.resolve(path) if tool_context is not None else _resolve(path)
     if not p.exists():
         return ToolResult(
@@ -57,6 +63,27 @@ def read_file(path: str, tool_context: ToolContext | None = None) -> ToolResult:
             metadata={"path": path, "status_source": "native"},
         )
     content = p.read_text(encoding="utf-8", errors="replace")
+    total_lines = len(content.splitlines())
+    if start_line is not None or max_lines is not None:
+        lines = content.splitlines()
+        start = max(1, int(start_line or 1))
+        end = len(lines) if max_lines is None else min(len(lines), start + max(0, int(max_lines)) - 1)
+        selected = lines[start - 1:end]
+        if include_line_numbers:
+            selected = [f"{line_no}: {line}" for line_no, line in enumerate(selected, start=start)]
+        content = "\n".join(selected)
+        return ToolResult(
+            tool="read_file",
+            status="success",
+            output=content,
+            metadata={
+                "path": path,
+                "start_line": start,
+                "max_lines": max_lines,
+                "total_lines": total_lines,
+                "status_source": "native",
+            },
+        )
     limit = 60_000
     if len(content) > limit:
         total = len(content)
@@ -525,6 +552,14 @@ def ask_user(
         )
 
     normalized_options = normalize_question_options(options, other_label=(other_label or "其他"))
+    if len(normalized_options) <= 1:
+        return ToolResult(
+            tool="ask_user",
+            status="failed",
+            output="[error] ask_user requires at least one non-Other option",
+            error="at least one option required",
+            metadata={"status_source": "validation"},
+        )
     request = QuestionRequest(
         question=question,
         options=normalized_options,
@@ -700,13 +735,13 @@ def _tool_schema_by_name(name: str) -> dict | None:
 
 def consultation_tool_schemas() -> list[dict]:
     """Return the read-only tool surface for consultation sub-agents."""
-    names = {"read_file", "list_files", "run_bash", "web_search", "web_fetch"}
+    names = ("read_file", "list_files", "run_bash", "web_search", "web_fetch")
     return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
 
 
 def planning_tool_schemas() -> list[dict]:
     """Return the constrained planning tool surface for the plan profile."""
-    names = {
+    names = (
         "read_file",
         "list_files",
         "read_skill_file",
@@ -718,7 +753,7 @@ def planning_tool_schemas() -> list[dict]:
         "write_file",
         "apply_patch",
         "update_plan_state",
-    }
+    )
     return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
 
 
@@ -1031,7 +1066,20 @@ CORE_TOOL_SCHEMAS = [
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": {"type": "string", "description": "Relative path inside workspace"}
+                    "path": {"type": "string", "description": "Relative path inside workspace"},
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional 1-based starting line for a ranged read.",
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Optional maximum number of lines to return.",
+                    },
+                    "include_line_numbers": {
+                        "type": "boolean",
+                        "description": "Prefix returned lines with 1-based line numbers.",
+                        "default": False,
+                    },
                 },
             },
         },
@@ -1186,7 +1234,8 @@ CORE_TOOL_SCHEMAS = [
                         "type": "array",
                         "description": (
                             "Choices to show before the automatic Other choice. "
-                            "Pass concise labels with optional values/descriptions."
+                            "Pass concise labels with optional values/descriptions. "
+                            "3-4 options is ideal; maximum 9 (only the first 9 get number-key shortcuts)."
                         ),
                         "items": {
                             "type": "object",
@@ -1612,6 +1661,22 @@ def execute_tool(
     agent_name: str | None = None,
     tool_context: ToolContext | None = None,
 ) -> str:
+    return execute_tool_result(
+        name,
+        arguments,
+        runtime_state=runtime_state,
+        agent_name=agent_name,
+        tool_context=tool_context,
+    ).to_text()
+
+
+def execute_tool_result(
+    name: str,
+    arguments: dict,
+    runtime_state=None,
+    agent_name: str | None = None,
+    tool_context: ToolContext | None = None,
+) -> ToolResult:
     """Execute a tool by name with pre-validation and auto-correction."""
     arguments = dict(arguments or {})
 
@@ -1626,7 +1691,7 @@ def execute_tool(
 
     fn = BUILTIN_TOOL_REGISTRY.get(name)
     if fn is None:
-        return _finalize_tool_result(
+        return _finalize_tool_result_object(
             ToolResult(
                 tool=name,
                 status="failed",
@@ -1643,7 +1708,7 @@ def execute_tool(
 
     # If validation returned a blocking error (no fix possible), return it.
     if fix_warning and fix_warning.startswith("[auto-fix] Empty"):
-        return _finalize_tool_result(
+        return _finalize_tool_result_object(
             ToolResult(
                 tool=name,
                 status="failed",
@@ -1655,7 +1720,7 @@ def execute_tool(
             agent_name=agent_name,
         )
     if fix_warning and "interactive command" in fix_warning:
-        return _finalize_tool_result(
+        return _finalize_tool_result_object(
             ToolResult(
                 tool=name,
                 status="failed",
@@ -1701,7 +1766,7 @@ def execute_tool(
             )
             if not approval_result.approved:
                 result = f"[approval_denied] {approval_result.reason}"
-                return _finalize_tool_result(
+                return _finalize_tool_result_object(
                     ToolResult(
                         tool=name,
                         status="failed",
@@ -1714,7 +1779,7 @@ def execute_tool(
                 )
         elif not decision.allowed:
             result = f"[blocked] {decision.reason}"
-            return _finalize_tool_result(
+            return _finalize_tool_result_object(
                 ToolResult(
                     tool=name,
                     status="failed",
@@ -1753,7 +1818,7 @@ def execute_tool(
     if fix_warning:
         tool_result = tool_result.with_output_prefix(fix_warning)
 
-    return _finalize_tool_result(
+    return _finalize_tool_result_object(
         tool_result,
         tool_context=tool_context,
         agent_name=agent_name,
@@ -1791,11 +1856,23 @@ def _finalize_tool_result(
     tool_context: ToolContext | None,
     agent_name: str | None,
 ) -> str:
-    result_text = tool_result.to_text()
+    return _finalize_tool_result_object(
+        tool_result,
+        tool_context=tool_context,
+        agent_name=agent_name,
+    ).to_text()
+
+
+def _finalize_tool_result_object(
+    tool_result: ToolResult,
+    *,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+) -> ToolResult:
     if tool_context is not None:
         _emit_structured_tool_result(tool_result, tool_context=tool_context, agent_name=agent_name)
         _emit_file_change_events(tool_result, tool_context=tool_context, agent_name=agent_name)
-    return result_text
+    return tool_result
 
 
 def _coerce_tool_result(name: str, result) -> ToolResult:
