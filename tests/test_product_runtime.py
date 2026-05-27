@@ -468,23 +468,7 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertNotEqual(first, third)
 
-    def test_prompt_builder_injects_dynamic_facts_without_mutating_history(self):
-        from harness_code_agent.agent.loop import Agent, AgentConversation
-
-        with patch("harness_code_agent.agent.loop.get_client"):
-            conversation = AgentConversation(Agent("test", "system", use_tools=False))
-        conversation.add_user_turn("Task:\ninspect")
-        conversation.fact_tracker.file_generation["note.txt"] = 2
-
-        prompt_result = conversation._build_prompt()
-
-        self.assertEqual(prompt_result.messages[0]["role"], "system")
-        self.assertIn("[DYNAMIC FACTS]", prompt_result.messages[1]["content"])
-        self.assertIn("note.txt: 2", prompt_result.messages[1]["content"])
-        self.assertEqual(conversation.messages[1]["content"], "Task:\ninspect")
-        self.assertNotIn("[DYNAMIC FACTS]", json.dumps(conversation.messages, ensure_ascii=False))
-
-    def test_context_replacement_detaches_observation_indexes_and_ages_survivors(self):
+    def test_context_replacement_detaches_observation_indexes_and_summarizes_survivors(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
         from harness_code_agent.runtime.tool_result import ToolResult
 
@@ -498,11 +482,11 @@ class ProductRuntimeTests(unittest.TestCase):
             result=result,
             fact_tracker=conversation.fact_tracker,
         )
-        fresh = conversation.observation_store.fresh_message(observation, result)
+        observed = conversation.observation_store.observed_message(observation, result)
         conversation.messages.extend(
             [
                 {"role": "user", "content": "old turn"},
-                {"role": "tool", "tool_call_id": "tc_read", "content": fresh},
+                {"role": "tool", "tool_call_id": "tc_read", "content": observed},
             ]
         )
         observation.message_index = 2
@@ -511,7 +495,7 @@ class ProductRuntimeTests(unittest.TestCase):
             [
                 conversation.messages[0],
                 {"role": "user", "content": "summary"},
-                {"role": "tool", "tool_call_id": "tc_read", "content": fresh},
+                {"role": "tool", "tool_call_id": "tc_read", "content": observed},
             ]
         )
 
@@ -519,17 +503,6 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertNotIn("SECRET_RAW_CONTENT", prompt_text)
         self.assertIn("historical", prompt_text)
         self.assertIsNone(observation.message_index)
-        self.assertEqual(observation.fresh_remaining, 0)
-
-    def test_included_observation_ids_detects_fresh_header_state(self):
-        from harness_code_agent.agent.observations import included_observation_ids_from_messages
-
-        messages = [
-            {"role": "tool", "content": "[OBS obs_0001 fresh]\ntool: read_file\npayload"},
-            {"role": "tool", "content": "[OBS obs_0002 historical]\ntool: read_file\npayload"},
-        ]
-
-        self.assertEqual(included_observation_ids_from_messages(messages), {"obs_0001"})
 
     def test_agent_loop_records_llm_cached_token_usage_event(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
@@ -572,7 +545,7 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(usage.payload["prompt_tokens"], 100)
         self.assertEqual(usage.payload["cache_hit_ratio"], 0.8)
 
-    def test_tool_observation_is_fresh_once_then_aged_and_invalidated(self):
+    def test_invalidated_long_observation_is_compressed_and_notice_is_appended(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
 
         class FakeCompletions:
@@ -626,7 +599,7 @@ class ProductRuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "note.txt").write_text("SECRET_FULL_CONTENT_UNSAFE", encoding="utf-8")
+            (root / "note.txt").write_text("SECRET_FULL_CONTENT_UNSAFE" * 700, encoding="utf-8")
             fake_client = FakeClient()
             with (
                 patch("harness_code_agent.agent.loop.get_client", return_value=fake_client),
@@ -647,9 +620,85 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertIn("SECRET_FULL_CONTENT_UNSAFE", second_prompt)
             self.assertNotIn("SECRET_FULL_CONTENT_UNSAFE", third_prompt)
             self.assertIn("[OBS", third_prompt)
-            self.assertIn("historical", third_prompt)
+            self.assertIn("stale", third_prompt)
             self.assertIn("FACT INVALIDATION", third_prompt)
+            self.assertIn("Compressed stale long observations", third_prompt)
             self.assertTrue(list((root / ".harness" / "observations").rglob("*.txt")))
+
+    def test_invalidated_short_observation_keeps_original_message_and_appends_notice(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(json.loads(json.dumps(kwargs["messages"])))
+                call_count = len(self.calls)
+                if call_count == 1:
+                    message = SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="tc_read",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="read_file",
+                                    arguments='{"path":"note.txt"}',
+                                ),
+                            )
+                        ],
+                    )
+                    finish_reason = "tool_calls"
+                elif call_count == 2:
+                    message = SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="tc_write",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="write_file",
+                                    arguments='{"path":"note.txt","content":"updated"}',
+                                ),
+                            )
+                        ],
+                    )
+                    finish_reason = "tool_calls"
+                else:
+                    message = SimpleNamespace(content="done", tool_calls=None)
+                    finish_reason = "stop"
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+                    usage=None,
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("SHORT_STALE_CONTENT", encoding="utf-8")
+            fake_client = FakeClient()
+            with (
+                patch("harness_code_agent.agent.loop.get_client", return_value=fake_client),
+                patch("harness_code_agent.agent.loop.config.WORKSPACE", str(root)),
+            ):
+                conversation = AgentConversation(Agent("test", "system", use_tools=True))
+
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 3),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+                patch("harness_code_agent.runtime.tools.config.WORKSPACE", str(root)),
+            ):
+                conversation.run_until_idle()
+
+            third_prompt = json.dumps(fake_client.chat.completions.calls[2], ensure_ascii=False)
+
+            self.assertIn("SHORT_STALE_CONTENT", third_prompt)
+            self.assertIn("FACT INVALIDATION", third_prompt)
+            self.assertNotIn("Compressed stale long observations", third_prompt)
 
     def test_trace_writer_stores_traces_under_harness_directory_without_stderr_by_default(self):
         from harness_code_agent.agent.loop import TraceWriter

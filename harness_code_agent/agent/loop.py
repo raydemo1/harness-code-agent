@@ -15,10 +15,7 @@ from . import context
 from .compaction import CompactionGate, CompactionManager, get_thresholds, compaction_action
 from .observations import (
     FactTracker,
-    ObservationContextPolicy,
     ObservationStore,
-    PromptBuildResult,
-    included_observation_ids_from_messages,
 )
 from .providers import ProviderAdapter, current_adapter, get_client
 from .utils import _prompt_cache_key, _short_hash, _usage_to_dict
@@ -261,7 +258,6 @@ class AgentConversation:
         self._event_bus = None
         self.fact_tracker = FactTracker()
         self.observation_store = ObservationStore(self._observation_dir())
-        self.observation_context_policy = ObservationContextPolicy()
         self._cached_prompt_cache_key: str | None = None
         if initial_task is not None:
             self.add_user_turn(initial_task)
@@ -275,24 +271,13 @@ class AgentConversation:
             root = Path(config.WORKSPACE)
         return root / ".harness" / "observations" / safe_session_id
 
-    def _build_prompt(self) -> PromptBuildResult:
+    def _build_prompt(self) -> list[dict]:
         """Build the messages list that will be sent to the LLM.
 
-        The API prompt is assembled as:
-        stable system prefix, dynamic fact layer, then the conversation tail.
-        ``self.messages`` remains the durable conversation log; generated
-        dynamic facts are intentionally not written back to it.
+        The API prompt is the durable conversation log. Dynamic fact changes
+        are represented as appended messages, not as a regenerated prelude.
         """
-        messages = [self.messages[0]]
-        dynamic_facts = self.observation_context_policy.dynamic_facts_message(
-            self.observation_store,
-            self.fact_tracker,
-        )
-        if dynamic_facts is not None:
-            messages.append(dynamic_facts)
-        messages.extend(self.messages[1:])
-        included_ids = included_observation_ids_from_messages(messages)
-        return PromptBuildResult(messages=messages, included_observation_ids=included_ids)
+        return self.messages
 
     def add_user_turn(self, task: str) -> None:
         self.runtime_state.current_turn_start_index = len(self.messages)
@@ -579,10 +564,10 @@ class AgentConversation:
                     log.warning(f"[{agent.name}] Async compaction candidate failed: {exc}")
 
             # --- Build prompt and LLM call ---
-            prompt_result = self._build_prompt()
+            prompt_messages = self._build_prompt()
             chat_args = {
                 "model": config.MODEL,
-                "messages": prompt_result.messages,
+                "messages": prompt_messages,
                 "max_tokens": 32768,
             }
             if agent.use_tools:
@@ -647,15 +632,6 @@ class AgentConversation:
 
             # --- Append assistant message to history ---
             self._append_message(assistant_msg)
-
-            # --- Age observations confirmed as included by the prompt builder ---
-            # included_ids was computed before the assistant message and tool
-            # results were appended, so it naturally excludes observations
-            # created during tool execution below.
-            self.observation_store.mark_seen_by_model(
-                self.messages,
-                included_ids=prompt_result.included_observation_ids,
-            )
 
             # --- Trace the LLM response ---
             self.trace.llm_response(content, tool_calls, finish_reason)
@@ -749,7 +725,7 @@ class AgentConversation:
                 self._append_message({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": self.observation_store.fresh_message(observation, tool_result),
+                    "content": self.observation_store.observed_message(observation, tool_result),
                 })
                 observation.message_index = len(self.messages) - 1
                 invalidation = self.fact_tracker.apply_mutation(
@@ -760,7 +736,11 @@ class AgentConversation:
                     exclude_ids={observation.id},
                 )
                 if invalidation:
-                    self.observation_store.replace_stale_messages(self.messages)
+                    replaced = self.observation_store.replace_long_stale_messages(self.messages)
+                    notice = invalidation
+                    if replaced:
+                        notice += "\nCompressed stale long observations: " + ", ".join(replaced)
+                    self._append_message({"role": "user", "content": notice})
                 self.compaction_gate.end_tool_call()
 
                 self._check_cancelled(cancellation_token)

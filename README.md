@@ -21,6 +21,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 - **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
 - **Benchmark 适配**：`benchmarks/` 下提供 Terminal-Bench 2.0 / Harbor 运行入口。
 - **项目规则文件**：交互式 session 启动时会读取当前工作区根目录的 `HARNESS.md`，并作为稳定系统提示的一部分注入。
+- **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。
 
 ## 项目结构
 
@@ -39,6 +40,19 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 ├── benchmarks/             # benchmark launcher 和 Harbor adapter
 └── tests/                  # unittest 测试
 ```
+
+## 上下文与 Prompt Cache
+
+Harness 的上下文拼接遵循“稳定前缀 + 追加式历史”的原则：
+
+- 稳定前缀只放 profile 规则、`HARNESS.md`、profile acceptance criteria、主 agent ownership rules 和 skill catalog。
+- 每轮用户任务、工具调用结果、文件变更、命令结果和事实失效提示都追加到 conversation tail。
+- 不在 system 后面每轮插入会变化的 dynamic facts 层。
+- 工具结果以 `[OBS obs_xxxx observed]` 记录当时观察到的 bounded 输出。
+- 当文件写入、patch 或高风险 shell 让旧观察失效时，追加 `[FACT INVALIDATION]` notice。
+- 如果失效的是长工具输出，会把原长 tool message 替换成短 stale summary，以回收上下文空间。
+
+实测对比中，旧方案每轮在前部插入变化的 dynamic facts，新方案改为尾部追加 notice。在 `deepseek-v4-flash` 上做 6 轮真实 API 请求，warmup 后平均缓存命中率从约 `49.8%` 提升到约 `87.5%`，第 6 轮从 `4352/8187 = 53.2%` 提升到 `7296/8148 = 89.5%`。
 
 ## 环境要求
 

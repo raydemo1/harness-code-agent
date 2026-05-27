@@ -12,20 +12,8 @@ from ..runtime.tool_result import ToolResult
 
 
 FRESH_DETAIL_LIMIT = 12_000
+STALE_REPLACEMENT_MIN_CHARS = 4_000
 _OBS_ID_PREFIX = "[OBS "
-
-
-@dataclass(frozen=True)
-class PromptBuildResult:
-    """Contract between the prompt builder and the freshness tracker.
-
-    ``messages`` is the list actually sent to the LLM.
-    ``included_observation_ids`` contains the IDs of observations whose
-    **full fresh content** appears verbatim in ``messages``.  Only these
-    observations should have their ``fresh_remaining`` consumed.
-    """
-    messages: list[dict]
-    included_observation_ids: set[str]
 
 
 @dataclass
@@ -42,7 +30,6 @@ class ToolObservation:
     output_hash: str
     created_at: float = field(default_factory=time.time)
     message_index: int | None = None
-    fresh_remaining: int = 1
     stale: bool = False
 
 
@@ -176,20 +163,20 @@ class ObservationStore:
                 pass
         del self.observations[:excess]
 
-    def fresh_message(self, observation: ToolObservation, result: ToolResult) -> str:
+    def observed_message(self, observation: ToolObservation, result: ToolResult) -> str:
         output = result.to_text()
         detail = output
         if len(detail) > FRESH_DETAIL_LIMIT:
             omitted = len(detail) - FRESH_DETAIL_LIMIT
             detail = detail[:FRESH_DETAIL_LIMIT] + f"\n\n[TRUNCATED observation detail: {omitted} chars omitted]"
         return (
-            f"[OBS {observation.id} fresh]\n"
+            f"[OBS {observation.id} observed]\n"
             f"tool: {observation.tool}\n"
             f"args: {observation.args_summary}\n"
             f"output_chars: {observation.output_chars}\n"
             f"output_sha256: {observation.output_hash}\n"
             f"resource_keys: {', '.join(observation.resource_keys) or 'none'}\n"
-            "freshness: This detailed observation is short-term context for the next model step only.\n\n"
+            "observation: This is the tool result as observed when the tool ran.\n\n"
             + detail
         )
 
@@ -207,49 +194,25 @@ class ObservationStore:
             "current truth rule: This is a historical observation, not current truth. Re-read files or rerun commands before relying on exact/current facts."
         )
 
-    def mark_seen_by_model(
+    def replace_long_stale_messages(
         self,
         messages: list[dict],
         *,
-        included_ids: set[str] | None = None,
-        legacy_mark_all: bool = False,
-    ) -> None:
-        """Consume ``fresh_remaining`` for observations confirmed as included.
-
-        When *included_ids* is provided only observations whose ID is in that
-        set will have their freshness counter decremented.  This is the
-        prompt-inclusion-based contract: the prompt builder decides which
-        observations actually appeared in full, and only those are aged.
-
-        ``included_ids=None`` without ``legacy_mark_all=True`` raises
-        ``ValueError`` to prevent accidental "mark everything" behaviour.
-        Pass ``legacy_mark_all=True`` explicitly if you genuinely want the
-        old index-based heuristic — this path is deprecated and will be
-        removed once all callers use the prompt-builder contract.
-        """
-        if included_ids is None and not legacy_mark_all:
-            raise ValueError(
-                "mark_seen_by_model requires included_ids. "
-                "Pass included_ids=<set> from PromptBuildResult, or "
-                "legacy_mark_all=True for the deprecated fallback."
-            )
-        msg_count = len(messages)
-        for observation in self.observations:
-            if observation.message_index is None or observation.fresh_remaining <= 0:
-                continue
-            if included_ids is not None and observation.id not in included_ids:
-                continue
-            observation.fresh_remaining -= 1
-            if observation.fresh_remaining == 0 and observation.message_index < msg_count:
-                messages[observation.message_index]["content"] = self.historical_message(observation)
-
-    def replace_stale_messages(self, messages: list[dict]) -> None:
+        min_chars: int = STALE_REPLACEMENT_MIN_CHARS,
+    ) -> list[str]:
+        """Replace only long stale observation messages with compact summaries."""
+        replaced: list[str] = []
         for observation in self.observations:
             if not observation.stale or observation.message_index is None:
                 continue
-            if observation.message_index < len(messages):
-                messages[observation.message_index]["content"] = self.historical_message(observation)
-                observation.fresh_remaining = 0
+            if observation.message_index >= len(messages):
+                continue
+            content = messages[observation.message_index].get("content") or ""
+            if len(content) < min_chars:
+                continue
+            messages[observation.message_index]["content"] = self.historical_message(observation)
+            replaced.append(observation.id)
+        return replaced
 
     def detach_message_indexes(self, messages: list[dict]) -> None:
         """Drop durable message indexes after context replacement.
@@ -273,60 +236,6 @@ class ObservationStore:
             message["content"] = self.historical_message(observation)
         for observation in self.observations:
             observation.message_index = None
-            observation.fresh_remaining = 0
-
-
-class ObservationContextPolicy:
-    """Formats the dynamic fact layer injected into each model request."""
-
-    MAX_OBSERVATION_SUMMARIES = 20
-    MAX_INVALIDATION_NOTICES = 3
-
-    def dynamic_facts_message(
-        self,
-        observation_store: ObservationStore,
-        fact_tracker: FactTracker,
-    ) -> dict | None:
-        if (
-            not observation_store.observations
-            and not fact_tracker.file_generation
-            and fact_tracker.workspace_generation == 0
-            and not fact_tracker.invalidation_notices
-        ):
-            return None
-
-        lines = [
-            "[DYNAMIC FACTS]",
-            "This generated layer summarizes current observation metadata. It is not a stable rule prefix.",
-            "Historical or stale observations are not current truth; re-read files or rerun commands for exact current facts.",
-            "",
-            f"workspace_generation: {fact_tracker.workspace_generation}",
-        ]
-        if fact_tracker.file_generation:
-            lines.append("file_generations:")
-            for path in sorted(fact_tracker.file_generation):
-                lines.append(f"- {path}: {fact_tracker.file_generation[path]}")
-
-        if fact_tracker.invalidation_notices:
-            lines.append("")
-            lines.append("latest_invalidation_notices:")
-            for notice in fact_tracker.invalidation_notices[-self.MAX_INVALIDATION_NOTICES:]:
-                lines.append(_indent(notice.strip(), "- "))
-
-        recent_observations = observation_store.observations[-self.MAX_OBSERVATION_SUMMARIES:]
-        if recent_observations:
-            lines.append("")
-            lines.append("active_observation_summaries:")
-            for obs in recent_observations:
-                state = "fresh" if obs.fresh_remaining > 0 and not obs.stale else "stale" if obs.stale else "historical"
-                resources = ", ".join(obs.resource_keys) or "none"
-                lines.append(
-                    f"- {obs.id}: state={state}; tool={obs.tool}; resources={resources}; "
-                    f"observed_workspace_generation={obs.observed_workspace_generation}; "
-                    f"output_chars={obs.output_chars}; output_sha256={obs.output_hash}; summary={obs.summary}"
-                )
-
-        return {"role": "user", "content": "\n".join(lines)}
 
 
 def _args_summary(args: dict[str, Any]) -> str:
@@ -359,33 +268,6 @@ def _indent(text: str, first_prefix: str) -> str:
         (first_prefix if idx == 0 else continuation) + line
         for idx, line in enumerate(lines)
     )
-
-
-def included_observation_ids_from_messages(messages: list[dict]) -> set[str]:
-    """Extract observation IDs whose full fresh content appears in *messages*.
-
-    Scans tool-role messages for the ``[OBS <id> fresh]`` header.  If a
-    future prompt builder truncates or summarises a tool message, the header
-    will be absent and the observation will *not* be marked as included —
-    exactly the behaviour we want.
-    """
-    included: set[str] = set()
-    for msg in messages:
-        if msg.get("role") != "tool":
-            continue
-        content = msg.get("content") or ""
-        if not content.startswith(_OBS_ID_PREFIX):
-            continue
-        # Header format: "[OBS obs_0001 fresh]\n..."
-        parsed = _observation_header(content)
-        if parsed is None:
-            continue
-        # Only count fresh observations — historical/stale headers use
-        # a different format like "[OBS obs_0001 historical]".
-        obs_id, state = parsed
-        if state == "fresh":
-            included.add(obs_id)
-    return included
 
 
 def _observation_id_from_header(content: str) -> str | None:
