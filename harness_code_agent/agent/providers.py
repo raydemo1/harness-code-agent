@@ -123,6 +123,9 @@ class ProviderAdapter:
         *,
         on_text_delta: TextDeltaCallback | None = None,
         on_chunk: ChunkCallback | None = None,
+        on_reasoning_start: Callable[[], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
+        cancellation_token=None,
     ) -> StreamResult:
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -130,8 +133,10 @@ class ProviderAdapter:
         finish_reason: str | None = None
 
         for chunk in chunks:
+            _check_cancelled(cancellation_token)
             if on_chunk is not None:
                 on_chunk()
+            _check_cancelled(cancellation_token)
             choices = _get(chunk, "choices") or []
             if not choices:
                 continue
@@ -149,7 +154,11 @@ class ProviderAdapter:
 
             reasoning_delta = _reasoning_content_from(delta)
             if reasoning_delta:
+                if not reasoning_parts and on_reasoning_start is not None:
+                    on_reasoning_start()
                 reasoning_parts.append(reasoning_delta)
+                if on_reasoning_delta is not None:
+                    on_reasoning_delta(reasoning_delta)
 
             for tc_delta in _get(delta, "tool_calls") or []:
                 index = _get(tc_delta, "index")
@@ -194,6 +203,12 @@ class ProviderAdapter:
     @property
     def requires_reasoning_content_roundtrip(self) -> bool:
         return self.name == "deepseek"
+
+
+def _check_cancelled(cancellation_token) -> None:
+    if cancellation_token is not None and getattr(cancellation_token, "is_cancelled", False):
+        from .cancellation import CancelledError
+        raise CancelledError("Turn cancelled by user")
 
 
 def _normalize_tool_call(tc) -> dict:

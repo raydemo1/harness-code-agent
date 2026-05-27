@@ -181,14 +181,14 @@ class InteractiveSession:
             "- Verify the acceptance criteria against actual files or command output before stopping."
         )
 
-    def submit(self, user_prompt: str) -> TurnResult:
+    def submit(self, user_prompt: str, cancellation_token=None) -> TurnResult:
         if self.pending_plan_markdown and self.profile.name() == "plan":
             if _is_plan_execution_confirmation(user_prompt):
                 return self.execute_pending_plan()
             return self.revise_pending_plan(user_prompt)
-        return self._submit_to_current_agent(user_prompt)
+        return self._submit_to_current_agent(user_prompt, cancellation_token=cancellation_token)
 
-    def _submit_to_current_agent(self, user_prompt: str) -> TurnResult:
+    def _submit_to_current_agent(self, user_prompt: str, cancellation_token=None) -> TurnResult:
         baseline_dirty = git_dirty_paths(self.cwd)
         baseline_staged = git_staged_paths(self.cwd)
         resolved = resolve_mentions(
@@ -214,7 +214,10 @@ class InteractiveSession:
                 "mentions": [item.raw for item in resolved],
             },
         )
-        text = self.conversation.submit(task)
+        text = self.conversation.submit(task, cancellation_token=cancellation_token)
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            from ..agent.cancellation import CancelledError
+            raise CancelledError("Turn cancelled by user")
         streamed = bool(getattr(self.conversation, "last_run_streamed_text", False))
         self.event_bus.emit_event(
             AssistantMessageEvent(
@@ -238,6 +241,19 @@ class InteractiveSession:
             },
         )
         return TurnResult(text=text, checkpoint=checkpoint, notice=notice, streamed=streamed)
+
+    def interrupt_current_shell(self) -> bool:
+        """Best-effort interrupt for a shell command owned by the active conversation."""
+        runtime_state = getattr(self.conversation, "runtime_state", None)
+        shell_session = getattr(runtime_state, "shell_session", None)
+        if shell_session is None:
+            return False
+        try:
+            shell_session.interrupt()
+        except Exception as exc:
+            log.debug("Failed to interrupt active shell session: %s", exc)
+            return False
+        return True
 
     def execute_pending_plan(self) -> TurnResult:
         if not self.pending_plan_markdown:

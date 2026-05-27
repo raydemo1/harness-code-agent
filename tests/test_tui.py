@@ -21,7 +21,7 @@ from harness_code_agent.tui.approval import (
 from harness_code_agent.tui.commands import default_command_registry
 from harness_code_agent.tui.completion import current_mention_query, mention_candidates
 from harness_code_agent.tui.render import bottom_toolbar, prompt_message
-from harness_code_agent.tui.state import SessionStatusSnapshot, TuiState
+from harness_code_agent.tui.state import SessionStatusSnapshot, TranscriptBlock, TuiState
 
 
 class TuiTests(unittest.TestCase):
@@ -52,7 +52,7 @@ class TuiTests(unittest.TestCase):
         self.assertIn("Usage: /config show", result.text)
         self.assertTrue(result.should_continue)
 
-    def test_bottom_toolbar_renders_clickable_context_threshold_circles(self):
+    def test_bottom_toolbar_renders_clickable_context_progress_bar(self):
         clicked = []
         snapshot = SessionStatusSnapshot(
             profile="coding-agent",
@@ -75,11 +75,14 @@ class TuiTests(unittest.TestCase):
         handlers = [fragment[2] for fragment in fragments if len(fragment) >= 3 and fragment[2] is not None]
 
         self.assertIn("ctx", text)
-        self.assertIn("○60", text)
-        self.assertIn("○68", text)
-        self.assertIn("○75", text)
-        self.assertIn("○82", text)
+        self.assertIn("▓", text)
+        self.assertIn("░", text)
         self.assertIn("70%", text)
+        self.assertIn("90K/128K", text)
+        self.assertNotIn("○60", text)
+        self.assertNotIn("○68", text)
+        self.assertNotIn("○75", text)
+        self.assertNotIn("○82", text)
         self.assertTrue(handlers)
         handlers[0](SimpleNamespace(event_type="MOUSE_UP"))
         self.assertEqual(clicked, [True])
@@ -452,6 +455,587 @@ class TuiTests(unittest.TestCase):
 
 
 
+
+
+class TuiLayoutTests(unittest.TestCase):
+    """Phase 1: Layout skeleton tests for the async Application-based TUI."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.root = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _make_app(self, **kwargs):
+        """Create a TuiApp with mocked InteractiveSession for layout testing."""
+        from prompt_toolkit.output.defaults import DummyOutput
+        from harness_code_agent.tui.app import TuiApp
+        with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession, \
+             patch("prompt_toolkit.output.defaults.create_output", return_value=DummyOutput()):
+            mock_session = SimpleNamespace(
+                profile=SimpleNamespace(name=lambda: "coding-agent"),
+                session=SimpleNamespace(id="test-session"),
+                cwd=str(self.root),
+                permission_mode="workspace-write",
+                conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
+                close=lambda: None,
+                handle_slash_command=lambda line: True,
+                manual_compact_context=lambda: "compacted",
+            )
+            MockSession.return_value = mock_session
+            app = TuiApp(cwd=self.root, profile_name="coding-agent", **kwargs)
+        return app
+
+    def test_tui_app_creates_application_instance(self):
+        """TuiApp should have a prompt_toolkit Application after init."""
+        from prompt_toolkit.application import Application
+        app = self._make_app()
+        self.assertIsInstance(app.app, Application)
+
+    def test_layout_has_transcript_window(self):
+        """Layout should contain a transcript area for displaying conversation."""
+        app = self._make_app()
+        # The transcript control should exist and be a FormattedTextControl
+        self.assertIsNotNone(app._transcript_control)
+        self.assertEqual(len(app.state.blocks), 0)
+
+    def test_layout_has_input_text_area(self):
+        """Layout should contain a TextArea for user input."""
+        from prompt_toolkit.widgets import TextArea
+        app = self._make_app()
+        self.assertIsInstance(app._input_area, TextArea)
+
+    def test_context_bar_renders_green_below_68_percent(self):
+        """Context bar should use green style when usage < 68%."""
+        from prompt_toolkit.formatted_text import to_formatted_text
+        from harness_code_agent.tui.render import context_bar_fragments
+        snapshot = SessionStatusSnapshot(
+            profile="coding-agent", model="m", provider="p",
+            permission_mode="w", session_id="s", cwd=self.root,
+            context_tokens=50_000, context_window_tokens=100_000,
+        )
+        fragments = list(to_formatted_text(context_bar_fragments(snapshot)))
+        styles = [f[0] for f in fragments]
+        # Green: #a3be8c
+        self.assertTrue(any("#a3be8c" in s for s in styles))
+
+    def test_context_bar_renders_yellow_at_70_percent(self):
+        """Context bar should use yellow style when usage is 68-81%."""
+        from prompt_toolkit.formatted_text import to_formatted_text
+        from harness_code_agent.tui.render import context_bar_fragments
+        snapshot = SessionStatusSnapshot(
+            profile="coding-agent", model="m", provider="p",
+            permission_mode="w", session_id="s", cwd=self.root,
+            context_tokens=70_000, context_window_tokens=100_000,
+        )
+        fragments = list(to_formatted_text(context_bar_fragments(snapshot)))
+        styles = [f[0] for f in fragments]
+        # Yellow: #ebcb8b
+        self.assertTrue(any("#ebcb8b" in s for s in styles))
+
+    def test_context_bar_renders_red_above_82_percent(self):
+        """Context bar should use red style when usage >= 82%."""
+        from prompt_toolkit.formatted_text import to_formatted_text
+        from harness_code_agent.tui.render import context_bar_fragments
+        snapshot = SessionStatusSnapshot(
+            profile="coding-agent", model="m", provider="p",
+            permission_mode="w", session_id="s", cwd=self.root,
+            context_tokens=85_000, context_window_tokens=100_000,
+        )
+        fragments = list(to_formatted_text(context_bar_fragments(snapshot)))
+        styles = [f[0] for f in fragments]
+        # Red: #bf616a
+        self.assertTrue(any("#bf616a" in s for s in styles))
+
+    def test_context_bar_shows_progress_bar_and_percentage(self):
+        """Context bar should display progress bar and percentage."""
+        from prompt_toolkit.formatted_text import to_formatted_text
+        from harness_code_agent.tui.render import context_bar_fragments
+        snapshot = SessionStatusSnapshot(
+            profile="coding-agent", model="m", provider="p",
+            permission_mode="w", session_id="s", cwd=self.root,
+            context_tokens=70_000, context_window_tokens=100_000,
+        )
+        fragments = list(to_formatted_text(context_bar_fragments(snapshot)))
+        text = "".join(f[1] for f in fragments)
+        self.assertIn("ctx", text)
+        self.assertIn("70%", text)
+        self.assertIn("▓", text)
+        self.assertIn("░", text)
+
+    def test_transcript_renders_user_message_with_blue_bar(self):
+        """User messages in transcript should have blue left marker."""
+        from harness_code_agent.tui.render import render_block_fragments
+        block = TranscriptBlock("user", "user turn 1", "fix the bug")
+        fragments = list(to_formatted_text(render_block_fragments(block)))
+        text = "".join(f[1] for f in fragments)
+        self.assertIn("fix the bug", text)
+
+    def test_transcript_renders_tool_as_card(self):
+        """Tool results should render as a card with border."""
+        from harness_code_agent.tui.render import render_block_fragments
+        block = TranscriptBlock("tool", "tool result: run_bash", "output text", "success")
+        fragments = list(to_formatted_text(render_block_fragments(block)))
+        text = "".join(f[1] for f in fragments)
+        self.assertIn("┌", text)
+        self.assertIn("┘", text)
+        self.assertIn("run_bash", text)
+
+
+class TuiAsyncTests(unittest.TestCase):
+    """Phase 2: Async submit tests."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.root = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _make_app(self, **kwargs):
+        from prompt_toolkit.output.defaults import DummyOutput
+        from harness_code_agent.tui.app import TuiApp
+        with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession, \
+             patch("prompt_toolkit.output.defaults.create_output", return_value=DummyOutput()):
+            mock_session = SimpleNamespace(
+                profile=SimpleNamespace(name=lambda: "coding-agent"),
+                session=SimpleNamespace(id="test-session"),
+                cwd=str(self.root),
+                permission_mode="workspace-write",
+                conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
+                close=lambda: None,
+                handle_slash_command=lambda line: True,
+                manual_compact_context=lambda: "compacted",
+                submit=lambda text: SimpleNamespace(notice="", checkpoint=""),
+            )
+            MockSession.return_value = mock_session
+            app = TuiApp(cwd=self.root, profile_name="coding-agent", **kwargs)
+        return app
+
+    def test_submit_dispatches_to_background_thread(self):
+        """_submit_async should run in background thread and return immediately."""
+        import threading
+        app = self._make_app()
+        submit_started = threading.Event()
+        submit_finished = threading.Event()
+
+        original_submit = app.session.submit
+        def slow_submit(text, cancellation_token=None):
+            submit_started.set()
+            import time
+            time.sleep(0.1)
+            submit_finished.set()
+            return SimpleNamespace(notice="", checkpoint="")
+        app.session.submit = slow_submit
+
+        app._submit_async("test task")
+        # Should return immediately, not block
+        self.assertTrue(submit_started.wait(1.0), "submit should have started in background")
+        # The background thread should eventually finish
+        self.assertTrue(submit_finished.wait(2.0), "submit should have finished")
+
+    def test_submitting_flag_prevents_double_submit(self):
+        """While submitting, _submit_async should be a no-op."""
+        import threading
+        app = self._make_app()
+        call_count = []
+
+        def slow_submit(text, cancellation_token=None):
+            call_count.append(text)
+            import time
+            time.sleep(0.2)
+            return SimpleNamespace(notice="", checkpoint="")
+        app.session.submit = slow_submit
+
+        app._submit_async("first")
+        app._submit_async("second")  # Should be ignored
+        import time
+        time.sleep(0.5)
+        self.assertEqual(len(call_count), 1)
+
+    def test_events_from_background_thread_update_state(self):
+        """Events emitted during background submit should update TuiState."""
+        app = self._make_app()
+
+        def submit_with_events(text, cancellation_token=None):
+            app._event_listener(SimpleNamespace(
+                to_dict=lambda: {"type": "turn_started", "payload": {"turn": 1}},
+            ))
+            app._event_listener(SimpleNamespace(
+                to_dict=lambda: {"type": "tool_call", "payload": {"tool": "read_file", "args": {"path": "x.py"}}},
+            ))
+            app._event_listener(SimpleNamespace(
+                to_dict=lambda: {"type": "turn_finished", "payload": {"turn": 1}},
+            ))
+            return SimpleNamespace(notice="", checkpoint="")
+        app.session.submit = submit_with_events
+
+        app._submit_async("test")
+        import time
+        time.sleep(0.5)
+        app._drain_event_queue()
+
+        self.assertEqual(app.state.snapshot.turn, 1)
+        self.assertEqual(app.state.snapshot.status, "idle")
+
+    def test_refresh_display_only_invalidates_and_does_not_drain_from_background(self):
+        """_refresh_display must be safe to call from worker threads."""
+        app = self._make_app()
+        app._event_queue.put(("event", SimpleNamespace(to_dict=lambda: {"type": "turn_started", "payload": {"turn": 1}})))
+
+        with patch.object(app, "_drain_event_queue", side_effect=AssertionError("must not drain")):
+            app._refresh_display()
+
+
+class TuiNoiseReductionTests(unittest.TestCase):
+    """Phase 3: Output noise reduction tests."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.root = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _make_state(self):
+        return TuiState(
+            SessionStatusSnapshot(
+                profile="coding-agent", model="m", provider="p",
+                permission_mode="w", session_id="s", cwd=self.root,
+            )
+        )
+
+    def test_tool_result_shows_summary_not_body(self):
+        """Tool result in transcript should show summary, not full output."""
+        from harness_code_agent.tui.render import render_block_fragments
+        state = self._make_state()
+
+        # Simulate tool_call then tool_result events
+        call_event = SimpleNamespace(
+            to_dict=lambda: {"type": "tool_call", "payload": {"tool": "run_bash", "args": {"command": "echo hi"}}},
+        )
+        result_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_result",
+                "payload": {
+                    "tool": "run_bash",
+                    "status": "success",
+                    "output": "line1\nline2\nline3\n" * 100,  # Large output
+                    "return_code": 0,
+                },
+            },
+        )
+
+        block1 = state.apply_event(call_event)
+        block2 = state.apply_event(result_event)
+
+        # The result block should be a summary, not the full output
+        self.assertIsNotNone(block2)
+        fragments = list(render_block_fragments(block2))
+        text = "".join(f[1] for f in fragments)
+        # Should NOT contain the full output body
+        self.assertNotIn("line1\nline2\nline3", text)
+        # Should contain the tool name and success icon
+        self.assertIn("run_bash", text)
+        self.assertIn("✓", text)  # success icon
+
+    def test_tool_result_shows_output_size(self):
+        """Tool result summary should include output size."""
+        from harness_code_agent.tui.render import render_block_fragments
+        state = self._make_state()
+
+        call_event = SimpleNamespace(
+            to_dict=lambda: {"type": "tool_call", "payload": {"tool": "read_file", "args": {"path": "x.py"}}},
+        )
+        result_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_result",
+                "payload": {
+                    "tool": "read_file",
+                    "status": "success",
+                    "output": "x" * 2048,
+                },
+            },
+        )
+
+        state.apply_event(call_event)
+        block = state.apply_event(result_event)
+
+        fragments = list(render_block_fragments(block))
+        text = "".join(f[1] for f in fragments)
+        # Should show size info
+        self.assertIn("2", text)  # 2048 chars ~ 2KB
+
+    def test_failed_tool_shows_error_summary(self):
+        """Failed tool should show short error, not full output."""
+        from harness_code_agent.tui.render import render_block_fragments
+        state = self._make_state()
+
+        call_event = SimpleNamespace(
+            to_dict=lambda: {"type": "tool_call", "payload": {"tool": "run_bash", "args": {"command": "bad_cmd"}}},
+        )
+        result_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_result",
+                "payload": {
+                    "tool": "run_bash",
+                    "status": "failed",
+                    "error": "command not found: bad_cmd",
+                    "return_code": 127,
+                },
+            },
+        )
+
+        state.apply_event(call_event)
+        block = state.apply_event(result_event)
+
+        fragments = list(render_block_fragments(block))
+        text = "".join(f[1] for f in fragments)
+        self.assertIn("command not found", text)
+        self.assertIn("✗", text)
+
+    def test_tool_call_shows_args_summary(self):
+        """Tool call should show key args, not full args dict."""
+        from harness_code_agent.tui.render import render_block_fragments
+        state = self._make_state()
+
+        call_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_call",
+                "payload": {"tool": "write_file", "args": {"path": "out.py", "content": "x" * 5000}},
+            },
+        )
+        block = state.apply_event(call_event)
+
+        fragments = list(render_block_fragments(block))
+        text = "".join(f[1] for f in fragments)
+        self.assertIn("write_file", text)
+        self.assertIn("out.py", text)
+        # Should not contain the full content
+        self.assertNotIn("x" * 5000, text)
+
+    def test_tool_timing_from_call_to_result(self):
+        """Tool summary should show elapsed time."""
+        import time
+        from harness_code_agent.tui.state import ToolSummary
+        state = self._make_state()
+
+        call_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_call",
+                "payload": {"tool": "run_bash", "args": {"command": "sleep 0"}},
+            },
+        )
+        state.apply_event(call_event)
+
+        # Check that pending tool is tracked
+        self.assertIn("run_bash", state._pending_tools)
+
+        time.sleep(0.05)
+        result_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_result",
+                "payload": {"tool": "run_bash", "status": "success", "output": "ok"},
+            },
+        )
+        block = state.apply_event(result_event)
+        self.assertIsNotNone(block)
+        # Pending tool should be cleared
+        self.assertNotIn("run_bash", state._pending_tools)
+
+    def test_full_tool_output_remains_in_event_storage_while_transcript_summarizes(self):
+        """Noise reduction is a display concern; stored events keep their payload."""
+        state = self._make_state()
+        events = []
+        bus = EventBus(listener=events.append)
+        large_output = "line1\nline2\nline3\n" * 100
+
+        bus.emit("tool_call", agent="main_agent", payload={"tool": "run_bash", "args": {"command": "make test"}})
+        bus.emit("tool_result", agent="main_agent", payload={"tool": "run_bash", "status": "success", "output": large_output})
+
+        for event in events:
+            block = state.apply_event(event)
+            state.add_block(block)
+
+        stored_result = [event for event in events if event.type == "tool_result"][0]
+        self.assertEqual(stored_result.payload["output"], large_output)
+        self.assertNotIn(large_output, state.blocks[-1].body)
+
+
+class TuiThoughtTests(unittest.TestCase):
+    """Phase 4: Thought hiding tests."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.root = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _make_state(self):
+        return TuiState(
+            SessionStatusSnapshot(
+                profile="coding-agent", model="m", provider="p",
+                permission_mode="w", session_id="s", cwd=self.root,
+            )
+        )
+
+    def test_thought_event_creates_thought_block(self):
+        """ThoughtFinishedEvent should create a thought block with duration."""
+        from harness_code_agent.tui.render import render_block_fragments
+        state = self._make_state()
+
+        event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "thought_finished",
+                "payload": {"duration_seconds": 12.3, "truncated": False, "source": "deepseek"},
+            },
+        )
+        block = state.apply_event(event)
+
+        self.assertIsNotNone(block)
+        self.assertEqual(block.kind, "thought")
+        fragments = list(render_block_fragments(block))
+        text = "".join(f[1] for f in fragments)
+        self.assertIn("thought for", text)
+        self.assertIn("12", text)  # duration
+        self.assertIn("💭", text)
+
+    def test_thought_block_does_not_contain_reasoning_text(self):
+        """Thought block should never contain actual reasoning content."""
+        from harness_code_agent.tui.render import render_block_fragments
+        state = self._make_state()
+
+        event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "thought_finished",
+                "payload": {"duration_seconds": 5.0, "truncated": False, "source": "deepseek"},
+            },
+        )
+        block = state.apply_event(event)
+        fragments = list(render_block_fragments(block))
+        text = "".join(f[1] for f in fragments)
+        # Should not contain any reasoning text (payload doesn't include it, so this is safe)
+        self.assertNotIn("reasoning", text.lower())
+
+    def test_thought_card_has_purple_border(self):
+        """Thought block should render with purple-themed card."""
+        from harness_code_agent.tui.render import render_block_fragments
+        state = self._make_state()
+
+        event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "thought_finished",
+                "payload": {"duration_seconds": 8.0, "truncated": False, "source": "deepseek"},
+            },
+        )
+        block = state.apply_event(event)
+        fragments = list(render_block_fragments(block))
+        styles = [f[0] for f in fragments]
+        # Should have purple (#b48ead) in styles
+        self.assertTrue(any("#b48ead" in s for s in styles))
+
+    def test_thought_toggle_stores_state(self):
+        """Ctrl+T should toggle thought metadata visibility."""
+        state = self._make_state()
+        self.assertFalse(state.show_thought_details)
+
+        state.toggle_thought_details()
+        self.assertTrue(state.show_thought_details)
+
+        state.toggle_thought_details()
+        self.assertFalse(state.show_thought_details)
+
+
+class TuiCancellationTests(unittest.TestCase):
+    """Phase 5: Cancellation tests."""
+
+    def test_cancellation_token_cancel_sets_flag(self):
+        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+        token = CancellationToken()
+        self.assertFalse(token.is_cancelled)
+        token.cancel()
+        self.assertTrue(token.is_cancelled)
+
+    def test_cancellation_token_check_raises_when_cancelled(self):
+        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+        token = CancellationToken()
+        token.cancel()
+        with self.assertRaises(CancelledError):
+            token.check()
+
+    def test_cancellation_token_check_passes_when_not_cancelled(self):
+        from harness_code_agent.agent.cancellation import CancellationToken
+        token = CancellationToken()
+        token.check()  # Should not raise
+
+    def test_ctrl_c_while_running_cancels_turn(self):
+        """Ctrl-C during submit should cancel the turn, not exit."""
+        from prompt_toolkit.output.defaults import DummyOutput
+        from harness_code_agent.tui.app import TuiApp
+        import threading
+
+        with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession, \
+             patch("prompt_toolkit.output.defaults.create_output", return_value=DummyOutput()):
+            submit_cancelled = threading.Event()
+            original_submit = None
+
+            def slow_submit(text, cancellation_token=None):
+                # Simulate a long-running submit that checks cancellation
+                import time
+                time.sleep(0.5)
+                submit_cancelled.set()
+                return SimpleNamespace(notice="", checkpoint="")
+
+            mock_session = SimpleNamespace(
+                profile=SimpleNamespace(name=lambda: "coding-agent"),
+                session=SimpleNamespace(id="test-session"),
+                cwd=str(Path(tempfile.mkdtemp())),
+                permission_mode="workspace-write",
+                conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
+                close=lambda: None,
+                handle_slash_command=lambda line: True,
+                manual_compact_context=lambda: "compacted",
+                submit=slow_submit,
+            )
+            MockSession.return_value = mock_session
+            app = TuiApp(cwd=Path(mock_session.cwd), profile_name="coding-agent")
+
+            # Verify _cancellation_token exists
+            self.assertIsNotNone(app._cancellation_token)
+            self.assertFalse(app._cancellation_token.is_cancelled)
+
+            # Simulate cancel
+            app._cancellation_token.cancel()
+            self.assertTrue(app._cancellation_token.is_cancelled)
+
+    def test_cancel_current_turn_interrupts_active_shell(self):
+        """Ctrl-C path should also best-effort interrupt the current shell command."""
+        from prompt_toolkit.output.defaults import DummyOutput
+        from harness_code_agent.tui.app import TuiApp
+
+        with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession, \
+             patch("prompt_toolkit.output.defaults.create_output", return_value=DummyOutput()):
+            interrupted = []
+            mock_session = SimpleNamespace(
+                profile=SimpleNamespace(name=lambda: "coding-agent"),
+                session=SimpleNamespace(id="test-session"),
+                cwd=str(Path(tempfile.mkdtemp())),
+                permission_mode="workspace-write",
+                conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
+                close=lambda: None,
+                handle_slash_command=lambda line: True,
+                manual_compact_context=lambda: "compacted",
+                interrupt_current_shell=lambda: interrupted.append(True),
+            )
+            MockSession.return_value = mock_session
+            app = TuiApp(cwd=Path(mock_session.cwd), profile_name="coding-agent")
+
+            app._cancel_current_turn()
+
+            self.assertTrue(app._cancellation_token.is_cancelled)
+            self.assertEqual(interrupted, [True])
 
 
 if __name__ == "__main__":

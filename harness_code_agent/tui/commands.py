@@ -76,7 +76,7 @@ def default_command_registry() -> SlashCommandRegistry:
         CommandSpec("/exit", "General", "/exit", "Close the current TUI session.", _exit, aliases=("/quit",)),
         CommandSpec("/profiles", "Profiles", "/profiles", "List available profiles.", _profiles),
         CommandSpec("/code", "Profiles", "/code", "Switch to coding-agent profile.", _profile("coding-agent", "/code")),
-        CommandSpec("/plan", "Profiles", "/plan", "Switch to read-only planning profile.", _profile("plan", "/plan")),
+        CommandSpec("/plan", "Profiles", "/plan", "Switch to constrained planning profile.", _profile("plan", "/plan")),
         CommandSpec("/terminal", "Profiles", "/terminal", "Switch to terminal task profile.", _profile("terminal", "/terminal")),
         CommandSpec("/swe", "Profiles", "/swe", "Switch to swe-bench profile.", _profile("swe-bench", "/swe")),
         CommandSpec("/app", "Profiles", "/app", "Switch to app-builder profile.", _profile("app-builder", "/app")),

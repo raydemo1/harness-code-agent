@@ -655,7 +655,7 @@ def consultation_tool_schemas() -> list[dict]:
 
 
 def planning_tool_schemas() -> list[dict]:
-    """Return the read-only tool surface for the plan profile."""
+    """Return the constrained planning tool surface for the plan profile."""
     names = {
         "read_file",
         "list_files",
@@ -664,6 +664,9 @@ def planning_tool_schemas() -> list[dict]:
         "web_search",
         "web_fetch",
         "consult_subagent",
+        "write_file",
+        "apply_patch",
+        "update_plan_state",
     }
     return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
 

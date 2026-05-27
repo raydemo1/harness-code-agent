@@ -163,6 +163,37 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(result.assistant_message["tool_calls"][0]["function"]["name"], "read_file")
         self.assertEqual(result.assistant_message["tool_calls"][0]["function"]["arguments"], '{"path":"README.md"}')
 
+    def test_provider_streaming_checks_cancellation_between_chunks(self):
+        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+        from harness_code_agent.agent.providers import ProviderAdapter
+
+        def chunk(text):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=text),
+                        finish_reason=None,
+                    )
+                ]
+            )
+
+        token = CancellationToken()
+        deltas = []
+
+        def chunks():
+            yield chunk("hel")
+            token.cancel()
+            yield chunk("lo")
+
+        with self.assertRaises(CancelledError):
+            ProviderAdapter("openai-compatible").assistant_message_from_stream(
+                chunks(),
+                on_text_delta=deltas.append,
+                cancellation_token=token,
+            )
+
+        self.assertEqual(deltas, ["hel"])
+
     def test_streaming_request_falls_back_to_non_stream_before_first_chunk(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
 

@@ -147,7 +147,7 @@ hca --profile plan "Design the fix for the failing parser tests"
 
 ```text
 /code      # coding-agent，默认实施模式
-/plan      # 只读方案模式
+/plan      # 受限方案模式（只允许计划/状态工件写入）
 /terminal  # CLI / shell 任务
 /swe       # swe-bench issue 修复
 /app       # app-builder Web 应用构建
@@ -161,7 +161,7 @@ hca --profile plan "Design the fix for the failing parser tests"
 | `app-builder` | 从 prompt 构建完整 Web 应用，可使用浏览器测试工具 |
 | `terminal` | 面向 Terminal-Bench 2.0 风格的 CLI / shell 任务 |
 | `swe-bench` | 面向真实仓库 issue 修复任务 |
-| `plan` | 只读调查和方案设计，输出结构化 Markdown 计划 |
+| `plan` | 调查和方案设计，输出结构化 Markdown 计划；只允许写计划 Markdown 和 planning state |
 
 `plan` profile 在交互模式下会进入显式 handoff：计划输出后不会自动改代码，而是提示用户选择下一步。
 

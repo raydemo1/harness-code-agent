@@ -61,7 +61,7 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertNotIn("builder", prompt)
         self.assertNotIn("evaluator", prompt)
 
-    def test_plan_profile_is_read_only_and_structured(self):
+    def test_plan_profile_allows_only_planning_artifact_writes_and_is_structured(self):
         main_agent = get_profile("plan").main_agent()
         prompt = main_agent.system_prompt.lower()
         tool_names = {
@@ -69,7 +69,7 @@ class ProfileInterfaceTests(unittest.TestCase):
             for schema in main_agent.tool_schemas
         }
 
-        self.assertIn("read-only planning task", prompt)
+        self.assertIn("planning task", prompt)
         self.assertIn("decision-complete", prompt)
         self.assertIn("# title", prompt)
         self.assertIn("## summary", prompt)
@@ -77,8 +77,8 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertIn("## test plan", prompt)
         self.assertIn("## assumptions", prompt)
         self.assertIn("do not implement", prompt)
-        self.assertIn("do not call update_plan_state", prompt)
-        self.assertIn("do not create any planning artifact", prompt)
+        self.assertIn("planning artifacts", prompt)
+        self.assertIn("update_plan_state", prompt)
         self.assertEqual(
             tool_names,
             {
@@ -89,9 +89,11 @@ class ProfileInterfaceTests(unittest.TestCase):
                 "web_search",
                 "web_fetch",
                 "consult_subagent",
+                "write_file",
+                "apply_patch",
+                "update_plan_state",
             },
         )
-        self.assertFalse({"write_file", "apply_patch", "update_plan_state"} & tool_names)
         self.assertFalse(any(name.startswith("browser") for name in tool_names))
         self.assertTrue(any(isinstance(mw, ReadOnlyPlanningMiddleware) for mw in main_agent.middlewares))
 

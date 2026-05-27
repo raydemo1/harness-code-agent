@@ -50,7 +50,7 @@ class FakeConversation:
         self.response_text = self.__class__.response_text
         self.__class__.instances.append(self)
 
-    def submit(self, task):
+    def submit(self, task, cancellation_token=None):
         self.submissions.append(task)
         return self.response_text
 
@@ -117,6 +117,41 @@ class InteractiveCliTests(unittest.TestCase):
             self.assertEqual(result.text, "assistant done")
             self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
             self.assertIn("fix the tests", FakeConversation.instances[0].submissions[0])
+        finally:
+            session.close()
+
+    def test_cancelled_submit_does_not_emit_assistant_message_event(self):
+        from harness_code_agent.agent.cancellation import CancelledError
+
+        class CancellingConversation(FakeConversation):
+            def submit(self, task, cancellation_token=None):
+                self.submissions.append(task)
+                if cancellation_token is not None:
+                    cancellation_token.cancel()
+                raise CancelledError("Turn cancelled by user")
+
+        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=CancellingConversation()):
+            session = InteractiveSession(cwd=self.temp_dir)
+        try:
+            with self.assertRaises(CancelledError):
+                session.submit("cancel this")
+
+            event_types = [event.type for event in session.event_bus.events]
+            self.assertIn("user_input", event_types)
+            self.assertIn("turn_started", event_types)
+            self.assertNotIn("assistant_message", event_types)
+        finally:
+            session.close()
+
+    def test_interrupt_current_shell_delegates_to_active_shell_session(self):
+        session = self._session()
+        try:
+            interrupted = []
+            shell = types.SimpleNamespace(interrupt=lambda: interrupted.append(True))
+            session.conversation.runtime_state = types.SimpleNamespace(shell_session=shell)
+
+            self.assertTrue(session.interrupt_current_shell())
+            self.assertEqual(interrupted, [True])
         finally:
             session.close()
 

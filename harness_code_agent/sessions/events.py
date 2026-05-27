@@ -294,6 +294,33 @@ class ContextCompactionForcedEvent:
         )
 
 
+@dataclass(frozen=True)
+class ThoughtStartedEvent:
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent("thought_started", {}, self.agent)
+
+
+@dataclass(frozen=True)
+class ThoughtFinishedEvent:
+    duration_seconds: float
+    truncated: bool = False
+    source: str = ""
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "thought_finished",
+            {
+                "duration_seconds": self.duration_seconds,
+                "truncated": self.truncated,
+                "source": self.source,
+            },
+            self.agent,
+        )
+
+
 class EventBus:
     """Append-only event stream for product runtime observability."""
 

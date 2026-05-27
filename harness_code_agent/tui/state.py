@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from prompt_toolkit.formatted_text import StyleAndTextTuples
 
 
 @dataclass
@@ -37,10 +40,44 @@ class TranscriptBlock:
 
 
 @dataclass
+class ToolSummary:
+    tool: str
+    status: str
+    args_summary: str = ""
+    output_chars: int = 0
+    return_code: int | None = None
+    error_summary: str = ""
+    elapsed: float = 0.0
+
+
+@dataclass
 class TuiState:
     snapshot: SessionStatusSnapshot
     blocks: list[TranscriptBlock] = field(default_factory=list)
     pending_approval: dict[str, Any] | None = None
+    transcript_fragments: StyleAndTextTuples = field(default_factory=list)
+    _pending_tools: dict[str, float] = field(default_factory=dict)
+    show_thought_details: bool = False
+
+    def toggle_thought_details(self) -> None:
+        self.show_thought_details = not self.show_thought_details
+
+    def add_transcript_fragments(self, fragments: StyleAndTextTuples) -> None:
+        self.transcript_fragments = list(self.transcript_fragments) + list(fragments)
+
+    def add_block_fragments(self, block: TranscriptBlock | None) -> None:
+        if block is None:
+            return
+        from .render import render_block_fragments
+        fragments = render_block_fragments(block)
+        self.add_transcript_fragments(fragments)
+
+    def add_block_fragments_simple(self, kind: str, title: str, body: str) -> None:
+        self.add_block_fragments(TranscriptBlock(kind, title, body))
+
+    def append_streaming_text(self, text: str) -> None:
+        """Append streaming text to the transcript (inline with last content)."""
+        self.transcript_fragments = list(self.transcript_fragments) + [("", text)]
 
     def apply_event(self, event: Any) -> TranscriptBlock | None:
         data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
@@ -65,15 +102,42 @@ class TuiState:
             tool = str(payload.get("tool", "tool"))
             self.snapshot.running_tool = tool
             self.snapshot.status = "tool"
-            return TranscriptBlock("tool", f"tool call: {tool}", _summarize_tool_args(payload.get("args")), "running")
+            self._pending_tools[tool] = time.time()
+            args_summary = _summarize_tool_args(payload.get("args"))
+            return TranscriptBlock("tool", f"{tool}({args_summary})", "", "running")
         if event_type == "tool_result":
             tool = str(payload.get("tool", "tool"))
             if self.snapshot.running_tool == tool:
                 self.snapshot.running_tool = ""
             status = str(payload.get("status", "unknown"))
             self.snapshot.status = "running"
-            body = str(payload.get("error") or payload.get("output") or "")
-            return TranscriptBlock("tool", f"tool result: {tool}", _tail(body), status)
+            # Calculate elapsed time
+            start_time = self._pending_tools.pop(tool, None)
+            elapsed = time.time() - start_time if start_time else 0.0
+            # Build summary
+            output = str(payload.get("output") or "")
+            error = str(payload.get("error") or "")
+            return_code = payload.get("return_code")
+            summary = ToolSummary(
+                tool=tool,
+                status=status,
+                output_chars=len(output),
+                return_code=return_code,
+                error_summary=_tail(error, 120) if error else "",
+                elapsed=elapsed,
+            )
+            # Build summary body: size + error (no full output)
+            parts = []
+            if summary.elapsed > 0:
+                parts.append(_format_elapsed(summary.elapsed))
+            if summary.output_chars > 0:
+                parts.append(_format_size(summary.output_chars))
+            if summary.return_code is not None:
+                parts.append(f"rc={summary.return_code}")
+            body = "  ".join(parts)
+            if summary.error_summary:
+                body += f"\n{summary.error_summary}"
+            return TranscriptBlock("tool", tool, body, status)
         if event_type == "file_change":
             self.snapshot.dirty_count += 1
             return TranscriptBlock("file", "file changed", _payload_summary(payload), "changed")
@@ -130,6 +194,22 @@ class TuiState:
         if event_type == "session_finished":
             self.snapshot.status = str(payload.get("status") or "closed")
             return TranscriptBlock("session", "session finished", _payload_summary(payload))
+        if event_type == "thought_started":
+            self.snapshot.status = "thinking"
+            return None
+        if event_type == "thought_finished":
+            duration = payload.get("duration_seconds", 0)
+            truncated = payload.get("truncated", False)
+            source = payload.get("source", "")
+            body = f"thought for {_format_elapsed(duration)}"
+            if self.show_thought_details:
+                parts = [body]
+                if source:
+                    parts.append(f"source: {source}")
+                if truncated:
+                    parts.append("truncated: yes")
+                body = "  ·  ".join(parts)
+            return TranscriptBlock("thought", "thinking", body, "thought")
         return None
 
     def add_block(self, block: TranscriptBlock | None) -> None:
@@ -178,3 +258,15 @@ def _tail(text: str, limit: int = 1200) -> str:
     if len(text) <= limit:
         return text
     return "...[truncated]\n" + text[-limit:]
+
+
+def _format_elapsed(seconds: float) -> str:
+    if seconds < 1.0:
+        return f"{int(seconds * 1000)}ms"
+    return f"{seconds:.1f}s"
+
+
+def _format_size(chars: int) -> str:
+    if chars < 1024:
+        return f"{chars}B"
+    return f"{chars / 1024:.1f}KB"

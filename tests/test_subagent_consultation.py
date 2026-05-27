@@ -111,7 +111,7 @@ class SubagentConsultationTests(unittest.TestCase):
 
                 self.assertIsNone(blocked)
 
-    def test_plan_tool_schemas_are_read_only(self):
+    def test_plan_tool_schemas_include_constrained_planning_writes(self):
         tool_names = {
             schema["function"]["name"]
             for schema in tools.planning_tool_schemas()
@@ -127,27 +127,56 @@ class SubagentConsultationTests(unittest.TestCase):
                 "web_search",
                 "web_fetch",
                 "consult_subagent",
+                "write_file",
+                "apply_patch",
+                "update_plan_state",
             },
         )
-        self.assertNotIn("write_file", tool_names)
-        self.assertNotIn("apply_patch", tool_names)
-        self.assertNotIn("update_plan_state", tool_names)
         self.assertNotIn("browser_test", tool_names)
 
-    def test_read_only_planning_blocks_write_tools_and_browser_tools(self):
+    def test_planning_profile_allows_plan_artifact_tools(self):
         middleware = ReadOnlyPlanningMiddleware()
 
-        for tool_name in ["write_file", "apply_patch", "update_plan_state", "browser_test"]:
-            with self.subTest(tool_name=tool_name):
+        allowed_calls = [
+            ("write_file", {"path": "global_plan/current/plan.md", "content": "# Plan\n"}),
+            ("write_file", {"path": "PLAN.md", "content": "# Plan\n"}),
+            ("write_file", {"path": "plan.markdown", "content": "# Plan\n"}),
+            ("apply_patch", {"path": "global_plan/current/plan.markdown", "search": "a", "replace": "b"}),
+            ("update_plan_state", {}),
+        ]
+
+        for tool_name, tool_args in allowed_calls:
+            with self.subTest(tool_name=tool_name, tool_args=tool_args):
                 blocked = middleware.before_tool(
                     tool_name,
-                    {},
+                    tool_args,
+                    messages=[],
+                    agent_name="main_agent",
+                )
+
+                self.assertIsNone(blocked)
+
+    def test_planning_profile_blocks_non_plan_writes_and_browser_tools(self):
+        middleware = ReadOnlyPlanningMiddleware()
+
+        blocked_calls = [
+            ("write_file", {"path": "src/app.py", "content": "x"}),
+            ("apply_patch", {"path": "README.md", "search": "a", "replace": "b"}),
+            ("write_file", {"path": ".harness/sessions/s/planning/state.json", "content": "{}"}),
+            ("browser_test", {}),
+        ]
+
+        for tool_name, tool_args in blocked_calls:
+            with self.subTest(tool_name=tool_name, tool_args=tool_args):
+                blocked = middleware.before_tool(
+                    tool_name,
+                    tool_args,
                     messages=[],
                     agent_name="main_agent",
                 )
 
                 self.assertIsNotNone(blocked)
-                self.assertIn("read-only", blocked.lower())
+                self.assertIn("planning", blocked.lower())
 
     def test_read_only_planning_blocks_mutating_shell_commands(self):
         middleware = ReadOnlyPlanningMiddleware()

@@ -1,4 +1,4 @@
-"""Read-only planning profile."""
+"""Planning profile with constrained planning-artifact writes."""
 from __future__ import annotations
 
 from .base import AgentConfig, BaseProfile
@@ -13,18 +13,18 @@ class PlanProfile(BaseProfile):
         return "plan"
 
     def description(self) -> str:
-        return "Investigate read-only and produce a decision-complete implementation plan"
+        return "Investigate and produce a decision-complete implementation plan"
 
     def main_agent(self) -> AgentConfig:
         return AgentConfig(
             system_prompt="""\
-You are the main agent for a read-only planning task. Your job is to investigate the repository, understand the requested change, and produce a decision-complete implementation plan.
+You are the main agent for a planning task. Your job is to investigate the repository, understand the requested change, and produce a decision-complete implementation plan.
 
-Read-only contract:
-- Do not modify files.
-- Do not call write_file, apply_patch, update_plan_state, browser tools, package installation, service-starting commands, or git state-changing commands.
-- Do not call update_plan_state.
-- Do not create any planning artifact on disk.
+Planning-mode contract:
+- Do not modify source, test, dependency, configuration, migration, or build-output files.
+- You may write only planning artifacts: top-level PLAN.md/plan.markdown or Markdown files under global_plan/.
+- Use update_plan_state for planning state.json; do not write state.json directly with write_file or apply_patch.
+- Do not call browser tools, package installation, service-starting commands, or git state-changing commands.
 - Do not create status.md or final.md.
 - You may inspect files, list files, read skill files, run read-only shell commands, search/fetch references, and use consult_subagent for read-only sub-agent advice.
 - Treat command and file output as evidence. If evidence is insufficient, state the assumption rather than inventing implementation details.

@@ -697,7 +697,7 @@ class ReadOnlySubagentMiddleware(AgentMiddleware):
 
 
 class ReadOnlyPlanningMiddleware(AgentMiddleware):
-    """Restrict the plan profile's main agent to read-only investigation."""
+    """Restrict the plan profile to investigation plus planning artifacts."""
 
     READ_ONLY_TOOLS = {
         "read_file",
@@ -707,11 +707,11 @@ class ReadOnlyPlanningMiddleware(AgentMiddleware):
         "web_search",
         "web_fetch",
         "consult_subagent",
-    }
-    BLOCKED_TOOLS = {
         "write_file",
         "apply_patch",
         "update_plan_state",
+    }
+    BLOCKED_TOOLS = {
         "browser_test",
         "stop_dev_server",
     }
@@ -729,6 +729,20 @@ class ReadOnlyPlanningMiddleware(AgentMiddleware):
         "npm install", "pip install", "python -m pip install", "uv add",
         "cargo add", "go get",
     )
+
+    def _is_allowed_planning_artifact_path(self, path: str) -> bool:
+        raw = str(path or "").strip().replace("\\", "/")
+        if not raw or raw.startswith("/") or raw.startswith("~"):
+            return False
+        parts = [part for part in raw.split("/") if part and part != "."]
+        if any(part == ".." for part in parts):
+            return False
+        normalized = "/".join(parts).lower()
+        if normalized in {"plan.md", "plan.markdown"}:
+            return True
+        return normalized.startswith("global_plan/") and (
+            normalized.endswith(".md") or normalized.endswith(".markdown")
+        )
 
     def _is_read_only_command(self, command: str) -> bool:
         lowered = command.strip().lower()
@@ -750,9 +764,16 @@ class ReadOnlyPlanningMiddleware(AgentMiddleware):
             return None
         if tool_name in self.BLOCKED_TOOLS or tool_name not in self.READ_ONLY_TOOLS:
             return (
-                "[blocked] The plan profile is read-only. Investigate and produce a structured "
-                "Markdown plan; do not write files, update planning files, use browser tools, "
-                "or perform implementation."
+                "[blocked] The plan profile may only investigate and update planning artifacts. "
+                "Do not use browser tools or perform implementation."
+            )
+        if tool_name in {"write_file", "apply_patch"} and not self._is_allowed_planning_artifact_path(
+            tool_args.get("path", "")
+        ):
+            return (
+                "[blocked] The plan profile may only write planning Markdown artifacts: "
+                "top-level PLAN.md/plan.markdown or Markdown files under global_plan/. "
+                "Use update_plan_state for planning state.json instead of writing it directly."
             )
         if tool_name == "run_bash" and not self._is_read_only_command(tool_args.get("command", "")):
             return (

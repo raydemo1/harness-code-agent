@@ -17,6 +17,7 @@ from .providers import ProviderAdapter, current_adapter, get_client
 from ..runtime import tools
 from ..runtime.tool_context import ToolContext
 from ..workspace.shell_session import PersistentShellSession
+from .cancellation import CancelledError
 
 log = logging.getLogger("harness")
 
@@ -374,15 +375,20 @@ class AgentConversation:
             )
         return msg_count_after < msg_count_before or bool(committed_summary)
 
-    def submit(self, task: str) -> str:
+    def submit(self, task: str, cancellation_token=None) -> str:
         self.add_user_turn(task)
-        return self.run_until_idle()
+        return self.run_until_idle(cancellation_token=cancellation_token)
 
-    def _request_assistant_message(self, kwargs: dict) -> tuple[dict, str | None] | None:
+    def _check_cancelled(self, cancellation_token) -> None:
+        if cancellation_token is not None:
+            cancellation_token.check()
+
+    def _request_assistant_message(self, kwargs: dict, cancellation_token=None) -> tuple[dict, str | None] | None:
         if self.agent.stream_callback is not None:
             stream_kwargs = dict(kwargs)
             stream_kwargs["stream"] = True
             saw_chunk = False
+            thought_start_time: float | None = None
 
             def on_chunk() -> None:
                 nonlocal saw_chunk
@@ -392,31 +398,63 @@ class AgentConversation:
                 self.last_run_streamed_text = True
                 self.agent.stream_callback(delta)
 
+            def on_reasoning_start() -> None:
+                nonlocal thought_start_time
+                thought_start_time = time.time()
+                if self._event_bus is not None:
+                    from ..sessions.events import ThoughtStartedEvent
+                    self._event_bus.emit_event(ThoughtStartedEvent().to_event())
+
+            def on_reasoning_delta(delta: str) -> None:
+                pass  # Reasoning content collected silently, not displayed
+
             try:
                 stream = self.client.chat.completions.create(**stream_kwargs)
                 result = self.provider.assistant_message_from_stream(
                     stream,
                     on_text_delta=on_text_delta,
                     on_chunk=on_chunk,
+                    on_reasoning_start=on_reasoning_start,
+                    on_reasoning_delta=on_reasoning_delta,
+                    cancellation_token=cancellation_token,
                 )
+                # Emit thought finished event if reasoning was detected
+                if thought_start_time is not None and self._event_bus is not None:
+                    duration = time.time() - thought_start_time
+                    from ..sessions.events import ThoughtFinishedEvent
+                    self._event_bus.emit_event(
+                        ThoughtFinishedEvent(
+                            duration_seconds=duration,
+                            source=self.provider.name,
+                        ).to_event()
+                    )
                 return result.assistant_message, result.finish_reason
+            except CancelledError:
+                raise
             except Exception as exc:
                 if saw_chunk:
                     raise
                 self.trace.error("stream_fallback", str(exc))
 
+        self._check_cancelled(cancellation_token)
         response = self.client.chat.completions.create(**kwargs)
+        self._check_cancelled(cancellation_token)
         if not response.choices:
             return None
         choice = response.choices[0]
         return self.provider.assistant_message_from_response(choice.message), choice.finish_reason
 
-    def run_until_idle(self) -> str:
+    def run_until_idle(self, cancellation_token=None) -> str:
         agent = self.agent
         self.last_run_streamed_text = False
+        self._cancellation_token = cancellation_token
 
         for local_iteration in range(1, config.MAX_AGENT_ITERATIONS + 1):
             iteration = self._iteration_offset + local_iteration
+
+            # --- Cancellation check ---
+            self._check_cancelled(cancellation_token)
+
             # --- Middleware: per-iteration hooks ---
             for mw in agent.middlewares:
                 inject = mw.per_iteration(
@@ -488,7 +526,9 @@ class AgentConversation:
             kwargs = self.provider.chat_kwargs(**chat_args)
 
             try:
-                completion = self._request_assistant_message(kwargs)
+                completion = self._request_assistant_message(kwargs, cancellation_token=cancellation_token)
+            except CancelledError:
+                raise
             except Exception as e:
                 err_str = str(e)
                 self.trace.error("api_error", err_str)
@@ -528,6 +568,8 @@ class AgentConversation:
             content = assistant_msg.get("content")
             tool_calls = assistant_msg.get("tool_calls") or []
 
+            self._check_cancelled(cancellation_token)
+
             # --- Append assistant message to history ---
             self._append_message(assistant_msg)
 
@@ -561,6 +603,7 @@ class AgentConversation:
 
             # --- Execute tool calls ---
             for tc in tool_calls:
+                self._check_cancelled(cancellation_token)
                 self.compaction_gate.begin_tool_call()
                 fn_name = tc["function"]["name"]
                 fn_arguments = tc["function"].get("arguments") or "{}"
@@ -618,6 +661,8 @@ class AgentConversation:
                     "content": result,
                 })
                 self.compaction_gate.end_tool_call()
+
+                self._check_cancelled(cancellation_token)
 
                 # --- Middleware: post-tool hooks ---
                 for mw in agent.middlewares:

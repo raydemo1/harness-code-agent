@@ -36,11 +36,13 @@ pip-wheel-metadata/
 # Local logs and runtime output
 *.log
 logs/
+.harness/
 run_logs/
 outputs/
 results/
 tmp/
 temp/
+docs/
 
 # Local/editor state
 .idea/
