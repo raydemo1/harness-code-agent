@@ -16,6 +16,7 @@ from ..runtime import tools
 from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider
 from ..runtime.middlewares import TimeBudgetMiddleware
 from ..runtime.permissions import PermissionPolicy
+from ..runtime.questions import ConsoleQuestionProvider, QuestionProvider
 from ..runtime.tool_context import ToolContext
 from ..sessions.events import AssistantMessageEvent, FinalReportEvent, SessionFinishedEvent, UserInputEvent
 from ..sessions.report import build_final_report
@@ -71,6 +72,7 @@ class InteractiveSession:
         stream_sink: Callable[[str], None] | None = None,
         event_listener: Callable[[object], None] | None = None,
         approval_provider: ApprovalProvider | None = None,
+        question_provider: QuestionProvider | None = None,
         output_sink: Callable[[str], None] | None = None,
         stream_callback=None,
     ):
@@ -79,6 +81,7 @@ class InteractiveSession:
         self.stream_sink = stream_sink or stream_callback
         self.event_listener = event_listener
         self.approval_provider = approval_provider or ConsoleApprovalProvider()
+        self.question_provider = question_provider or ConsoleQuestionProvider()
         self.output_sink = output_sink or print
         self.profile = get_profile(profile_name)
         self.skill_registry = SkillRegistry()
@@ -113,6 +116,7 @@ class InteractiveSession:
             event_bus=self.event_bus,
             session_id=self.session.id,
             approval_provider=self.approval_provider,
+            question_provider=self.question_provider,
         )
         self.agent = self._build_agent()
         self.conversation: AgentConversation = self.agent.start_conversation()

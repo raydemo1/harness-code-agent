@@ -17,7 +17,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 - **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
 - **运行时权限策略**：支持 `read-only`、`workspace-write`、`danger-full-access` 三种权限模式。
 - **会话与事件记录**：每次运行会写入 `.harness/` 元数据、事件和文件快照。
-- **工具系统**：支持文件读写、持久 shell、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
+- **工具系统**：支持文件读写、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
 - **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
 - **Benchmark 适配**：`benchmarks/` 下提供 Terminal-Bench 2.0 / Harbor 运行入口。
 

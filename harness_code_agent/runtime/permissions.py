@@ -26,7 +26,15 @@ class PermissionPolicy:
     WORKSPACE_WRITE = "workspace-write"
     DANGER_FULL_ACCESS = "danger-full-access"
     VALID_MODES = {READ_ONLY, WORKSPACE_WRITE, DANGER_FULL_ACCESS}
-    READ_TOOLS = {"read_file", "read_skill_file", "list_files", "web_search", "web_fetch", "consult_subagent"}
+    READ_TOOLS = {
+        "read_file",
+        "read_skill_file",
+        "list_files",
+        "web_search",
+        "web_fetch",
+        "consult_subagent",
+        "ask_user",
+    }
     EDIT_TOOLS = {"write_file", "apply_patch", "update_plan_state"}
 
     def __init__(self, mode: str = WORKSPACE_WRITE):

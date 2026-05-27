@@ -384,6 +384,36 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("stop_dev_server"), tools.TOOL_DISPATCH["stop_dev_server"])
         self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
 
+    def test_ask_user_tool_appends_other_and_returns_structured_choice(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.questions import StaticQuestionProvider
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="read-only"),
+                event_bus=EventBus(root / ".harness" / "events.jsonl"),
+                question_provider=StaticQuestionProvider(index=1),
+            )
+
+            result = tools.execute_tool(
+                "ask_user",
+                {"question": "Pick a path", "options": ["Fast path"]},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+            data = json.loads(result)
+            self.assertEqual(data["selected_index"], 1)
+            self.assertEqual(data["label"], "其他")
+            self.assertTrue(data["is_other"])
+            self.assertIn("ask_user", [schema["function"]["name"] for schema in tools.TOOL_SCHEMAS])
+
     def test_structured_event_schema_covers_mvp_event_types(self):
         from harness_code_agent.sessions.events import (
             AssistantMessageEvent,

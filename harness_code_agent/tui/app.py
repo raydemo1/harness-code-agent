@@ -20,6 +20,7 @@ from ..core.mentions import MentionResolutionError
 from .approval import TuiApprovalProvider
 from .commands import default_command_registry
 from .completion import HcaCompleter
+from .question import TuiQuestionProvider
 from .render import (
     context_bar_fragments,
     welcome_fragments,
@@ -59,6 +60,7 @@ class TuiApp:
             stream_sink=self._stream_delta,
             event_listener=self._event_listener,
             approval_provider=TuiApprovalProvider(project_root=self.cwd),
+            question_provider=TuiQuestionProvider(),
             output_sink=self._output,
         )
         self.state = TuiState(

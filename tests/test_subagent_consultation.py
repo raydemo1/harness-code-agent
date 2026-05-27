@@ -126,6 +126,7 @@ class SubagentConsultationTests(unittest.TestCase):
                 "run_bash",
                 "web_search",
                 "web_fetch",
+                "ask_user",
                 "consult_subagent",
                 "write_file",
                 "apply_patch",

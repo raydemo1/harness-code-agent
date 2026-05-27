@@ -18,6 +18,7 @@ from typing import Callable
 from .. import config
 from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent, classify_tool_failure
 from .approvals import ApprovalRequest
+from .questions import ConsoleQuestionProvider, QuestionRequest, normalize_question_options
 from .tool_context import ToolContext
 from .tool_result import ToolResult, unstructured_tool_result_from_text
 
@@ -505,6 +506,55 @@ def list_files(directory: str = ".") -> ToolResult:
     )
 
 
+def ask_user(
+    question: str,
+    options: list | None,
+    other_label: str = "其他",
+    agent_name: str | None = None,
+    tool_context: ToolContext | None = None,
+) -> ToolResult:
+    """Ask the user a multiple-choice question and return the selected answer as JSON."""
+    question = (question or "").strip()
+    if not question:
+        return ToolResult(
+            tool="ask_user",
+            status="failed",
+            output="[error] ask_user requires a non-empty question",
+            error="ask_user requires a non-empty question",
+            metadata={"status_source": "validation"},
+        )
+
+    normalized_options = normalize_question_options(options, other_label=(other_label or "其他"))
+    request = QuestionRequest(
+        question=question,
+        options=normalized_options,
+        agent_name=agent_name,
+        session_id=tool_context.session_id if tool_context is not None else None,
+    )
+    provider = tool_context.question_provider if tool_context is not None else ConsoleQuestionProvider()
+    result = provider.ask(request)
+    if result.cancelled:
+        reason = result.reason or "question cancelled"
+        return ToolResult(
+            tool="ask_user",
+            status="failed",
+            output=f"[cancelled] {reason}",
+            error=reason,
+            metadata={"status_source": "user_question", **result.metadata},
+        )
+
+    return ToolResult(
+        tool="ask_user",
+        status="success",
+        output=json.dumps(result.to_dict(), ensure_ascii=False),
+        metadata={
+            "status_source": "user_question",
+            "selected_index": result.selected_index,
+            "is_other": result.is_other,
+        },
+    )
+
+
 def run_bash(
     command: str,
     timeout: int = 300,
@@ -663,6 +713,7 @@ def planning_tool_schemas() -> list[dict]:
         "run_bash",
         "web_search",
         "web_fetch",
+        "ask_user",
         "consult_subagent",
         "write_file",
         "apply_patch",
@@ -1116,6 +1167,49 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "ask_user",
+            "description": (
+                "Ask the user one focused multiple-choice question. "
+                "Use when the model needs a user decision before continuing. "
+                "The UI always includes an Other/其他 option with free-text input, "
+                "and returns the selected option as structured JSON."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["question", "options"],
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to show the user.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": (
+                            "Choices to show before the automatic Other choice. "
+                            "Pass concise labels with optional values/descriptions."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "required": ["label"],
+                            "properties": {
+                                "label": {"type": "string", "description": "Short visible option label."},
+                                "value": {"type": "string", "description": "Value returned to the model if selected."},
+                                "description": {"type": "string", "description": "Optional one-line explanation."},
+                            },
+                        },
+                    },
+                    "other_label": {
+                        "type": "string",
+                        "description": "Label for the automatic free-text option. Defaults to 其他.",
+                        "default": "其他",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_bash",
             "description": (
                 "Execute a shell command in the workspace directory. "
@@ -1491,6 +1585,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "apply_patch": apply_patch,
         "update_plan_state": update_plan_state,
         "list_files": list_files,
+        "ask_user": ask_user,
         "run_bash": run_bash,
         "consult_subagent": consult_subagent,
         "web_search": web_search,

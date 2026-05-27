@@ -18,6 +18,11 @@ from harness_code_agent.tui.approval import (
     _derive_persistent_prefix,
     _format_approval_body,
 )
+from harness_code_agent.tui.question import (
+    QuestionChoiceBar,
+    TuiQuestionProvider,
+    _format_question_choice_bar,
+)
 from harness_code_agent.tui.commands import default_command_registry
 from harness_code_agent.tui.completion import current_mention_query, mention_candidates
 from harness_code_agent.tui.render import bottom_toolbar, prompt_message
@@ -417,6 +422,63 @@ class TuiTests(unittest.TestCase):
         self.assertNotIn("'content': 'hello'", collapsed)
         self.assertIn("'content': 'hello'", expanded)
         self.assertIn("'path': 'note.txt'", expanded)
+
+    def test_tui_question_provider_uses_choice_bar_result(self):
+        from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
+
+        class FakeChoiceBar:
+            def __init__(self, request):
+                self.request = request
+
+            def run(self):
+                return {
+                    "selected_index": 1,
+                    "label": "Other",
+                    "value": "Other",
+                    "is_other": True,
+                    "custom_text": "Use a hybrid approach",
+                }
+
+        request = QuestionRequest(
+            question="Which approach?",
+            options=[QuestionOption(label="Simple"), QuestionOption(label="Other", is_other=True)],
+        )
+        result = TuiQuestionProvider(choice_bar_factory=FakeChoiceBar).ask(request)
+
+        self.assertEqual(result.selected_index, 1)
+        self.assertTrue(result.is_other)
+        self.assertEqual(result.custom_text, "Use a hybrid approach")
+
+    def test_question_choice_bar_number_key_requires_second_press_to_submit(self):
+        from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
+
+        request = QuestionRequest(
+            question="Which approach?",
+            options=[
+                QuestionOption(label="Simple"),
+                QuestionOption(label="Detailed"),
+                QuestionOption(label="Other", is_other=True),
+            ],
+        )
+        bar = QuestionChoiceBar(request)
+
+        self.assertIsNone(bar.handle_number_key("2"))
+        self.assertEqual(bar.selected_index, 1)
+        self.assertEqual(bar.handle_number_key("2")["label"], "Detailed")
+
+    def test_question_choice_bar_renders_numbered_other_input(self):
+        from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
+
+        request = QuestionRequest(
+            question="Which approach?",
+            options=[QuestionOption(label="Simple"), QuestionOption(label="Other", is_other=True)],
+        )
+        fragments = _format_question_choice_bar(request.options, selected_index=1, other_text="custom")
+        text = "".join(fragment[1] for fragment in fragments)
+
+        self.assertIn("1 Simple", text)
+        self.assertIn("2 Other", text)
+        self.assertIn("Other: custom", text)
 
     def test_iter_workspace_paths_skips_excluded_dirs_traversal(self):
         import os
