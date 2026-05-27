@@ -103,5 +103,12 @@ def _parse_frontmatter(path: Path) -> dict | None:
     for line in match.group(1).splitlines():
         if ":" in line:
             key, _, value = line.partition(":")
-            meta[key.strip()] = value.strip()
+            meta[key.strip()] = _strip_scalar_quotes(value.strip())
     return meta
+
+
+def _strip_scalar_quotes(value: str) -> str:
+    """Remove one pair of matching YAML-style scalar quotes for catalog text."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value

@@ -1,174 +1,70 @@
 ---
 name: assisting-reverse-engineering
-description: Provides reverse engineering analysis support including function identification, data structure analysis, and behavior understanding. Use when analyzing unknown binaries, understanding program structu
+description: Guide for triaging unknown binaries and reverse-engineering program behavior. Use when analyzing executables, firmware, malware-like samples, crash artifacts, decompiled code, assembly, imports, strings, protocols, data structures, or anti-debugging behavior.
 ---
 
 # Reverse Engineering Assistance
 
-## Analysis Workflow
+Use this skill to produce a structured, evidence-based analysis of an unknown
+binary or low-level program artifact. Keep claims tied to observed strings,
+imports, control flow, traces, or decompiler output.
 
-1. **Initial survey**: Get function list, extract strings, identify imports and exports, map binary structure
-2. **Key function analysis**: Decompile main/entry functions, analyze control flow, identify critical operations, classify functions by purpose
-3. **Data flow mapping**: Trace data through functions, identify data structures, map global state, analyze stack layouts
-4. **Behavior understanding**: Identify protocol handlers, understand input/output patterns, map to known functionality, reconstruct high-level logic
+## Workflow
 
-## Key Capabilities
+1. Survey the artifact.
+   Identify file type, architecture, bitness, compiler/runtime clues, entry
+   points, imports/exports, sections, strings, and obvious packed or obfuscated
+   regions.
 
-- Function identification: entry points and main functions, common library functions, custom application logic, function classification
-- Data structure analysis: strings and constants, data structures (structs, arrays), global variables, stack layouts
-- Pattern recognition: common algorithms (sorting, hashing), protocol implementations, obfuscation techniques, anti-debugging code
-- Code reconstruction: high-level logic reconstruction, control flow patterns, error handling, mapping to source concepts
+2. Classify functions.
+   Separate startup/runtime glue from custom logic. Prioritize entry points,
+   exported functions, suspicious imports, protocol handlers, parsers, crypto,
+   filesystem/network access, and error paths.
 
-## Output Format
+3. Map data flow.
+   Trace inputs through parsing, validation, transformation, storage, and output.
+   Reconstruct structures, global state, constants, stack layouts, and call-site
+   invariants.
 
-Report with: binary_summary (type, architecture, language, compiler), key_functions (entry_points, protocol_handlers, utility_functions), data_structures, strings_of_interest, behavior_analysis (protocols, ports, functionality), recommendations.
+4. Validate behavior.
+   Prefer dynamic traces, debugger breakpoints, emulation, or fixture inputs when
+   available. Mark static-only conclusions with confidence levels.
 
-## Quality Criteria
+5. Report findings.
+   Summarize behavior, key functions, data structures, indicators, uncertainty,
+   and recommended next manual steps.
 
-- **Accuracy**: Correct identification of functionality
-- **Completeness**: Cover all key aspects
-- **Clarity**: Clear explanations of behavior
-- **Actionability**: Highlight areas needing review
+## Output Shape
 
-## See Also
+```md
+## Binary Summary
 
-- `patterns.md` - Detailed analysis patterns and techniques
-- `examples.md` - Example analysis cases and output formats
-- `references.md` - Tools and best practices
+## Key Functions
 
-Overview
+## Data Structures
 
-This skill provides targeted reverse engineering analysis to help you identify functions, reconstruct data structures, and understand binary behavior. It produces a structured report that summarizes architecture, key functions, strings of interest, data structures, and behavioral findings. Use it to accelerate triage of unknown binaries and to prepare focused manual analysis steps.
+## Strings And Indicators
 
-How this skill works
+## Behavior Analysis
 
-The skill begins with an initial survey to enumerate functions, strings, imports/exports, and binary layout. It then performs focused analysis on key functions, reconstructs data flows and structures, and recognizes protocol or algorithmic patterns. Results are compiled into an actionable report with recommendations and prioritized items for deeper review.
+## Confidence And Unknowns
 
-When to use it
+## Recommended Next Steps
+```
 
-Triage an unfamiliar binary to determine potential risks and functionality
+## Good Practices
 
-Map program structure before manual decompilation or debugging
+- Start broad before deep-diving one function.
+- Distinguish evidence from inference.
+- Prefer stable names such as `parse_message`, `decrypt_config`, or
+  `dispatch_command` once behavior is clear.
+- Track confidence for each classification.
+- Preserve exact offsets, addresses, symbols, strings, and hashes when useful.
 
-Identify protocol handlers, network activity, or I/O surfaces
+## Pitfalls
 
-Extract likely data structures for vulnerability or forensic analysis
-
-Analyze obfuscated code or anti-debugging techniques
-
-Best practices
-
-Start with a full binary survey (functions, imports, strings) before deep dives
-
-Prioritize functions by entry points, exported symbols, and suspicious API calls
-
-Correlate static findings with dynamic traces when possible to validate behavior
-
-Document assumptions and confidence levels for each finding
-
-Focus recommendations on actionable next steps: breakpoints, inputs, or sanitizers
-
-Example use cases
-
-Produce a concise report identifying network protocol handlers and likely ports for a suspicious sample
-
-Reconstruct custom data structures to guide exploit development or patch analysis
-
-Identify library vs. custom functions to speed decompilation and reduce noise
-
-Highlight anti-analysis techniques and recommend settings to bypass them
-
-Map control flow and error handling to support secure code reviews
-
-FAQ
-
-What does the report include?
-
-A binary summary (type, arch, compiler), key_functions, data_structures, strings_of_interest, behavior_analysis, and prioritized recommendations.
-
-How accurate are function classifications?
-
-Classifications use pattern recognition and heuristics; combine with dynamic validation for high-confidence results.
-
-Skill score
-
-0
-
-Health score
-
-i
-
-F
-
-52
-/100
-
-Stats
-
-278
- stars
-
-First Seen
-
-2 months ago
-
-Repository
-
-benchflow-ai
-/
-skillsbench
-
-Tags
-
-pddl
-
-Topics
-
-security
-
-debugging
-
-data
-
-analytics
-
-scripting
-
-code-review
-
-Trigger phrases
-
-analyze binaries
-
-identify functions
-
-map data flows
-
-inspect strings
-
-reconstruct logic
-
-classify functions
-
-map protocols
-
-review global state
-
-#
-
-#
-
-#
-
-#
-
-Privacy
-
-/
-
-Terms
-
-Made
- by
- 
-Ian Nuttall
+- Treating library/runtime code as custom logic.
+- Naming functions too early and anchoring on weak guesses.
+- Ignoring dynamic behavior when static control flow is ambiguous.
+- Reporting every string instead of strings that explain behavior.
+- Omitting the input or trace that supports a conclusion.

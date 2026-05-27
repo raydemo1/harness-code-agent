@@ -1,318 +1,86 @@
 ---
 name: shell-tools
-description: Production-grade shell tools - jq, xargs, parallel, pipelines
+description: Practical guidance for reliable shell data processing with jq, xargs, GNU parallel, find, sort, and pipelines. Use when transforming JSON/CSV/text streams, batching commands, parallelizing local work, safely handling filenames, or building reproducible command-line data workflows.
 ---
 
-# Shell Tools Skill
+# Shell Tools
 
-> Master jq, xargs, GNU parallel, and advanced pipelines
+Use this skill to build shell pipelines that are correct, safe, and repeatable.
+Prefer structured tools over brittle text parsing.
 
-## Learning Objectives
+## Core Rules
 
-After completing this skill, you will be able to:
-- [ ] Process JSON with jq
-- [ ] Use xargs for argument handling
-- [ ] Parallelize tasks with GNU parallel
-- [ ] Build efficient data pipelines
-- [ ] Use utility commands effectively
+- Parse JSON with `jq`, not `grep` or regex.
+- Use null-delimited paths for filenames: `find -print0`, `xargs -0`.
+- Quote variables and arguments.
+- Start with one small input, then scale.
+- Use `tee`, temporary files, or intermediate commands to inspect pipelines.
+- Prefer `rg` for search when available.
 
-## Prerequisites
+## jq Patterns
 
-- Strong Bash fundamentals
-- Text processing basics
-- Understanding of pipes
-
-## Core Concepts
-
-### 1. jq Essentials
 ```bash
-# Basic queries
-jq '.' file.json              # Pretty print
-jq '.key' file.json           # Get key
-jq '.array[0]' file.json      # First element
-jq '.nested.key' file.json    # Nested
-
-# Filtering
-jq '.[] | select(.active)'    # Filter
-jq '.[] | select(.count > 10)'
-
-# Transform
-jq '.[] | {id, name}'         # Select fields
-jq 'map(.price * .qty)'       # Calculate
-jq -r '.[] | @csv'            # To CSV
-
-# From variables
-jq -n --arg x "$VAR" '{value: $x}'
+jq '.' file.json
+jq -r '.items[] | [.id, .email] | @tsv' file.json
+jq '.items[] | select(.active == true)' file.json
+jq -n --arg value "$VALUE" '{value: $value}'
 ```
 
-### 2. Xargs
+For large arrays, stream compact records:
+
 ```bash
-# Basic usage
-echo "a b c" | xargs echo
-
-# Safe with spaces
-find . -print0 | xargs -0 rm
-
-# Limit arguments
-cat list | xargs -n 1 process
-cat list | xargs -n 10 process
-
-# Parallel
-cat list | xargs -P 4 -n 1 process
-
-# Placeholder
-cat urls | xargs -I {} curl {}
+jq -c '.items[]' large.json
 ```
 
-### 3. GNU Parallel
+## xargs And find
+
+Use null delimiters when filenames may contain spaces or newlines:
+
 ```bash
-# Basic
-parallel echo ::: a b c
-
-# From file
-parallel process :::: list.txt
-
-# With options
-parallel -j 4 process ::: *.txt
-parallel --progress process ::: *.txt
-
-# Complex
-parallel -j 4 --delay 0.5 \
-    'curl -s {} | jq .name' :::: urls.txt
+find . -name '*.log' -print0 | xargs -0 -n 20 gzip
 ```
 
-### 4. Pipeline Utilities
+Limit batches and parallelism explicitly:
+
 ```bash
-# Sort and unique
-sort file.txt
-sort -n file.txt          # Numeric
-sort -u file.txt          # Unique
-sort file | uniq -c       # Count
-
-# Cut and paste
-cut -d',' -f1,3 file.csv
-paste file1.txt file2.txt
-
-# Transform
-tr 'a-z' 'A-Z' < file
-tr -d '\r' < dos.txt > unix.txt
+xargs -n 1 -P 4 process < ids.txt
 ```
 
-## Common Patterns
+## GNU parallel
 
-### API Data Pipeline
+Use `parallel` for more complex concurrency, placeholders, progress, and rate
+limits:
+
 ```bash
-curl -s 'https://api.example.com/users' |
-    jq -r '.[] | select(.active) | [.id, .email] | @csv' |
-    sort -t',' -k2 |
-    head -20
+parallel -j 5 --delay 0.2 'curl -s "https://api.example.com/item/{}"' :::: ids.txt
 ```
 
-### Parallel Processing
-```bash
-# Compress all logs in parallel
-find . -name "*.log" |
-    parallel -j 4 gzip
-
-# Batch API calls with rate limit
-cat ids.txt |
-    parallel -j 5 --delay 0.2 \
-        'curl -s "https://api.example.com/item/{}"'
-```
-
-### Data Transformation
-```bash
-# JSON to formatted output
-cat data.json |
-    jq -r '.items[] | "\(.id)\t\(.name)\t\(.price)"' |
-    column -t
-```
-
-## Anti-Patterns
-
-| Don't | Do | Why |
-|-------|-----|-----|
-| Parse JSON with grep | Use jq | Proper parsing |
-| Sequential when parallel | Use parallel | Speed |
-| `cat \| xargs` | `xargs < file` | Efficiency |
-
-## Practice Exercises
-
-1. **JSON Processor**: Transform API response
-2. **Batch Processor**: Parallel file processing
-3. **Log Analyzer**: Complex log pipeline
-4. **Data Migrator**: Transform and load data
-
-## Troubleshooting
-
-### Common Errors
-
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `jq: error` | Invalid JSON | Validate with `jq .` |
-| `xargs: arg too long` | Too many args | Use `-n` |
-| `parallel: not found` | Not installed | `apt install parallel` |
-
-### Debug Techniques
-```bash
-# Validate JSON
-jq '.' < input.json
-
-# Debug pipeline
-command1 | tee /dev/stderr | command2
-
-# Test jq filter
-echo '{"a":1}' | jq '.a'
-```
-
-## Performance Tips
+## Data Shaping
 
 ```bash
-# Faster sorting
 LC_ALL=C sort file.txt
-
-# Parallel for CPU-bound
-parallel -j $(nproc) process ::: *.txt
-
-# Stream large files
-jq -c '.[]' large.json | while read -r line; do
-    # process line
-done
+sort file.txt | uniq -c
+cut -d',' -f1,3 file.csv
+tr -d '\r' < input.txt > output.txt
 ```
 
-## Resources
+## Windows Notes
 
-- [jq Manual](https://stedolan.github.io/jq/manual/)
-- [GNU Parallel Tutorial](https://www.gnu.org/software/parallel/parallel_tutorial.html)
-- [jq Playground](https://jqplay.org/)
+When running in PowerShell, prefer native cmdlets for filesystem mutation and use
+explicit UTF-8 encoding for text files. Use Unix-style pipelines only when the
+environment actually provides the tools.
 
-Overview
+## Pitfalls
 
-This skill delivers production-grade shell tooling patterns centered on jq, xargs, GNU parallel, and efficient pipelines. It teaches reliable JSON processing, safe argument handling, parallel task execution, and composing fast data transformations. The content focuses on practical commands, common patterns, anti-patterns, and troubleshooting tips for real-world workflows.
+- Parsing JSON with `grep`.
+- Building destructive commands from untrusted text.
+- Forgetting `-0` with filenames.
+- Running unlimited parallel jobs against APIs.
+- Hiding failures in long pipelines without checking exit codes.
 
-How this skill works
+## Done Criteria
 
-You learn concrete commands and idioms that inspect and transform data streams: jq for robust JSON parsing and transformation, xargs for controlled argument passing and batching, GNU parallel for concurrency and rate-limited jobs, and core Unix utilities (sort, cut, tr, column) for shaping text. Examples show how these tools chain via pipes and files, how to handle edge cases (spaces, large arg lists, invalid JSON), and how to benchmark and debug pipelines.
-
-When to use it
-
-Extract and transform API JSON responses for reporting or downstream processing
-
-Batch or parallelize IO- or CPU-bound tasks like downloads, compression, or image processing
-
-Safely construct command arguments from files or find output (handling spaces/newlines)
-
-Convert JSON to CSV/TSV or formatted tables for human review or imports
-
-Optimize large-file workflows with streaming, locale-tuned sort, and parallelism
-
-Best practices
-
-Always parse JSON with jq instead of grep/sed to avoid brittle errors
-
-Use find -print0 and xargs -0 or null-delimited jq output for safe filenames
-
-Prefer GNU parallel for complex concurrency, with --delay and -j to avoid API rate limits
-
-Stream large JSON with jq -c and process line-by-line to reduce memory use
-
-Set LC_ALL=C for faster sort on large datasets and use nproc to size parallel jobs
-
-Example use cases
-
-Fetch users from an API, filter active accounts with jq, sort by email and show the top 20
-
-Compress all .log files in a directory in parallel with find | parallel -j 4 gzip
-
-Batch API item retrieval from ids.txt using parallel --delay to respect rate limits
-
-Convert nested JSON items to a tabular report with jq -r and column -t for readability
-
-Process a huge JSON array by streaming jq -c '.[]' and handling each entry in a loop
-
-FAQ
-
-What if jq reports invalid JSON?
-
-Validate the input with jq '.' to find syntax errors, or produce compact records with jq -c and inspect problematic lines.
-
-How do I avoid xargs 'arg too long' errors?
-
-Use xargs -n to limit args per command, -0 with null-delimited input, or switch to GNU parallel for more flexible batching.
-
-Skill score
-
-0
-
-Health score
-
-i
-
-D
-
-65
-/100
-
-Stats
-
-278
- stars
-
-First Seen
-
-2 months ago
-
-Repository
-
-benchflow-ai
-/
-skillsbench
-
-Tags
-
-pddl
-
-Topics
-
-automation
-
-devops
-
-data
-
-cli
-
-scripting
-
-Trigger phrases
-
-analyze json
-
-process data
-
-build pipelines
-
-parallelize tasks
-
-transform outputs
-
-optimize pipelines
-
-#
-
-#
-
-#
-
-#
-
-Privacy
-
-/
-
-Terms
-
-Made
- by
- 
-Ian Nuttall
+- The pipeline handles spaces and special characters where relevant.
+- The transformation is tested on representative input.
+- Parallelism or batching is bounded.
+- Output format is explicit and reproducible.
