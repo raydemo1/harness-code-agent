@@ -22,6 +22,7 @@ them without touching this file:
 from __future__ import annotations
 
 from .base import BaseProfile, AgentConfig
+from ..planning_policy import PLANNING_MODE_POLICY
 from ..runtime.middlewares import (
     LoopDetectionMiddleware,
     PreExitVerificationMiddleware,
@@ -55,7 +56,7 @@ class TerminalProfile(BaseProfile):
 
     def main_agent(self) -> AgentConfig:
         return AgentConfig(
-            system_prompt="""\
+            system_prompt=f"""\
 You are the main agent for a terminal/CLI task. You own the entire loop from task understanding to final verification.
 
 NON-INTERACTIVE MODE:
@@ -67,10 +68,7 @@ NON-INTERACTIVE MODE:
 CRITICAL RULES:
 - Your primary action is run_bash. Execute commands instead of describing them.
 - run_bash uses one persistent shell session for the whole run; preserve useful shell state such as cwd and exported variables intentionally.
-- Before substantive work, run a Planning Mode Self-Check.
-- Use skip for <=2 low-risk actions and <=1 file; skip calls no planning tool and writes no artifact.
-- Use light for 3-5 actions or 2-3 files; call update_plan_state(update_kind="start") before tracked actions.
-- Use full for >5 actions, >3 files, cross-module work, state/middleware/tool schema/TUI/persistence risk, rollback risk, or plans needing user confirmation; call update_plan_state(update_kind="start", requires_approval=true) with plan_markdown, then tell the user the plan was written to global_plan/current/plan.md and wait for confirmation.
+{PLANNING_MODE_POLICY}
 - Follow task specifications literally: exact paths, exact output, exact formats, exact filenames.
 - Prefer command-driven evidence. Use commands that match the active shell. On Windows, run_bash uses PowerShell by default; prefer PowerShell cmdlets/syntax, and use cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd.
 - If a command fails, read the actual stderr/stdout, identify the failure class, and switch strategy instead of retrying blindly.

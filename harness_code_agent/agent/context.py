@@ -120,29 +120,32 @@ def detect_anxiety(messages: list[dict]) -> bool:
 # Compaction
 # ---------------------------------------------------------------------------
 
-def compact_messages(messages: list[dict], llm_call, role: str = "default") -> list[dict]:
+def compact_messages(
+    messages: list[dict],
+    llm_call,
+    role: str = "default",
+    *,
+    force: bool = False,
+    target_tokens: int | None = None,
+) -> list[dict]:
     """
     Summarize the older portion of messages, keep the system prompt
     and recent messages intact.
 
     llm_call: a callable(messages) -> str that calls the LLM for summarization.
+    force: if True, can compress segments within the current user turn
+           (but never splits tool_call/tool result pairs).
     """
     if not messages:
         return messages
 
-    retention = 0.30
-
     system = [messages[0]] if messages[0].get("role") == "system" else []
     non_system = messages[len(system):]
-
-    keep_count = max(4, int(len(non_system) * retention))
-
-    # Adjust the split point so we never cut between an assistant message
-    # with tool_calls and its corresponding tool response messages.
-    # The OpenAI API requires tool results to immediately follow the
-    # assistant message that requested them.
-    split_idx = len(non_system) - keep_count
-    split_idx = _safe_split_index(non_system, split_idx)
+    split_idx = choose_compaction_split_index(
+        messages,
+        force=force,
+        target_tokens=target_tokens,
+    ) - len(system)
     old = non_system[:split_idx]
     recent = non_system[split_idx:]
 
@@ -169,6 +172,49 @@ def compact_messages(messages: list[dict], llm_call, role: str = "default") -> l
     return system + [summary_msg] + recent
 
 
+def choose_compaction_split_index(
+    messages: list[dict],
+    *,
+    force: bool = False,
+    target_tokens: int | None = None,
+) -> int:
+    """Return an absolute split index for replacing the old prefix."""
+    if not messages:
+        return 0
+
+    retention = 0.30
+    system = [messages[0]] if messages[0].get("role") == "system" else []
+    non_system = messages[len(system):]
+    keep_count = max(4, int(len(non_system) * retention))
+
+    # In normal mode (not forced), skip the current user turn — find the
+    # last user message and keep everything from there onward.
+    if not force:
+        last_user_idx = None
+        for i in range(len(non_system) - 1, -1, -1):
+            if non_system[i].get("role") == "user":
+                last_user_idx = i
+                break
+        if last_user_idx is not None:
+            keep_count = max(keep_count, len(non_system) - last_user_idx)
+
+    split_idx = len(non_system) - keep_count
+    split_idx = _safe_split_index(non_system, split_idx)
+    if target_tokens is not None:
+        placeholder_summary = {
+            "role": "user",
+            "content": "[COMPACTED CONTEXT — summary of earlier work]\n",
+        }
+        split_idx = _fit_tail_start_to_budget(
+            system,
+            placeholder_summary,
+            non_system,
+            split_idx,
+            target_tokens,
+        )
+    return len(system) + split_idx
+
+
 def _safe_split_index(messages: list[dict], target_idx: int) -> int:
     """Find a safe split point that doesn't break tool_call/tool message pairs.
 
@@ -192,6 +238,40 @@ def _safe_split_index(messages: list[dict], target_idx: int) -> int:
             break
 
     return idx
+
+
+def _safe_tail_start_at_or_after(messages: list[dict], target_idx: int) -> int:
+    """Find a safe tail start at or after target_idx without orphaning tool results."""
+    idx = max(0, min(target_idx, len(messages)))
+    while idx < len(messages):
+        msg = messages[idx]
+        if msg.get("role") == "tool":
+            idx += 1
+            continue
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            idx += 1
+            while idx < len(messages) and messages[idx].get("role") == "tool":
+                idx += 1
+            continue
+        break
+    return idx
+
+
+def _fit_tail_start_to_budget(
+    system: list[dict],
+    summary_msg: dict,
+    non_system: list[dict],
+    split_idx: int,
+    target_tokens: int,
+) -> int:
+    compacted = system + [summary_msg] + non_system[split_idx:]
+    while count_tokens(compacted) > target_tokens and split_idx < len(non_system) - 1:
+        next_idx = _safe_tail_start_at_or_after(non_system, split_idx + 1)
+        if next_idx <= split_idx or next_idx >= len(non_system):
+            break
+        split_idx = next_idx
+        compacted = system + [summary_msg] + non_system[split_idx:]
+    return split_idx
 
 
 # ---------------------------------------------------------------------------
@@ -235,24 +315,8 @@ def create_checkpoint(messages: list[dict], llm_call) -> str:
 def restore_from_checkpoint(checkpoint: str, system_prompt: str) -> list[dict]:
     """
     Build a fresh message list from a checkpoint.
-    Includes recent git diff for additional grounding.
+    No implicit git context injection — messages is the sole context source.
     """
-    # Get recent code changes for extra context
-    git_context = ""
-    try:
-        result = subprocess.run(
-            "git diff --stat HEAD~5 2>/dev/null || git log --oneline -5 2>/dev/null",
-            shell=True,
-            cwd=config.WORKSPACE,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.stdout.strip():
-            git_context = f"\n\nRecent code changes:\n```\n{result.stdout.strip()[:2000]}\n```"
-    except Exception:
-        pass
-
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": (
@@ -260,7 +324,6 @@ def restore_from_checkpoint(checkpoint: str, system_prompt: str) -> list[dict]:
             "context was reset to give you a clean slate.\n\n"
             "Here is the handoff document from the previous session:\n\n"
             + checkpoint
-            + git_context
             + "\n\nContinue from where the previous session left off. "
             "Do NOT redo work that's already completed."
         )},

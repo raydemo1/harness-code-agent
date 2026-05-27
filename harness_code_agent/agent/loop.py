@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .. import config
 from . import context
+from .compaction import CompactionGate, CompactionManager, get_thresholds, compaction_action
 from .providers import ProviderAdapter, current_adapter, get_client
 from ..runtime import tools
 from ..runtime.tool_context import ToolContext
@@ -244,6 +245,8 @@ class AgentConversation:
         self.last_run_streamed_text = False
         self._closed = False
         self._iteration_offset = 0
+        self.compaction_gate = CompactionGate()
+        self.compaction_mgr: CompactionManager | None = None
         if initial_task is not None:
             self.add_user_turn(initial_task)
 
@@ -258,7 +261,118 @@ class AgentConversation:
                 runtime_state=self.runtime_state,
                 agent_name=self.agent.name,
             )
-        self.messages.append({"role": "user", "content": task})
+        self._append_message({"role": "user", "content": task})
+
+    def _append_message(self, message: dict) -> None:
+        self.messages.append(message)
+        self.compaction_gate.bump_revision()
+
+    def _replace_messages(self, messages: list[dict]) -> None:
+        self.messages = messages
+        self.compaction_gate.bump_revision()
+
+    def _reset_context(self, agent: Agent, reason: str) -> None:
+        log.warning(f"[{agent.name}] Context reset triggered ({reason}). Writing checkpoint...")
+        self.trace.context_event("reset", reason)
+        checkpoint = context.create_checkpoint(self.messages, llm_call_simple)
+        self._replace_messages(context.restore_from_checkpoint(checkpoint, agent.system_prompt))
+        self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
+        self.compaction_gate.mark_compacted()
+
+    def _compact_context(self, agent: Agent, *, token_count: int, forced: bool, threshold: int) -> bool:
+        log.info(f"[{agent.name}] Compacting context (role={agent.name}, forced={forced})...")
+        self.trace.context_event("compact", f"tokens={token_count} forced={forced}")
+        if hasattr(self, '_event_bus') and self._event_bus is not None:
+            from ..sessions.events import ContextCompactionStartedEvent
+            self._event_bus.emit_event(
+                ContextCompactionStartedEvent(
+                    token_count=token_count,
+                    threshold=threshold,
+                    forced=forced,
+                ).to_event()
+            )
+        msg_count_before = len(self.messages)
+        target_tokens = threshold
+        committed_summary = ""
+
+        if self.compaction_mgr is not None:
+            candidate = self.compaction_mgr.candidate
+            result = None
+            if candidate is not None:
+                result = self.compaction_mgr.commit_candidate_to_messages(
+                    candidate,
+                    self.messages,
+                    current_revision=self.compaction_gate.revision,
+                )
+            if result is None or not result.committed:
+                split_index = context.choose_compaction_split_index(
+                    self.messages,
+                    force=forced,
+                    target_tokens=target_tokens,
+                )
+                system_len = 1 if self.messages and self.messages[0].get("role") == "system" else 0
+                if split_index <= system_len:
+                    return False
+                candidate = self.compaction_mgr.generate_candidate(
+                    self.messages,
+                    llm_call=llm_call_simple,
+                    split_index=split_index,
+                    revision=self.compaction_gate.revision,
+                )
+                result = self.compaction_mgr.commit_candidate_to_messages(
+                    candidate,
+                    self.messages,
+                    current_revision=self.compaction_gate.revision,
+                )
+            if result.committed and result.messages is not None:
+                committed_summary = result.summary
+                self._replace_messages(result.messages)
+            else:
+                if hasattr(self, '_event_bus') and self._event_bus is not None:
+                    from ..sessions.events import ContextCompactionFailedEvent
+                    self._event_bus.emit_event(
+                        ContextCompactionFailedEvent(
+                            reason=result.reason if result is not None else "unable to generate summary",
+                        ).to_event()
+                    )
+                return False
+        else:
+            self._replace_messages(context.compact_messages(
+                self.messages,
+                llm_call_simple,
+                role=agent.name,
+                force=forced,
+                target_tokens=target_tokens,
+            ))
+            if len(self.messages) > 1:
+                committed_summary = self.messages[1].get("content", "")
+
+        msg_count_after = len(self.messages)
+        self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
+        self.compaction_gate.mark_compacted()
+        if hasattr(self, '_event_bus') and self._event_bus is not None:
+            from ..sessions.events import (
+                ContextCompactionCommittedEvent,
+                ContextCompactionForcedEvent,
+            )
+            tokens_after = context.count_tokens(self.messages)
+            tokens_saved = max(0, token_count - tokens_after)
+            if forced:
+                self._event_bus.emit_event(
+                    ContextCompactionForcedEvent(
+                        token_count=token_count,
+                        threshold=threshold,
+                    ).to_event()
+                )
+            self._event_bus.emit_event(
+                ContextCompactionCommittedEvent(
+                    summary_chars=len(committed_summary),
+                    messages_before=msg_count_before,
+                    messages_after=msg_count_after,
+                    tokens_saved=tokens_saved,
+                ).to_event()
+            )
+        return msg_count_after < msg_count_before or bool(committed_summary)
 
     def submit(self, task: str) -> str:
         self.add_user_turn(task)
@@ -312,7 +426,7 @@ class AgentConversation:
                     agent_name=agent.name,
                 )
                 if inject:
-                    self.messages.append({"role": "user", "content": inject})
+                    self._append_message({"role": "user", "content": inject})
                     self.trace.middleware_inject(type(mw).__name__, "per_iteration", inject)
 
             # --- Context lifecycle check ---
@@ -320,18 +434,43 @@ class AgentConversation:
             log.info(f"[{agent.name}] iteration={iteration}  tokens≈{token_count}")
             self.trace.iteration(iteration, token_count)
 
-            if token_count > config.RESET_THRESHOLD or context.detect_anxiety(self.messages):
+            thresholds = get_thresholds()
+            action = compaction_action(token_count, thresholds)
+            anxiety = context.detect_anxiety(self.messages)
+
+            if action == "force_sync" or (action == "sync_compact" and self.compaction_gate.can_compact()):
+                forced = action == "force_sync"
+                compacted = self._compact_context(
+                    agent,
+                    token_count=token_count,
+                    forced=forced,
+                    threshold=thresholds.force if forced else thresholds.allow,
+                )
+                if forced:
+                    tokens_after = context.count_tokens(self.messages)
+                    if not compacted or tokens_after > thresholds.allow:
+                        self._reset_context(agent, f"compaction failed to reach safe threshold ({tokens_after} > {thresholds.allow})")
+            elif token_count > config.RESET_THRESHOLD or anxiety:
                 reason = "anxiety detected" if token_count <= config.RESET_THRESHOLD else f"tokens {token_count} > threshold"
-                log.warning(f"[{agent.name}] Context reset triggered ({reason}). Writing checkpoint...")
-                self.trace.context_event("reset", reason)
-                checkpoint = context.create_checkpoint(self.messages, llm_call_simple)
-                self.messages = context.restore_from_checkpoint(checkpoint, agent.system_prompt)
-                self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
-            elif token_count > config.COMPRESS_THRESHOLD:
-                log.info(f"[{agent.name}] Compacting context (role={agent.name})...")
-                self.trace.context_event("compact", f"tokens={token_count}")
-                self.messages = context.compact_messages(self.messages, llm_call_simple, role=agent.name)
-                self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
+                self._reset_context(agent, reason)
+            elif action == "async_prepare" and self.compaction_mgr is not None and self.compaction_gate.can_compact():
+                # Async candidate generation — only if gate allows
+                log.info(f"[{agent.name}] Async compaction candidate preparation (tokens≈{token_count})...")
+                self.trace.context_event("async_prepare", f"tokens={token_count}")
+                try:
+                    split_index = context.choose_compaction_split_index(
+                        self.messages,
+                        force=False,
+                        target_tokens=thresholds.allow,
+                    )
+                    self.compaction_mgr.prepare_candidate_async(
+                        self.messages,
+                        llm_call=llm_call_simple,
+                        split_index=split_index,
+                        revision=self.compaction_gate.revision,
+                    )
+                except Exception as exc:
+                    log.warning(f"[{agent.name}] Async compaction candidate failed: {exc}")
 
             # --- LLM call ---
             chat_args = {
@@ -390,7 +529,7 @@ class AgentConversation:
             tool_calls = assistant_msg.get("tool_calls") or []
 
             # --- Append assistant message to history ---
-            self.messages.append(assistant_msg)
+            self._append_message(assistant_msg)
 
             # --- Trace the LLM response ---
             self.trace.llm_response(content, tool_calls, finish_reason)
@@ -410,7 +549,7 @@ class AgentConversation:
                         agent_name=agent.name,
                     )
                     if inject:
-                        self.messages.append({"role": "user", "content": inject})
+                        self._append_message({"role": "user", "content": inject})
                         self.trace.middleware_inject(type(mw).__name__, "pre_exit", inject)
                         forced_continue = True
                         break
@@ -422,6 +561,7 @@ class AgentConversation:
 
             # --- Execute tool calls ---
             for tc in tool_calls:
+                self.compaction_gate.begin_tool_call()
                 fn_name = tc["function"]["name"]
                 fn_arguments = tc["function"].get("arguments") or "{}"
                 try:
@@ -429,11 +569,12 @@ class AgentConversation:
                 except json.JSONDecodeError:
                     log.warning(f"[{agent.name}] Bad JSON in tool call {fn_name}: {fn_arguments[:200]}")
                     self.trace.error("bad_json", f"{fn_name}: {fn_arguments[:200]}")
-                    self.messages.append({
+                    self._append_message({
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "content": f"[error] Invalid JSON arguments: {fn_arguments[:200]}",
                     })
+                    self.compaction_gate.end_tool_call()
                     continue
 
                 blocked = None
@@ -446,7 +587,7 @@ class AgentConversation:
                         agent_name=agent.name,
                     )
                     if blocked:
-                        self.messages.append({
+                        self._append_message({
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": blocked,
@@ -454,6 +595,7 @@ class AgentConversation:
                         self.trace.middleware_inject(type(mw).__name__, "before_tool", blocked)
                         break
                 if blocked:
+                    self.compaction_gate.end_tool_call()
                     continue
 
                 if fn_name == "run_bash" and self.runtime_state.shell_session is None:
@@ -470,11 +612,12 @@ class AgentConversation:
                 log.debug(f"[{agent.name}] tool result: {_truncate(result, 200)}")
                 self.trace.tool_call(fn_name, fn_args, result)
 
-                self.messages.append({
+                self._append_message({
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "content": result,
                 })
+                self.compaction_gate.end_tool_call()
 
                 # --- Middleware: post-tool hooks ---
                 for mw in agent.middlewares:
@@ -487,7 +630,7 @@ class AgentConversation:
                         agent_name=agent.name,
                     )
                     if inject:
-                        self.messages.append({"role": "user", "content": inject})
+                        self._append_message({"role": "user", "content": inject})
                         self.trace.middleware_inject(type(mw).__name__, "post_tool", inject)
                         break
 
@@ -504,7 +647,7 @@ class AgentConversation:
                 # Only tell the model they weren't executed if none were parsed
                 # (i.e. the truncation cut off the tool call JSON itself).
                 if tool_calls:
-                    self.messages.append({
+                    self._append_message({
                         "role": "user",
                         "content": (
                             "[SYSTEM] Your response was truncated (token limit), but your tool calls "
@@ -514,7 +657,7 @@ class AgentConversation:
                         ),
                     })
                 else:
-                    self.messages.append({
+                    self._append_message({
                         "role": "user",
                         "content": (
                             "[SYSTEM] Your last response was cut off because it exceeded the token limit. "
@@ -539,6 +682,8 @@ class AgentConversation:
         self._closed = True
         if self.runtime_state.shell_session is not None:
             self.runtime_state.shell_session.close()
+        if self.compaction_mgr is not None:
+            self.compaction_mgr.close()
 
 
 def _truncate(s: str, n: int) -> str:

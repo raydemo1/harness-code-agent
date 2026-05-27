@@ -17,6 +17,8 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from ..planning_policy import PLANNING_MODE_POLICY
+
 
 @dataclass
 class AgentConfig:
@@ -114,12 +116,7 @@ class BaseProfile(ABC):
             "perform final integration, and make the final stop decision.\n\n"
             "Required loop:\n"
             "1. Read the task and repository state.\n"
-            "2. Run a Planning Mode Self-Check before substantive work. "
-            "Use skip for <=2 low-risk actions and <=1 file; use light for 3-5 actions or 2-3 files; "
-            "use full for >5 actions, >3 files, cross-module work, state/middleware/tool schema/TUI/persistence risk, "
-            "or any plan that needs user confirmation. skip calls no planning tool. "
-            "For light/full, call update_plan_state with update_kind=\"start\" before tracked actions. "
-            "In full start, write plan_markdown with requires_approval=true and wait for user confirmation.\n"
+            f"2. {PLANNING_MODE_POLICY}\n"
             "3. Consult sub-agents only when their read-only findings would reduce context load or risk.\n"
             "4. Apply all code and test changes yourself.\n"
             "5. Run concrete verification commands.\n"

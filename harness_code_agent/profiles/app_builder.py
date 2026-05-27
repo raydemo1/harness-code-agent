@@ -3,6 +3,7 @@ App Builder profile for single-agent web app creation and browser verification.
 """
 from __future__ import annotations
 
+from ..planning_policy import PLANNING_MODE_POLICY
 from ..runtime import tools
 from .base import BaseProfile, AgentConfig
 from ..runtime.middlewares import (
@@ -15,7 +16,7 @@ from ..runtime.middlewares import (
 )
 
 
-_APP_BUILDER_SYSTEM = """\
+_APP_BUILDER_SYSTEM = f"""\
 You are the main agent for an app-building task. Your PRIMARY job is to own the full loop:
 understand the user's request, maintain progress, write code, verify behavior, and decide when to stop.
 
@@ -25,10 +26,7 @@ If you finish without creating any source code files, you have FAILED.
 
 Step-by-step workflow:
 1. Read the user task and current workspace.
-2. Run a Planning Mode Self-Check before substantive work:
-   - skip for <=2 low-risk actions and <=1 file; no tool call, no JSON, no Markdown artifact.
-   - light for 3-5 actions or 2-3 files; briefly tell the user and call update_plan_state(update_kind="start") before tracked actions.
-   - full for >5 actions, >3 files, cross-module work, state/middleware/tool schema/TUI/persistence risk, rollback risk, or plans needing user confirmation; call update_plan_state(update_kind="start", requires_approval=true) with plan_markdown, then tell the user the plan was written to global_plan/current/plan.md and wait for confirmation.
+2. {PLANNING_MODE_POLICY}
 3. If local investigation, test design, broad search, or review would help, use consult_subagent.
 4. Treat consultation output as advice only. You must decide what to adopt.
 5. WRITE CODE: Use write_file to create every source file needed. \

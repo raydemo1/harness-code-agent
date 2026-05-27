@@ -25,13 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("task", nargs="*", help="Optional first task to submit after startup")
     parser.add_argument("--profile", default=PRODUCT_DEFAULT_PROFILE, help="Profile name to use before the session starts")
     parser.add_argument("--resume", help="Session id to resume as context")
-    parser.add_argument(
-        "--exit-after-task",
-        "--no-repl",
-        dest="exit_after_task",
-        action="store_true",
-        help="Submit the task and exit instead of entering the REPL",
-    )
+    parser.add_argument("-p", "--print", dest="print_mode", action="store_true",
+        help="Execute a single task and print results (no REPL)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--list-profiles", action="store_true", help="List profiles and exit")
     args = parser.parse_args(argv)
@@ -45,35 +40,37 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     first_task = " ".join(args.task).strip()
-    if args.exit_after_task and not first_task:
-        print("Error: --exit-after-task/--no-repl requires a task.")
-        return 2
 
     if not config.API_KEY:
         print("Error: Set OPENAI_API_KEY in .env or environment.")
         return 1
 
-    if args.exit_after_task:
+    cwd = Path.cwd()
+    is_tty = _is_interactive_tty()
+
+    if args.print_mode or not is_tty:
+        if not first_task and not args.print_mode:
+            # Only read stdin when auto-degrading (no TTY). -p requires argv.
+            first_task = sys.stdin.read().strip()
+        if not first_task:
+            print("Error: no task provided (pass a task argument or pipe input)")
+            return 2
         try:
             stream_sink = _build_stream_callback()
         except ValueError as e:
             print(f"Error: {e}")
             return 2
         return run_batch(
-            cwd=Path.cwd(),
+            cwd=cwd,
             profile_name=args.profile,
             resume_session_id=args.resume,
             first_task=first_task,
             stream_sink=stream_sink,
         )
 
-    if not _is_interactive_tty():
-        print("Error: hca interactive mode requires a TTY. Use --exit-after-task/--no-repl for batch execution.")
-        return 2
-
     try:
         app = TuiApp(
-            cwd=Path.cwd(),
+            cwd=cwd,
             profile_name=args.profile,
             resume_session_id=args.resume,
             first_task=first_task,

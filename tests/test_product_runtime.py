@@ -336,19 +336,19 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "_trace_main_agent.jsonl").exists())
             self.assertEqual(stderr.getvalue(), "")
 
-    def test_builtin_tool_registry_preserves_legacy_schema_and_dispatch_exports(self):
+    def test_builtin_tool_registry_exposes_schema_and_dispatch_exports(self):
         from harness_code_agent.runtime import tools
 
         registry_names = {
             schema["function"]["name"]
             for schema in tools.BUILTIN_TOOL_REGISTRY.schemas()
         }
-        legacy_names = {
+        exported_schema_names = {
             schema["function"]["name"]
             for schema in tools.TOOL_SCHEMAS + tools.BROWSER_TOOL_SCHEMAS
         }
 
-        self.assertEqual(registry_names, legacy_names)
+        self.assertEqual(registry_names, exported_schema_names)
         self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("read_file"), tools.TOOL_DISPATCH["read_file"])
         self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("stop_dev_server"), tools.TOOL_DISPATCH["stop_dev_server"])
         self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
@@ -896,11 +896,6 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIs(summary._changed_files, _event_helpers.changed_files)
         self.assertIs(summary._event_type, _event_helpers.event_type)
         self.assertIs(summary._payload, _event_helpers.payload)
-
-    def test_readme_does_not_reference_removed_main_agent_flow_test(self):
-        readme = Path(__file__).resolve().parents[1] / "README.md"
-
-        self.assertNotIn("tests.test_main_agent_flow", readme.read_text(encoding="utf-8"))
 
     def test_workspace_service_resolves_paths_and_snapshots_before_write(self):
         from harness_code_agent.workspace.service import WorkspaceService

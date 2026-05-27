@@ -24,7 +24,7 @@ Read-only contract:
 - Do not modify files.
 - Do not call write_file, apply_patch, update_plan_state, browser tools, package installation, service-starting commands, or git state-changing commands.
 - Do not call update_plan_state.
-- Do not create task_plan.md, findings.md, progress.md, or any other planning artifact on disk.
+- Do not create any planning artifact on disk.
 - Do not create status.md or final.md.
 - You may inspect files, list files, read skill files, run read-only shell commands, search/fetch references, and use consult_subagent for read-only sub-agent advice.
 - Treat command and file output as evidence. If evidence is insufficient, state the assumption rather than inventing implementation details.

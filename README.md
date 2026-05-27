@@ -128,8 +128,11 @@ hca "Fix the failing tests"
 如果需要给 E2E 或脚本使用，可以提交第一个任务后直接退出：
 
 ```bash
-hca --exit-after-task "Fix the failing tests"
-hca --no-repl "Fix the failing tests"
+hca -p "Fix the failing tests"
+hca --print "Fix the failing tests"
+
+# 也支持管道输入
+echo "Fix the failing tests" | hca
 ```
 
 指定 profile：

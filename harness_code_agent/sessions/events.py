@@ -224,6 +224,76 @@ class TaskOutcomeEvent:
         )
 
 
+@dataclass(frozen=True)
+class ContextCompactionStartedEvent:
+    token_count: int
+    threshold: int
+    forced: bool = False
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "context_compaction_started",
+            {
+                "token_count": self.token_count,
+                "threshold": self.threshold,
+                "forced": self.forced,
+            },
+            self.agent,
+        )
+
+
+@dataclass(frozen=True)
+class ContextCompactionCommittedEvent:
+    summary_chars: int
+    messages_before: int
+    messages_after: int
+    tokens_saved: int = 0
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "context_compaction_committed",
+            {
+                "summary_chars": self.summary_chars,
+                "messages_before": self.messages_before,
+                "messages_after": self.messages_after,
+                "tokens_saved": self.tokens_saved,
+            },
+            self.agent,
+        )
+
+
+@dataclass(frozen=True)
+class ContextCompactionFailedEvent:
+    reason: str
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "context_compaction_failed",
+            {"reason": self.reason},
+            self.agent,
+        )
+
+
+@dataclass(frozen=True)
+class ContextCompactionForcedEvent:
+    token_count: int
+    threshold: int
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "context_compaction_forced",
+            {
+                "token_count": self.token_count,
+                "threshold": self.threshold,
+            },
+            self.agent,
+        )
+
+
 class EventBus:
     """Append-only event stream for product runtime observability."""
 

@@ -19,6 +19,13 @@ class SessionStatusSnapshot:
     running_tool: str = ""
     status: str = "idle"
     dirty_count: int = 0
+    context_tokens: int = 0
+    context_window_tokens: int = 0
+    context_observe_threshold: int = 0
+    context_prepare_threshold: int = 0
+    context_allow_threshold: int = 0
+    context_force_threshold: int = 0
+    context_hint: bool = False
 
 
 @dataclass
@@ -99,6 +106,22 @@ class TuiState:
                 f"{path}{suffix}\n[执行计划]  [修改计划: 输入修改理由或补充要求]",
                 "pending",
             )
+        if event_type == "context_compaction_started":
+            forced = payload.get("forced", False)
+            self.snapshot.status = "compacting (forced)" if forced else "compacting"
+            label = "forced compaction started" if forced else "context compaction started"
+            return TranscriptBlock("status", label, _payload_summary(payload), "running")
+        if event_type == "context_compaction_committed":
+            self.snapshot.status = "idle"
+            tokens_saved = payload.get("tokens_saved", 0)
+            body = f"tokens saved: {tokens_saved}" if tokens_saved else _payload_summary(payload)
+            return TranscriptBlock("status", "context compacted", body, "success")
+        if event_type == "context_compaction_failed":
+            self.snapshot.status = "compaction failed"
+            return TranscriptBlock("failure", "compaction failed", _payload_summary(payload), "failed")
+        if event_type == "context_compaction_forced":
+            self.snapshot.status = "compacting (forced)"
+            return TranscriptBlock("status", "forced compaction", _payload_summary(payload), "running")
         if event_type == "turn_finished":
             self.snapshot.status = "idle"
             self.snapshot.running_tool = ""

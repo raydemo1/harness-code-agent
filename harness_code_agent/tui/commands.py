@@ -88,6 +88,7 @@ def default_command_registry() -> SlashCommandRegistry:
         CommandSpec("/checkpoint", "Workflow", "/checkpoint [auto on|auto off|every turn|every <N> turns|status]", "Create or configure checkpoint commits.", _checkpoint),
         CommandSpec("/doctor", "Diagnostics", "/doctor", "Check API, workspace, git, and shell setup.", _doctor),
         CommandSpec("/config", "Diagnostics", "/config show", "Show effective Harness configuration.", _config),
+        CommandSpec("/compact", "Workflow", "/compact show", "View the latest compacted summary.", _compact),
     ])
 
 
@@ -178,3 +179,16 @@ def _require_arg(args: list[str], usage: str) -> None:
 def _no_args(args: list[str], usage: str) -> None:
     if args:
         raise ValueError(usage)
+
+
+def _compact(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
+    """Handle /compact and its subcommands."""
+    if args != ["show"]:
+        raise ValueError("Usage: /compact show")
+    mgr = getattr(session.conversation, "compaction_mgr", None)
+    if mgr is None:
+        return CommandResult("No compaction manager available.")
+    summary = mgr.get_latest_summary()
+    if summary is None:
+        return CommandResult("No compacted summary available yet.")
+    return CommandResult(f"Latest compacted summary:\n\n{summary}")

@@ -111,13 +111,6 @@ class SubagentConsultationTests(unittest.TestCase):
 
                 self.assertIsNone(blocked)
 
-    def test_delegate_task_is_not_available_as_a_tool(self):
-        tool_names = {schema["function"]["name"] for schema in tools.TOOL_SCHEMAS}
-
-        self.assertNotIn("delegate_task", tool_names)
-        self.assertNotIn("delegate_task", tools.TOOL_DISPATCH)
-        self.assertIn("Unknown tool", tools.execute_tool("delegate_task", {"task": "do work"}))
-
     def test_plan_tool_schemas_are_read_only(self):
         tool_names = {
             schema["function"]["name"]

@@ -557,7 +557,7 @@ def run_bash(
         )
 
 
-def _smart_truncate_output(stdout: str, stderr: str, limit: int = 30_000) -> str:
+def _smart_truncate_output(stdout: str, stderr: str, limit: int = 12_000) -> str:
     """Truncate command output while preserving the most useful information.
 
     Strategy:

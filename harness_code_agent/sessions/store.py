@@ -18,6 +18,7 @@ class Session:
     events_path: Path
     snapshots_dir: Path
     summary_path: Path
+    compacted_dir: Path = Path(".")
 
 
 class SessionStore:
@@ -39,8 +40,11 @@ class SessionStore:
         session_id = self._new_session_id()
         session_root = self.sessions_dir / session_id
         snapshots_dir = session_root / "snapshots"
+        compacted_dir = session_root / "compacted"
         session_root.mkdir(parents=True, exist_ok=False)
         snapshots_dir.mkdir(parents=True, exist_ok=True)
+        compacted_dir.mkdir(parents=True, exist_ok=True)
+        (compacted_dir / "history").mkdir(parents=True, exist_ok=True)
 
         session = Session(
             id=session_id,
@@ -49,6 +53,7 @@ class SessionStore:
             events_path=session_root / "events.jsonl",
             snapshots_dir=snapshots_dir,
             summary_path=session_root / "summary.md",
+            compacted_dir=compacted_dir,
         )
         metadata = {
             "id": session.id,

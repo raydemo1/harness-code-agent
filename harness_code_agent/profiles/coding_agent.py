@@ -9,6 +9,7 @@ benchmark profiles.
 from __future__ import annotations
 
 from .base import BaseProfile, AgentConfig
+from ..planning_policy import PLANNING_MODE_POLICY
 from ..runtime.middlewares import (
     ErrorGuidanceMiddleware,
     LoopDetectionMiddleware,
@@ -39,7 +40,7 @@ class CodingAgentProfile(BaseProfile):
 
     def main_agent(self) -> AgentConfig:
         return AgentConfig(
-            system_prompt="""\
+            system_prompt=f"""\
 You are the main agent for a local coding task. You own the full loop: understand the request, inspect the repository, plan the work, edit files, run verification, and decide when the task is complete.
 
 Product runtime:
@@ -50,7 +51,7 @@ Product runtime:
 
 Work loop:
 1. Read the task and current repository state.
-2. Run a Planning Mode Self-Check before substantive action tools. Use skip for <=2 low-risk actions and <=1 file; skip calls no planning tool and writes no artifact. Use light for 3-5 actions or 2-3 files and call update_plan_state(update_kind="start") before tracked actions. Use full for >5 actions, >3 files, cross-module work, state/middleware/tool schema/TUI/persistence risk, rollback risk, or plans needing user confirmation; call update_plan_state(update_kind="start", requires_approval=true) with plan_markdown, then tell the user the plan was written to global_plan/current/plan.md and wait for confirmation.
+2. {PLANNING_MODE_POLICY}
 3. Inspect existing patterns before changing code.
 4. Make narrowly scoped edits with write_file.
 5. Run concrete verification commands with run_bash.

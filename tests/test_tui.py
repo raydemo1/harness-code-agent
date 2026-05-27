@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from prompt_toolkit.formatted_text import to_formatted_text
 
 from harness_code_agent.core.mentions import parse_mentions, resolve_mentions
 from harness_code_agent.runtime.approvals import ApprovalRequest
@@ -19,7 +20,7 @@ from harness_code_agent.tui.approval import (
 )
 from harness_code_agent.tui.commands import default_command_registry
 from harness_code_agent.tui.completion import current_mention_query, mention_candidates
-from harness_code_agent.tui.render import prompt_message
+from harness_code_agent.tui.render import bottom_toolbar, prompt_message
 from harness_code_agent.tui.state import SessionStatusSnapshot, TuiState
 
 
@@ -50,6 +51,38 @@ class TuiTests(unittest.TestCase):
 
         self.assertIn("Usage: /config show", result.text)
         self.assertTrue(result.should_continue)
+
+    def test_bottom_toolbar_renders_clickable_context_threshold_circles(self):
+        clicked = []
+        snapshot = SessionStatusSnapshot(
+            profile="coding-agent",
+            model="model-a",
+            provider="auto",
+            permission_mode="workspace-write",
+            session_id="s1",
+            cwd=self.root,
+            context_tokens=90_000,
+            context_window_tokens=128_000,
+            context_observe_threshold=76_800,
+            context_prepare_threshold=87_040,
+            context_allow_threshold=96_000,
+            context_force_threshold=104_960,
+            context_hint=True,
+        )
+
+        fragments = list(to_formatted_text(bottom_toolbar(snapshot, on_context_click=lambda: clicked.append(True))))
+        text = "".join(fragment[1] for fragment in fragments)
+        handlers = [fragment[2] for fragment in fragments if len(fragment) >= 3 and fragment[2] is not None]
+
+        self.assertIn("ctx", text)
+        self.assertIn("○60", text)
+        self.assertIn("○68", text)
+        self.assertIn("○75", text)
+        self.assertIn("○82", text)
+        self.assertIn("70%", text)
+        self.assertTrue(handlers)
+        handlers[0](SimpleNamespace(event_type="MOUSE_UP"))
+        self.assertEqual(clicked, [True])
 
     def test_quoted_file_mention_resolves_paths_with_spaces(self):
         Path(self.temp_dir, "space name.md").write_text("hello space\n", encoding="utf-8")

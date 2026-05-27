@@ -118,6 +118,12 @@ class InteractiveSession:
         self.conversation: AgentConversation = self.agent.start_conversation()
         self.turn_count = 0
         self.checkpoint = CheckpointConfig()
+        # Wire compaction manager
+        from ..agent.compaction import CompactionManager
+        self.conversation.compaction_mgr = CompactionManager(
+            compacted_dir=self.session.compacted_dir,
+        )
+        self.conversation._event_bus = self.event_bus
         self.pending_plan_markdown: str | None = None
         self.pending_plan_revision = 0
         self.last_user_task: str = ""
@@ -136,7 +142,7 @@ class InteractiveSession:
             },
         )
         if self.resume_context:
-            self.conversation.messages.append({
+            self._append_conversation_message({
                 "role": "user",
                 "content": f"Resume context:\n{self.resume_context}",
             })
@@ -305,6 +311,11 @@ class InteractiveSession:
         self.profile = get_profile(profile_name)
         self.agent = self._build_agent()
         self.conversation = self.agent.start_conversation()
+        from ..agent.compaction import CompactionManager
+        self.conversation.compaction_mgr = CompactionManager(
+            compacted_dir=self.session.compacted_dir,
+        )
+        self.conversation._event_bus = self.event_bus
         handoff = self._build_profile_handoff_context(
             previous_profile=previous,
             current_profile=self.profile.name(),
@@ -312,7 +323,7 @@ class InteractiveSession:
             plan_markdown=plan_markdown,
         )
         if handoff:
-            self.conversation.messages.append({
+            self._append_conversation_message({
                 "role": "user",
                 "content": handoff,
             })
@@ -384,11 +395,65 @@ class InteractiveSession:
 
     def _inject_resume_context(self, session_id: str) -> str:
         context_text = _build_resume_context(self.session_store, session_id)
-        self.conversation.messages.append({
+        self._append_conversation_message({
             "role": "user",
             "content": f"Resume context:\n{context_text}",
         })
         return f"Resumed context injected for session: {session_id}"
+
+    def manual_compact_context(self) -> str:
+        from ..agent import context
+        from ..agent.compaction import get_thresholds
+        from ..agent.loop import llm_call_simple
+
+        conv = self.conversation
+        token_count = context.count_tokens(conv.messages)
+        msg_count_before = len(conv.messages)
+        mgr = getattr(conv, "compaction_mgr", None)
+        if mgr is not None:
+            split_index = context.choose_compaction_split_index(
+                conv.messages,
+                force=True,
+                target_tokens=get_thresholds().allow,
+            )
+            system_len = 1 if conv.messages and conv.messages[0].get("role") == "system" else 0
+            if split_index <= system_len:
+                return "Compaction skipped: not enough old context to summarize."
+            candidate = mgr.generate_candidate(
+                conv.messages,
+                llm_call=llm_call_simple,
+                split_index=split_index,
+                revision=conv.compaction_gate.revision,
+            )
+            commit = mgr.commit_candidate_to_messages(
+                candidate,
+                conv.messages,
+                current_revision=conv.compaction_gate.revision,
+            )
+            if not commit.committed or commit.messages is None:
+                return f"Compaction skipped: {commit.reason or 'unable to commit summary'}"
+            conv.messages = commit.messages
+        else:
+            conv.messages = context.compact_messages(
+                conv.messages,
+                llm_call_simple,
+                role=conv.agent.name,
+                force=True,
+                target_tokens=get_thresholds().allow,
+            )
+        msg_count_after = len(conv.messages)
+        conv.runtime_state.current_turn_start_index = max(1, len(conv.messages) - 1)
+        conv.compaction_gate.bump_revision()
+        conv.compaction_gate.mark_compacted()
+        tokens_saved = max(0, token_count - context.count_tokens(conv.messages))
+        return f"Compacted: {msg_count_before} -> {msg_count_after} messages, ~{tokens_saved} tokens saved."
+
+    def _append_conversation_message(self, message: dict) -> None:
+        append = getattr(self.conversation, "_append_message", None)
+        if append is not None:
+            append(message)
+        else:
+            self.conversation.messages.append(message)
 
     def _handle_checkpoint_command(self, args: list[str]) -> str:
         if not args:

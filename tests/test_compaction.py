@@ -1,0 +1,745 @@
+"""Tests for context compaction strategy (PLAN.md).
+
+TDD — these tests define the expected behavior before implementation.
+"""
+import json
+import os
+import shutil
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+
+def _install_fake_openai_module() -> None:
+    if "openai" in sys.modules:
+        return
+    openai = types.ModuleType("openai")
+
+    class OpenAI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    openai.OpenAI = OpenAI
+    sys.modules["openai"] = openai
+
+
+_install_fake_openai_module()
+
+from harness_code_agent import config
+
+
+# ---------------------------------------------------------------------------
+# CompactionGate — controls when compaction is allowed
+# ---------------------------------------------------------------------------
+
+class CompactionGateTests(unittest.TestCase):
+    """CompactionGate tracks active tool calls, dirty state, and message revision."""
+
+    def _make_gate(self):
+        from harness_code_agent.agent.compaction import CompactionGate
+        return CompactionGate()
+
+    def test_initial_state_allows_compaction(self):
+        gate = self._make_gate()
+        self.assertTrue(gate.can_compact())
+
+    def test_active_tool_calls_block_compaction(self):
+        gate = self._make_gate()
+        gate.begin_tool_call()
+        gate.begin_tool_call()
+        self.assertFalse(gate.can_compact())
+
+    def test_tool_result_allows_compaction(self):
+        gate = self._make_gate()
+        gate.begin_tool_call()
+        gate.begin_tool_call()
+        gate.end_tool_call()
+        gate.end_tool_call()
+        self.assertTrue(gate.can_compact())
+
+    def test_partial_tool_calls_still_block(self):
+        gate = self._make_gate()
+        gate.begin_tool_call()
+        gate.begin_tool_call()
+        gate.end_tool_call()
+        self.assertFalse(gate.can_compact())
+
+    def test_message_revision_increments(self):
+        gate = self._make_gate()
+        r0 = gate.revision
+        gate.bump_revision()
+        r1 = gate.revision
+        self.assertEqual(r1, r0 + 1)
+
+    def test_coalescing_window_prevents_rapid_compaction(self):
+        gate = self._make_gate()
+        gate.mark_compacted()
+        # Within coalescing window, should not compact again
+        self.assertFalse(gate.can_compact(coalesce_seconds=30))
+
+    def test_coalescing_window_expires(self):
+        import time
+        gate = self._make_gate()
+        gate._last_compact_time = time.time() - 60
+        self.assertTrue(gate.can_compact(coalesce_seconds=30))
+
+    def test_dirty_flag_tracks_context_changes(self):
+        gate = self._make_gate()
+        self.assertFalse(gate.dirty)
+        gate.mark_dirty()
+        self.assertTrue(gate.dirty)
+        gate.mark_compacted()
+        self.assertFalse(gate.dirty)
+
+
+# ---------------------------------------------------------------------------
+# Threshold behavior — token usage triggers different actions
+# ---------------------------------------------------------------------------
+
+class CompactionThresholdTests(unittest.TestCase):
+    """Token usage thresholds drive compaction strategy."""
+
+    def test_thresholds_derived_from_context_window(self):
+        """Thresholds should be percentages of HARNESS_CONTEXT_WINDOW_TOKENS."""
+        with patch.dict(os.environ, {"HARNESS_CONTEXT_WINDOW_TOKENS": "100000"}):
+            # Reload config to pick up env var
+            from harness_code_agent.agent import compaction
+            thresholds = compaction.get_thresholds(100000)
+            self.assertEqual(thresholds.observe, 60000)    # 60%
+            self.assertEqual(thresholds.prepare, 68000)    # 68%
+            self.assertEqual(thresholds.allow, 75000)      # 75%
+            self.assertEqual(thresholds.force, 82000)      # 82%
+
+    def test_observe_zone_no_action(self):
+        from harness_code_agent.agent.compaction import compaction_action
+        from harness_code_agent.agent.compaction import get_thresholds
+        thresholds = get_thresholds(128000)
+        action = compaction_action(50000, thresholds)
+        self.assertEqual(action, "none")
+
+    def test_prepare_zone_triggers_async(self):
+        from harness_code_agent.agent.compaction import compaction_action
+        from harness_code_agent.agent.compaction import get_thresholds
+        thresholds = get_thresholds(128000)
+        action = compaction_action(90000, thresholds)  # ~70%
+        self.assertEqual(action, "async_prepare")
+
+    def test_allow_zone_allows_boundary_commit(self):
+        from harness_code_agent.agent.compaction import compaction_action
+        from harness_code_agent.agent.compaction import get_thresholds
+        thresholds = get_thresholds(128000)
+        action = compaction_action(97000, thresholds)  # ~76%
+        self.assertEqual(action, "sync_compact")
+
+    def test_force_zone_triggers_forced_sync(self):
+        from harness_code_agent.agent.compaction import compaction_action
+        from harness_code_agent.agent.compaction import get_thresholds
+        thresholds = get_thresholds(128000)
+        action = compaction_action(106000, thresholds)  # ~83%
+        self.assertEqual(action, "force_sync")
+
+
+# ---------------------------------------------------------------------------
+# CompactionManager — async candidate generation and revision validation
+# ---------------------------------------------------------------------------
+
+class CompactionManagerTests(unittest.TestCase):
+    """CompactionManager handles async summarization and revision-guarded commit."""
+
+    def _make_manager(self, tmpdir):
+        from harness_code_agent.agent.compaction import CompactionManager
+        return CompactionManager(compacted_dir=Path(tmpdir))
+
+    def test_generate_candidate_stores_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = self._make_manager(tmpdir)
+            mock_llm = MagicMock(return_value="Summary of old work")
+            messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "task"},
+                {"role": "assistant", "content": "working"},
+                {"role": "user", "content": "next"},
+            ]
+            candidate = mgr.generate_candidate(messages, llm_call=mock_llm, split_index=2, revision=5)
+            self.assertEqual(candidate.revision, 5)
+            self.assertEqual(candidate.summary, "Summary of old work")
+
+    def test_commit_with_matching_revision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import CompactionManager
+            mgr = CompactionManager(compacted_dir=Path(tmpdir))
+            mock_llm = MagicMock(return_value="Summary text")
+            messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "old1"},
+                {"role": "assistant", "content": "old2"},
+                {"role": "user", "content": "recent"},
+            ]
+            candidate = mgr.generate_candidate(messages, llm_call=mock_llm, split_index=2, revision=3)
+            result = mgr.commit_candidate(candidate, current_revision=3)
+            self.assertTrue(result.committed)
+            self.assertEqual(result.summary, "Summary text")
+
+    def test_commit_with_stale_revision_discards(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import CompactionManager
+            mgr = CompactionManager(compacted_dir=Path(tmpdir))
+            mock_llm = MagicMock(return_value="Stale summary")
+            messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "old"},
+                {"role": "user", "content": "recent"},
+            ]
+            candidate = mgr.generate_candidate(messages, llm_call=mock_llm, split_index=1, revision=2)
+            result = mgr.commit_candidate(candidate, current_revision=5)
+            self.assertFalse(result.committed)
+            self.assertIn("stale", result.reason.lower())
+
+    def test_commit_persists_to_compacted_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import CompactionManager
+            mgr = CompactionManager(compacted_dir=Path(tmpdir))
+            mock_llm = MagicMock(return_value="Work summary")
+            messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "task"},
+                {"role": "user", "content": "recent"},
+            ]
+            candidate = mgr.generate_candidate(messages, llm_call=mock_llm, split_index=1, revision=1)
+            mgr.commit_candidate(candidate, current_revision=1)
+
+            latest = Path(tmpdir) / "latest.md"
+            self.assertTrue(latest.exists())
+            self.assertIn("Work summary", latest.read_text(encoding="utf-8"))
+
+    def test_commit_writes_history(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import CompactionManager
+            mgr = CompactionManager(compacted_dir=Path(tmpdir))
+            mock_llm = MagicMock(return_value="History entry")
+            messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "task"},
+                {"role": "user", "content": "recent"},
+            ]
+            candidate = mgr.generate_candidate(messages, llm_call=mock_llm, split_index=1, revision=1)
+            mgr.commit_candidate(candidate, current_revision=1)
+
+            history_dir = Path(tmpdir) / "history"
+            self.assertTrue(history_dir.exists())
+            history_files = list(history_dir.glob("*.md"))
+            self.assertEqual(len(history_files), 1)
+
+    def test_commit_updates_index_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import CompactionManager
+            mgr = CompactionManager(compacted_dir=Path(tmpdir))
+            mock_llm = MagicMock(return_value="Index entry")
+            messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "task"},
+                {"role": "user", "content": "recent"},
+            ]
+            candidate = mgr.generate_candidate(messages, llm_call=mock_llm, split_index=1, revision=1)
+            mgr.commit_candidate(candidate, current_revision=1)
+
+            index_path = Path(tmpdir) / "index.jsonl"
+            self.assertTrue(index_path.exists())
+            entries = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(len(entries), 1)
+            self.assertIn("timestamp", entries[0])
+            self.assertIn("revision", entries[0])
+
+    def test_get_latest_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import CompactionManager
+            mgr = CompactionManager(compacted_dir=Path(tmpdir))
+            # No summary yet
+            self.assertIsNone(mgr.get_latest_summary())
+
+            mock_llm = MagicMock(return_value="Latest summary")
+            messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "task"},
+                {"role": "user", "content": "recent"},
+            ]
+            candidate = mgr.generate_candidate(messages, llm_call=mock_llm, split_index=1, revision=1)
+            mgr.commit_candidate(candidate, current_revision=1)
+            self.assertEqual(mgr.get_latest_summary(), "Latest summary")
+
+    def test_get_history(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import CompactionManager
+            mgr = CompactionManager(compacted_dir=Path(tmpdir))
+            self.assertEqual(mgr.get_history(), [])
+
+            for i in range(3):
+                mock_llm = MagicMock(return_value=f"Summary {i}")
+                messages = [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "task"},
+                    {"role": "user", "content": "recent"},
+                ]
+                candidate = mgr.generate_candidate(messages, llm_call=mock_llm, split_index=1, revision=i)
+                mgr.commit_candidate(candidate, current_revision=i)
+
+            history = mgr.get_history()
+            self.assertEqual(len(history), 3)
+
+    def test_commit_candidate_rewrites_messages_with_summary_and_recent_tail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import CompactionCandidate, CompactionManager
+            mgr = CompactionManager(compacted_dir=Path(tmpdir))
+            messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "old task"},
+                {"role": "assistant", "content": "old result"},
+                {"role": "user", "content": "recent task"},
+            ]
+            candidate = CompactionCandidate(
+                summary="Prepared summary",
+                revision=1,
+                split_index=3,
+                old_count=3,
+            )
+
+            result = mgr.commit_candidate_to_messages(
+                candidate,
+                messages,
+                current_revision=1,
+            )
+
+            self.assertTrue(result.committed)
+            self.assertEqual(result.messages[0], messages[0])
+            self.assertIn("Prepared summary", result.messages[1]["content"])
+            self.assertEqual(result.messages[-1]["content"], "recent task")
+            self.assertIn(
+                "Prepared summary",
+                (Path(tmpdir) / "latest.md").read_text(encoding="utf-8"),
+            )
+
+
+# ---------------------------------------------------------------------------
+# compact_messages — the core summarization function
+# ---------------------------------------------------------------------------
+
+class CompactMessagesTests(unittest.TestCase):
+    """Updated compact_messages: user role summary, token budget, tool_call protection."""
+
+    def _mock_llm(self, return_value="summary"):
+        return MagicMock(return_value=return_value)
+
+    def test_summary_uses_user_role(self):
+        from harness_code_agent.agent.context import compact_messages
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task1"},
+            {"role": "assistant", "content": "done1"},
+            {"role": "user", "content": "task2"},
+            {"role": "assistant", "content": "done2"},
+            {"role": "user", "content": "current task"},
+        ]
+        result = compact_messages(messages, self._mock_llm())
+        # Find the compacted summary message
+        summary_msgs = [m for m in result if m.get("role") == "user" and "COMPACTED" in (m.get("content") or "")]
+        self.assertEqual(len(summary_msgs), 1)
+
+    def test_preserves_system_prompt(self):
+        from harness_code_agent.agent.context import compact_messages
+        messages = [
+            {"role": "system", "content": "system instructions"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "response"},
+            {"role": "user", "content": "current"},
+        ]
+        result = compact_messages(messages, self._mock_llm())
+        self.assertEqual(result[0]["role"], "system")
+        self.assertEqual(result[0]["content"], "system instructions")
+
+    def test_protects_tool_call_tool_result_pairs(self):
+        from harness_code_agent.agent.context import compact_messages
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "tc1", "function": {"name": "run_bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "tc1", "content": "output"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "task2"},
+            {"role": "assistant", "content": "done2"},
+            {"role": "user", "content": "task3"},
+            {"role": "assistant", "content": "done3"},
+            {"role": "user", "content": "current"},
+        ]
+        result = compact_messages(messages, self._mock_llm())
+        # The tool_call + tool result pair should be kept together in either
+        # old (summarized) or recent (kept raw), never split.
+        contents = " ".join(str(m) for m in result)
+        # If tc1 appears, its tool result must also appear
+        if "tc1" in contents:
+            self.assertIn("output", contents)
+
+    def test_normal_compaction_skips_current_user_turn(self):
+        """Normal compaction (below force threshold) should not compact the current user turn."""
+        from harness_code_agent.agent.context import compact_messages
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old task 1"},
+            {"role": "assistant", "content": "old response 1"},
+            {"role": "user", "content": "old task 2"},
+            {"role": "assistant", "content": "old response 2"},
+            {"role": "user", "content": "current task"},
+        ]
+        result = compact_messages(messages, self._mock_llm(), force=False)
+        # The last user message "current task" should remain as-is
+        last_user = [m for m in result if m.get("role") == "user" and "COMPACTED" not in (m.get("content") or "")]
+        self.assertTrue(any("current task" in (m.get("content") or "") for m in last_user))
+
+    def test_respects_target_token_budget_for_recent_tail(self):
+        from harness_code_agent.agent.context import compact_messages
+        messages = [{"role": "system", "content": "sys"}]
+        for i in range(8):
+            messages.extend([
+                {"role": "user", "content": f"task {i}"},
+                {"role": "assistant", "content": "x" * 2000},
+            ])
+        messages.append({"role": "user", "content": "current task"})
+
+        result = compact_messages(
+            messages,
+            self._mock_llm("summary"),
+            force=True,
+            target_tokens=1200,
+        )
+
+        from harness_code_agent.agent.context import count_tokens
+        self.assertLessEqual(count_tokens(result), 1200)
+        self.assertEqual(result[-1]["content"], "current task")
+
+
+# ---------------------------------------------------------------------------
+# Reset regression — no implicit git context injection
+# ---------------------------------------------------------------------------
+
+class ResetRegressionTests(unittest.TestCase):
+    """Reset should only be a final fallback and must not inject git context."""
+
+    def test_restore_from_checkpoint_no_git_injection(self):
+        from harness_code_agent.agent.context import restore_from_checkpoint
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="some git output", returncode=0)
+            result = restore_from_checkpoint("checkpoint text", "system prompt")
+            # Should NOT contain git context
+            user_content = result[1]["content"]
+            self.assertNotIn("Recent code changes", user_content)
+            self.assertNotIn("git diff", user_content)
+            self.assertIn("checkpoint text", user_content)
+
+    def test_restore_preserves_system_prompt(self):
+        from harness_code_agent.agent.context import restore_from_checkpoint
+        with patch("subprocess.run", side_effect=Exception("no git")):
+            result = restore_from_checkpoint("handoff", "my system prompt")
+            self.assertEqual(result[0]["content"], "my system prompt")
+
+
+# ---------------------------------------------------------------------------
+# /compact slash command
+# ---------------------------------------------------------------------------
+
+class CompactCommandTests(unittest.TestCase):
+    """Tests for /compact and its subcommands."""
+
+    def _make_session(self, tmpdir):
+        """Create a minimal mock session for command testing."""
+        session = MagicMock()
+        session.cwd = Path(tmpdir)
+        session.conversation = MagicMock()
+        session.conversation.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "done"},
+        ]
+        session._compaction_mgr = None  # Will be set by implementation
+        return session
+
+    def test_compact_command_is_registered_for_summary_view(self):
+        """`/compact show` is the only slash-command compaction surface."""
+        from harness_code_agent.tui.commands import default_command_registry
+        registry = default_command_registry()
+        spec = registry._by_name.get("/compact")
+        self.assertIsNotNone(spec, "/compact command should be registered")
+        self.assertEqual(spec.usage, "/compact show")
+
+    def test_compact_show_subcommand(self):
+        """`/compact show` displays the latest compacted summary."""
+        from harness_code_agent.tui.commands import default_command_registry
+        registry = default_command_registry()
+        spec = registry._by_name.get("/compact")
+        self.assertIsNotNone(spec)
+
+    def test_compact_show_reads_latest_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.tui.commands import default_command_registry
+
+            Path(tmpdir, "latest.md").write_text("Latest summary text", encoding="utf-8")
+            session = MagicMock()
+            session.conversation.compaction_mgr.get_latest_summary.return_value = "Latest summary text"
+            registry = default_command_registry()
+
+            show = registry.execute("/compact show", session)
+
+            self.assertIn("Latest summary text", show.text)
+
+    def test_compact_rejects_manual_status_and_history_commands(self):
+        from harness_code_agent.tui.commands import default_command_registry
+        registry = default_command_registry()
+        session = MagicMock()
+
+        self.assertIn("Usage: /compact show", registry.execute("/compact", session).text)
+        self.assertIn("Usage: /compact show", registry.execute("/compact status", session).text)
+        self.assertIn("Usage: /compact show", registry.execute("/compact history", session).text)
+
+
+class AgentConversationCompactionLifecycleTests(unittest.TestCase):
+    def test_message_revision_tracks_user_assistant_tool_and_middleware_appends(self):
+        from harness_code_agent.agent.loop import Agent
+
+        agent = Agent("test_agent", "sys", use_tools=False)
+        conv = agent.start_conversation()
+        initial = conv.compaction_gate.revision
+
+        conv.add_user_turn("task")
+
+        self.assertGreater(conv.compaction_gate.revision, initial)
+
+    def test_force_compaction_runs_before_reset_fallback(self):
+        from harness_code_agent.agent.loop import Agent
+
+        agent = Agent("test_agent", "sys", use_tools=False)
+        conv = agent.start_conversation("task")
+        compacted_messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "[COMPACTED CONTEXT]\nsummary"},
+            {"role": "user", "content": "task"},
+        ]
+
+        with (
+            patch("harness_code_agent.agent.loop.context.count_tokens", side_effect=[200000, 1000]),
+            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
+            patch("harness_code_agent.agent.loop.context.compact_messages", return_value=compacted_messages) as compact,
+            patch("harness_code_agent.agent.loop.context.create_checkpoint", return_value="checkpoint") as checkpoint,
+            patch.object(
+                conv,
+                "_request_assistant_message",
+                return_value=({"role": "assistant", "content": "done"}, "stop"),
+            ),
+        ):
+            conv.run_until_idle()
+
+        compact.assert_called_once()
+        self.assertTrue(compact.call_args.kwargs["force"])
+        checkpoint.assert_not_called()
+
+    def test_allow_zone_commits_prepared_candidate_to_messages_and_storage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.agent.compaction import (
+                CompactionCandidate,
+                CompactionManager,
+                get_thresholds,
+            )
+            from harness_code_agent.agent.loop import Agent
+
+            agent = Agent("test_agent", "sys", use_tools=False)
+            conv = agent.start_conversation()
+            conv.messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "old task"},
+                {"role": "assistant", "content": "old result"},
+                {"role": "user", "content": "recent task"},
+            ]
+            conv.compaction_mgr = CompactionManager(Path(tmpdir))
+            conv.compaction_mgr._candidate = CompactionCandidate(
+                summary="Prepared async summary",
+                revision=conv.compaction_gate.revision,
+                split_index=3,
+                old_count=3,
+            )
+
+            with (
+                patch(
+                    "harness_code_agent.agent.loop.context.count_tokens",
+                    return_value=get_thresholds().allow + 1,
+                ),
+                patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
+                patch("harness_code_agent.agent.loop.llm_call_simple", return_value="Sync summary"),
+                patch.object(
+                    conv,
+                    "_request_assistant_message",
+                    return_value=({"role": "assistant", "content": "done"}, "stop"),
+                ),
+            ):
+                conv.run_until_idle()
+
+            self.assertIn("Prepared async summary", conv.messages[1]["content"])
+            self.assertIn(
+                "Prepared async summary",
+                (Path(tmpdir) / "latest.md").read_text(encoding="utf-8"),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Compacted storage — persistence in .harness/sessions/<id>/compacted/
+# ---------------------------------------------------------------------------
+
+class CompactedStorageTests(unittest.TestCase):
+    """Compacted directory structure and persistence."""
+
+    def test_session_dataclass_has_compacted_path(self):
+        """Session dataclass should include compacted_dir."""
+        from harness_code_agent.sessions.store import Session
+        s = Session(
+            id="test",
+            root=Path("/tmp/test"),
+            metadata_path=Path("/tmp/test/session.json"),
+            events_path=Path("/tmp/test/events.jsonl"),
+            snapshots_dir=Path("/tmp/test/snapshots"),
+            summary_path=Path("/tmp/test/summary.md"),
+        )
+        # compacted_dir should exist as an attribute
+        self.assertTrue(hasattr(s, "compacted_dir"))
+
+    def test_session_store_creates_compacted_dir(self):
+        """SessionStore.create() should create the compacted/ subdirectory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.sessions.store import SessionStore
+            store = SessionStore(Path(tmpdir))
+            session = store.create(
+                profile="coding-agent",
+                cwd=tmpdir,
+                model="test",
+                permission_mode="workspace-write",
+            )
+            compacted = session.root / "compacted"
+            self.assertTrue(compacted.exists())
+            self.assertTrue((compacted / "history").exists())
+
+
+# ---------------------------------------------------------------------------
+# Session events for compaction
+# ---------------------------------------------------------------------------
+
+class CompactionEventTests(unittest.TestCase):
+    """New session event types for compaction lifecycle."""
+
+    def test_compaction_started_event(self):
+        from harness_code_agent.sessions.events import ContextCompactionStartedEvent
+        event = ContextCompactionStartedEvent(
+            token_count=100000,
+            threshold=108800,
+            forced=False,
+        )
+        structured = event.to_event()
+        self.assertEqual(structured.type, "context_compaction_started")
+        self.assertEqual(structured.payload["token_count"], 100000)
+
+    def test_compaction_committed_event(self):
+        from harness_code_agent.sessions.events import ContextCompactionCommittedEvent
+        event = ContextCompactionCommittedEvent(
+            summary_chars=500,
+            messages_before=20,
+            messages_after=5,
+            tokens_saved=40000,
+        )
+        structured = event.to_event()
+        self.assertEqual(structured.type, "context_compaction_committed")
+        self.assertIn("tokens_saved", structured.payload)
+
+    def test_compaction_failed_event(self):
+        from harness_code_agent.sessions.events import ContextCompactionFailedEvent
+        event = ContextCompactionFailedEvent(reason="LLM call failed")
+        structured = event.to_event()
+        self.assertEqual(structured.type, "context_compaction_failed")
+
+    def test_compaction_forced_event(self):
+        from harness_code_agent.sessions.events import ContextCompactionForcedEvent
+        event = ContextCompactionForcedEvent(token_count=106000, threshold=104960)
+        structured = event.to_event()
+        self.assertEqual(structured.type, "context_compaction_forced")
+
+
+# ---------------------------------------------------------------------------
+# TUI state — compaction events update status bar
+# ---------------------------------------------------------------------------
+
+class TuiStateCompactionTests(unittest.TestCase):
+    """TUI state.py should handle compaction events."""
+
+    def _make_state(self):
+        from harness_code_agent.tui.state import TuiState, SessionStatusSnapshot
+        snapshot = SessionStatusSnapshot(
+            profile="coding-agent",
+            model="test",
+            provider="test",
+            permission_mode="workspace-write",
+            session_id="test-123",
+            cwd=Path("/tmp"),
+        )
+        return TuiState(snapshot=snapshot)
+
+    def test_compaction_started_updates_status(self):
+        state = self._make_state()
+        event = MagicMock()
+        event.to_dict.return_value = {
+            "type": "context_compaction_started",
+            "payload": {"token_count": 100000, "forced": False},
+        }
+        block = state.apply_event(event)
+        self.assertIsNotNone(block)
+        self.assertIn("compact", state.snapshot.status.lower())
+
+    def test_compaction_committed_restores_idle(self):
+        state = self._make_state()
+        event = MagicMock()
+        event.to_dict.return_value = {
+            "type": "context_compaction_committed",
+            "payload": {"tokens_saved": 40000},
+        }
+        block = state.apply_event(event)
+        self.assertIsNotNone(block)
+
+    def test_compaction_forced_shows_notice(self):
+        state = self._make_state()
+        event = MagicMock()
+        event.to_dict.return_value = {
+            "type": "context_compaction_forced",
+            "payload": {"token_count": 120000},
+        }
+        block = state.apply_event(event)
+        self.assertIsNotNone(block)
+        self.assertIn("forced", block.title.lower())
+        self.assertIn("forced", state.snapshot.status.lower())
+
+
+# ---------------------------------------------------------------------------
+# Config — context window tokens
+# ---------------------------------------------------------------------------
+
+class ContextWindowConfigTests(unittest.TestCase):
+    """HARNESS_CONTEXT_WINDOW_TOKENS config."""
+
+    def test_context_window_configurable(self):
+        with patch.dict(os.environ, {"HARNESS_CONTEXT_WINDOW_TOKENS": "64000"}):
+            # Need to reload to pick up env change
+            import importlib
+            from harness_code_agent import config
+            importlib.reload(config)
+            self.assertEqual(config.CONTEXT_WINDOW_TOKENS, 64000)
+            self.assertEqual(config.RESET_THRESHOLD, 52480)
+            # Restore default
+            importlib.reload(config)
+
+
+if __name__ == "__main__":
+    unittest.main()

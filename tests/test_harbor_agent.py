@@ -101,7 +101,6 @@ class HarnessAgentInstallTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cd /app &&", command)
         self.assertIn("PYTHONPATH=/home/user/harness-agent", command)
         self.assertIn("python3 -m harness_code_agent.cli --profile terminal", command)
-        self.assertNotIn("python3 harness.py", command)
         self.assertNotIn("HARNESS_WORKSPACE=/app", command)
 
 

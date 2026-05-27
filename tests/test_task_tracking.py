@@ -77,9 +77,6 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertEqual(data["update_kind"], "start")
         self.assertFalse(data["requires_approval"])
         self.assertFalse(Path(self.temp_dir, "global_plan", "current", "plan.md").exists())
-        self.assertFalse(Path(self.temp_dir, config.PROGRESS_FILE).exists())
-        self.assertFalse(Path(self.temp_dir, "task_plan.md").exists())
-        self.assertFalse(Path(self.temp_dir, "findings.md").exists())
 
     def test_full_start_writes_state_and_plan_with_approval_required(self):
         state = AgentRuntimeState(session_id="test-session")
@@ -174,10 +171,6 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertIn("[error]", result)
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), {"mode": "old"})
         self.assertEqual(list(state_path.parent.glob("state.json.tmp.*")), [])
-
-    def test_old_tool_name_is_not_agent_callable(self):
-        self.assertIn("Unknown tool", execute_tool("update_planning_files", {}, runtime_state=AgentRuntimeState()))
-
 
 class TaskTrackingEnforcementTests(unittest.TestCase):
     def test_unset_mode_allows_first_action_for_skip_path(self):

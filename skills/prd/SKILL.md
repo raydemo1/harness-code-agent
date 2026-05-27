@@ -1,6 +1,6 @@
 ---
 name: prd
-description: "Use this skill before Vibe Coding implementation when the user needs to define or refine product requirements, MVP scope, non-goals, acceptance criteria, user workflows, constraints, or the first implementation slice. This skill owns PRD.md only. PRD.md is user-facing and must be written in Chinese by default. Do not create ARCH.md or PROJECT_STATE.md; use planning-with-files for execution plans, findings, and progress logs."
+description: "Use this skill before Vibe Coding implementation when the user needs to define or refine product requirements, MVP scope, non-goals, acceptance criteria, user workflows, constraints, or the first implementation slice. This skill owns PRD.md only. PRD.md is user-facing and must be written in Chinese by default. Do not create ARCH.md, PROJECT_STATE.md, execution plans, findings logs, or progress logs from this skill."
 ---
 
 # PRD
@@ -21,13 +21,13 @@ The job is simple: turn a fuzzy idea into `PRD.md` with clear scope, boundaries,
 
 `PRD.md` is the source of truth for what should be built and how success will be judged.
 
-Keep execution memory out of the PRD. If the task needs phase tracking, research notes, retry logs, or session progress, use `planning-with-files` alongside this skill.
+Keep execution memory out of the PRD. If the task needs phase tracking, research notes, retry logs, or session progress, use the runtime Planning Mode Self-Check and `update_plan_state` after the PRD pass.
 
 Do not create `ARCH.md` or `PROJECT_STATE.md` from this skill. Put only lightweight technical direction in `PRD.md`; create separate architecture docs only if the user explicitly asks.
 
-## Collaboration With planning-with-files
+## Collaboration With Runtime Planning
 
-Use `prd` and `planning-with-files` as a pair when a task moves from fuzzy product intent into multi-step execution.
+Use `prd` for product clarity, then let the runtime planning policy choose the lightest execution mode for the first implementation slice.
 
 `prd` owns:
 - 产品目标和背景。
@@ -37,13 +37,12 @@ Use `prd` and `planning-with-files` as a pair when a task moves from fuzzy produ
 - 用户工作流和约束。
 - 第一阶段实现切片和建议验证方式。
 
-`planning-with-files` owns:
-- `task_plan.md` 阶段拆解和当前状态。
-- `findings.md` 研究记录和代码库发现。
-- `progress.md` 会话日志、工具级进展、错误和验证结果。
-- 重试历史和下一步行动。
+Runtime planning owns:
+- `skip`、`light`、`full` 的执行模式选择。
+- `update_plan_state` 中的当前步骤、已完成步骤、阻塞项、下一步行动、重试原因和验证结果。
+- 需要用户确认时的 `global_plan/current/plan.md`。
 
-After writing or updating `PRD.md`, hand off to `planning-with-files` when execution is complex, multi-step, research-heavy, or likely to take more than a few tool calls. The handoff should include:
+After writing or updating `PRD.md`, hand off to runtime planning when execution is complex, multi-step, research-heavy, or likely to take more than a few tool calls. The handoff context should include:
 
 ```md
 PRD 目标：
@@ -54,12 +53,12 @@ PRD 目标：
 已知风险：
 ```
 
-If implementation reveals a product decision changed, return to `PRD.md` and update the requirement source of truth before changing the execution plan. If only status, discovered facts, errors, or verification results changed, update the planning files only.
+If implementation reveals a product decision changed, return to `PRD.md` and update the requirement source of truth before changing the execution plan. If only status, discovered facts, errors, or verification results changed, update runtime planning state only.
 
 After the PRD pass, choose the planning mode for the first execution slice:
-- `skip`: fewer than 3 estimated tool calls; no planning files required.
-- `light`: 3-5 estimated tool calls; maintain `progress.md` only.
-- `full`: more than 5 estimated tool calls; maintain `task_plan.md`, `findings.md`, and `progress.md`.
+- `skip`: fewer than 3 estimated tool calls; no planning artifact required.
+- `light`: 3-5 estimated tool calls; call `update_plan_state(update_kind="start")` before tracked actions.
+- `full`: more than 5 estimated tool calls or higher-risk execution; call `update_plan_state(update_kind="start", requires_approval=true)` with `plan_markdown`, then wait for confirmation.
 
 Do not force full planning just because `PRD.md` exists. `PRD.md` defines scope and acceptance; the execution slice still chooses the lightest planning mode that fits.
 
@@ -101,7 +100,7 @@ Output inside `PRD.md`:
 - 第一阶段实现切片。
 - 待确认问题，仅保留阻塞项。
 
-If execution will continue immediately, choose `skip`, `light`, or `full` with `planning-with-files` after the brief is written.
+If execution will continue immediately, choose `skip`, `light`, or `full` with the runtime Planning Mode Self-Check after the brief is written.
 
 ### Full PRD
 
@@ -112,7 +111,7 @@ Output:
 - 第一阶段执行切片。
 - 建议验证方式。
 
-If planning or progress tracking is needed, create or update the planning-with-files documents separately. Do not duplicate those logs in `PRD.md`.
+If planning or progress tracking is needed, update runtime planning state separately. Do not duplicate execution logs in `PRD.md`.
 
 ### High-Risk PRD
 
@@ -206,18 +205,18 @@ Every PRD pass should end with:
 - 第一阶段实现切片。
 - 建议验证方式。
 - 已知风险。
-- 是否接下来使用 `planning-with-files`。
+- 是否接下来进入执行，以及建议的 runtime planning mode。
 - 第一阶段执行切片建议使用的 planning mode：`skip`、`light` 或 `full`。
 
 Default execution contract:
 - 一次只推进一个可验证切片。
 - 未更新 `PRD.md` 前不要扩展范围。
 - 保持现有项目约定。
-- 任务较长或复杂时，用 planning-with-files 记录 task plan、findings、progress 和重试日志。
+- 任务较长或复杂时，用 `update_plan_state` 记录当前步骤、阻塞项、重试原因、验证结果和剩余问题。
 - 声称完成前，用具体命令或人工检查验证。
 - 如有无法运行的验证，必须说明。
 
-交接给 `planning-with-files` 时，不要在 planning files 里复述整份 PRD。只复制执行当前切片所需的目标、当前切片、验收标准、验证目标和已知风险。
+交接给 runtime planning 时，不要复述整份 PRD。只保留执行当前切片所需的目标、当前切片、验收标准、验证目标和已知风险。
 
 ## PRD.md Template
 
@@ -256,7 +255,7 @@ PRD 工作完成的标准：
 - 重要约束已写明或明确延后。
 - 需要时已经写入或更新 `PRD.md`。
 - 第一阶段执行切片已经明确。
-- 对复杂执行，已经明确交接给 `planning-with-files`。
+- 对复杂执行，已经明确建议 runtime planning mode。
 
 ## 示例
 

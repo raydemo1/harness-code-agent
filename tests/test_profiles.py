@@ -17,7 +17,8 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent.profiles import get_profile, list_profiles
-from harness_code_agent.profiles.base import AgentConfig, BaseProfile
+from harness_code_agent.profiles.base import AgentConfig
+from harness_code_agent.planning_policy import PLANNING_MODE_POLICY
 from harness_code_agent.runtime.middlewares import (
     PreExitVerificationMiddleware,
     RecoveryStrategyMiddleware,
@@ -33,14 +34,9 @@ class ProfileInterfaceTests(unittest.TestCase):
 
         self.assertIn("coding-agent", profile_names)
         self.assertIn("plan", profile_names)
-        self.assertNotIn("reasoning", profile_names)
         self.assertIn("local repository", profile.description())
         self.assertIn("durable Harness session", profile.main_agent().system_prompt)
         self.assertIn("workspace path checks", profile.main_agent().system_prompt)
-
-    def test_reasoning_profile_is_removed_without_fallback(self):
-        with self.assertRaisesRegex(ValueError, "Unknown profile: reasoning"):
-            get_profile("reasoning")
 
     def test_all_profiles_expose_main_agent_and_subagent_policy(self):
         for profile_meta in list_profiles():
@@ -65,34 +61,6 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertNotIn("builder", prompt)
         self.assertNotIn("evaluator", prompt)
 
-    def test_profile_interface_exposes_no_legacy_role_methods(self):
-        class MinimalProfile(BaseProfile):
-            def name(self) -> str:
-                return "minimal"
-
-            def description(self) -> str:
-                return "Minimal main-agent-only profile"
-
-        profile = MinimalProfile()
-
-        self.assertIsInstance(profile.main_agent(), AgentConfig)
-        self.assertFalse(hasattr(profile, "planner"))
-        self.assertFalse(hasattr(profile, "builder"))
-        self.assertFalse(hasattr(profile, "evaluator"))
-
-        for profile_meta in list_profiles():
-            builtin = get_profile(profile_meta["name"])
-
-            self.assertFalse(hasattr(builtin, "planner"))
-            self.assertFalse(hasattr(builtin, "builder"))
-            self.assertFalse(hasattr(builtin, "evaluator"))
-
-    def test_builtin_profiles_do_not_prompt_for_delegate_task(self):
-        for profile_meta in list_profiles():
-            profile = get_profile(profile_meta["name"])
-
-            self.assertNotIn("delegate_task", profile.main_agent().system_prompt)
-
     def test_plan_profile_is_read_only_and_structured(self):
         main_agent = get_profile("plan").main_agent()
         prompt = main_agent.system_prompt.lower()
@@ -110,7 +78,7 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertIn("## assumptions", prompt)
         self.assertIn("do not implement", prompt)
         self.assertIn("do not call update_plan_state", prompt)
-        self.assertIn("do not create task_plan.md", prompt)
+        self.assertIn("do not create any planning artifact", prompt)
         self.assertEqual(
             tool_names,
             {
@@ -149,6 +117,13 @@ class ProfileInterfaceTests(unittest.TestCase):
                 self.assertTrue(any(isinstance(mw, TaskTrackingEnforcementMiddleware) for mw in middlewares))
                 self.assertTrue(any(isinstance(mw, RecoveryStrategyMiddleware) for mw in middlewares))
                 self.assertTrue(any(isinstance(mw, PreExitVerificationMiddleware) for mw in middlewares))
+
+    def test_runtime_profiles_use_shared_planning_mode_policy(self):
+        for profile_name in ["coding-agent", "app-builder", "swe-bench", "terminal"]:
+            with self.subTest(profile=profile_name):
+                prompt = get_profile(profile_name).main_agent().system_prompt
+
+                self.assertIn(PLANNING_MODE_POLICY, prompt)
 
 
 if __name__ == "__main__":

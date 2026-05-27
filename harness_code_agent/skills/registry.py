@@ -23,6 +23,8 @@ import logging
 import re
 from pathlib import Path
 
+from ..planning_policy import PLANNING_MODE_CATALOG_POLICY
+
 log = logging.getLogger("harness")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -78,9 +80,8 @@ class SkillRegistry:
             "- If PRD.md exists in the workspace, read it first and use it as the product requirements source of truth.",
             "- If the task starts a new or fuzzy project/major feature, read `skills/prd/SKILL.md` before implementation and create or update PRD.md as the requirements artifact.",
             "- If the task is already scoped by PRD.md or the user request, do not re-run PRD planning; execute directly from the existing context.",
-            "- Treat `prd` and planning state as collaborators: PRD.md defines goal, scope, non-goals, acceptance criteria, first slice, and risks; update_plan_state tracks light/full execution in session state.json.",
-            "- Use a Planning Mode Self-Check before substantive work: skip for <=2 low-risk actions and <=1 file with no artifact, light for 3-5 actions or 2-3 files with session state.json only, and full for larger/riskier work with session state.json plus global_plan/current/plan.md when approval is required. Only mention the mode to the user for light/full.",
-            "- For long, complex, research-heavy, or multi-tool execution, read `skills/planning-with-files/SKILL.md` after PRD context is clear and keep execution state, retries, and verification out of PRD.md.",
+            "- Treat `prd` and runtime planning state as collaborators: PRD.md defines goal, scope, non-goals, acceptance criteria, first slice, and risks; update_plan_state tracks light/full execution.",
+            f"- {PLANNING_MODE_CATALOG_POLICY}",
             "- If execution touches high-risk or tightly bounded areas, read `skills/vibe-execution-guard/SKILL.md` before editing.",
             "- Keep PRD.md current when scope, requirements, acceptance criteria, risks, or major product decisions change.\n",
         ]
