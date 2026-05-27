@@ -325,6 +325,10 @@ class ProductRuntimeTests(unittest.TestCase):
                 self.calls = []
                 self.delegate = ProviderAdapter("openai")
 
+            @property
+            def supports_prompt_cache_key(self):
+                return self.delegate.supports_prompt_cache_key
+
             def chat_kwargs(self, **kwargs):
                 self.calls.append(kwargs)
                 return self.delegate.chat_kwargs(**kwargs)
@@ -348,6 +352,304 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(len(provider.calls), 1)
         self.assertEqual(provider.calls[0]["tools"], schema)
         self.assertEqual(provider.calls[0]["tool_choice"], "auto")
+
+    def test_openai_provider_accepts_prompt_cache_key_and_stream_usage_options(self):
+        from harness_code_agent.agent.providers import ProviderAdapter
+
+        kwargs = ProviderAdapter("openai").chat_kwargs(
+            model="m",
+            messages=[],
+            max_tokens=10,
+            prompt_cache_key="cache-key",
+            stream_options={"include_usage": True},
+        )
+
+        self.assertEqual(kwargs["prompt_cache_key"], "cache-key")
+        self.assertEqual(kwargs["stream_options"], {"include_usage": True})
+
+    def test_agent_loop_uses_prompt_cache_key_only_for_openai_provider(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.agent.providers import ProviderAdapter
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="done", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=None,
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        class CapturingProvider:
+            def __init__(self, name):
+                self.name = name
+                self.calls = []
+                self.delegate = ProviderAdapter(name)
+
+            @property
+            def supports_prompt_cache_key(self):
+                return self.delegate.supports_prompt_cache_key
+
+            def chat_kwargs(self, **kwargs):
+                self.calls.append(kwargs)
+                return self.delegate.chat_kwargs(**kwargs)
+
+            def assistant_message_from_response(self, msg):
+                return self.delegate.assistant_message_from_response(msg)
+
+        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            openai_conv = AgentConversation(Agent("test", "system", use_tools=False))
+            compatible_conv = AgentConversation(Agent("test", "system", use_tools=False))
+        openai_conv.provider = CapturingProvider("openai")
+        compatible_conv.provider = CapturingProvider("openai-compatible")
+
+        with (
+            patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+        ):
+            openai_conv.run_until_idle()
+            compatible_conv.run_until_idle()
+
+        self.assertIn("prompt_cache_key", openai_conv.provider.calls[0])
+        self.assertNotIn("prompt_cache_key", compatible_conv.provider.calls[0])
+
+    def test_prompt_cache_key_changes_when_system_prompt_changes(self):
+        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.utils import _prompt_cache_key
+
+        first = _prompt_cache_key(Agent("test", "system\nHARNESS A", use_tools=False), None)
+        second = _prompt_cache_key(Agent("test", "system\nHARNESS B", use_tools=False), None)
+
+        self.assertNotEqual(first, second)
+
+    def test_prompt_cache_key_uses_stable_prefix_identity_and_tools_hash(self):
+        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.utils import _prompt_cache_key
+
+        first = _prompt_cache_key(
+            Agent(
+                "test",
+                "rendered system",
+                use_tools=False,
+                prompt_cache_identity={"global_rules_hash": "a"},
+            ),
+            [{"type": "function", "function": {"name": "read_file"}}],
+        )
+        second = _prompt_cache_key(
+            Agent(
+                "test",
+                "rendered system",
+                use_tools=False,
+                prompt_cache_identity={"global_rules_hash": "b"},
+            ),
+            [{"type": "function", "function": {"name": "read_file"}}],
+        )
+        third = _prompt_cache_key(
+            Agent(
+                "test",
+                "rendered system",
+                use_tools=False,
+                prompt_cache_identity={"global_rules_hash": "a"},
+            ),
+            [{"type": "function", "function": {"name": "write_file"}}],
+        )
+
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, third)
+
+    def test_prompt_builder_injects_dynamic_facts_without_mutating_history(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+
+        with patch("harness_code_agent.agent.loop.get_client"):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False))
+        conversation.add_user_turn("Task:\ninspect")
+        conversation.fact_tracker.file_generation["note.txt"] = 2
+
+        prompt_result = conversation._build_prompt()
+
+        self.assertEqual(prompt_result.messages[0]["role"], "system")
+        self.assertIn("[DYNAMIC FACTS]", prompt_result.messages[1]["content"])
+        self.assertIn("note.txt: 2", prompt_result.messages[1]["content"])
+        self.assertEqual(conversation.messages[1]["content"], "Task:\ninspect")
+        self.assertNotIn("[DYNAMIC FACTS]", json.dumps(conversation.messages, ensure_ascii=False))
+
+    def test_context_replacement_detaches_observation_indexes_and_ages_survivors(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.runtime.tool_result import ToolResult
+
+        with patch("harness_code_agent.agent.loop.get_client"):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False))
+
+        result = ToolResult(tool="read_file", status="success", output="SECRET_RAW_CONTENT")
+        observation = conversation.observation_store.create(
+            tool="read_file",
+            args={"path": "note.txt"},
+            result=result,
+            fact_tracker=conversation.fact_tracker,
+        )
+        fresh = conversation.observation_store.fresh_message(observation, result)
+        conversation.messages.extend(
+            [
+                {"role": "user", "content": "old turn"},
+                {"role": "tool", "tool_call_id": "tc_read", "content": fresh},
+            ]
+        )
+        observation.message_index = 2
+
+        conversation._replace_messages(
+            [
+                conversation.messages[0],
+                {"role": "user", "content": "summary"},
+                {"role": "tool", "tool_call_id": "tc_read", "content": fresh},
+            ]
+        )
+
+        prompt_text = json.dumps(conversation.messages, ensure_ascii=False)
+        self.assertNotIn("SECRET_RAW_CONTENT", prompt_text)
+        self.assertIn("historical", prompt_text)
+        self.assertIsNone(observation.message_index)
+        self.assertEqual(observation.fresh_remaining, 0)
+
+    def test_included_observation_ids_detects_fresh_header_state(self):
+        from harness_code_agent.agent.observations import included_observation_ids_from_messages
+
+        messages = [
+            {"role": "tool", "content": "[OBS obs_0001 fresh]\ntool: read_file\npayload"},
+            {"role": "tool", "content": "[OBS obs_0002 historical]\ntool: read_file\npayload"},
+        ]
+
+        self.assertEqual(included_observation_ids_from_messages(messages), {"obs_0001"})
+
+    def test_agent_loop_records_llm_cached_token_usage_event(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.sessions.events import EventBus
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="done", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(
+                        prompt_tokens=100,
+                        completion_tokens=20,
+                        total_tokens=120,
+                        prompt_tokens_details=SimpleNamespace(cached_tokens=80),
+                    ),
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        events = []
+        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False))
+        conversation._event_bus = EventBus(listener=events.append)
+
+        with (
+            patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+        ):
+            conversation.run_until_idle()
+
+        usage = [event for event in events if event.type == "llm_usage"][0]
+        self.assertEqual(usage.payload["cached_tokens"], 80)
+        self.assertEqual(usage.payload["prompt_tokens"], 100)
+        self.assertEqual(usage.payload["cache_hit_ratio"], 0.8)
+
+    def test_tool_observation_is_fresh_once_then_aged_and_invalidated(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(json.loads(json.dumps(kwargs["messages"])))
+                call_count = len(self.calls)
+                if call_count == 1:
+                    message = SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="tc_read",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="read_file",
+                                    arguments='{"path":"note.txt"}',
+                                ),
+                            )
+                        ],
+                    )
+                    finish_reason = "tool_calls"
+                elif call_count == 2:
+                    message = SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="tc_write",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="write_file",
+                                    arguments='{"path":"note.txt","content":"updated"}',
+                                ),
+                            )
+                        ],
+                    )
+                    finish_reason = "tool_calls"
+                else:
+                    message = SimpleNamespace(content="done", tool_calls=None)
+                    finish_reason = "stop"
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+                    usage=None,
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("SECRET_FULL_CONTENT_UNSAFE", encoding="utf-8")
+            fake_client = FakeClient()
+            with (
+                patch("harness_code_agent.agent.loop.get_client", return_value=fake_client),
+                patch("harness_code_agent.agent.loop.config.WORKSPACE", str(root)),
+            ):
+                conversation = AgentConversation(Agent("test", "system", use_tools=True))
+
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 3),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+                patch("harness_code_agent.runtime.tools.config.WORKSPACE", str(root)),
+            ):
+                conversation.run_until_idle()
+
+            second_prompt = json.dumps(fake_client.chat.completions.calls[1], ensure_ascii=False)
+            third_prompt = json.dumps(fake_client.chat.completions.calls[2], ensure_ascii=False)
+
+            self.assertIn("SECRET_FULL_CONTENT_UNSAFE", second_prompt)
+            self.assertNotIn("SECRET_FULL_CONTENT_UNSAFE", third_prompt)
+            self.assertIn("[OBS", third_prompt)
+            self.assertIn("historical", third_prompt)
+            self.assertIn("FACT INVALIDATION", third_prompt)
+            self.assertTrue(list((root / ".harness" / "observations").rglob("*.txt")))
 
     def test_trace_writer_stores_traces_under_harness_directory_without_stderr_by_default(self):
         from harness_code_agent.agent.loop import TraceWriter
@@ -536,6 +838,62 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(tool_result["payload"]["output"], "[redacted read_file output: 5 chars]")
             self.assertTrue(tool_result["payload"]["metadata"]["output_redacted"])
             self.assertEqual(tool_result["payload"]["metadata"]["output_length"], 5)
+
+    def test_read_file_supports_line_ranges_and_line_numbers(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(root / ".harness" / "events.jsonl"),
+            )
+
+            output = tools.execute_tool(
+                "read_file",
+                {
+                    "path": "note.txt",
+                    "start_line": 2,
+                    "max_lines": 2,
+                    "include_line_numbers": True,
+                },
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+        self.assertEqual(output, "2: two\n3: three")
+
+    def test_read_file_large_file_truncation_points_to_ranged_read_file(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "big.txt").write_text("x" * 60_100, encoding="utf-8")
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(root / ".harness" / "events.jsonl"),
+            )
+
+            output = tools.execute_tool(
+                "read_file",
+                {"path": "big.txt"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+        self.assertIn("Use read_file with start_line/max_lines", output)
+        self.assertNotIn("run_bash with head/tail/sed", output)
 
     def test_tool_result_does_not_infer_status_from_raw_tool_text(self):
         from unittest.mock import patch
@@ -1198,5 +1556,3 @@ class ProductRuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

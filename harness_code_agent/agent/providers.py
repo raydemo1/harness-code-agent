@@ -8,6 +8,7 @@ from typing import Callable, Iterable
 from openai import OpenAI
 
 from .. import config
+from .utils import _get, _usage_to_dict
 
 
 TextDeltaCallback = Callable[[str], None]
@@ -77,6 +78,7 @@ def resolve_provider_name(*, provider: str | None, base_url: str | None, model: 
 class StreamResult:
     assistant_message: dict
     finish_reason: str | None
+    usage: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,8 @@ class ProviderAdapter:
         tools: list[dict] | None = None,
         tool_choice: str | None = None,
         stream: bool = False,
+        prompt_cache_key: str | None = None,
+        stream_options: dict | None = None,
     ) -> dict:
         kwargs = {
             "model": model,
@@ -104,6 +108,10 @@ class ProviderAdapter:
             kwargs["tool_choice"] = tool_choice
         if stream:
             kwargs["stream"] = True
+        if prompt_cache_key:
+            kwargs["prompt_cache_key"] = prompt_cache_key
+        if stream_options:
+            kwargs["stream_options"] = stream_options
         return kwargs
 
     def assistant_message_from_response(self, msg) -> dict:
@@ -131,12 +139,16 @@ class ProviderAdapter:
         reasoning_parts: list[str] = []
         tool_calls_by_index: dict[int, dict] = {}
         finish_reason: str | None = None
+        usage: dict | None = None
 
         for chunk in chunks:
             _check_cancelled(cancellation_token)
             if on_chunk is not None:
                 on_chunk()
             _check_cancelled(cancellation_token)
+            chunk_usage = _usage_to_dict(_get(chunk, "usage"))
+            if chunk_usage is not None:
+                usage = chunk_usage
             choices = _get(chunk, "choices") or []
             if not choices:
                 continue
@@ -198,11 +210,15 @@ class ProviderAdapter:
                 if not call.get("id"):
                     call["id"] = f"call_{idx}"
             assistant_msg["tool_calls"] = tool_calls
-        return StreamResult(assistant_message=assistant_msg, finish_reason=finish_reason)
+        return StreamResult(assistant_message=assistant_msg, finish_reason=finish_reason, usage=usage)
 
     @property
     def requires_reasoning_content_roundtrip(self) -> bool:
         return self.name == "deepseek"
+
+    @property
+    def supports_prompt_cache_key(self) -> bool:
+        return self.name == "openai"
 
 
 def _check_cancelled(cancellation_token) -> None:
@@ -230,7 +246,3 @@ def _reasoning_content_from(value) -> str | None:
     return reasoning_content
 
 
-def _get(value, key: str, default=None):
-    if isinstance(value, dict):
-        return value.get(key, default)
-    return getattr(value, key, default)

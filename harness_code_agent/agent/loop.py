@@ -13,7 +13,15 @@ from pathlib import Path
 from .. import config
 from . import context
 from .compaction import CompactionGate, CompactionManager, get_thresholds, compaction_action
+from .observations import (
+    FactTracker,
+    ObservationContextPolicy,
+    ObservationStore,
+    PromptBuildResult,
+    included_observation_ids_from_messages,
+)
 from .providers import ProviderAdapter, current_adapter, get_client
+from .utils import _prompt_cache_key, _short_hash, _usage_to_dict
 from ..runtime import tools
 from ..runtime.tool_context import ToolContext
 from ..workspace.shell_session import PersistentShellSession
@@ -197,7 +205,8 @@ class Agent:
                  time_budget: float | None = None,
                  tool_schemas: list[dict] | None = None,
                   tool_context: ToolContext | None = None,
-                  stream_callback=None):
+                  stream_callback=None,
+                  prompt_cache_identity: dict[str, str] | None = None):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
@@ -207,6 +216,7 @@ class Agent:
         self.tool_schemas = tool_schemas
         self.tool_context = tool_context
         self.stream_callback = stream_callback
+        self.prompt_cache_identity = prompt_cache_identity
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
         return AgentRuntimeState(task_board=TaskBoard(goal=task))
@@ -248,8 +258,41 @@ class AgentConversation:
         self._iteration_offset = 0
         self.compaction_gate = CompactionGate()
         self.compaction_mgr: CompactionManager | None = None
+        self._event_bus = None
+        self.fact_tracker = FactTracker()
+        self.observation_store = ObservationStore(self._observation_dir())
+        self.observation_context_policy = ObservationContextPolicy()
+        self._cached_prompt_cache_key: str | None = None
         if initial_task is not None:
             self.add_user_turn(initial_task)
+
+    def _observation_dir(self) -> Path:
+        session_id = getattr(self.runtime_state, "session_id", None) or "default"
+        safe_session_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
+        if self.agent.tool_context is not None:
+            root = self.agent.tool_context.workspace.root
+        else:
+            root = Path(config.WORKSPACE)
+        return root / ".harness" / "observations" / safe_session_id
+
+    def _build_prompt(self) -> PromptBuildResult:
+        """Build the messages list that will be sent to the LLM.
+
+        The API prompt is assembled as:
+        stable system prefix, dynamic fact layer, then the conversation tail.
+        ``self.messages`` remains the durable conversation log; generated
+        dynamic facts are intentionally not written back to it.
+        """
+        messages = [self.messages[0]]
+        dynamic_facts = self.observation_context_policy.dynamic_facts_message(
+            self.observation_store,
+            self.fact_tracker,
+        )
+        if dynamic_facts is not None:
+            messages.append(dynamic_facts)
+        messages.extend(self.messages[1:])
+        included_ids = included_observation_ids_from_messages(messages)
+        return PromptBuildResult(messages=messages, included_observation_ids=included_ids)
 
     def add_user_turn(self, task: str) -> None:
         self.runtime_state.current_turn_start_index = len(self.messages)
@@ -270,6 +313,7 @@ class AgentConversation:
 
     def _replace_messages(self, messages: list[dict]) -> None:
         self.messages = messages
+        self.observation_store.detach_message_indexes(self.messages)
         self.compaction_gate.bump_revision()
 
     def _reset_context(self, agent: Agent, reason: str) -> None:
@@ -409,6 +453,8 @@ class AgentConversation:
                 pass  # Reasoning content collected silently, not displayed
 
             try:
+                if self.provider.supports_prompt_cache_key:
+                    stream_kwargs.setdefault("stream_options", {"include_usage": True})
                 stream = self.client.chat.completions.create(**stream_kwargs)
                 result = self.provider.assistant_message_from_stream(
                     stream,
@@ -428,6 +474,7 @@ class AgentConversation:
                             source=self.provider.name,
                         ).to_event()
                     )
+                self._emit_llm_usage(result.usage, kwargs.get("prompt_cache_key"))
                 return result.assistant_message, result.finish_reason
             except CancelledError:
                 raise
@@ -442,7 +489,28 @@ class AgentConversation:
         if not response.choices:
             return None
         choice = response.choices[0]
+        self._emit_llm_usage(_usage_to_dict(getattr(response, "usage", None)), kwargs.get("prompt_cache_key"))
+
         return self.provider.assistant_message_from_response(choice.message), choice.finish_reason
+
+    def _emit_llm_usage(self, usage: dict | None, prompt_cache_key: str | None) -> None:
+        if not usage or self._event_bus is None:
+            return
+        from ..sessions.events import LlmUsageEvent
+
+        key_hash = _short_hash(prompt_cache_key) if prompt_cache_key else None
+        self._event_bus.emit_event(
+            LlmUsageEvent(
+                provider=getattr(self.provider, "name", "unknown"),
+                model=config.MODEL,
+                prompt_tokens=usage.get("prompt_tokens"),
+                cached_tokens=int(usage.get("cached_tokens") or 0),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
+                prompt_cache_key_hash=key_hash,
+                agent=self.agent.name,
+            ).to_event()
+        )
 
     def run_until_idle(self, cancellation_token=None) -> str:
         agent = self.agent
@@ -510,10 +578,11 @@ class AgentConversation:
                 except Exception as exc:
                     log.warning(f"[{agent.name}] Async compaction candidate failed: {exc}")
 
-            # --- LLM call ---
+            # --- Build prompt and LLM call ---
+            prompt_result = self._build_prompt()
             chat_args = {
                 "model": config.MODEL,
-                "messages": self.messages,
+                "messages": prompt_result.messages,
                 "max_tokens": 32768,
             }
             if agent.use_tools:
@@ -523,6 +592,12 @@ class AgentConversation:
                     tool_schemas = tools.TOOL_SCHEMAS + agent.extra_tool_schemas
                 chat_args["tools"] = tool_schemas
                 chat_args["tool_choice"] = "auto"
+            else:
+                tool_schemas = None
+            if self.provider.supports_prompt_cache_key:
+                if self._cached_prompt_cache_key is None:
+                    self._cached_prompt_cache_key = _prompt_cache_key(agent, tool_schemas)
+                chat_args["prompt_cache_key"] = self._cached_prompt_cache_key
             kwargs = self.provider.chat_kwargs(**chat_args)
 
             try:
@@ -572,6 +647,15 @@ class AgentConversation:
 
             # --- Append assistant message to history ---
             self._append_message(assistant_msg)
+
+            # --- Age observations confirmed as included by the prompt builder ---
+            # included_ids was computed before the assistant message and tool
+            # results were appended, so it naturally excludes observations
+            # created during tool execution below.
+            self.observation_store.mark_seen_by_model(
+                self.messages,
+                included_ids=prompt_result.included_observation_ids,
+            )
 
             # --- Trace the LLM response ---
             self.trace.llm_response(content, tool_calls, finish_reason)
@@ -645,21 +729,38 @@ class AgentConversation:
                     self.runtime_state.shell_session = PersistentShellSession(config.WORKSPACE)
 
                 log.info(f"[{agent.name}] tool: {fn_name}({_truncate(str(fn_args), 120)})")
-                result = tools.execute_tool(
+                tool_result = tools.execute_tool_result(
                     fn_name,
                     fn_args,
                     runtime_state=self.runtime_state,
                     agent_name=agent.name,
                     tool_context=agent.tool_context,
                 )
+                result = tool_result.to_text()
                 log.debug(f"[{agent.name}] tool result: {_truncate(result, 200)}")
                 self.trace.tool_call(fn_name, fn_args, result)
+                observation = self.observation_store.create(
+                    tool=fn_name,
+                    args=fn_args,
+                    result=tool_result,
+                    fact_tracker=self.fact_tracker,
+                )
 
                 self._append_message({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": result,
+                    "content": self.observation_store.fresh_message(observation, tool_result),
                 })
+                observation.message_index = len(self.messages) - 1
+                invalidation = self.fact_tracker.apply_mutation(
+                    tool=fn_name,
+                    args=fn_args,
+                    result=tool_result,
+                    observations=self.observation_store.observations,
+                    exclude_ids={observation.id},
+                )
+                if invalidation:
+                    self.observation_store.replace_stale_messages(self.messages)
                 self.compaction_gate.end_tool_call()
 
                 self._check_cancelled(cancellation_token)
@@ -733,6 +834,7 @@ class AgentConversation:
 
 def _truncate(s: str, n: int) -> str:
     return s[:n] + "..." if len(s) > n else s
+
 
 
 def _assistant_message_from_response(msg) -> dict:

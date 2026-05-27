@@ -59,9 +59,11 @@ class FakeConversation:
 
 
 class RecordingInteractiveAgent:
+    init_args = None
     init_kwargs = None
 
     def __init__(self, *args, **kwargs):
+        self.__class__.init_args = args
         self.__class__.init_kwargs = kwargs
         self.middlewares = kwargs.get("middlewares") or []
 
@@ -176,6 +178,53 @@ class InteractiveCliTests(unittest.TestCase):
                 RecordingInteractiveAgent.init_kwargs["tool_schemas"],
                 [{"type": "function", "function": {"name": "read_file"}}],
             )
+        finally:
+            session.close()
+
+    def test_interactive_session_injects_workspace_harness_md_into_system_prompt(self):
+        Path(self.temp_dir, "HARNESS.md").write_text(
+            "# Project Rules\n\nAlways prefer focused tests.\n",
+            encoding="utf-8",
+        )
+
+        class FakeToolProfile:
+            def name(self):
+                return "fake-tools"
+
+            def main_agent(self):
+                return AgentConfig(system_prompt="fake")
+
+        with (
+            patch("harness_code_agent.core.interactive.get_profile", return_value=FakeToolProfile()),
+            patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
+        try:
+            prompt = RecordingInteractiveAgent.init_args[1]
+            self.assertIn("## HARNESS.md", prompt)
+            self.assertIn("Always prefer focused tests.", prompt)
+            self.assertIn("## Profile Acceptance Criteria", prompt)
+            self.assertIn("## Main-Agent Ownership Rules", prompt)
+            self.assertEqual(session.format_task("hello"), "Task:\nhello")
+        finally:
+            session.close()
+
+    def test_interactive_session_missing_harness_md_does_not_change_prompt(self):
+        class FakeToolProfile:
+            def name(self):
+                return "fake-tools"
+
+            def main_agent(self):
+                return AgentConfig(system_prompt="fake")
+
+        with (
+            patch("harness_code_agent.core.interactive.get_profile", return_value=FakeToolProfile()),
+            patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
+        try:
+            prompt = RecordingInteractiveAgent.init_args[1]
+            self.assertNotIn("## HARNESS.md", prompt)
         finally:
             session.close()
 

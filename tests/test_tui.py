@@ -466,6 +466,42 @@ class TuiTests(unittest.TestCase):
         self.assertEqual(bar.selected_index, 1)
         self.assertEqual(bar.handle_number_key("2")["label"], "Detailed")
 
+    def test_question_choice_bar_allows_digits_in_other_text(self):
+        from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
+
+        request = QuestionRequest(
+            question="Which version?",
+            options=[
+                QuestionOption(label="Stable"),
+                QuestionOption(label="Experimental"),
+                QuestionOption(label="Other", is_other=True),
+            ],
+        )
+        bar = QuestionChoiceBar(request)
+        bar._select(2)
+
+        self.assertIsNone(bar.handle_number_key("1"))
+        self.assertEqual(bar.other_text, "1")
+
+    def test_question_choice_bar_keeps_other_number_double_submit(self):
+        from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
+
+        request = QuestionRequest(
+            question="Which version?",
+            options=[
+                QuestionOption(label="Stable"),
+                QuestionOption(label="Experimental"),
+                QuestionOption(label="Other", is_other=True),
+            ],
+        )
+        bar = QuestionChoiceBar(request)
+
+        self.assertIsNone(bar.handle_number_key("3"))
+        payload = bar.handle_number_key("3")
+
+        self.assertEqual(payload["label"], "Other")
+        self.assertTrue(payload["is_other"])
+
     def test_question_choice_bar_renders_numbered_other_input(self):
         from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
 

@@ -135,6 +135,28 @@ class SubagentConsultationTests(unittest.TestCase):
         )
         self.assertNotIn("browser_test", tool_names)
 
+    def test_profile_tool_schema_helpers_are_stably_ordered(self):
+        self.assertEqual(
+            [schema["function"]["name"] for schema in tools.planning_tool_schemas()],
+            [
+                "read_file",
+                "list_files",
+                "read_skill_file",
+                "run_bash",
+                "web_search",
+                "web_fetch",
+                "ask_user",
+                "consult_subagent",
+                "write_file",
+                "apply_patch",
+                "update_plan_state",
+            ],
+        )
+        self.assertEqual(
+            [schema["function"]["name"] for schema in tools.consultation_tool_schemas()],
+            ["read_file", "list_files", "run_bash", "web_search", "web_fetch"],
+        )
+
     def test_planning_profile_allows_plan_artifact_tools(self):
         middleware = ReadOnlyPlanningMiddleware()
 

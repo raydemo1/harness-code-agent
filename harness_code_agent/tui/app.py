@@ -53,6 +53,8 @@ class TuiApp:
         self._event_queue: queue.Queue = queue.Queue()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hca-tui")
 
+        self._question_provider = TuiQuestionProvider()
+
         self.session = InteractiveSession(
             cwd=self.cwd,
             profile_name=profile_name,
@@ -60,7 +62,7 @@ class TuiApp:
             stream_sink=self._stream_delta,
             event_listener=self._event_listener,
             approval_provider=TuiApprovalProvider(project_root=self.cwd),
-            question_provider=TuiQuestionProvider(),
+            question_provider=self._question_provider,
             output_sink=self._output,
         )
         self.state = TuiState(
@@ -146,6 +148,7 @@ class TuiApp:
             full_screen=False,
             mouse_support=True,
         )
+        self._question_provider.app = self.app
 
     def run(self) -> int:
         assert self.state is not None

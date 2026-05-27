@@ -90,7 +90,8 @@ def read_file(
         content = content[:limit] + (
             f"\n\n[TRUNCATED] You are seeing {limit} of {total} total characters. "
             f"The remaining {total - limit} characters are NOT shown above. "
-            f"You MUST use run_bash with head/tail/sed to read the rest if needed."
+            "Use read_file with start_line/max_lines and include_line_numbers=true "
+            "to inspect the exact remaining lines if needed."
         )
     return ToolResult(
         tool="read_file",
@@ -1061,7 +1062,7 @@ CORE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file in the workspace.",
+            "description": "Read a workspace file. Prefer bounded reads with start_line and max_lines unless the file is known small.",
             "parameters": {
                 "type": "object",
                 "required": ["path"],
@@ -1069,11 +1070,11 @@ CORE_TOOL_SCHEMAS = [
                     "path": {"type": "string", "description": "Relative path inside workspace"},
                     "start_line": {
                         "type": "integer",
-                        "description": "Optional 1-based starting line for a ranged read.",
+                        "description": "1-based starting line for a bounded read.",
                     },
                     "max_lines": {
                         "type": "integer",
-                        "description": "Optional maximum number of lines to return.",
+                        "description": "Maximum lines to return for a bounded read.",
                     },
                     "include_line_numbers": {
                         "type": "boolean",
@@ -1270,13 +1271,14 @@ CORE_TOOL_SCHEMAS = [
                 + "Use for installing deps, running builds, starting servers, running tests, etc. "
                 "For long-running commands (compilation, training), increase the timeout parameter. "
                 "For background services (VMs, servers), use an OS-appropriate background command and a separate command to check readiness. "
+                "Prefer bounded inspection commands such as rg, head/tail, sed -n, Select-Object -First/-Last, or line counts instead of dumping whole files or logs. "
                 "Stderr is preserved separately in output for easier debugging."
             ),
             "parameters": {
                 "type": "object",
                 "required": ["command"],
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command to run"},
+                    "command": {"type": "string", "description": "Shell command to run; keep inspection commands bounded."},
                     "timeout": {
                         "type": "integer",
                         "description": "Timeout in seconds (default 300). Increase for long builds/training.",

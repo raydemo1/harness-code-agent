@@ -20,6 +20,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 - **工具系统**：支持文件读写、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
 - **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
 - **Benchmark 适配**：`benchmarks/` 下提供 Terminal-Bench 2.0 / Harbor 运行入口。
+- **项目规则文件**：交互式 session 启动时会读取当前工作区根目录的 `HARNESS.md`，并作为稳定系统提示的一部分注入。
 
 ## 项目结构
 

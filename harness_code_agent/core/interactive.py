@@ -10,6 +10,7 @@ from typing import Callable
 
 from .. import config
 from ..agent.loop import AgentConversation
+from ..agent.prompts import GlobalRulesDoc, PromptPrefixBuilder
 from ..profiles import get_profile, list_profiles
 from ..profiles.base import BaseProfile
 from ..runtime import tools
@@ -155,10 +156,22 @@ class InteractiveSession:
         from ..agent.loop import Agent
 
         cfg = self.profile.main_agent()
+        harness_rules = _load_harness_rules(self.cwd)
         catalog = self.skill_registry.build_catalog_prompt()
+        acceptance_criteria = (
+            self.profile.acceptance_criteria()
+            if hasattr(self.profile, "acceptance_criteria")
+            else []
+        )
+        prefix = PromptPrefixBuilder().build(
+            profile_prompt=cfg.system_prompt,
+            global_rules_docs=[harness_rules] if harness_rules is not None else [],
+            skill_catalog=catalog,
+            acceptance_criteria=acceptance_criteria,
+        )
         return Agent(
             "main_agent",
-            cfg.system_prompt + catalog,
+            prefix.content,
             use_tools=True,
             extra_tool_schemas=cfg.extra_tool_schemas,
             tool_schemas=cfg.tool_schemas,
@@ -166,6 +179,7 @@ class InteractiveSession:
             time_budget=cfg.time_budget,
             tool_context=self.tool_context,
             stream_callback=self.stream_sink,
+            prompt_cache_identity=prefix.cache_identity,
         )
 
     def _sync_time_budget(self) -> None:
@@ -174,16 +188,7 @@ class InteractiveSession:
                 mw.sync_start_time(self._started_at)
 
     def format_task(self, user_prompt: str) -> str:
-        criteria = self.profile.acceptance_criteria()
-        criteria_text = "\n".join(f"- {item}" for item in criteria) if criteria else "- Verify the task requirements before stopping."
-        return (
-            f"Task:\n{user_prompt}\n\n"
-            f"Acceptance criteria:\n{criteria_text}\n\n"
-            "Main-agent ownership rules:\n"
-            "- Only the main agent may modify files, create tests, integrate results, and decide when to stop.\n"
-            "- Consultation sub-agents are read-only and may only return findings, evidence, recommendations, and risks.\n"
-            "- Verify the acceptance criteria against actual files or command output before stopping."
-        )
+        return f"Task:\n{user_prompt}"
 
     def submit(self, user_prompt: str, cancellation_token=None) -> TurnResult:
         if self.pending_plan_markdown and self.profile.name() == "plan":
@@ -615,6 +620,16 @@ def _is_plan_execution_confirmation(text: str) -> bool:
         "按计划执行",
         "继续执行",
     }
+
+
+def _load_harness_rules(workspace: Path) -> GlobalRulesDoc | None:
+    path = workspace / "HARNESS.md"
+    if not path.exists() or not path.is_file():
+        return None
+    content = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not content:
+        return None
+    return GlobalRulesDoc(source=str(path), content=content)
 
 
 

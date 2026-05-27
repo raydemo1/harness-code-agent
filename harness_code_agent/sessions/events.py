@@ -225,6 +225,35 @@ class TaskOutcomeEvent:
 
 
 @dataclass(frozen=True)
+class LlmUsageEvent:
+    provider: str
+    model: str
+    prompt_tokens: int | None = None
+    cached_tokens: int = 0
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    prompt_cache_key_hash: str | None = None
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        ratio = 0.0
+        if self.prompt_tokens is not None and self.prompt_tokens > 0:
+            ratio = self.cached_tokens / self.prompt_tokens
+        payload: dict[str, Any] = {
+            "provider": self.provider,
+            "model": self.model,
+            "prompt_tokens": self.prompt_tokens,
+            "cached_tokens": self.cached_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "cache_hit_ratio": ratio,
+        }
+        if self.prompt_cache_key_hash:
+            payload["prompt_cache_key_hash"] = self.prompt_cache_key_hash
+        return StructuredEvent("llm_usage", payload, self.agent)
+
+
+@dataclass(frozen=True)
 class ContextCompactionStartedEvent:
     token_count: int
     threshold: int

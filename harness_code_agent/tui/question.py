@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import threading
 from textwrap import fill
-from typing import Callable, Any
+from typing import Any, Callable
 
 from prompt_toolkit import print_formatted_text
-from prompt_toolkit.application import Application
+from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
@@ -31,12 +32,21 @@ _QUESTION_STYLE = Style.from_dict(
 
 
 class TuiQuestionProvider:
-    def __init__(self, *, choice_bar_factory: Callable[..., "QuestionChoiceBar"] | None = None):
+    def __init__(
+        self,
+        *,
+        app: Application | None = None,
+        choice_bar_factory: Callable[..., "QuestionChoiceBar"] | None = None,
+    ):
+        self.app = app
         self.choice_bar_factory = choice_bar_factory or QuestionChoiceBar
 
     def ask(self, request: QuestionRequest) -> QuestionResult:
         try:
-            payload = self.choice_bar_factory(request).run()
+            if self.app is not None and self.app.is_running:
+                payload = self._ask_via_run_in_terminal(request)
+            else:
+                payload = self.choice_bar_factory(request).run()
         except (EOFError, KeyboardInterrupt):
             print_formatted_text(HTML("\n<ansired>Question cancelled/interrupted.</ansired>"))
             return QuestionResult(cancelled=True, reason="interrupted in TUI", metadata={"ui": "tui"})
@@ -45,6 +55,25 @@ class TuiQuestionProvider:
             payload.metadata.setdefault("ui", "tui")
             return payload
         return _question_result_from_payload(request, payload)
+
+    def _ask_via_run_in_terminal(self, request: QuestionRequest) -> dict[str, Any]:
+        """Route QuestionChoiceBar to the main thread via run_in_terminal."""
+        result_box: list[Any] = []
+        done = threading.Event()
+
+        def _run_on_main_thread() -> None:
+            try:
+                result_box.append(self.choice_bar_factory(request).run())
+            except (EOFError, KeyboardInterrupt):
+                result_box.append(None)
+            except Exception:
+                result_box.append(None)
+            finally:
+                done.set()
+
+        run_in_terminal(_run_on_main_thread, in_executor=True)
+        done.wait()
+        return result_box[0] if result_box else None
 
 
 class QuestionChoiceBar:
@@ -105,10 +134,7 @@ class QuestionChoiceBar:
             key = event.key_sequence[0].key
             if not self._selected_is_other() or len(str(key)) != 1:
                 return
-            text = str(key)
-            if text.isprintable():
-                self.other_text += text
-                self._armed_number_key = None
+            if self.handle_text_key(str(key)):
                 event.app.invalidate()
 
         body = Window(
@@ -141,11 +167,23 @@ class QuestionChoiceBar:
         target = int(key) - 1
         if target < 0 or target >= len(self.request.options):
             return None
+        if self._selected_is_other() and (
+            self.other_text or self._armed_number_key is None or self._armed_number_key != key
+        ):
+            self.handle_text_key(key)
+            return None
         if self.selected_index == target and self._armed_number_key == key:
             return self._result_payload()
         self.selected_index = target
         self._armed_number_key = key
         return None
+
+    def handle_text_key(self, key: str) -> bool:
+        if not self._selected_is_other() or len(key) != 1 or not key.isprintable():
+            return False
+        self.other_text += key
+        self._armed_number_key = None
+        return True
 
     def _select(self, index: int) -> None:
         self.selected_index = index
