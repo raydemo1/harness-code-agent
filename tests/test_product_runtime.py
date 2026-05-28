@@ -733,7 +733,47 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(registry_names, exported_schema_names)
         self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("read_file"), tools.TOOL_DISPATCH["read_file"])
         self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("stop_dev_server"), tools.TOOL_DISPATCH["stop_dev_server"])
+        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.permission_for("web_search"), "network_read")
+        self.assertTrue(all(spec.permission for spec in tools.BUILTIN_TOOL_REGISTRY.specs()))
         self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
+
+    def test_tool_registry_requires_explicit_permission_classification(self):
+        from harness_code_agent.runtime import tools
+
+        registry = tools.ToolRegistry()
+        schema = {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get current weather for a location.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["location"],
+                    "properties": {"location": {"type": "string"}},
+                },
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "permission"):
+            registry.register(schema, lambda **_: "sunny")
+
+        with self.assertRaisesRegex(ValueError, "unknown permission"):
+            registry.register(schema, lambda **_: "sunny", permission="weatherish")
+
+    def test_network_read_tool_permission_is_allowed_without_approval(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+
+        policy = PermissionPolicy(mode="workspace-write")
+
+        decision = policy.decide_tool_call(
+            "get_weather",
+            {"location": "Hong Kong"},
+            tool_permission="network_read",
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.requires_approval)
+        self.assertEqual(decision.risk, "network_read")
 
     def test_ask_user_tool_appends_other_and_returns_structured_choice(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
@@ -747,7 +787,7 @@ class ProductRuntimeTests(unittest.TestCase):
             root = Path(tmp)
             context = ToolContext(
                 workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
-                permission_policy=PermissionPolicy(mode="read-only"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
                 event_bus=EventBus(root / ".harness" / "events.jsonl"),
                 question_provider=StaticQuestionProvider(index=1),
             )
@@ -918,7 +958,7 @@ class ProductRuntimeTests(unittest.TestCase):
 
         self.assertEqual(output, "2: two\n3: three")
 
-    def test_read_file_large_file_truncation_points_to_ranged_read_file(self):
+    def test_read_file_requires_bounded_ranges_for_files_over_500_lines(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
         from harness_code_agent.sessions.events import EventBus
@@ -927,7 +967,10 @@ class ProductRuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "big.txt").write_text("x" * 60_100, encoding="utf-8")
+            (root / "big.txt").write_text(
+                "\n".join(f"line {i}" for i in range(1, 502)),
+                encoding="utf-8",
+            )
             context = ToolContext(
                 workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
                 permission_policy=PermissionPolicy(mode="workspace-write"),
@@ -941,12 +984,71 @@ class ProductRuntimeTests(unittest.TestCase):
                 agent_name="main_agent",
             )
 
-        self.assertIn("Use read_file with start_line/max_lines", output)
-        self.assertNotIn("run_bash with head/tail/sed", output)
+        self.assertIn("[error]", output)
+        self.assertIn("500 lines", output)
+        self.assertIn("start_line", output)
+        self.assertIn("max_lines", output)
+
+    def test_read_file_rejects_ranges_over_500_lines(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "big.txt").write_text(
+                "\n".join(f"line {i}" for i in range(1, 700)),
+                encoding="utf-8",
+            )
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(root / ".harness" / "events.jsonl"),
+            )
+
+            output = tools.execute_tool(
+                "read_file",
+                {"path": "big.txt", "start_line": 1, "max_lines": 501},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+        self.assertIn("[error]", output)
+        self.assertIn("max_lines must be <= 500", output)
+
+    def test_read_file_rejects_windows_with_too_much_output(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "wide.txt").write_text("x" * 100_001, encoding="utf-8")
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(root / ".harness" / "events.jsonl"),
+            )
+
+            output = tools.execute_tool(
+                "read_file",
+                {"path": "wide.txt", "start_line": 1, "max_lines": 1},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+        self.assertIn("[error]", output)
+        self.assertIn("too large", output)
+        self.assertNotIn("[TRUNCATED]", output)
 
     def test_tool_result_does_not_infer_status_from_raw_tool_text(self):
         from unittest.mock import patch
 
+        from harness_code_agent.runtime.approvals import StaticApprovalProvider
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
         from harness_code_agent.sessions.events import EventBus
@@ -960,6 +1062,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
                 permission_policy=PermissionPolicy(mode="workspace-write"),
                 event_bus=EventBus(events_path),
+                approval_provider=StaticApprovalProvider(approved=True, reason="test approval"),
             )
 
             with patch.object(
@@ -1420,45 +1523,103 @@ class ProductRuntimeTests(unittest.TestCase):
     def test_permission_policy_uses_codex_sandbox_modes(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
 
-        read_only_policy = PermissionPolicy(mode="read-only")
-        read_decision = read_only_policy.decide_tool_call("read_file", {"path": "x.txt"})
-        write_decision = read_only_policy.decide_tool_call("write_file", {"path": "x.txt"})
-        shell_decision = read_only_policy.decide_tool_call(
-            "run_bash",
-            {"command": "git status --short"},
-        )
-
         workspace_policy = PermissionPolicy(mode="workspace-write")
+        read_decision = workspace_policy.decide_tool_call("read_file", {"path": "x.txt"})
         edit_decision = workspace_policy.decide_tool_call("write_file", {"path": "x.txt"})
+        plan_decision = workspace_policy.decide_tool_call("update_plan_state", {"mode": "light"})
         safe_shell_decision = workspace_policy.decide_tool_call(
             "run_bash",
             {"command": "git status --short"},
         )
-        dangerous_decision = workspace_policy.decide_tool_call(
+        risky_shell_decision = workspace_policy.decide_tool_call(
             "run_bash",
             {"command": "rm -rf build"},
         )
+        reset_decision = workspace_policy.decide_tool_call(
+            "run_bash",
+            {"command": "git reset --hard"},
+        )
+        blocked_commands = [
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf *",
+            "Remove-Item C:\\ -Recurse",
+            "mkfs.ext4 /dev/sda",
+            "dd if=/dev/zero of=/dev/sda",
+        ]
+        blocked_decisions = [
+            workspace_policy.decide_tool_call("run_bash", {"command": command})
+            for command in blocked_commands
+        ]
+        unknown_decision = workspace_policy.decide_tool_call("new_tool", {})
 
         full_access_policy = PermissionPolicy(mode="danger-full-access")
         full_access_decision = full_access_policy.decide_tool_call(
             "run_bash",
-            {"command": "git reset --hard"},
+            {"command": "rm -rf build"},
+        )
+        full_access_blocked_decision = full_access_policy.decide_tool_call(
+            "run_bash",
+            {"command": "dd if=/dev/zero of=/dev/sda"},
         )
 
         self.assertTrue(read_decision.allowed)
-        self.assertTrue(write_decision.requires_approval)
-        self.assertTrue(shell_decision.requires_approval)
         self.assertTrue(edit_decision.allowed)
+        self.assertTrue(plan_decision.allowed)
         self.assertTrue(safe_shell_decision.allowed)
-        self.assertTrue(dangerous_decision.requires_approval)
-        self.assertEqual(dangerous_decision.risk, "shell_dangerous")
+        self.assertTrue(risky_shell_decision.requires_approval)
+        self.assertEqual(risky_shell_decision.risk, "shell_risky")
+        self.assertTrue(reset_decision.requires_approval)
+        self.assertEqual(reset_decision.risk, "shell_risky")
+        for command, blocked_decision in zip(blocked_commands, blocked_decisions):
+            with self.subTest(command=command):
+                self.assertFalse(blocked_decision.allowed)
+                self.assertFalse(blocked_decision.requires_approval)
+                self.assertEqual(blocked_decision.risk, "shell_blocked")
+        self.assertTrue(unknown_decision.requires_approval)
         self.assertTrue(full_access_decision.allowed)
+        self.assertFalse(full_access_blocked_decision.allowed)
+        self.assertEqual(full_access_blocked_decision.risk, "shell_blocked")
+
+    def test_permission_policy_rejects_read_only_mode(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+
+        with self.assertRaisesRegex(ValueError, "Unknown permission mode"):
+            PermissionPolicy(mode="read-only")
 
     def test_permission_policy_rejects_unknown_mode_names(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
 
         with self.assertRaises(ValueError):
             PermissionPolicy(mode="unsupported-mode")
+
+    def test_interactive_session_switches_permission_mode_and_updates_context(self):
+        from harness_code_agent.core.interactive import InteractiveSession
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = InteractiveSession(cwd=tmp, profile_name="coding-agent")
+            try:
+                result = session.toggle_permission_mode()
+                metadata = session.session_store.read_metadata(session.session.id)
+
+                self.assertIn("workspace-write -> danger-full-access", result)
+                self.assertEqual(session.permission_mode, "danger-full-access")
+                self.assertEqual(metadata["permission_mode"], "danger-full-access")
+                self.assertIsInstance(session.tool_context.permission_policy, PermissionPolicy)
+                self.assertTrue(
+                    session.tool_context.permission_policy.decide_tool_call(
+                        "run_bash",
+                        {"command": "rm -rf build"},
+                    ).allowed
+                )
+
+                result = session.toggle_permission_mode()
+
+                self.assertIn("danger-full-access -> workspace-write", result)
+                self.assertEqual(session.permission_mode, "workspace-write")
+            finally:
+                session.close()
 
     def test_execute_tool_with_context_records_events_snapshots_and_approval_denial(self):
         from harness_code_agent.sessions.events import EventBus
@@ -1521,6 +1682,44 @@ class ProductRuntimeTests(unittest.TestCase):
             ][0]
             self.assertFalse(approval["payload"]["approved"])
 
+    def test_execute_tool_blocks_blacklisted_shell_without_approval(self):
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / ".harness" / "events.jsonl"
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(events_path),
+            )
+
+            blocked = tools.execute_tool(
+                "run_bash",
+                {"command": "rm -rf /"},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+            self.assertIn("[blocked]", blocked)
+            event_types = [event["type"] for event in events]
+            self.assertNotIn("approval_requested", event_types)
+            self.assertNotIn("approval_decided", event_types)
+            denied_result = [
+                event for event in events
+                if event["type"] == "tool_result" and event["payload"].get("tool") == "run_bash"
+            ][0]
+            self.assertEqual(denied_result["payload"]["status"], "failed")
+            self.assertEqual(denied_result["payload"]["metadata"]["status_source"], "permission")
+
     def test_execute_tool_apply_patch_records_snapshot_and_rejects_ambiguous_patch(self):
         from harness_code_agent.sessions.events import EventBus
         from harness_code_agent.runtime.permissions import PermissionPolicy
@@ -1575,14 +1774,14 @@ class ProductRuntimeTests(unittest.TestCase):
             events_path = root / ".harness" / "events.jsonl"
             context = ToolContext(
                 workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
-                permission_policy=PermissionPolicy(mode="read-only"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
                 event_bus=EventBus(events_path),
                 approval_provider=StaticApprovalProvider(approved=True, reason="test approval"),
             )
 
             result = tools.execute_tool(
-                "write_file",
-                {"path": "approved.txt", "content": "ok"},
+                "run_bash",
+                {"command": "npm run test"},
                 tool_context=context,
                 agent_name="main_agent",
             )
@@ -1591,16 +1790,16 @@ class ProductRuntimeTests(unittest.TestCase):
                 for line in events_path.read_text(encoding="utf-8").splitlines()
             ]
 
-            self.assertIn("Wrote", result)
-            self.assertEqual((root / "approved.txt").read_text(encoding="utf-8"), "ok")
+            self.assertIn("[error] No active shell session for run_bash", result)
             requested = [event for event in events if event["type"] == "approval_requested"][0]
             decided = [event for event in events if event["type"] == "approval_decided"][0]
             tool_result = [event for event in events if event["type"] == "tool_result"][0]
-            self.assertEqual(requested["payload"]["tool"], "write_file")
-            self.assertEqual(decided["payload"]["tool"], "write_file")
+            self.assertEqual(requested["payload"]["tool"], "run_bash")
+            self.assertEqual(requested["payload"]["risk"], "shell_risky")
+            self.assertEqual(decided["payload"]["tool"], "run_bash")
             self.assertTrue(decided["payload"]["approved"])
-            self.assertEqual(tool_result["payload"]["status"], "success")
-            self.assertTrue(tool_result["payload"]["ok"])
+            self.assertEqual(tool_result["payload"]["status"], "failed")
+            self.assertFalse(tool_result["payload"]["ok"])
 
 
 if __name__ == "__main__":

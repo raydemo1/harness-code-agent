@@ -4,7 +4,6 @@ App Builder profile for single-agent web app creation and browser verification.
 from __future__ import annotations
 
 from ..planning_policy import PLANNING_MODE_POLICY
-from ..runtime import tools
 from .base import BaseProfile, AgentConfig
 from ..runtime.middlewares import (
     ErrorGuidanceMiddleware,
@@ -60,7 +59,7 @@ class AppBuilderProfile(BaseProfile):
     def main_agent(self) -> AgentConfig:
         return AgentConfig(
             system_prompt=_APP_BUILDER_SYSTEM,
-            extra_tool_schemas=tools.BROWSER_TOOL_SCHEMAS,
+            blocked_tool_names=set(),
             middlewares=[
                 LoopDetectionMiddleware(),
                 ErrorGuidanceMiddleware(),

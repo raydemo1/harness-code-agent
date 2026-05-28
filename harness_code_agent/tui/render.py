@@ -64,7 +64,7 @@ def print_output(text: str, *, title: str = "output") -> None:
     print_block(TranscriptBlock("status", title, text))
 
 
-def bottom_toolbar(snapshot: SessionStatusSnapshot, on_context_click=None) -> FormattedText:
+def bottom_toolbar(snapshot: SessionStatusSnapshot, on_context_click=None, on_permission_click=None) -> FormattedText:
     plan = " plan:pending" if snapshot.pending_plan else ""
     tool = f" tool:{snapshot.running_tool}" if snapshot.running_tool else ""
     checkpoint = f" checkpoint:{snapshot.checkpoint}" if snapshot.checkpoint else ""
@@ -72,13 +72,30 @@ def bottom_toolbar(snapshot: SessionStatusSnapshot, on_context_click=None) -> Fo
     if "compact" in snapshot.status.lower():
         compact = f" compact:{snapshot.status}"
     fragments = [
-        ("bg:#2d2d3d #cccccc", f" {snapshot.profile} | turn {snapshot.turn} | {snapshot.permission_mode} "),
+        ("bg:#2d2d3d #cccccc", f" {snapshot.profile} | turn {snapshot.turn} | "),
         ("bg:#2d2d3d #cccccc", f"| {snapshot.status}{tool}{plan}{checkpoint}{compact} "),
         ("bg:#2d2d3d #cccccc", "| "),
     ]
+    fragments[1:1] = permission_mode_fragments(snapshot, on_permission_click=on_permission_click)
     fragments.extend(context_indicator_fragments(snapshot, on_context_click=on_context_click))
     fragments.append(("bg:#2d2d3d", " "))
     return FormattedText(fragments)
+
+
+def permission_mode_fragments(snapshot: SessionStatusSnapshot, on_permission_click=None) -> list[tuple]:
+    def mouse_handler(mouse_event):
+        event_type = str(getattr(mouse_event, "event_type", ""))
+        if "MOUSE_UP" in event_type and on_permission_click is not None:
+            on_permission_click()
+        return None
+
+    click = mouse_handler if on_permission_click is not None else None
+    mode_style = "#bf616a" if snapshot.permission_mode == "danger-full-access" else "#a3be8c"
+    return [
+        ("bg:#2d2d3d #aaaaaa", "perm ", click),
+        (f"bg:#2d2d3d {mode_style} bold", f"{snapshot.permission_mode}", click),
+        ("bg:#2d2d3d #cccccc", " ", click),
+    ]
 
 
 def context_indicator_fragments(snapshot: SessionStatusSnapshot, on_context_click=None) -> list[tuple]:
@@ -166,6 +183,7 @@ def escape_html(value: object) -> str:
 def context_bar_fragments(
     snapshot: SessionStatusSnapshot,
     on_context_click=None,
+    on_permission_click=None,
 ) -> StyleAndTextTuples:
     """Render context bar as progress bar + percentage + token count."""
     percent = _context_percent(snapshot)
@@ -185,13 +203,16 @@ def context_bar_fragments(
         return None
 
     click = mouse_handler if on_context_click is not None else None
-    return [
+    fragments = permission_mode_fragments(snapshot, on_permission_click=on_permission_click)
+    fragments.extend([
+        ("bg:#2d2d3d #cccccc", "| "),
         ("bg:#2d2d3d #aaaaaa", " ctx ", click),
         (f"bg:#2d2d3d {bar_style}", bar, click),
         (f"bg:#2d2d3d {bar_style} bold", f" {percent}%", click),
         ("bg:#2d2d3d #888888", f"  {_context_token_label(snapshot)}", click),
         ("bg:#2d2d3d", " ", click),
-    ]
+    ])
+    return fragments
 
 
 def render_block_fragments(block: TranscriptBlock) -> StyleAndTextTuples:

@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 from .base import AgentConfig, BaseProfile
+from ..runtime.permissions import (
+    TOOL_PERMISSION_CONTROL,
+    TOOL_PERMISSION_NETWORK_READ,
+    TOOL_PERMISSION_READ,
+)
 from ..runtime.middlewares import ReadOnlyPlanningMiddleware
-from ..runtime.tools import planning_tool_schemas
 
 
 class PlanProfile(BaseProfile):
@@ -22,12 +26,11 @@ You are the main agent for a planning task. Your job is to investigate the repos
 
 Planning-mode contract:
 - Do not modify source, test, dependency, configuration, migration, or build-output files.
-- You may write only planning artifacts: top-level PLAN.md/plan.markdown or Markdown files under global_plan/.
-- Use update_plan_state for planning state.json; do not write state.json directly with write_file or apply_patch.
-- Do not call browser tools, package installation, service-starting commands, or git state-changing commands.
+- Use update_plan_state for planning state and plan.md; do not write files directly.
+- Do not call shell commands, browser tools, package installation, service-starting commands, or git state-changing commands.
 - Do not create status.md or final.md.
-- You may inspect files, list files, read skill files, run read-only shell commands, search/fetch references, and use consult_subagent for read-only sub-agent advice.
-- Treat command and file output as evidence. If evidence is insufficient, state the assumption rather than inventing implementation details.
+- You may inspect files, list files, read skill files, search/fetch references, ask the user focused questions, and use consult_subagent for read-only sub-agent advice.
+- Treat file, web, user, and consultation output as evidence. If evidence is insufficient, state the assumption rather than inventing implementation details.
 
 Planning standard:
 - The plan must be decision-complete: an implementer should know what to edit, why, in what order, and how to verify it.
@@ -46,7 +49,12 @@ Final answer format:
 
 ## Assumptions
 """,
-            tool_schemas=planning_tool_schemas(),
+            allowed_tool_permissions={
+                TOOL_PERMISSION_READ,
+                TOOL_PERMISSION_NETWORK_READ,
+                TOOL_PERMISSION_CONTROL,
+            },
+            blocked_tool_names=set(),
             middlewares=[ReadOnlyPlanningMiddleware()],
             time_budget=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
         )

@@ -18,14 +18,32 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from ..planning_policy import PLANNING_MODE_POLICY
+from ..runtime.permissions import (
+    TOOL_PERMISSION_CONTROL,
+    TOOL_PERMISSION_EDIT,
+    TOOL_PERMISSION_NETWORK_READ,
+    TOOL_PERMISSION_READ,
+    TOOL_PERMISSION_SHELL,
+)
+
+
+DEFAULT_PROFILE_TOOL_PERMISSIONS = {
+    TOOL_PERMISSION_READ,
+    TOOL_PERMISSION_NETWORK_READ,
+    TOOL_PERMISSION_EDIT,
+    TOOL_PERMISSION_CONTROL,
+    TOOL_PERMISSION_SHELL,
+}
+DEFAULT_PROFILE_BLOCKED_TOOLS = {"browser_test", "stop_dev_server"}
 
 
 @dataclass
 class AgentConfig:
     """Configuration for the main agent."""
     system_prompt: str
-    extra_tool_schemas: list[dict] = field(default_factory=list)
-    tool_schemas: list[dict] | None = None
+    allowed_tool_permissions: set[str] = field(default_factory=lambda: set(DEFAULT_PROFILE_TOOL_PERMISSIONS))
+    allowed_tool_names: set[str] = field(default_factory=set)
+    blocked_tool_names: set[str] = field(default_factory=lambda: set(DEFAULT_PROFILE_BLOCKED_TOOLS))
     enabled: bool = True
     middlewares: list = field(default_factory=list)  # list[AgentMiddleware]
     time_budget: float | None = None  # seconds; None = no limit

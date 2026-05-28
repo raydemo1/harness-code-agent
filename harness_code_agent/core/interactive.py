@@ -173,8 +173,11 @@ class InteractiveSession:
             "main_agent",
             prefix.content,
             use_tools=True,
-            extra_tool_schemas=cfg.extra_tool_schemas,
-            tool_schemas=cfg.tool_schemas,
+            tool_schemas=tools.tool_schemas_for_profile(
+                allowed_permissions=cfg.allowed_tool_permissions,
+                include_names=cfg.allowed_tool_names,
+                exclude_names=cfg.blocked_tool_names,
+            ),
             middlewares=cfg.middlewares,
             time_budget=cfg.time_budget,
             tool_context=self.tool_context,
@@ -417,6 +420,32 @@ class InteractiveSession:
         if current == previous:
             return f"profile already active: {current}"
         return f"profile switched: {previous} -> {current}"
+
+    def set_permission_mode(self, permission_mode: str) -> str:
+        PermissionPolicy(mode=permission_mode)
+        previous = self.permission_mode
+        if previous == permission_mode:
+            return f"permission mode already active: {permission_mode}"
+        self.permission_mode = permission_mode
+        self.tool_context.permission_policy = PermissionPolicy(mode=permission_mode)
+        self.session_store.update_permission_mode(self.session.id, permission_mode)
+        self.event_bus.emit(
+            "permission_mode_switched",
+            agent="main_agent",
+            payload={
+                "previous_permission_mode": previous,
+                "permission_mode": permission_mode,
+            },
+        )
+        return f"permission mode switched: {previous} -> {permission_mode}"
+
+    def toggle_permission_mode(self) -> str:
+        next_mode = (
+            PermissionPolicy.DANGER_FULL_ACCESS
+            if self.permission_mode == PermissionPolicy.WORKSPACE_WRITE
+            else PermissionPolicy.WORKSPACE_WRITE
+        )
+        return self.set_permission_mode(next_mode)
 
     def _inject_resume_context(self, session_id: str) -> str:
         context_text = _build_resume_context(self.session_store, session_id)

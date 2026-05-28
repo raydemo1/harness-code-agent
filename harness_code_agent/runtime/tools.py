@@ -18,6 +18,14 @@ from typing import Callable
 from .. import config
 from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent, classify_tool_failure
 from .approvals import ApprovalRequest
+from .permissions import (
+    TOOL_PERMISSION_CONTROL,
+    TOOL_PERMISSION_EDIT,
+    TOOL_PERMISSION_NETWORK_READ,
+    TOOL_PERMISSION_READ,
+    TOOL_PERMISSION_SHELL,
+    VALID_TOOL_PERMISSIONS,
+)
 from .questions import ConsoleQuestionProvider, QuestionRequest, normalize_question_options
 from .tool_context import ToolContext
 from .tool_result import ToolResult, unstructured_tool_result_from_text
@@ -46,6 +54,10 @@ def _resolve(path: str) -> Path:
 # Tool implementations
 # ---------------------------------------------------------------------------
 
+READ_FILE_MAX_LINES = 500
+READ_FILE_MAX_OUTPUT_CHARS = 100_000
+
+
 def read_file(
     path: str,
     start_line: int | None = None,
@@ -63,41 +75,66 @@ def read_file(
             metadata={"path": path, "status_source": "native"},
         )
     content = p.read_text(encoding="utf-8", errors="replace")
-    total_lines = len(content.splitlines())
-    if start_line is not None or max_lines is not None:
-        lines = content.splitlines()
-        start = max(1, int(start_line or 1))
-        end = len(lines) if max_lines is None else min(len(lines), start + max(0, int(max_lines)) - 1)
-        selected = lines[start - 1:end]
-        if include_line_numbers:
-            selected = [f"{line_no}: {line}" for line_no, line in enumerate(selected, start=start)]
-        content = "\n".join(selected)
+    lines = content.splitlines()
+    total_lines = len(lines)
+    start = max(1, int(start_line or 1))
+    requested_lines = int(max_lines) if max_lines is not None else max(0, total_lines - start + 1)
+    if requested_lines > READ_FILE_MAX_LINES:
         return ToolResult(
             tool="read_file",
-            status="success",
-            output=content,
+            status="failed",
+            output=(
+                f"[error] read_file can read at most {READ_FILE_MAX_LINES} lines per call. "
+                f"max_lines must be <= {READ_FILE_MAX_LINES}. "
+                f"{path} has {total_lines} total lines; requested {requested_lines} lines. "
+                f"Use start_line and max_lines <= {READ_FILE_MAX_LINES} to read a bounded range."
+            ),
+            error=f"read_file max_lines must be <= {READ_FILE_MAX_LINES}",
             metadata={
                 "path": path,
                 "start_line": start,
                 "max_lines": max_lines,
                 "total_lines": total_lines,
-                "status_source": "native",
+                "status_source": "validation",
             },
         )
-    limit = 60_000
-    if len(content) > limit:
-        total = len(content)
-        content = content[:limit] + (
-            f"\n\n[TRUNCATED] You are seeing {limit} of {total} total characters. "
-            f"The remaining {total - limit} characters are NOT shown above. "
-            "Use read_file with start_line/max_lines and include_line_numbers=true "
-            "to inspect the exact remaining lines if needed."
+
+    end = len(lines) if max_lines is None else min(len(lines), start + max(0, requested_lines) - 1)
+    selected = lines[start - 1:end]
+    if include_line_numbers:
+        selected = [f"{line_no}: {line}" for line_no, line in enumerate(selected, start=start)]
+    output = "\n".join(selected)
+    if len(output) > READ_FILE_MAX_OUTPUT_CHARS:
+        return ToolResult(
+            tool="read_file",
+            status="failed",
+            output=(
+                f"[error] read_file output window is too large ({len(output)} chars). "
+                f"Use a smaller max_lines value or a narrower start_line range. "
+                f"The per-call output limit is {READ_FILE_MAX_OUTPUT_CHARS} chars."
+            ),
+            error=f"read_file output window is too large: {len(output)} chars",
+            metadata={
+                "path": path,
+                "start_line": start,
+                "max_lines": max_lines,
+                "total_lines": total_lines,
+                "output_chars": len(output),
+                "status_source": "validation",
+            },
         )
+
     return ToolResult(
         tool="read_file",
         status="success",
-        output=content,
-        metadata={"path": path, "status_source": "native"},
+        output=output,
+        metadata={
+            "path": path,
+            "start_line": start,
+            "max_lines": max_lines,
+            "total_lines": total_lines,
+            "status_source": "native",
+        },
     )
 
 
@@ -740,24 +777,6 @@ def consultation_tool_schemas() -> list[dict]:
     return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
 
 
-def planning_tool_schemas() -> list[dict]:
-    """Return the constrained planning tool surface for the plan profile."""
-    names = (
-        "read_file",
-        "list_files",
-        "read_skill_file",
-        "run_bash",
-        "web_search",
-        "web_fetch",
-        "ask_user",
-        "consult_subagent",
-        "write_file",
-        "apply_patch",
-        "update_plan_state",
-    )
-    return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
-
-
 def _as_consultation_report(scope: str, raw_result: str) -> str:
     raw_result = raw_result or ""
     try:
@@ -1031,6 +1050,7 @@ class ToolSpec:
     name: str
     schema: dict
     handler: Callable
+    permission: str
 
 
 class ToolRegistry:
@@ -1039,22 +1059,63 @@ class ToolRegistry:
     def __init__(self):
         self._schemas: dict[str, dict] = {}
         self._handlers: dict[str, Callable] = {}
+        self._permissions: dict[str, str] = {}
 
-    def register(self, schema: dict, handler: Callable) -> None:
+    def register(self, schema: dict, handler: Callable, *, permission: str | None = None) -> None:
         name = schema.get("function", {}).get("name")
         if not name:
             raise ValueError("Tool schema missing function.name")
+        if permission is None:
+            raise ValueError(f"Tool {name} missing permission classification")
+        if permission not in VALID_TOOL_PERMISSIONS:
+            raise ValueError(f"Tool {name} has unknown permission classification: {permission}")
         self._schemas[name] = schema
         self._handlers[name] = handler
+        self._permissions[name] = permission
 
     def get(self, name: str) -> Callable | None:
         return self._handlers.get(name)
+
+    def permission_for(self, name: str) -> str | None:
+        return self._permissions.get(name)
+
+    def specs(self) -> list[ToolSpec]:
+        return [
+            ToolSpec(name, self._schemas[name], self._handlers[name], self._permissions[name])
+            for name in self._schemas
+        ]
 
     def schemas(self) -> list[dict]:
         return list(self._schemas.values())
 
     def dispatch(self) -> dict[str, Callable]:
         return dict(self._handlers)
+
+
+def tool_schemas_for_profile(
+    *,
+    allowed_permissions: set[str] | None = None,
+    include_names: set[str] | None = None,
+    exclude_names: set[str] | None = None,
+) -> list[dict]:
+    allowed_permissions = set(allowed_permissions) if allowed_permissions is not None else None
+    include_names = set(include_names or set())
+    exclude_names = set(exclude_names or set())
+    if allowed_permissions is not None:
+        unknown_permissions = allowed_permissions - VALID_TOOL_PERMISSIONS
+        if unknown_permissions:
+            names = ", ".join(sorted(unknown_permissions))
+            raise ValueError(f"Unknown tool permission classification for profile: {names}")
+
+    schemas: list[dict] = []
+    for spec in BUILTIN_TOOL_REGISTRY.specs():
+        if spec.name in exclude_names:
+            continue
+        if spec.name in include_names or (
+            allowed_permissions is not None and spec.permission in allowed_permissions
+        ):
+            schemas.append(spec.schema)
+    return schemas
 
 
 CORE_TOOL_SCHEMAS = [
@@ -1070,11 +1131,14 @@ CORE_TOOL_SCHEMAS = [
                     "path": {"type": "string", "description": "Relative path inside workspace"},
                     "start_line": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "1-based starting line for a bounded read.",
                     },
                     "max_lines": {
                         "type": "integer",
-                        "description": "Maximum lines to return for a bounded read.",
+                        "minimum": 1,
+                        "maximum": READ_FILE_MAX_LINES,
+                        "description": "Maximum lines to return for a bounded read. Must be <= 500.",
                     },
                     "include_line_numbers": {
                         "type": "boolean",
@@ -1644,10 +1708,25 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "browser_test": browser_test,
         "stop_dev_server": stop_dev_server,
     }
+    permissions = {
+        "read_file": TOOL_PERMISSION_READ,
+        "read_skill_file": TOOL_PERMISSION_READ,
+        "list_files": TOOL_PERMISSION_READ,
+        "ask_user": TOOL_PERMISSION_READ,
+        "consult_subagent": TOOL_PERMISSION_READ,
+        "web_search": TOOL_PERMISSION_NETWORK_READ,
+        "web_fetch": TOOL_PERMISSION_NETWORK_READ,
+        "write_file": TOOL_PERMISSION_EDIT,
+        "apply_patch": TOOL_PERMISSION_EDIT,
+        "update_plan_state": TOOL_PERMISSION_CONTROL,
+        "run_bash": TOOL_PERMISSION_SHELL,
+        "browser_test": TOOL_PERMISSION_SHELL,
+        "stop_dev_server": TOOL_PERMISSION_SHELL,
+    }
     for schema in CORE_TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS:
         name = schema["function"]["name"]
         if name in handlers:
-            registry.register(schema, handlers[name])
+            registry.register(schema, handlers[name], permission=permissions.get(name))
     return registry
 
 
@@ -1735,7 +1814,11 @@ def execute_tool_result(
         )
 
     if tool_context is not None:
-        decision = tool_context.permission_policy.decide_tool_call(name, arguments)
+        decision = tool_context.permission_policy.decide_tool_call(
+            name,
+            arguments,
+            tool_permission=BUILTIN_TOOL_REGISTRY.permission_for(name),
+        )
         if decision.requires_approval:
             approval_request = ApprovalRequest(
                 tool_name=name,

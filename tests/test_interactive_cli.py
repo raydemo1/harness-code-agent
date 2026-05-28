@@ -157,27 +157,35 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
-    def test_interactive_session_passes_profile_tool_schemas_to_agent(self):
-        class FakeToolProfile:
+    def test_interactive_session_builds_profile_tools_from_allowed_permissions(self):
+        class FakePermissionProfile:
             def name(self):
-                return "fake-tools"
+                return "fake-permissions"
 
             def main_agent(self):
                 return AgentConfig(
                     system_prompt="fake",
-                    tool_schemas=[{"type": "function", "function": {"name": "read_file"}}],
+                    allowed_tool_permissions={"read"},
+                    allowed_tool_names={"web_search"},
+                    blocked_tool_names={"ask_user"},
                 )
 
         with (
-            patch("harness_code_agent.core.interactive.get_profile", return_value=FakeToolProfile()),
+            patch("harness_code_agent.core.interactive.get_profile", return_value=FakePermissionProfile()),
             patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
         ):
-            session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-permissions")
         try:
-            self.assertEqual(
-                RecordingInteractiveAgent.init_kwargs["tool_schemas"],
-                [{"type": "function", "function": {"name": "read_file"}}],
-            )
+            tool_names = {
+                schema["function"]["name"]
+                for schema in RecordingInteractiveAgent.init_kwargs["tool_schemas"]
+            }
+
+            self.assertIn("read_file", tool_names)
+            self.assertIn("web_search", tool_names)
+            self.assertNotIn("ask_user", tool_names)
+            self.assertNotIn("write_file", tool_names)
+            self.assertNotIn("run_bash", tool_names)
         finally:
             session.close()
 

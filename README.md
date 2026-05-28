@@ -15,13 +15,13 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 - **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
 - **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
 - **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
-- **运行时权限策略**：支持 `read-only`、`workspace-write`、`danger-full-access` 三种权限模式。
+- **运行时权限策略**：支持 `workspace-write`、`danger-full-access` 两种权限模式；受限调查/计划工作使用 `plan` profile。
 - **会话与事件记录**：每次运行会写入 `.harness/` 元数据、事件和文件快照。
 - **工具系统**：支持文件读写、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
 - **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
 - **Benchmark 适配**：`benchmarks/` 下提供 Terminal-Bench 2.0 / Harbor 运行入口。
 - **项目规则文件**：交互式 session 启动时会读取当前工作区根目录的 `HARNESS.md`，并作为稳定系统提示的一部分注入。
-- **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。
+- **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。warmup 后平均缓存命中率从约 `49.8%` 提升到约 `87.5%`，第 6 轮从 `4352/8187 = 53.2%` 提升到 `7296/8148 = 89.5%`。
 
 ## 项目结构
 
@@ -41,19 +41,6 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 └── tests/                  # unittest 测试
 ```
 
-## 上下文与 Prompt Cache
-
-Harness 的上下文拼接遵循“稳定前缀 + 追加式历史”的原则：
-
-- 稳定前缀只放 profile 规则、`HARNESS.md`、profile acceptance criteria、主 agent ownership rules 和 skill catalog。
-- 每轮用户任务、工具调用结果、文件变更、命令结果和事实失效提示都追加到 conversation tail。
-- 不在 system 后面每轮插入会变化的 dynamic facts 层。
-- 工具结果以 `[OBS obs_xxxx observed]` 记录当时观察到的 bounded 输出。
-- 当文件写入、patch 或高风险 shell 让旧观察失效时，追加 `[FACT INVALIDATION]` notice。
-- 如果失效的是长工具输出，会把原长 tool message 替换成短 stale summary，以回收上下文空间。
-
-实测对比中，旧方案每轮在前部插入变化的 dynamic facts，新方案改为尾部追加 notice。在 `deepseek-v4-flash` 上做 6 轮真实 API 请求，warmup 后平均缓存命中率从约 `49.8%` 提升到约 `87.5%`，第 6 轮从 `4352/8187 = 53.2%` 提升到 `7296/8148 = 89.5%`。
-
 ## 环境要求
 
 - Python 3.10+
@@ -70,13 +57,15 @@ Harness 的上下文拼接遵循“稳定前缀 + 追加式历史”的原则：
 cd harness-code-agent
 ```
 
-2. 安装 Python 依赖：
+2. 以 editable 方式安装项目和依赖，这会注册 `hca` 命令：
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
-3. 如需浏览器测试，安装 Playwright 浏览器：
+如果只想在源码目录内临时运行，也可以安装 `requirements.txt` 后使用 `python -m harness_code_agent.cli`，但不会自动注册 `hca` console script。
+
+3. 如需 `app-builder` 浏览器测试，安装 Playwright Chromium：
 
 ```bash
 python -m playwright install chromium
@@ -100,7 +89,6 @@ Copy-Item .env.template .env
 OPENAI_API_KEY=sk-your-deepseek-key-here
 OPENAI_BASE_URL=https://api.deepseek.com
 HARNESS_MODEL=deepseek-v4-flash
-HARNESS_COMMIT_POLICY=checkpoint
 ```
 
 ## 快速开始
@@ -158,6 +146,13 @@ hca --profile swe-bench "Fix the TypeError in parse_config()"
 hca --profile plan "Design the fix for the failing parser tests"
 ```
 
+恢复旧 session 作为上下文：
+
+```bash
+hca --resume <session-id>
+hca --resume <session-id> "Continue the previous parser work"
+```
+
 交互模式里可以用短 slash 命令切换 profile：
 
 ```text
@@ -196,16 +191,27 @@ hca
 
 交互模式默认直接在当前目录工作，不再为开发任务创建带时间戳的工作区。该目录会自动初始化 Git 仓库，并在 `.harness/` 中记录 session metadata、events 和文件快照。
 
-自动 checkpoint 默认在每个完成的 turn 后运行，但只会尝试提交本轮新增的可提交变更；如果没有本轮新增变更，会提示没有需要 checkpoint 的内容。本轮开始前已经存在的 dirty 文件不会被自动提交；如果本轮开始前已有 staged changes，自动 checkpoint 会跳过，避免混入用户已暂存内容。
+自动 checkpoint 默认在每个完成的 turn 后运行，可在交互模式中用 `/checkpoint auto off` 关闭，或用 `/checkpoint every <N> turns` 调整频率。自动 checkpoint 只会尝试提交本轮新增的可提交变更；如果没有本轮新增变更，会提示没有需要 checkpoint 的内容。本轮开始前已经存在的 dirty 文件不会被自动提交；如果本轮开始前已有 staged changes，自动 checkpoint 会跳过，避免混入用户已暂存内容。
 
 常用会话命令：
 
 ```bash
 hca
+/help
+/profiles
 /sessions
 /session <session-id>
 /resume <session-id>
+/fork <session-id>
+/rollback <session-id> <path>
 /checkpoint status
+/compact show
+```
+
+非交互入口也保留了一个快速查看最新 session 的兼容命令：
+
+```bash
+hca session show latest
 ```
 
 可以用 `@` mention 把文件或历史 session 作为上下文注入当前 turn：
@@ -228,11 +234,14 @@ hca
 | `HARNESS_PROVIDER` | `auto` | Provider adapter：`auto` / `openai` / `deepseek` / `openai-compatible` |
 | `HARNESS_STREAM` | `auto` | CLI streaming：`auto` 表示仅 TTY 实时输出，`1` 强制开启，`0` 关闭 |
 | `HARNESS_WINDOWS_SHELL` | `auto` | Windows shell 后端：`auto` / `pwsh` / `powershell` / `cmd` |
-| `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式：`read-only` / `workspace-write` / `danger-full-access` |
-| `HARNESS_COMMIT_POLICY` | `checkpoint` | Git 自动保存策略。交互式模式下 `checkpoint` 表示每轮完成后把本轮新增的可提交变更提交成可回退的本地 checkpoint commit；`none` 关闭自动提交；`milestone` 主要用于旧的单任务/benchmark 流程 |
+| `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式：`workspace-write` / `danger-full-access` |
+| `HARNESS_CONTEXT_WINDOW_TOKENS` | `128000` | 上下文窗口估算值，用于推导默认压缩/重置阈值 |
+| `COMPRESS_THRESHOLD` | `96000` | 上下文压缩阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.75` |
+| `RESET_THRESHOLD` | `104960` | 上下文重置阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.82` |
 | `MAX_AGENT_ITERATIONS` | `60` | 单次 agent loop 最大迭代数 |
-| `COMPRESS_THRESHOLD` | `80000` | 上下文压缩阈值 |
-| `RESET_THRESHOLD` | `150000` | 上下文重置阈值 |
+| `HARNESS_TRACE_STDERR` | 空 | 设置为 `1` / `true` / `yes` / `on` 时输出底层 API 错误追踪 |
+| `MAX_HARNESS_ROUNDS` | `5` | 兼容保留的 harness loop / benchmark 调参项 |
+| `PASS_THRESHOLD` | `7.0` | 兼容保留的 harness loop / benchmark 调参项 |
 
 交互式模式会把启动 `hca` 时所在的目录作为当前工作目录，不需要在 `.env` 中配置 `HARNESS_WORKSPACE`。代码中的 `config.WORKSPACE` 仍作为运行时内部字段使用，用来告诉工具、会话记录和权限检查“当前项目根目录”在哪里。
 
@@ -246,18 +255,18 @@ PROFILE_<PROFILE_NAME>_<KEY>=value
 
 ```bash
 PROFILE_TERMINAL_TASK_BUDGET=1800
-PROFILE_TERMINAL_PASS_THRESHOLD=8.0
+PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.45
 ```
 
 ## 权限模式
 
 | 模式 | 行为 |
 | --- | --- |
-| `read-only` | 允许读文件、搜索、只读子 agent；写入和 shell 命令需要批准 |
-| `workspace-write` | 默认模式，允许工作区内读写和常规命令，高风险 shell 命令需要批准 |
-| `danger-full-access` | 放行所有工具调用，适合受控 benchmark 环境 |
+| `workspace-write` | 默认模式，允许读工具、路径受控的项目内结构化写工具、白名单 shell；非白名单 shell 和未知工具需要批准；极危黑名单命令永远阻断 |
+| `danger-full-access` | 放行非黑名单工具调用，适合受控 benchmark 环境；极危黑名单命令仍永远阻断 |
 
 文件写入会通过 `WorkspaceService` 做路径约束，防止写出工作区；默认也会拒绝写入 `.git/` 和敏感 `.env` 文件。
+受限调查/计划工作请使用 `--profile plan`；该 profile 只暴露必要读工具、只读 shell、用户提问/子 agent 咨询和 `update_plan_state`。
 
 ## 测试
 
@@ -322,8 +331,9 @@ python benchmarks/run_terminal_bench.py --task fix-git --env daytona
 
 1. 在 `harness_code_agent/runtime/tools.py` 中实现工具函数。
 2. 在 tool schema 中声明参数。
-3. 在 `execute_tool()` 路由中接入实现。
-4. 根据风险更新 `harness_code_agent/runtime/permissions.py` 的工具分类。
+3. 在 `_build_builtin_tool_registry()` 中注册 handler，并显式声明权限分类。
+   例如查询天气这类外部只读工具应使用 `TOOL_PERMISSION_NETWORK_READ`。
+4. 如果现有分类不够表达风险，再扩展 `harness_code_agent/runtime/permissions.py` 的权限分类。
 5. 添加单元测试覆盖正常路径和失败路径。
 
 新增 middleware 时，建议先明确它要拦截的是 tool call、tool result 还是 agent loop 退出条件，并在 `harness_code_agent/runtime/middlewares.py` 中保持行为可测试、可组合。
@@ -334,4 +344,4 @@ python benchmarks/run_terminal_bench.py --task fix-git --env daytona
 - `HARNESS_MODEL` 必须是目标 provider 可识别的模型名。
 - `app-builder` 的浏览器能力依赖 Playwright；未安装时相关工具会不可用或报错。
 - `terminal` profile 针对非交互式 CLI 任务优化，会更积极地执行 shell 命令和本地验证。
-- 默认 `workspace-write` 模式仍会对高风险命令触发批准流程；自动化 benchmark 可按需切换权限模式。
+- 默认 `workspace-write` 模式会对白名单外 shell 命令和未知工具触发批准流程；自动化 benchmark 可按需切换权限模式。

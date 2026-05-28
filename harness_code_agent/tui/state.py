@@ -158,6 +158,11 @@ class TuiState:
             current = payload.get("profile", "")
             reason = payload.get("reason", "")
             return TranscriptBlock("profile", "profile switched", f"{previous} -> {current} ({reason})")
+        if event_type == "permission_mode_switched":
+            self.snapshot.permission_mode = str(payload.get("permission_mode") or self.snapshot.permission_mode)
+            previous = payload.get("previous_permission_mode", "")
+            current = payload.get("permission_mode", "")
+            return TranscriptBlock("status", "permission mode switched", f"{previous} -> {current}")
         if event_type == "plan_ready":
             self.snapshot.pending_plan = True
             self.snapshot.status = "plan ready"

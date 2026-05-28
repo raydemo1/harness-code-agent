@@ -19,6 +19,7 @@ _install_fake_openai_module()
 from harness_code_agent.profiles import get_profile, list_profiles
 from harness_code_agent.profiles.base import AgentConfig
 from harness_code_agent.planning_policy import PLANNING_MODE_POLICY
+from harness_code_agent.runtime import tools
 from harness_code_agent.runtime.middlewares import (
     PreExitVerificationMiddleware,
     RecoveryStrategyMiddleware,
@@ -61,12 +62,16 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertNotIn("builder", prompt)
         self.assertNotIn("evaluator", prompt)
 
-    def test_plan_profile_allows_only_planning_artifact_writes_and_is_structured(self):
+    def test_plan_profile_allows_only_plan_state_writes_and_is_structured(self):
         main_agent = get_profile("plan").main_agent()
         prompt = main_agent.system_prompt.lower()
         tool_names = {
             schema["function"]["name"]
-            for schema in main_agent.tool_schemas
+            for schema in tools.tool_schemas_for_profile(
+                allowed_permissions=main_agent.allowed_tool_permissions,
+                include_names=main_agent.allowed_tool_names,
+                exclude_names=main_agent.blocked_tool_names,
+            )
         }
 
         self.assertIn("planning task", prompt)
@@ -77,7 +82,7 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertIn("## test plan", prompt)
         self.assertIn("## assumptions", prompt)
         self.assertIn("do not implement", prompt)
-        self.assertIn("planning artifacts", prompt)
+        self.assertIn("planning state", prompt)
         self.assertIn("update_plan_state", prompt)
         self.assertEqual(
             tool_names,
@@ -85,16 +90,14 @@ class ProfileInterfaceTests(unittest.TestCase):
                 "read_file",
                 "list_files",
                 "read_skill_file",
-                "run_bash",
                 "web_search",
                 "web_fetch",
                 "ask_user",
                 "consult_subagent",
-                "write_file",
-                "apply_patch",
                 "update_plan_state",
             },
         )
+        self.assertNotIn("run_bash", tool_names)
         self.assertFalse(any(name.startswith("browser") for name in tool_names))
         self.assertTrue(any(isinstance(mw, ReadOnlyPlanningMiddleware) for mw in main_agent.middlewares))
 

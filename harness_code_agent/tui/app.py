@@ -316,7 +316,19 @@ class TuiApp:
         if self.state is None:
             return FormattedText([("", "")])
         self._refresh_context_snapshot()
-        return FormattedText(context_bar_fragments(self.state.snapshot))
+        return FormattedText(context_bar_fragments(
+            self.state.snapshot,
+            on_permission_click=self._toggle_permission_mode_from_bar,
+        ))
+
+    def _toggle_permission_mode_from_bar(self) -> None:
+        try:
+            result = self.session.toggle_permission_mode()
+            self.state.snapshot.permission_mode = self.session.permission_mode
+            self._output(result, title="permission mode switched")
+        except Exception as exc:
+            self._output(f"Error: {exc}", title="permission mode error")
+        self._refresh_display()
 
     def _refresh_context_snapshot(self) -> None:
         from ..agent import context

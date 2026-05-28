@@ -46,7 +46,11 @@ class TuiComposer:
 
     def _bottom_toolbar(self):
         self._refresh_context_snapshot()
-        return bottom_toolbar(self.state.snapshot, on_context_click=self._manual_compact_from_toolbar)
+        return bottom_toolbar(
+            self.state.snapshot,
+            on_context_click=self._manual_compact_from_toolbar,
+            on_permission_click=self._toggle_permission_mode_from_toolbar,
+        )
 
     def _refresh_context_snapshot(self) -> None:
         thresholds = get_thresholds()
@@ -65,3 +69,12 @@ class TuiComposer:
             output(result)
 
         run_in_terminal(compact_and_report)
+
+    def _toggle_permission_mode_from_toolbar(self) -> None:
+        def toggle_and_report() -> None:
+            result = self.session.toggle_permission_mode()
+            self.state.snapshot.permission_mode = self.session.permission_mode
+            output = getattr(self.session, "output_sink", print)
+            output(result)
+
+        run_in_terminal(toggle_and_report)

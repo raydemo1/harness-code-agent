@@ -59,6 +59,7 @@ class TuiTests(unittest.TestCase):
 
     def test_bottom_toolbar_renders_clickable_context_progress_bar(self):
         clicked = []
+        permission_clicked = []
         snapshot = SessionStatusSnapshot(
             profile="coding-agent",
             model="model-a",
@@ -75,10 +76,24 @@ class TuiTests(unittest.TestCase):
             context_hint=True,
         )
 
-        fragments = list(to_formatted_text(bottom_toolbar(snapshot, on_context_click=lambda: clicked.append(True))))
+        fragments = list(to_formatted_text(bottom_toolbar(
+            snapshot,
+            on_context_click=lambda: clicked.append(True),
+            on_permission_click=lambda: permission_clicked.append(True),
+        )))
         text = "".join(fragment[1] for fragment in fragments)
-        handlers = [fragment[2] for fragment in fragments if len(fragment) >= 3 and fragment[2] is not None]
+        permission_handlers = [
+            fragment[2]
+            for fragment in fragments
+            if len(fragment) >= 3 and fragment[2] is not None and "workspace-write" in fragment[1]
+        ]
+        context_handlers = [
+            fragment[2]
+            for fragment in fragments
+            if len(fragment) >= 3 and fragment[2] is not None and "ctx" in fragment[1]
+        ]
 
+        self.assertIn("perm workspace-write", text)
         self.assertIn("ctx", text)
         self.assertIn("▓", text)
         self.assertIn("░", text)
@@ -88,8 +103,11 @@ class TuiTests(unittest.TestCase):
         self.assertNotIn("○68", text)
         self.assertNotIn("○75", text)
         self.assertNotIn("○82", text)
-        self.assertTrue(handlers)
-        handlers[0](SimpleNamespace(event_type="MOUSE_UP"))
+        self.assertTrue(permission_handlers)
+        permission_handlers[0](SimpleNamespace(event_type="MOUSE_UP"))
+        self.assertEqual(permission_clicked, [True])
+        self.assertTrue(context_handlers)
+        context_handlers[0](SimpleNamespace(event_type="MOUSE_UP"))
         self.assertEqual(clicked, [True])
 
     def test_quoted_file_mention_resolves_paths_with_spaces(self):
@@ -185,8 +203,8 @@ class TuiTests(unittest.TestCase):
                 "type": "approval_requested",
                 "payload": {
                     "tool": "run_bash",
-                    "risk": "shell_dangerous",
-                    "reason": "workspace-write mode requires user approval for high-risk shell commands",
+                    "risk": "shell_risky",
+                    "reason": "workspace-write mode requires user approval for non-whitelisted commands and tools",
                     "args": {"command": "rm -rf build", "content": "x" * 500},
                 },
             }
@@ -195,7 +213,7 @@ class TuiTests(unittest.TestCase):
         self.assertIsNotNone(block)
         self.assertEqual(block.status, "pending")
         self.assertIn("tool=run_bash", block.body)
-        self.assertIn("risk=shell_dangerous", block.body)
+        self.assertIn("risk=shell_risky", block.body)
         self.assertIn("reason=workspace-write mode requires user approval", block.body)
         self.assertNotIn("args=", block.body)
         self.assertNotIn("content=", block.body)
@@ -258,7 +276,7 @@ class TuiTests(unittest.TestCase):
             tool_name="run_bash",
             args={"command": "npm run test -- --watch"},
             risk="shell_risky",
-            reason="read-only mode requires user approval",
+            reason="workspace-write mode requires user approval",
         )
         provider = TuiApprovalProvider(project_root=self.root, choice_bar_factory=FakeChoiceBar)
 
@@ -268,7 +286,7 @@ class TuiTests(unittest.TestCase):
                 tool_name="run_bash",
                 args={"command": "npm run test -- tests/test_tui.py"},
                 risk="shell_risky",
-                reason="read-only mode requires user approval",
+                reason="workspace-write mode requires user approval",
             )
         )
         data = json.loads((self.root / ".harness" / "approval_allowlist.json").read_text(encoding="utf-8"))
@@ -383,7 +401,7 @@ class TuiTests(unittest.TestCase):
         request = ApprovalRequest(
             tool_name="run_bash",
             args={"command": "rm -rf build"},
-            risk="shell_dangerous",
+            risk="shell_risky",
             reason="workspace-write mode requires user approval",
         )
 
@@ -391,7 +409,7 @@ class TuiTests(unittest.TestCase):
 
         self.assertIn("Approval required", body)
         self.assertIn("tool: run_bash", body)
-        self.assertIn("risk: shell_dangerous", body)
+        self.assertIn("risk: shell_risky", body)
         self.assertIn("reason: workspace-write mode requires user approval", body)
         self.assertIn("command: rm -rf build", body)
 
@@ -399,7 +417,7 @@ class TuiTests(unittest.TestCase):
         request = ApprovalRequest(
             tool_name="run_bash",
             args={"command": "rm -rf build"},
-            risk="shell_dangerous",
+            risk="shell_risky",
             reason="workspace-write mode requires user approval",
         )
 
@@ -412,7 +430,7 @@ class TuiTests(unittest.TestCase):
             tool_name="write_file",
             args={"path": "note.txt", "content": "hello"},
             risk="edit",
-            reason="read-only mode requires user approval",
+            reason="workspace-write mode allows edit",
         )
 
         collapsed = _format_approval_body(request, show_details=False)
@@ -604,6 +622,24 @@ class TuiLayoutTests(unittest.TestCase):
         app = self._make_app()
         self.assertIsInstance(app._input_area, TextArea)
 
+    def test_permission_bar_click_toggles_session_permission_mode(self):
+        """Clicking the permission segment should cycle the runtime permission mode."""
+        app = self._make_app()
+        calls = []
+
+        def toggle_permission_mode():
+            calls.append(True)
+            app.session.permission_mode = "danger-full-access"
+            return "permission mode switched: workspace-write -> danger-full-access"
+
+        app.session.toggle_permission_mode = toggle_permission_mode
+
+        app._toggle_permission_mode_from_bar()
+
+        self.assertEqual(calls, [True])
+        self.assertEqual(app.state.snapshot.permission_mode, "danger-full-access")
+        self.assertTrue(any("permission mode switched" in block.body for block in app.state.blocks))
+
     def test_context_bar_renders_green_below_68_percent(self):
         """Context bar should use green style when usage < 68%."""
         from prompt_toolkit.formatted_text import to_formatted_text
@@ -650,17 +686,30 @@ class TuiLayoutTests(unittest.TestCase):
         """Context bar should display progress bar and percentage."""
         from prompt_toolkit.formatted_text import to_formatted_text
         from harness_code_agent.tui.render import context_bar_fragments
+        permission_clicked = []
         snapshot = SessionStatusSnapshot(
             profile="coding-agent", model="m", provider="p",
-            permission_mode="w", session_id="s", cwd=self.root,
+            permission_mode="workspace-write", session_id="s", cwd=self.root,
             context_tokens=70_000, context_window_tokens=100_000,
         )
-        fragments = list(to_formatted_text(context_bar_fragments(snapshot)))
+        fragments = list(to_formatted_text(context_bar_fragments(
+            snapshot,
+            on_permission_click=lambda: permission_clicked.append(True),
+        )))
         text = "".join(f[1] for f in fragments)
+        permission_handlers = [
+            fragment[2]
+            for fragment in fragments
+            if len(fragment) >= 3 and fragment[2] is not None and "workspace-write" in fragment[1]
+        ]
+        self.assertIn("perm workspace-write", text)
         self.assertIn("ctx", text)
         self.assertIn("70%", text)
         self.assertIn("▓", text)
         self.assertIn("░", text)
+        self.assertTrue(permission_handlers)
+        permission_handlers[0](SimpleNamespace(event_type="MOUSE_UP"))
+        self.assertEqual(permission_clicked, [True])
 
     def test_transcript_renders_user_message_with_blue_bar(self):
         """User messages in transcript should have blue left marker."""

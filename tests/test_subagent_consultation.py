@@ -111,60 +111,16 @@ class SubagentConsultationTests(unittest.TestCase):
 
                 self.assertIsNone(blocked)
 
-    def test_plan_tool_schemas_include_constrained_planning_writes(self):
-        tool_names = {
-            schema["function"]["name"]
-            for schema in tools.planning_tool_schemas()
-        }
-
-        self.assertEqual(
-            tool_names,
-            {
-                "read_file",
-                "list_files",
-                "read_skill_file",
-                "run_bash",
-                "web_search",
-                "web_fetch",
-                "ask_user",
-                "consult_subagent",
-                "write_file",
-                "apply_patch",
-                "update_plan_state",
-            },
-        )
-        self.assertNotIn("browser_test", tool_names)
-
-    def test_profile_tool_schema_helpers_are_stably_ordered(self):
-        self.assertEqual(
-            [schema["function"]["name"] for schema in tools.planning_tool_schemas()],
-            [
-                "read_file",
-                "list_files",
-                "read_skill_file",
-                "run_bash",
-                "web_search",
-                "web_fetch",
-                "ask_user",
-                "consult_subagent",
-                "write_file",
-                "apply_patch",
-                "update_plan_state",
-            ],
-        )
+    def test_consultation_tool_schema_helper_is_stably_ordered(self):
         self.assertEqual(
             [schema["function"]["name"] for schema in tools.consultation_tool_schemas()],
             ["read_file", "list_files", "run_bash", "web_search", "web_fetch"],
         )
 
-    def test_planning_profile_allows_plan_artifact_tools(self):
+    def test_planning_profile_allows_only_plan_state_write_tool(self):
         middleware = ReadOnlyPlanningMiddleware()
 
         allowed_calls = [
-            ("write_file", {"path": "global_plan/current/plan.md", "content": "# Plan\n"}),
-            ("write_file", {"path": "PLAN.md", "content": "# Plan\n"}),
-            ("write_file", {"path": "plan.markdown", "content": "# Plan\n"}),
-            ("apply_patch", {"path": "global_plan/current/plan.markdown", "search": "a", "replace": "b"}),
             ("update_plan_state", {}),
         ]
 
@@ -184,8 +140,11 @@ class SubagentConsultationTests(unittest.TestCase):
 
         blocked_calls = [
             ("write_file", {"path": "src/app.py", "content": "x"}),
+            ("write_file", {"path": "global_plan/current/plan.md", "content": "# Plan\n"}),
             ("apply_patch", {"path": "README.md", "search": "a", "replace": "b"}),
+            ("apply_patch", {"path": "global_plan/current/plan.markdown", "search": "a", "replace": "b"}),
             ("write_file", {"path": ".harness/sessions/s/planning/state.json", "content": "{}"}),
+            ("run_bash", {"command": "rg consult_subagent ."}),
             ("browser_test", {}),
         ]
 
@@ -201,30 +160,7 @@ class SubagentConsultationTests(unittest.TestCase):
                 self.assertIsNotNone(blocked)
                 self.assertIn("planning", blocked.lower())
 
-    def test_read_only_planning_blocks_mutating_shell_commands(self):
-        middleware = ReadOnlyPlanningMiddleware()
-
-        dangerous_commands = [
-            "rm -rf build",
-            "echo hacked > file.txt",
-            "printf hacked >> file.txt",
-            "git add .",
-            "python -m pip install pytest",
-        ]
-
-        for command in dangerous_commands:
-            with self.subTest(command=command):
-                blocked = middleware.before_tool(
-                    "run_bash",
-                    {"command": command},
-                    messages=[],
-                    agent_name="main_agent",
-                )
-
-                self.assertIsNotNone(blocked)
-                self.assertIn("read-only shell", blocked.lower())
-
-    def test_read_only_planning_allows_investigation_and_test_commands(self):
+    def test_read_only_planning_allows_investigation_tools_without_shell(self):
         middleware = ReadOnlyPlanningMiddleware()
 
         read_only_calls = [
@@ -234,11 +170,6 @@ class SubagentConsultationTests(unittest.TestCase):
             ("web_search", {"query": "docs"}),
             ("web_fetch", {"url": "https://example.com"}),
             ("consult_subagent", {"task": "inspect", "scope": "review"}),
-            ("run_bash", {"command": "rg consult_subagent ."}),
-            ("run_bash", {"command": "git diff -- tests"}),
-            ("run_bash", {"command": "cat harness_code_agent/runtime/tools.py"}),
-            ("run_bash", {"command": "python -m unittest discover -s tests"}),
-            ("run_bash", {"command": "pytest tests"}),
         ]
 
         for tool_name, args in read_only_calls:
