@@ -1621,7 +1621,7 @@ class ProductRuntimeTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_execute_tool_with_context_records_events_snapshots_and_approval_denial(self):
+    def test_execute_tool_records_events_and_snapshots(self):
         from harness_code_agent.sessions.events import EventBus
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
@@ -1645,12 +1645,6 @@ class ProductRuntimeTests(unittest.TestCase):
                 tool_context=context,
                 agent_name="main_agent",
             )
-            approval_denied = tools.execute_tool(
-                "run_bash",
-                {"command": "rm -rf build"},
-                tool_context=context,
-                agent_name="main_agent",
-            )
 
             events = [
                 json.loads(line)
@@ -1660,32 +1654,16 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertIn("Wrote", result)
             self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "new")
             self.assertEqual(len(list((root / ".harness" / "snapshots").rglob("*.*"))), 1)
-            self.assertIn("[approval_denied]", approval_denied)
             event_types = [event["type"] for event in events]
             self.assertIn("tool_call", event_types)
             self.assertIn("tool_result", event_types)
             self.assertIn("file_change", event_types)
-            self.assertIn("failure", event_types)
-            self.assertNotIn("before_tool", event_types)
-            self.assertNotIn("permission_decided", event_types)
-            self.assertNotIn("after_tool", event_types)
-            self.assertNotIn("file_changed", event_types)
-            denied_result = [
-                event for event in events
-                if event["type"] == "tool_result" and event["payload"].get("tool") == "run_bash"
-            ][0]
-            self.assertEqual(denied_result["payload"]["status"], "failed")
-            self.assertFalse(denied_result["payload"]["ok"])
-            approval = [
-                event for event in events
-                if event["type"] == "approval_decided" and event["payload"].get("tool") == "run_bash"
-            ][0]
-            self.assertFalse(approval["payload"]["approved"])
 
-    def test_execute_tool_blocks_blacklisted_shell_without_approval(self):
+    def test_permission_middleware_denies_approval_and_emits_events(self):
         from harness_code_agent.sessions.events import EventBus
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.runtime.permission_middleware import PermissionMiddleware
         from harness_code_agent.workspace.service import WorkspaceService
         from harness_code_agent.runtime import tools
 
@@ -1697,28 +1675,224 @@ class ProductRuntimeTests(unittest.TestCase):
                 permission_policy=PermissionPolicy(mode="workspace-write"),
                 event_bus=EventBus(events_path),
             )
-
-            blocked = tools.execute_tool(
-                "run_bash",
-                {"command": "rm -rf /"},
+            middleware = PermissionMiddleware(
                 tool_context=context,
+                tool_registry=tools.BUILTIN_TOOL_REGISTRY,
+            )
+
+            blocked = middleware.before_tool(
+                "run_bash",
+                {"command": "rm -rf build"},
+                messages=[],
                 agent_name="main_agent",
             )
+
             events = [
                 json.loads(line)
                 for line in events_path.read_text(encoding="utf-8").splitlines()
             ]
 
-            self.assertIn("[blocked]", blocked)
+            self.assertIn("[approval_denied]", blocked)
             event_types = [event["type"] for event in events]
-            self.assertNotIn("approval_requested", event_types)
-            self.assertNotIn("approval_decided", event_types)
-            denied_result = [
+            self.assertIn("approval_requested", event_types)
+            self.assertIn("approval_decided", event_types)
+            approval = [
                 event for event in events
-                if event["type"] == "tool_result" and event["payload"].get("tool") == "run_bash"
+                if event["type"] == "approval_decided" and event["payload"].get("tool") == "run_bash"
             ][0]
-            self.assertEqual(denied_result["payload"]["status"], "failed")
-            self.assertEqual(denied_result["payload"]["metadata"]["status_source"], "permission")
+            self.assertFalse(approval["payload"]["approved"])
+
+    def test_permission_middleware_denial_in_agent_loop_emits_tool_result_and_failure_events(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.runtime import tools
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.permission_middleware import PermissionMiddleware
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    message = SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="tc_shell",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="run_bash",
+                                    arguments='{"command":"rm -rf build"}',
+                                ),
+                            )
+                        ],
+                    )
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(message=message, finish_reason="tool_calls")],
+                        usage=None,
+                    )
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        message=SimpleNamespace(content="done", tool_calls=None),
+                        finish_reason="stop",
+                    )],
+                    usage=None,
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(),
+            )
+            middleware = PermissionMiddleware(
+                tool_context=context,
+                tool_registry=tools.BUILTIN_TOOL_REGISTRY,
+            )
+            shell_schemas = tools.tool_schemas_for_profile(allowed_permissions={"shell"})
+
+            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+                conversation = AgentConversation(
+                    Agent(
+                        "main_agent",
+                        "system",
+                        use_tools=True,
+                        tool_schemas=shell_schemas,
+                        middlewares=[middleware],
+                        tool_context=context,
+                    )
+                )
+            with patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2):
+                conversation.run_until_idle()
+
+            event_types = [event.type for event in context.event_bus.events]
+            self.assertIn("approval_requested", event_types)
+            self.assertIn("approval_decided", event_types)
+            self.assertIn("tool_call", event_types)
+            self.assertIn("tool_result", event_types)
+            self.assertIn("failure", event_types)
+            tool_result = [event for event in context.event_bus.events if event.type == "tool_result"][0]
+            self.assertEqual(tool_result.payload["status"], "failed")
+            self.assertEqual(tool_result.payload["metadata"]["status_source"], "approval")
+
+    def test_agent_loop_blocks_tool_calls_not_advertised_in_schema(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.runtime import tools
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    message = SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="tc_write",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="write_file",
+                                    arguments='{"path":"should_not_exist.txt","content":"bad"}',
+                                ),
+                            )
+                        ],
+                    )
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(message=message, finish_reason="tool_calls")],
+                        usage=None,
+                    )
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        message=SimpleNamespace(content="done", tool_calls=None),
+                        finish_reason="stop",
+                    )],
+                    usage=None,
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(),
+            )
+            read_only_schemas = tools.tool_schemas_for_profile(allowed_permissions={"read"})
+            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+                conversation = AgentConversation(
+                    Agent(
+                        "consult_test",
+                        "system",
+                        use_tools=True,
+                        tool_schemas=read_only_schemas,
+                        tool_context=context,
+                    )
+                )
+            with patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2):
+                conversation.run_until_idle()
+
+            self.assertFalse((root / "should_not_exist.txt").exists())
+            tool_result = [event for event in context.event_bus.events if event.type == "tool_result"][0]
+            self.assertEqual(tool_result.payload["status"], "failed")
+            self.assertEqual(tool_result.payload["metadata"]["status_source"], "permission")
+            self.assertIn("not available", tool_result.payload["output"])
+
+    def test_permission_middleware_blocks_blacklisted_shell_without_approval(self):
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.runtime.permission_middleware import PermissionMiddleware
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(),
+            )
+            middleware = PermissionMiddleware(
+                tool_context=context,
+                tool_registry=tools.BUILTIN_TOOL_REGISTRY,
+            )
+
+            blocked = middleware.before_tool(
+                "run_bash",
+                {"command": "rm -rf /"},
+                messages=[],
+                agent_name="main_agent",
+            )
+
+            self.assertIn("[blocked]", blocked)
+            self.assertIn("blacklisted", blocked.lower())
+
+    def test_env_shell_command_requires_approval(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+
+        policy = PermissionPolicy(mode="workspace-write")
+        decision = policy.decide_tool_call("run_bash", {"command": "env"})
+
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.risk, "shell_risky")
 
     def test_execute_tool_apply_patch_records_snapshot_and_rejects_ambiguous_patch(self):
         from harness_code_agent.sessions.events import EventBus
@@ -1761,11 +1935,12 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertTrue(any(event["type"] == "file_change" for event in events))
             self.assertFalse(any(event["type"] == "file_changed" for event in events))
 
-    def test_execute_tool_runs_approved_tool_call(self):
+    def test_permission_middleware_allows_approved_tool_call(self):
         from harness_code_agent.runtime.approvals import StaticApprovalProvider
         from harness_code_agent.sessions.events import EventBus
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.runtime.permission_middleware import PermissionMiddleware
         from harness_code_agent.workspace.service import WorkspaceService
         from harness_code_agent.runtime import tools
 
@@ -1778,11 +1953,15 @@ class ProductRuntimeTests(unittest.TestCase):
                 event_bus=EventBus(events_path),
                 approval_provider=StaticApprovalProvider(approved=True, reason="test approval"),
             )
+            middleware = PermissionMiddleware(
+                tool_context=context,
+                tool_registry=tools.BUILTIN_TOOL_REGISTRY,
+            )
 
-            result = tools.execute_tool(
+            result = middleware.before_tool(
                 "run_bash",
                 {"command": "npm run test"},
-                tool_context=context,
+                messages=[],
                 agent_name="main_agent",
             )
             events = [
@@ -1790,16 +1969,112 @@ class ProductRuntimeTests(unittest.TestCase):
                 for line in events_path.read_text(encoding="utf-8").splitlines()
             ]
 
-            self.assertIn("[error] No active shell session for run_bash", result)
+            self.assertIsNone(result)
             requested = [event for event in events if event["type"] == "approval_requested"][0]
             decided = [event for event in events if event["type"] == "approval_decided"][0]
-            tool_result = [event for event in events if event["type"] == "tool_result"][0]
             self.assertEqual(requested["payload"]["tool"], "run_bash")
             self.assertEqual(requested["payload"]["risk"], "shell_risky")
             self.assertEqual(decided["payload"]["tool"], "run_bash")
             self.assertTrue(decided["payload"]["approved"])
-            self.assertEqual(tool_result["payload"]["status"], "failed")
-            self.assertFalse(tool_result["payload"]["ok"])
+
+    def test_static_verifier_passes_clean_python_file(self):
+        import subprocess
+        from harness_code_agent.runtime.middlewares import StaticVerifierMiddleware
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, capture_output=True)
+            (root / "ok.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=root, capture_output=True)
+            (root / "ok.py").write_text("x = 2\n", encoding="utf-8")
+
+            mw = StaticVerifierMiddleware(workspace_root=str(root))
+            result = mw.pre_exit(messages=[])
+
+            self.assertIsNone(result)
+
+    def test_static_verifier_ignores_preexisting_dirty_python_files(self):
+        from harness_code_agent.runtime.middlewares import StaticVerifierMiddleware
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "bad.py").write_text("def f(\n", encoding="utf-8")
+
+            workspace = WorkspaceService(root=root)
+            mw = StaticVerifierMiddleware(workspace_root=str(root), workspace=workspace)
+            mw.begin_turn("task", messages=[])
+            result = mw.pre_exit(messages=[])
+
+            self.assertIsNone(result)
+
+    def test_static_verifier_blocks_syntax_error_from_current_turn_workspace_change(self):
+        from harness_code_agent.runtime.middlewares import StaticVerifierMiddleware
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = WorkspaceService(root=root)
+            mw = StaticVerifierMiddleware(workspace_root=str(root), workspace=workspace)
+            mw.begin_turn("task", messages=[])
+            workspace.write_text("bad.py", "def f(\n")
+
+            result = mw.pre_exit(messages=[])
+
+            self.assertIsNotNone(result)
+            self.assertIn("LINT CHECK FAILED", result)
+            self.assertIn("bad.py", result)
+
+    def test_static_verifier_warns_only_once_then_allows_exit(self):
+        from harness_code_agent.runtime.middlewares import StaticVerifierMiddleware
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = WorkspaceService(root=root)
+            mw = StaticVerifierMiddleware(workspace_root=str(root), workspace=workspace)
+            mw.begin_turn("task", messages=[])
+            workspace.write_text("warn.py", "x = 1\n")
+
+            with patch(
+                "harness_code_agent.runtime.middlewares._check_ruff_diff",
+                return_value=[("warn.py", "W292", "no newline at end of file")],
+            ):
+                first = mw.pre_exit(messages=[])
+                second = mw.pre_exit(messages=[])
+
+            self.assertIsNotNone(first)
+            self.assertIn("Lint warnings", first)
+            self.assertIsNone(second)
+
+    def test_static_verifier_skips_non_python_files(self):
+        import subprocess
+        from harness_code_agent.runtime.middlewares import StaticVerifierMiddleware
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=root, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=root, capture_output=True)
+            (root / "data.json").write_text("{}", encoding="utf-8")
+
+            mw = StaticVerifierMiddleware(workspace_root=str(root))
+            result = mw.pre_exit(messages=[])
+
+            self.assertIsNone(result)
+
+    def test_static_verifier_ruff_diff_not_installed_gracefully_skips(self):
+        from unittest.mock import patch as _patch
+        from harness_code_agent.runtime.middlewares import _check_ruff_diff
+
+        def fake_run(*a, **kw):
+            raise FileNotFoundError
+
+        with _patch("subprocess.run", side_effect=fake_run):
+            result = _check_ruff_diff("/tmp")
+
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":

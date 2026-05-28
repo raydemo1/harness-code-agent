@@ -22,6 +22,9 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from .permissions import is_read_only_command
 
 log = logging.getLogger("harness")
 
@@ -504,11 +507,6 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         "modulenotfounderror",
     )
     ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "consult_subagent", "browser_test"}
-    READ_ONLY_PREFIXES = (
-        "cat ", "ls", "pwd", "grep ", "head ", "tail ",
-        "git status", "git diff", "git log", "pytest", "python -m pytest",
-        "test ", "diff ", "wc ", "which ", "env",
-    )
     VERIFICATION_FAILURE_PATTERNS = (
         "assert",
         "failed",
@@ -544,10 +542,6 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
     def _is_env_failure(self, text: str) -> bool:
         lowered = text.lower()
         return any(pattern in lowered for pattern in self.ENV_ERROR_PATTERNS)
-
-    def _is_read_only_command(self, command: str) -> bool:
-        lowered = command.strip().lower()
-        return any(lowered.startswith(prefix) for prefix in self.READ_ONLY_PREFIXES)
 
     def _looks_like_verification_failure(self, text: str) -> bool:
         lowered = text.lower()
@@ -611,7 +605,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         if mode == "SPEC_RECHECK":
             if tool_name in {"write_file", "consult_subagent"}:
                 return "[blocked] Recovery mode SPEC_RECHECK is read-only. Re-read the task and verification outputs first."
-            if tool_name == "run_bash" and not self._is_read_only_command(tool_args.get("command", "")):
+            if tool_name == "run_bash" and not is_read_only_command(tool_args.get("command", "")):
                 return "[blocked] Recovery mode SPEC_RECHECK only allows read-only verification commands."
             return None
 
@@ -641,11 +635,11 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             if (
                 runtime_state.recovery.mode == "ENV_FIX"
                 and command
-                and not self._is_read_only_command(command)
+                and not is_read_only_command(command)
             ):
                 self._clear_mode(runtime_state)
             elif (
-                self._is_read_only_command(command)
+                is_read_only_command(command)
                 and self._looks_like_verification_failure(result)
             ):
                 self.observe_verification_failure(result, runtime_state)
@@ -658,78 +652,6 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         return None
 
 
-class ReadOnlySubagentMiddleware(AgentMiddleware):
-    """Restrict consultation sub-agents to read-only investigation."""
-
-    READ_ONLY_TOOLS = {"read_file", "list_files", "run_bash", "web_search", "web_fetch"}
-    READ_ONLY_PREFIXES = (
-        "cat ", "ls", "pwd", "grep ", "rg ", "head ", "tail ",
-        "git status", "git diff", "git log", "git show", "git branch",
-        "python -m unittest", "python -m pytest", "pytest", "test ", "diff ",
-        "wc ", "which ", "where ", "env",
-    )
-
-    def _is_read_only_command(self, command: str) -> bool:
-        lowered = command.strip().lower()
-        return any(lowered.startswith(prefix) for prefix in self.READ_ONLY_PREFIXES)
-
-    def before_tool(
-        self,
-        tool_name: str,
-        tool_args: dict,
-        messages: list[dict],
-        runtime_state=None,
-        agent_name: str | None = None,
-    ) -> str | None:
-        if not (agent_name or "").startswith("consult_"):
-            return None
-        if tool_name not in self.READ_ONLY_TOOLS:
-            return (
-                "[blocked] Consultation sub-agents are read-only. "
-                "Return findings and recommendations; the main agent owns all code changes."
-            )
-        if tool_name == "run_bash" and not self._is_read_only_command(tool_args.get("command", "")):
-            return (
-                "[blocked] Consultation sub-agents may only run read-only shell commands. "
-                "Do not modify files, start services, install packages, or change git state."
-            )
-        return None
-
-
-class ReadOnlyPlanningMiddleware(AgentMiddleware):
-    """Restrict the plan profile to investigation plus planning state updates."""
-
-    READ_ONLY_TOOLS = {
-        "read_file",
-        "list_files",
-        "read_skill_file",
-        "web_search",
-        "web_fetch",
-        "ask_user",
-        "consult_subagent",
-        "update_plan_state",
-    }
-    BLOCKED_TOOLS = {
-        "browser_test",
-        "stop_dev_server",
-    }
-
-    def before_tool(
-        self,
-        tool_name: str,
-        tool_args: dict,
-        messages: list[dict],
-        runtime_state=None,
-        agent_name: str | None = None,
-    ) -> str | None:
-        if agent_name not in MAIN_AGENT_NAMES:
-            return None
-        if tool_name in self.BLOCKED_TOOLS or tool_name not in self.READ_ONLY_TOOLS:
-            return (
-                "[blocked] The plan profile may only investigate and update planning state. "
-                "Use update_plan_state for planning state and plan.md; do not write files directly."
-            )
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -879,3 +801,180 @@ class ErrorGuidanceMiddleware(AgentMiddleware):
 
         self._last_guidance_type = None
         return None
+
+
+
+# ---------------------------------------------------------------------------
+# Static Verifier (pre-exit lint gate, git-diff based)
+# ---------------------------------------------------------------------------
+
+VERDICT_PASS = 0
+VERDICT_WARN = 1
+VERDICT_BLOCK = 2
+
+
+class StaticVerifierMiddleware(AgentMiddleware):
+    """Pre-exit lint gate for Python files changed in the current turn.
+
+    - ``py_compile`` (stdlib): syntax errors on any changed .py → block
+    - ``ruff --diff`` (optional): only reports errors on *new/changed lines*,
+      E/F → block, W/C/N → warn.  Gracefully skipped if ruff is not installed.
+    """
+
+    def __init__(self, workspace_root: str | None = None, workspace=None):
+        self._workspace_root = workspace_root
+        self._workspace = workspace
+        self._turn_changed_start = len(getattr(workspace, "changed_files", [])) if workspace is not None else 0
+        self._reported_warning_signatures: set[tuple[str, ...]] = set()
+
+    def begin_turn(self, task: str, messages: list[dict], runtime_state=None,
+                   agent_name: str | None = None) -> None:
+        if self._workspace is not None:
+            self._turn_changed_start = len(getattr(self._workspace, "changed_files", []))
+        self._reported_warning_signatures.clear()
+
+    def pre_exit(self, messages: list[dict], runtime_state=None,
+                 agent_name: str | None = None) -> str | None:
+        py_files = _turn_changed_py_files(
+            self._workspace_root,
+            self._workspace,
+            self._turn_changed_start,
+        )
+        if not py_files:
+            return None
+
+        blocks: list[str] = []
+        warns: list[str] = []
+
+        # --- py_compile: syntax errors on changed files ---
+        for path, msg in _check_py_compile(self._workspace_root, py_files):
+            blocks.append(f"  [syntax] {path}: {msg}")
+
+        # --- ruff --diff: only errors on changed lines, E/F → block ---
+        for path, code, msg in _check_ruff_diff(self._workspace_root):
+            line = f"  [{code}] {path}: {msg}" if path else f"  [{code}] {msg}"
+            if code and code[0] in {"E", "F"}:
+                blocks.append(line)
+            else:
+                warns.append(line)
+
+        if blocks:
+            details = "\n".join(blocks[:20])
+            return (
+                "[SYSTEM] LINT CHECK FAILED -- fix these errors before stopping:\n"
+                f"{details}"
+            )
+        if warns:
+            details = "\n".join(warns[:20])
+            signature = tuple(warns[:20])
+            if signature in self._reported_warning_signatures:
+                return None
+            self._reported_warning_signatures.add(signature)
+            return (
+                f"[SYSTEM] Lint warnings (non-blocking):\n{details}\n"
+                "Consider fixing before stopping."
+            )
+        return None
+
+
+# ------------------------------------------------------------------
+# Git diff helpers
+# ------------------------------------------------------------------
+
+def _turn_changed_py_files(workspace_root: str | None, workspace, start_index: int) -> list[str]:
+    if workspace is None:
+        return _git_diff_changed_py_files(workspace_root)
+    root = Path(workspace_root or getattr(workspace, "root", ".")).resolve()
+    changed = getattr(workspace, "changed_files", [])[start_index:]
+    files: set[str] = set()
+    for path in changed:
+        rel = Path(path)
+        rel_text = rel.as_posix()
+        if rel_text.endswith(".py") and (root / rel).exists():
+            files.add(rel_text)
+    return sorted(files)
+
+
+def _git_diff_changed_py_files(workspace_root: str | None) -> list[str]:
+    """Return .py files with uncommitted changes (tracked + untracked)."""
+    import subprocess
+    if not workspace_root:
+        return []
+    files: list[str] = []
+    # Tracked changes (modified, added, renamed)
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=ACMR", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=workspace_root,
+        )
+        if result.returncode == 0:
+            files.extend(result.stdout.splitlines())
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Untracked files
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=10,
+            cwd=workspace_root,
+        )
+        if result.returncode == 0:
+            files.extend(result.stdout.splitlines())
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return list({f.strip().replace("\\", "/") for f in files if f.strip().endswith(".py")})
+
+
+# ------------------------------------------------------------------
+# Checkers
+# ------------------------------------------------------------------
+
+def _check_py_compile(
+    workspace_root: str | None, py_files: list[str],
+) -> list[tuple[str, str]]:
+    """Parse each file for syntax errors without writing bytecode."""
+    import ast
+    errors: list[tuple[str, str]] = []
+    for rel_path in py_files:
+        full_path = Path(workspace_root) / rel_path if workspace_root else Path(rel_path)
+        try:
+            source = full_path.read_text(encoding="utf-8", errors="replace")
+            ast.parse(source, filename=str(full_path))
+        except (OSError, SyntaxError) as exc:
+            errors.append((rel_path, str(exc)))
+    return errors
+
+
+def _check_ruff_diff(workspace_root: str | None) -> list[tuple[str, str, str]]:
+    """Run ``ruff check --diff`` — only reports findings on changed lines."""
+    import subprocess
+    if not workspace_root:
+        return []
+    try:
+        result = subprocess.run(
+            ["ruff", "check", "--diff", "--no-fix", "--output-format=text"],
+            capture_output=True, text=True, timeout=30,
+            cwd=workspace_root,
+        )
+    except FileNotFoundError:
+        return []
+    except subprocess.TimeoutExpired:
+        return [("", "TIMEOUT", "ruff check timed out after 30s")]
+    if result.returncode == 0:
+        return []
+    findings: list[tuple[str, str, str]] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split(":", 3)
+        if len(parts) >= 4:
+            path = parts[0].strip()
+            rest = parts[3].strip()
+            code_end = rest.find(" ")
+            if code_end > 0:
+                code, msg = rest[:code_end], rest[code_end + 1:]
+            else:
+                code, msg = rest, ""
+            findings.append((path, code, msg))
+        else:
+            findings.append(("", "", line))
+    return findings

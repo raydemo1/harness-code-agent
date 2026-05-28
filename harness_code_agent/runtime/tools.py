@@ -17,7 +17,6 @@ from typing import Callable
 
 from .. import config
 from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent, classify_tool_failure
-from .approvals import ApprovalRequest
 from .permissions import (
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_EDIT,
@@ -773,7 +772,7 @@ def _tool_schema_by_name(name: str) -> dict | None:
 
 def consultation_tool_schemas() -> list[dict]:
     """Return the read-only tool surface for consultation sub-agents."""
-    names = ("read_file", "list_files", "run_bash", "web_search", "web_fetch")
+    names = ("read_file", "list_files", "web_search", "web_fetch")
     return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
 
 
@@ -824,13 +823,12 @@ def consult_subagent(task: str, scope: str = "codebase_investigation") -> ToolRe
         )
 
     from ..agent.loop import Agent
-    from .middlewares import ReadOnlySubagentMiddleware
 
     sub = Agent(
         name=f"consult_{scope}",
         system_prompt=(
             "You are a read-only consultation helper. You are not a separate implementation owner.\n"
-            "You may inspect files, run read-only commands, search, and fetch references. "
+            "You may inspect files, search, and fetch references. "
             "You must not modify files, start services, install packages, change git state, "
             "or decide whether the overall task is complete.\n"
             "Return only JSON with this shape:\n"
@@ -846,7 +844,6 @@ def consult_subagent(task: str, scope: str = "codebase_investigation") -> ToolRe
         ),
         use_tools=True,
         tool_schemas=consultation_tool_schemas(),
-        middlewares=[ReadOnlySubagentMiddleware()],
     )
 
     result = sub.run(task)
@@ -1813,72 +1810,6 @@ def execute_tool_result(
             agent_name=agent_name,
         )
 
-    if tool_context is not None:
-        decision = tool_context.permission_policy.decide_tool_call(
-            name,
-            arguments,
-            tool_permission=BUILTIN_TOOL_REGISTRY.permission_for(name),
-        )
-        if decision.requires_approval:
-            approval_request = ApprovalRequest(
-                tool_name=name,
-                args=_redact_tool_args(arguments),
-                risk=decision.risk,
-                reason=decision.reason,
-                agent_name=agent_name,
-                session_id=tool_context.session_id,
-            )
-            tool_context.event_bus.emit(
-                "approval_requested",
-                agent=agent_name,
-                payload={
-                    "tool": name,
-                    "risk": decision.risk,
-                    "reason": decision.reason,
-                    "args": _redact_tool_args(arguments),
-                },
-            )
-            approval_result = tool_context.approval_provider.request(approval_request)
-            tool_context.event_bus.emit(
-                "approval_decided",
-                agent=agent_name,
-                payload={
-                    "tool": name,
-                    "approved": approval_result.approved,
-                    "reason": approval_result.reason,
-                    "metadata": approval_result.metadata,
-                },
-            )
-            if not approval_result.approved:
-                result = f"[approval_denied] {approval_result.reason}"
-                return _finalize_tool_result_object(
-                    ToolResult(
-                        tool=name,
-                        status="failed",
-                        output=result,
-                        error=approval_result.reason,
-                        metadata={"requires_approval": True, "status_source": "approval"},
-                    ),
-                    tool_context=tool_context,
-                    agent_name=agent_name,
-                )
-        elif not decision.allowed:
-            result = f"[blocked] {decision.reason}"
-            return _finalize_tool_result_object(
-                ToolResult(
-                    tool=name,
-                    status="failed",
-                    output=result,
-                    error=decision.reason,
-                    metadata={
-                        "requires_approval": decision.requires_approval,
-                        "status_source": "permission",
-                    },
-                ),
-                tool_context=tool_context,
-                agent_name=agent_name,
-            )
-
     try:
         result = _invoke_registered_tool(
             fn,
@@ -1903,6 +1834,29 @@ def execute_tool_result(
     if fix_warning:
         tool_result = tool_result.with_output_prefix(fix_warning)
 
+    return _finalize_tool_result_object(
+        tool_result,
+        tool_context=tool_context,
+        agent_name=agent_name,
+    )
+
+
+def finalize_intercepted_tool_result(
+    tool_result: ToolResult,
+    *,
+    arguments: dict | None = None,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+) -> ToolResult:
+    """Record a tool call that was intercepted before native execution."""
+    if tool_context is not None:
+        tool_context.event_bus.emit_event(
+            ToolCallEvent(
+                tool=tool_result.tool,
+                args=_redact_tool_args(arguments or {}),
+                agent=agent_name,
+            ).to_event()
+        )
     return _finalize_tool_result_object(
         tool_result,
         tool_context=tool_context,

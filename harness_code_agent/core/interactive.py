@@ -15,7 +15,8 @@ from ..profiles import get_profile, list_profiles
 from ..profiles.base import BaseProfile
 from ..runtime import tools
 from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider
-from ..runtime.middlewares import TimeBudgetMiddleware
+from ..runtime.middlewares import StaticVerifierMiddleware, TimeBudgetMiddleware
+from ..runtime.permission_middleware import PermissionMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.questions import ConsoleQuestionProvider, QuestionProvider
 from ..runtime.tool_context import ToolContext
@@ -169,6 +170,16 @@ class InteractiveSession:
             skill_catalog=catalog,
             acceptance_criteria=acceptance_criteria,
         )
+        middlewares = list(cfg.middlewares)
+        middlewares.append(
+            PermissionMiddleware(
+                tool_context=self.tool_context,
+                tool_registry=tools.BUILTIN_TOOL_REGISTRY,
+            )
+        )
+        middlewares.append(
+            StaticVerifierMiddleware(workspace_root=str(self.cwd), workspace=self.tool_context.workspace)
+        )
         return Agent(
             "main_agent",
             prefix.content,
@@ -178,7 +189,7 @@ class InteractiveSession:
                 include_names=cfg.allowed_tool_names,
                 exclude_names=cfg.blocked_tool_names,
             ),
-            middlewares=cfg.middlewares,
+            middlewares=middlewares,
             time_budget=cfg.time_budget,
             tool_context=self.tool_context,
             stream_callback=self.stream_sink,

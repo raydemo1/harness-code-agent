@@ -23,7 +23,6 @@ from harness_code_agent.runtime import tools
 from harness_code_agent.runtime.middlewares import (
     PreExitVerificationMiddleware,
     RecoveryStrategyMiddleware,
-    ReadOnlyPlanningMiddleware,
     TaskTrackingEnforcementMiddleware,
 )
 
@@ -99,7 +98,6 @@ class ProfileInterfaceTests(unittest.TestCase):
         )
         self.assertNotIn("run_bash", tool_names)
         self.assertFalse(any(name.startswith("browser") for name in tool_names))
-        self.assertTrue(any(isinstance(mw, ReadOnlyPlanningMiddleware) for mw in main_agent.middlewares))
 
     def test_specialized_profile_prompts_capture_expected_workflows(self):
         app_prompt = get_profile("app-builder").main_agent().system_prompt.lower()

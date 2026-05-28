@@ -119,13 +119,21 @@ class PermissionPolicy:
         if all(fragment in lowered for fragment in (":(){", ":|:&", "};:")):
             return "shell_blocked"
 
-        safe_prefixes = (
-            "cat ", "type ", "ls", "dir", "pwd", "grep ", "rg ", "head ", "tail ",
-            "git status", "git diff", "git log", "git show", "git branch",
-            "python -m unittest", "python -m pytest", "pytest", "test ", "diff ",
-            "wc ", "which ", "where ",
-        )
-        if any(lowered.startswith(prefix) for prefix in safe_prefixes):
+        if is_read_only_command(lowered):
             return "shell_safe"
 
         return "shell_risky"
+
+
+_READ_ONLY_COMMAND_PREFIXES = (
+    "cat ", "type ", "ls", "dir", "pwd", "grep ", "rg ", "head ", "tail ",
+    "git status", "git diff", "git log", "git show", "git branch",
+    "python -m unittest", "python -m pytest", "pytest", "test ", "diff ",
+    "wc ", "which ", "where ",
+)
+
+
+def is_read_only_command(command: str) -> bool:
+    """Check whether a shell command is safe to run in read-only contexts."""
+    lowered = command.strip().lower()
+    return any(lowered.startswith(prefix) for prefix in _READ_ONLY_COMMAND_PREFIXES)

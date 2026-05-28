@@ -21,6 +21,7 @@ from .providers import ProviderAdapter, current_adapter, get_client
 from .utils import _prompt_cache_key, _short_hash, _usage_to_dict
 from ..runtime import tools
 from ..runtime.tool_context import ToolContext
+from ..runtime.tool_result import ToolResult
 from ..workspace.shell_session import PersistentShellSession
 from .cancellation import CancelledError
 
@@ -211,6 +212,7 @@ class Agent:
         self.middlewares = middlewares or []  # list[AgentMiddleware]
         self.time_budget = time_budget
         self.tool_schemas = tool_schemas
+        self.allowed_tool_names = _tool_names_from_schemas(tool_schemas) if tool_schemas is not None else None
         self.tool_context = tool_context
         self.stream_callback = stream_callback
         self.prompt_cache_identity = prompt_cache_identity
@@ -680,24 +682,54 @@ class AgentConversation:
                     self.compaction_gate.end_tool_call()
                     continue
 
-                blocked = None
-                for mw in agent.middlewares:
-                    blocked = mw.before_tool(
-                        fn_name,
-                        fn_args,
-                        self.messages,
-                        runtime_state=self.runtime_state,
+                intercepted_result = None
+                if agent.allowed_tool_names is not None and fn_name not in agent.allowed_tool_names:
+                    output = f"[blocked] Tool '{fn_name}' is not available to this agent profile."
+                    intercepted_result = tools.finalize_intercepted_tool_result(
+                        ToolResult(
+                            tool=fn_name,
+                            status="failed",
+                            output=output,
+                            error=output.removeprefix("[blocked] "),
+                            metadata={"status_source": "permission"},
+                        ),
+                        arguments=fn_args,
+                        tool_context=agent.tool_context,
                         agent_name=agent.name,
                     )
-                    if blocked:
-                        self._append_message({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": blocked,
-                        })
-                        self.trace.middleware_inject(type(mw).__name__, "before_tool", blocked)
-                        break
-                if blocked:
+                    self.trace.middleware_inject("ToolSchemaGuard", "before_tool", output)
+                else:
+                    for mw in agent.middlewares:
+                        blocked = mw.before_tool(
+                            fn_name,
+                            fn_args,
+                            self.messages,
+                            runtime_state=self.runtime_state,
+                            agent_name=agent.name,
+                        )
+                        if blocked:
+                            blocked_text = blocked.to_text() if isinstance(blocked, ToolResult) else str(blocked)
+                            intercepted_result = (
+                                blocked
+                                if isinstance(blocked, ToolResult)
+                                else _tool_result_from_before_tool_block(fn_name, blocked_text)
+                            )
+                            intercepted_result = tools.finalize_intercepted_tool_result(
+                                intercepted_result,
+                                arguments=fn_args,
+                                tool_context=agent.tool_context,
+                                agent_name=agent.name,
+                            )
+                            self.trace.middleware_inject(type(mw).__name__, "before_tool", blocked_text)
+                            break
+                if intercepted_result is not None:
+                    result = intercepted_result.to_text()
+                    self.trace.tool_call(fn_name, fn_args, result)
+                    self._append_message({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result,
+                    })
                     self.compaction_gate.end_tool_call()
                     continue
 
@@ -814,6 +846,26 @@ class AgentConversation:
 
 def _truncate(s: str, n: int) -> str:
     return s[:n] + "..." if len(s) > n else s
+
+
+def _tool_names_from_schemas(tool_schemas: list[dict] | None) -> set[str]:
+    names: set[str] = set()
+    for schema in tool_schemas or []:
+        function = schema.get("function") if isinstance(schema, dict) else None
+        if isinstance(function, dict) and function.get("name"):
+            names.add(str(function["name"]))
+    return names
+
+
+def _tool_result_from_before_tool_block(tool_name: str, message: str) -> ToolResult:
+    status_source = "approval" if message.startswith("[approval_denied]") else "permission"
+    return ToolResult(
+        tool=tool_name,
+        status="failed",
+        output=message,
+        error=message,
+        metadata={"status_source": status_source},
+    )
 
 
 
