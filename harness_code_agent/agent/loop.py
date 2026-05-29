@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import time
 import logging
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -216,6 +217,7 @@ class Agent:
         self.tool_context = tool_context
         self.stream_callback = stream_callback
         self.prompt_cache_identity = prompt_cache_identity
+        self._conversations: weakref.WeakSet[AgentConversation] = weakref.WeakSet()
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
         return AgentRuntimeState(task_board=TaskBoard(goal=task))
@@ -234,8 +236,24 @@ class Agent:
         finally:
             conversation.close()
 
+    def update_tool_schemas(self, tool_schemas: list[dict]) -> None:
+        """Hot-reload tool schemas (e.g. after MCP reconnect).
+
+        Updates the schema list, allowed name set, and invalidates any
+        cached prompt-cache key on running conversations only when schemas change.
+        """
+        if tool_schemas == self.tool_schemas:
+            self.allowed_tool_names = _tool_names_from_schemas(tool_schemas)
+            return
+        self.tool_schemas = tool_schemas
+        self.allowed_tool_names = _tool_names_from_schemas(tool_schemas)
+        for conversation in list(self._conversations):
+            conversation._cached_prompt_cache_key = None
+
     def start_conversation(self, initial_task: str | None = None) -> "AgentConversation":
-        return AgentConversation(self, initial_task)
+        conversation = AgentConversation(self, initial_task)
+        self._conversations.add(conversation)
+        return conversation
 
 
 class AgentConversation:

@@ -82,8 +82,8 @@ class McpServerStatus:
 @dataclass
 class _McpConnection:
     config: McpServerConfig
-    session: Any
-    exit_stack: contextlib.AsyncExitStack
+    request_queue: asyncio.Queue
+    task: asyncio.Task
 
 
 def load_mcp_config(workspace: str | Path) -> McpConfig:
@@ -201,17 +201,25 @@ class McpClientManager:
         if not self.config.servers:
             return
         self._ensure_loop()
-        for server in self.config.servers.values():
-            try:
-                connection, bindings = self._run(self._connect_server(server))
-            except Exception as exc:
+        self._run(self._connect_all_parallel())
+
+    async def _connect_all_parallel(self) -> None:
+        """Connect to all configured MCP servers concurrently."""
+        servers = list(self.config.servers.values())
+        results = await asyncio.gather(
+            *(self._connect_one(server) for server in servers),
+            return_exceptions=True,
+        )
+        for server, result in zip(servers, results):
+            if isinstance(result, BaseException):
                 self.statuses[server.name] = McpServerStatus(
                     name=server.name,
                     transport=server.transport,
                     state="failed",
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=f"{type(result).__name__}: {result}",
                 )
                 continue
+            connection, bindings = result
             self._connections[server.name] = connection
             self.statuses[server.name] = McpServerStatus(
                 name=server.name,
@@ -221,6 +229,20 @@ class McpClientManager:
             )
             self.tool_bindings.extend(bindings)
             self._bindings_by_exposed_name.update({binding.exposed_name: binding for binding in bindings})
+
+    async def _connect_one(self, server: McpServerConfig) -> tuple["_McpConnection", list[McpToolBinding]]:
+        """Connect to a single server with a per-server timeout."""
+        request_queue: asyncio.Queue = asyncio.Queue()
+        ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        task = asyncio.create_task(self._connection_worker(server, request_queue, ready))
+        try:
+            bindings = await asyncio.wait_for(asyncio.shield(ready), timeout=self.timeout_seconds)
+        except (asyncio.CancelledError, Exception):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            raise
+        return _McpConnection(config=server, request_queue=request_queue, task=task), bindings
 
     def register_tools(self, registry) -> None:
         for binding in self.tool_bindings:
@@ -314,12 +336,19 @@ class McpClientManager:
             self._loop_thread.close()
             self._loop_thread = None
 
-    async def _connect_server(self, server: McpServerConfig) -> tuple[_McpConnection, list[McpToolBinding]]:
+    async def _connection_worker(
+        self,
+        server: McpServerConfig,
+        request_queue: asyncio.Queue,
+        ready: asyncio.Future,
+    ) -> None:
+        """Own a server connection in one task from connect through close."""
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
         from mcp.client.streamable_http import streamable_http_client
 
         stack = contextlib.AsyncExitStack()
+        close_response: asyncio.Future | None = None
         try:
             if server.transport == "stdio":
                 params = StdioServerParameters(
@@ -343,10 +372,47 @@ class McpClientManager:
             list_result = await session.list_tools()
             tools = list(getattr(list_result, "tools", []) or [])
             bindings = _bindings_for_server(server, tools)
-            return _McpConnection(config=server, session=session, exit_stack=stack), bindings
-        except Exception:
-            await stack.aclose()
+            if not ready.done():
+                ready.set_result(bindings)
+
+            while True:
+                kind, payload, response = await request_queue.get()
+                if kind == "close":
+                    close_response = response
+                    break
+                if kind != "call":
+                    if not response.done():
+                        response.set_exception(ValueError(f"Unknown MCP worker request: {kind}"))
+                    continue
+                binding, arguments = payload
+                if response.cancelled():
+                    continue
+                try:
+                    result = await session.call_tool(binding.tool_name, arguments)
+                    tool_result = mcp_result_to_tool_result(binding.exposed_name, result, binding=binding)
+                except Exception as exc:
+                    if not response.done():
+                        response.set_exception(exc)
+                else:
+                    if not response.done():
+                        response.set_result(tool_result)
+        except Exception as exc:
+            if not ready.done():
+                ready.set_exception(exc)
             raise
+        finally:
+            close_error: Exception | None = None
+            try:
+                await stack.aclose()
+            except Exception as exc:
+                close_error = exc
+            if close_response is not None and not close_response.done():
+                if close_error is None:
+                    close_response.set_result(None)
+                else:
+                    close_response.set_exception(close_error)
+            if close_error is not None:
+                raise close_error
 
     async def _call_tool(
         self,
@@ -354,14 +420,23 @@ class McpClientManager:
         binding: McpToolBinding,
         arguments: dict[str, Any],
     ) -> ToolResult:
-        result = await connection.session.call_tool(binding.tool_name, arguments)
-        return mcp_result_to_tool_result(binding.exposed_name, result, binding=binding)
+        response = asyncio.get_running_loop().create_future()
+        await connection.request_queue.put(("call", (binding, arguments), response))
+        try:
+            return await response
+        except asyncio.CancelledError:
+            response.cancel()
+            raise
 
     async def _close_async(self) -> None:
         connections = list(self._connections.values())
         self._connections.clear()
         for connection in reversed(connections):
-            await connection.exit_stack.aclose()
+            response = asyncio.get_running_loop().create_future()
+            await connection.request_queue.put(("close", None, response))
+            await response
+            with contextlib.suppress(Exception):
+                await connection.task
 
     def _handler_for(self, binding: McpToolBinding) -> Callable[..., ToolResult]:
         def handler(**kwargs) -> ToolResult:
@@ -510,7 +585,7 @@ def _exposed_tool_name(server_name: str, tool_name: str, used_names: set[str]) -
     safe_tool = _safe_name_segment(tool_name)
     base = f"{MCP_TOOL_PREFIX}{safe_server}__{safe_tool}"
     if len(base) > MCP_TOOL_NAME_LIMIT:
-        digest = hashlib.sha1(f"{server_name}/{tool_name}".encode("utf-8")).hexdigest()[:8]
+        digest = hashlib.sha256(f"{server_name}/{tool_name}".encode("utf-8")).hexdigest()[:8]
         server_budget = min(len(safe_server), 20)
         tool_budget = max(1, MCP_TOOL_NAME_LIMIT - len(MCP_TOOL_PREFIX) - server_budget - len("__") - len("__") - 8)
         base = f"{MCP_TOOL_PREFIX}{safe_server[:server_budget]}__{safe_tool[:tool_budget]}__{digest}"
@@ -544,19 +619,28 @@ class _AsyncLoopThread:
         self.loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._queue = None
+        self._actor_task: asyncio.Task | None = None
         self._thread = threading.Thread(target=self._run_loop, name="hca-mcp-loop", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=5)
 
     def run(self, coro, *, timeout: float):
         future: Future = Future()
+        actor_holder: list[asyncio.Task | None] = [None]
 
         def submit() -> None:
             assert self._queue is not None
-            self._queue.put_nowait((coro, future))
+            self._queue.put_nowait((coro, future, actor_holder))
 
         self.loop.call_soon_threadsafe(submit)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            actor_task = actor_holder[0]
+            if actor_task is not None and not actor_task.done():
+                self.loop.call_soon_threadsafe(actor_task.cancel)
+            raise
 
     def close(self) -> None:
         if self._queue is not None:
@@ -578,20 +662,33 @@ class _AsyncLoopThread:
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self.loop)
         self._queue = asyncio.Queue()
-        self.loop.create_task(self._actor())
+        self._actor_task = self.loop.create_task(self._actor())
         self._ready.set()
         self.loop.run_forever()
 
     async def _actor(self) -> None:
         assert self._queue is not None
         while True:
-            coro, future = await self._queue.get()
+            item = await self._queue.get()
+            coro, future = item[0], item[1]
+            actor_holder: list[asyncio.Task | None] | None = item[2] if len(item) > 2 else None
             if coro is None:
                 future.set_result(None)
                 return
+            if future.cancelled():
+                coro.close()
+                continue
+            if actor_holder is not None:
+                actor_holder[0] = asyncio.current_task()
             try:
                 result = await coro
+            except asyncio.CancelledError:
+                if not future.done():
+                    future.set_exception(TimeoutError("MCP operation timed out and was cancelled"))
+                continue
             except Exception as exc:
-                future.set_exception(exc)
+                if not future.done():
+                    future.set_exception(exc)
             else:
-                future.set_result(result)
+                if not future.done():
+                    future.set_result(result)

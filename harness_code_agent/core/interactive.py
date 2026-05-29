@@ -212,14 +212,7 @@ class InteractiveSession:
     def _refresh_agent_tool_schemas(self) -> None:
         cfg = self.profile.main_agent()
         schemas = self._tool_schemas_for_agent_config(cfg)
-        self.agent.tool_schemas = schemas
-        self.agent.allowed_tool_names = {
-            schema["function"]["name"]
-            for schema in schemas
-            if schema.get("function", {}).get("name")
-        }
-        if hasattr(self.conversation, "_cached_prompt_cache_key"):
-            self.conversation._cached_prompt_cache_key = None
+        self.agent.update_tool_schemas(schemas)
 
     def _sync_time_budget(self) -> None:
         for mw in self.agent.middlewares:

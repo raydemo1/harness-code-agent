@@ -760,6 +760,59 @@ class ProductRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown permission"):
             registry.register(schema, lambda **_: "sunny", permission="weatherish")
 
+    def test_agent_update_tool_schemas_invalidates_conversation_prompt_cache(self):
+        from harness_code_agent.agent.loop import Agent
+
+        class DummyConversation:
+            pass
+
+        agent = Agent("test", "system", use_tools=True, tool_schemas=[])
+        conversation = DummyConversation()
+        conversation._cached_prompt_cache_key = "old-cache-key"
+        agent._conversations.add(conversation)
+
+        agent.update_tool_schemas(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "dynamic_tool",
+                        "description": "Dynamic tool",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(agent.allowed_tool_names, {"dynamic_tool"})
+        self.assertIsNone(conversation._cached_prompt_cache_key)
+
+    def test_agent_update_tool_schemas_preserves_prompt_cache_when_unchanged(self):
+        from harness_code_agent.agent.loop import Agent
+
+        class DummyConversation:
+            pass
+
+        schemas = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "dynamic_tool",
+                    "description": "Dynamic tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        agent = Agent("test", "system", use_tools=True, tool_schemas=schemas)
+        conversation = DummyConversation()
+        conversation._cached_prompt_cache_key = "old-cache-key"
+        agent._conversations.add(conversation)
+
+        agent.update_tool_schemas(list(schemas))
+
+        self.assertEqual(agent.allowed_tool_names, {"dynamic_tool"})
+        self.assertEqual(conversation._cached_prompt_cache_key, "old-cache-key")
+
     def test_network_read_tool_permission_is_allowed_without_approval(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
 

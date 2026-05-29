@@ -1,4 +1,5 @@
 import json
+import asyncio
 import socket
 import subprocess
 import sys
@@ -252,6 +253,29 @@ class McpRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(failures, 1)
         self.assertIn("MCP", text)
         self.assertIn("Invalid MCP server name", text)
+
+    def test_async_loop_thread_cancels_timed_out_coroutine_and_continues(self):
+        from harness_code_agent.runtime.mcp import _AsyncLoopThread
+
+        cancelled = []
+
+        async def slow():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        loop_thread = _AsyncLoopThread()
+        try:
+            with self.assertRaises(TimeoutError):
+                loop_thread.run(slow(), timeout=0.01)
+
+            loop_thread.run(asyncio.sleep(0), timeout=1)
+        finally:
+            loop_thread.close()
+
+        self.assertEqual(cancelled, [True])
 
     def test_stdio_mcp_server_tool_is_registered_and_callable(self):
         from harness_code_agent.runtime import tools
