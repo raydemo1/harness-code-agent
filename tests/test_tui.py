@@ -18,8 +18,8 @@ from harness_code_agent.tui.approval import (
 from harness_code_agent.tui.question import TuiQuestionProvider
 from harness_code_agent.tui.commands import default_command_registry
 from harness_code_agent.tui.completion import current_mention_query, mention_candidates
-from harness_code_agent.tui.state import SessionStatusSnapshot, TranscriptBlock, TuiState
-from harness_code_agent.tui.widgets import block_to_rich, ContextBar, StatusBar
+from harness_code_agent.tui.state import PlanStep, SessionStatusSnapshot, TranscriptBlock, TuiState
+from harness_code_agent.tui.widgets import block_to_rich, ContextBar, PlanPanel, StatusBar
 
 
 class TuiTests(unittest.TestCase):
@@ -125,6 +125,44 @@ class TuiTests(unittest.TestCase):
         self.assertEqual(state.snapshot.checkpoint, "checkpoint created: abc")
         self.assertEqual(state.snapshot.running_tool, "")
         self.assertGreaterEqual(len(state.blocks), 5)
+
+    def test_update_plan_state_result_updates_plan_steps(self):
+        state = TuiState(
+            SessionStatusSnapshot(
+                profile="coding-agent",
+                model="model-a",
+                provider="auto",
+                permission_mode="workspace-write",
+                session_id="s1",
+                cwd=self.root,
+            )
+        )
+
+        state.apply_event(
+            {
+                "type": "tool_result",
+                "payload": {
+                    "tool": "update_plan_state",
+                    "status": "success",
+                    "metadata": {
+                        "planning_state": {
+                            "steps": ["write failing test", "implement panel", "run tests"],
+                            "current_step": "implement panel",
+                            "completed_steps": ["write failing test"],
+                        }
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(
+            state.plan_steps,
+            [
+                PlanStep("write failing test", "completed"),
+                PlanStep("implement panel", "current"),
+                PlanStep("run tests", "pending"),
+            ],
+        )
 
     def test_approval_requested_summary_omits_repeated_args_blob(self):
         state = TuiState(
@@ -588,6 +626,28 @@ class TuiRichRenderTests(unittest.TestCase):
         bar.context_percent = 85
         text = bar.render()
         self.assertIn("85%", text.plain)
+
+    def test_plan_panel_renders_completed_steps_with_strike_style(self):
+        panel = PlanPanel()
+        panel.update_steps(
+            [
+                PlanStep("write failing test", "completed"),
+                PlanStep("implement panel", "current"),
+                PlanStep("run tests", "pending"),
+            ]
+        )
+
+        text = panel.render()
+        self.assertIn("write failing test", text.plain)
+        self.assertIn("implement panel", text.plain)
+        self.assertIn("run tests", text.plain)
+
+        struck_segments = [
+            text.plain[span.start:span.end]
+            for span in text.spans
+            if "strike" in str(span.style)
+        ]
+        self.assertIn("write failing test", struck_segments)
 
 
 class TuiAppTests(unittest.TestCase):

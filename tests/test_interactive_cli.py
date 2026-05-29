@@ -189,6 +189,116 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_interactive_session_registers_mcp_tools_from_session_registry(self):
+        from harness_code_agent.runtime import tools
+
+        class FakeMcpManager:
+            def __init__(self):
+                self.closed = False
+
+            @classmethod
+            def from_workspace(cls, workspace):
+                return cls()
+
+            def connect_all(self):
+                return None
+
+            def register_tools(self, registry):
+                registry.register(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__docs__search",
+                            "description": "Search docs",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    },
+                    lambda **_: "ok",
+                    permission="read",
+                )
+
+            def close(self):
+                self.closed = True
+
+        class FakeToolProfile:
+            def name(self):
+                return "fake-tools"
+
+            def main_agent(self):
+                return AgentConfig(system_prompt="fake", allowed_tool_permissions={"read"})
+
+            def acceptance_criteria(self):
+                return []
+
+        with (
+            patch("harness_code_agent.core.interactive.get_profile", return_value=FakeToolProfile()),
+            patch("harness_code_agent.core.interactive.McpClientManager", FakeMcpManager),
+            patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
+        try:
+            tool_names = {
+                schema["function"]["name"]
+                for schema in RecordingInteractiveAgent.init_kwargs["tool_schemas"]
+            }
+
+            self.assertIn("read_file", tool_names)
+            self.assertIn("mcp__docs__search", tool_names)
+            self.assertIsNot(session.tool_registry, tools.BUILTIN_TOOL_REGISTRY)
+            self.assertIs(session.tool_context.tool_registry, session.tool_registry)
+        finally:
+            session.close()
+
+    def test_mcp_slash_commands_show_status_list_and_reload(self):
+        class FakeMcpManager:
+            instances = []
+
+            def __init__(self):
+                self.closed = False
+                self.registered = False
+                self.__class__.instances.append(self)
+
+            @classmethod
+            def from_workspace(cls, workspace):
+                return cls()
+
+            def connect_all(self):
+                return None
+
+            def register_tools(self, registry):
+                self.registered = True
+
+            def status_report(self):
+                return "MCP status\nserver docs: connected"
+
+            def tools_report(self):
+                return "MCP tools\nmcp__docs__search"
+
+            def close(self):
+                self.closed = True
+
+        with (
+            patch("harness_code_agent.core.interactive.McpClientManager", FakeMcpManager),
+            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir)
+            try:
+                out = StringIO()
+                session.output_sink = lambda text: print(text, file=out)
+
+                self.assertTrue(session.handle_slash_command("/mcp status"))
+                self.assertTrue(session.handle_slash_command("/mcp list"))
+                self.assertTrue(session.handle_slash_command("/mcp reload"))
+
+                text = out.getvalue()
+                self.assertIn("server docs: connected", text)
+                self.assertIn("mcp__docs__search", text)
+                self.assertIn("MCP reloaded", text)
+                self.assertTrue(FakeMcpManager.instances[0].closed)
+                self.assertGreaterEqual(len(FakeMcpManager.instances), 2)
+            finally:
+                session.close()
+
     def test_interactive_session_injects_workspace_harness_md_into_system_prompt(self):
         Path(self.temp_dir, "HARNESS.md").write_text(
             "# Project Rules\n\nAlways prefer focused tests.\n",

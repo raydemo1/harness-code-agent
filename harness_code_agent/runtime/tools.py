@@ -489,6 +489,7 @@ def update_plan_state(
         output="Updated plan state: " + ", ".join(written),
         metadata={
             "status_source": "native",
+            "planning_state": payload,
             "file_changes": [
                 {"path": path, "operation": "write_file", "snapshot_path": None}
                 for path in written
@@ -1088,13 +1089,22 @@ class ToolRegistry:
     def dispatch(self) -> dict[str, Callable]:
         return dict(self._handlers)
 
+    def copy(self) -> "ToolRegistry":
+        clone = ToolRegistry()
+        clone._schemas = dict(self._schemas)
+        clone._handlers = dict(self._handlers)
+        clone._permissions = dict(self._permissions)
+        return clone
+
 
 def tool_schemas_for_profile(
     *,
     allowed_permissions: set[str] | None = None,
     include_names: set[str] | None = None,
     exclude_names: set[str] | None = None,
+    registry: ToolRegistry | None = None,
 ) -> list[dict]:
+    registry = registry or BUILTIN_TOOL_REGISTRY
     allowed_permissions = set(allowed_permissions) if allowed_permissions is not None else None
     include_names = set(include_names or set())
     exclude_names = set(exclude_names or set())
@@ -1105,7 +1115,7 @@ def tool_schemas_for_profile(
             raise ValueError(f"Unknown tool permission classification for profile: {names}")
 
     schemas: list[dict] = []
-    for spec in BUILTIN_TOOL_REGISTRY.specs():
+    for spec in registry.specs():
         if spec.name in exclude_names:
             continue
         if spec.name in include_names or (
@@ -1757,6 +1767,7 @@ def execute_tool_result(
 ) -> ToolResult:
     """Execute a tool by name with pre-validation and auto-correction."""
     arguments = dict(arguments or {})
+    registry = _registry_for_context(tool_context)
 
     if tool_context is not None:
         tool_context.event_bus.emit_event(
@@ -1767,7 +1778,7 @@ def execute_tool_result(
             ).to_event()
         )
 
-    fn = BUILTIN_TOOL_REGISTRY.get(name)
+    fn = registry.get(name)
     if fn is None:
         return _finalize_tool_result_object(
             ToolResult(
@@ -1862,6 +1873,12 @@ def finalize_intercepted_tool_result(
         tool_context=tool_context,
         agent_name=agent_name,
     )
+
+
+def _registry_for_context(tool_context: ToolContext | None) -> ToolRegistry:
+    if tool_context is not None and tool_context.tool_registry is not None:
+        return tool_context.tool_registry
+    return BUILTIN_TOOL_REGISTRY
 
 
 def _invoke_registered_tool(

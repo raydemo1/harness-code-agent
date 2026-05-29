@@ -62,10 +62,11 @@ class PermissionMiddleware(AgentMiddleware):
             A blocking message (used as the tool result) if the call is
             denied or the user rejects approval.  ``None`` means "allow".
         """
+        registry = self._ctx.tool_registry or self._registry
         decision = self._ctx.permission_policy.decide_tool_call(
             tool_name,
             tool_args,
-            tool_permission=self._registry.permission_for(tool_name),
+            tool_permission=registry.permission_for(tool_name),
         )
 
         # --- deny (hard block, e.g. blacklisted shell command) ---

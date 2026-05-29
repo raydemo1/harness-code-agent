@@ -37,6 +37,12 @@ class TranscriptBlock:
     status: str = ""
 
 
+@dataclass(frozen=True)
+class PlanStep:
+    text: str
+    status: str
+
+
 @dataclass
 class ToolSummary:
     tool: str
@@ -52,6 +58,7 @@ class ToolSummary:
 class TuiState:
     snapshot: SessionStatusSnapshot
     blocks: list[TranscriptBlock] = field(default_factory=list)
+    plan_steps: list[PlanStep] = field(default_factory=list)
     pending_approval: dict[str, Any] | None = None
     _pending_tools: dict[str, float] = field(default_factory=dict)
     show_thought_details: bool = False
@@ -95,6 +102,8 @@ class TuiState:
             if self.snapshot.running_tool == tool:
                 self.snapshot.running_tool = ""
             status = str(payload.get("status", "unknown"))
+            if tool == "update_plan_state" and status == "success":
+                self._update_plan_steps_from_metadata(payload.get("metadata"))
             self.snapshot.status = "running"
             # Calculate elapsed time
             start_time = self._pending_tools.pop(tool, None)
@@ -205,6 +214,38 @@ class TuiState:
     def add_block(self, block: TranscriptBlock | None) -> None:
         if block is not None:
             self.blocks.append(block)
+
+    def _update_plan_steps_from_metadata(self, metadata: Any) -> None:
+        if not isinstance(metadata, dict):
+            return
+        planning_state = metadata.get("planning_state")
+        if not isinstance(planning_state, dict):
+            return
+
+        raw_steps = planning_state.get("steps")
+        if not isinstance(raw_steps, list):
+            return
+        steps = [str(step).strip() for step in raw_steps if str(step).strip()]
+        current_step = str(planning_state.get("current_step") or "").strip()
+        raw_completed_steps = planning_state.get("completed_steps")
+        if not isinstance(raw_completed_steps, list):
+            raw_completed_steps = []
+        completed_steps = {
+            str(step).strip()
+            for step in raw_completed_steps
+            if str(step).strip()
+        }
+
+        plan_steps: list[PlanStep] = []
+        for step in steps:
+            if step in completed_steps:
+                status = "completed"
+            elif step == current_step:
+                status = "current"
+            else:
+                status = "pending"
+            plan_steps.append(PlanStep(step, status))
+        self.plan_steps = plan_steps
 
 
 def _payload_summary(payload: dict[str, Any]) -> str:

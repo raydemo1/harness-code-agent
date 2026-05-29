@@ -1,17 +1,38 @@
 """Inline approval and question panels for the TUI."""
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.css.query import NoMatches
+from textual.message import Message
 from textual.widgets import Input, Static
 
 if TYPE_CHECKING:
     from ..runtime.approvals import ApprovalRequest
     from ..runtime.questions import QuestionRequest
+
+log = logging.getLogger("harness.tui.screens")
+
+
+# ── Messages ──────────────────────────────────────────────────────────────
+
+class ApprovalResult(Message, bubble=True):
+    """Message posted when user makes an approval decision."""
+    def __init__(self, approved: bool) -> None:
+        super().__init__()
+        self.approved = approved
+
+
+class QuestionResult(Message, bubble=True):
+    """Message posted when user answers a question."""
+    def __init__(self, payload: dict | None) -> None:
+        super().__init__()
+        self.payload = payload
 
 
 # ── ApprovalPanel ───────────────────────────────────────────────────────────
@@ -27,6 +48,7 @@ class ApprovalPanel(Vertical):
     """Inline approval panel that replaces the input area.
 
     Double-key-press behavior: first press selects, second press submits.
+    Posts ApprovalResult message on decision.
     """
 
     can_focus = True
@@ -80,8 +102,10 @@ class ApprovalPanel(Vertical):
     def _refresh_choices(self) -> None:
         try:
             self.query_one("#approval-choices", Static).update(self._format_choices())
+        except NoMatches:
+            log.debug("approval-choices not found")
         except Exception:
-            pass
+            log.warning("Error refreshing approval choices", exc_info=True)
 
     def on_key(self, event) -> None:
         if self.handle_key(event.key):
@@ -123,9 +147,7 @@ class ApprovalPanel(Vertical):
         return False
 
     def _submit(self) -> None:
-        if self._selected_index == _APPROVE:
-            self.app._on_approval_result(True)
-        elif self._selected_index == _PERSIST:
+        if self._selected_index == _PERSIST:
             from .approval import TuiApprovalProvider, _persistent_prefix_for_request
             provider = TuiApprovalProvider(project_root=self.app.cwd)
             persistent_prefix = _persistent_prefix_for_request(self._request)
@@ -134,12 +156,11 @@ class ApprovalPanel(Vertical):
                     persistent_prefix,
                     command=str(self._request.args.get("command", "")),
                 )
-            self.app._on_approval_result(True)
-        else:
-            self.app._on_approval_result(False)
+        approved = self._selected_index in (_APPROVE, _PERSIST)
+        self.post_message(ApprovalResult(approved))
 
     def _deny(self) -> None:
-        self.app._on_approval_result(False)
+        self.post_message(ApprovalResult(False))
 
 
 # ── QuestionPanel ───────────────────────────────────────────────────────────
@@ -195,8 +216,10 @@ class QuestionPanel(Vertical):
     def _refresh_choices(self) -> None:
         try:
             self.query_one("#q-choices", Static).update(self._format_choices())
+        except NoMatches:
+            log.debug("q-choices not found")
         except Exception:
-            pass
+            log.warning("Error refreshing question choices", exc_info=True)
 
     def _update_other_visibility(self) -> None:
         opt = self._request.options[self._selected_index]
@@ -268,7 +291,7 @@ class QuestionPanel(Vertical):
             custom_text=custom_text,
             metadata={"ui": "tui"},
         )
-        self.app._on_question_result(result.to_dict())
+        self.post_message(QuestionResult(result.to_dict()))
 
     def _cancel(self) -> None:
-        self.app._on_question_result(None)
+        self.post_message(QuestionResult(None))

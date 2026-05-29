@@ -1,0 +1,597 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import os
+import re
+import threading
+from concurrent.futures import Future
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from .permissions import TOOL_PERMISSION_DANGEROUS, VALID_TOOL_PERMISSIONS
+from .tool_result import ToolResult
+
+
+MCP_CONFIG_RELATIVE_PATH = Path(".harness") / "mcp.json"
+MCP_TOOL_PREFIX = "mcp__"
+MCP_TOOL_NAME_LIMIT = 64
+MCP_OUTPUT_LIMIT = 60_000
+
+
+class McpConfigError(ValueError):
+    """Raised when .harness/mcp.json cannot be parsed or validated."""
+
+
+@dataclass(frozen=True)
+class McpServerConfig:
+    name: str
+    transport: str
+    permission: str = TOOL_PERMISSION_DANGEROUS
+    command: str | None = None
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    cwd: str | None = None
+    url: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    tool_permissions: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class McpConfig:
+    path: Path
+    servers: dict[str, McpServerConfig] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class McpToolBinding:
+    exposed_name: str
+    server_name: str
+    tool_name: str
+    description: str
+    input_schema: dict[str, Any]
+    permission: str
+    annotations: dict[str, Any] = field(default_factory=dict)
+
+    def schema(self) -> dict[str, Any]:
+        parameters = self.input_schema or {"type": "object", "properties": {}}
+        if parameters.get("type") != "object":
+            parameters = {"type": "object", "properties": {}, "additionalProperties": True}
+        return {
+            "type": "function",
+            "function": {
+                "name": self.exposed_name,
+                "description": self.description or f"MCP tool {self.server_name}/{self.tool_name}",
+                "parameters": parameters,
+            },
+        }
+
+
+@dataclass
+class McpServerStatus:
+    name: str
+    transport: str
+    state: str
+    tool_count: int = 0
+    error: str | None = None
+
+
+@dataclass
+class _McpConnection:
+    config: McpServerConfig
+    session: Any
+    exit_stack: contextlib.AsyncExitStack
+
+
+def load_mcp_config(workspace: str | Path) -> McpConfig:
+    root = Path(workspace).resolve()
+    path = root / MCP_CONFIG_RELATIVE_PATH
+    if not path.exists():
+        return McpConfig(path=path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise McpConfigError(f"Invalid MCP config JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise McpConfigError("MCP config must be a JSON object")
+    raw_servers = data.get("servers", {})
+    if not isinstance(raw_servers, dict):
+        raise McpConfigError("MCP config field 'servers' must be an object")
+
+    servers: dict[str, McpServerConfig] = {}
+    for name, raw in raw_servers.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise McpConfigError(f"Invalid MCP server name: {name!r}")
+        if not isinstance(raw, dict):
+            raise McpConfigError(f"MCP server {name!r} must be an object")
+        if raw.get("enabled", True) is False:
+            continue
+
+        expanded = _expand_env(raw)
+        transport = str(expanded.get("transport") or "").strip()
+        if transport == "streamable-http":
+            transport = "streamable_http"
+        if transport not in {"stdio", "streamable_http"}:
+            raise McpConfigError(f"MCP server {name!r} has unsupported transport: {transport!r}")
+
+        permission = str(expanded.get("permission") or TOOL_PERMISSION_DANGEROUS)
+        _validate_permission(permission, f"server {name!r}")
+        tool_permissions = _string_dict(expanded.get("tool_permissions") or {}, f"server {name!r} tool_permissions")
+        for tool_name, tool_permission in tool_permissions.items():
+            _validate_permission(tool_permission, f"server {name!r} tool {tool_name!r}")
+
+        args = expanded.get("args") or []
+        if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+            raise McpConfigError(f"MCP server {name!r} args must be a list of strings")
+
+        if transport == "stdio":
+            command = str(expanded.get("command") or "").strip()
+            if not command:
+                raise McpConfigError(f"MCP stdio server {name!r} requires command")
+            servers[name] = McpServerConfig(
+                name=name,
+                transport=transport,
+                permission=permission,
+                command=command,
+                args=args,
+                env=_string_dict(expanded.get("env") or {}, f"server {name!r} env"),
+                cwd=str(expanded.get("cwd")) if expanded.get("cwd") else None,
+                tool_permissions=tool_permissions,
+            )
+        else:
+            url = str(expanded.get("url") or "").strip()
+            if not url:
+                raise McpConfigError(f"MCP streamable_http server {name!r} requires url")
+            servers[name] = McpServerConfig(
+                name=name,
+                transport=transport,
+                permission=permission,
+                url=url,
+                headers=_string_dict(expanded.get("headers") or {}, f"server {name!r} headers"),
+                tool_permissions=tool_permissions,
+            )
+
+    return McpConfig(path=path, servers=servers)
+
+
+class McpClientManager:
+    def __init__(
+        self,
+        *,
+        workspace: str | Path,
+        config: McpConfig | None = None,
+        config_error: str | None = None,
+        timeout_seconds: float = 30.0,
+    ):
+        self.workspace = Path(workspace).resolve()
+        self.config = config or McpConfig(path=self.workspace / MCP_CONFIG_RELATIVE_PATH)
+        self.config_error = config_error
+        self.timeout_seconds = timeout_seconds
+        self.statuses: dict[str, McpServerStatus] = {}
+        self.tool_bindings: list[McpToolBinding] = []
+        self._bindings_by_exposed_name: dict[str, McpToolBinding] = {}
+        self._connections: dict[str, _McpConnection] = {}
+        self._loop_thread: _AsyncLoopThread | None = None
+
+    @classmethod
+    def from_workspace(cls, workspace: str | Path) -> "McpClientManager":
+        try:
+            config = load_mcp_config(workspace)
+            return cls(workspace=workspace, config=config)
+        except McpConfigError as exc:
+            root = Path(workspace).resolve()
+            return cls(
+                workspace=root,
+                config=McpConfig(path=root / MCP_CONFIG_RELATIVE_PATH),
+                config_error=str(exc),
+            )
+
+    def connect_all(self) -> None:
+        if self.config_error:
+            self.statuses["config"] = McpServerStatus(
+                name="config",
+                transport="config",
+                state="failed",
+                error=self.config_error,
+            )
+            return
+        if not self.config.servers:
+            return
+        self._ensure_loop()
+        for server in self.config.servers.values():
+            try:
+                connection, bindings = self._run(self._connect_server(server))
+            except Exception as exc:
+                self.statuses[server.name] = McpServerStatus(
+                    name=server.name,
+                    transport=server.transport,
+                    state="failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            self._connections[server.name] = connection
+            self.statuses[server.name] = McpServerStatus(
+                name=server.name,
+                transport=server.transport,
+                state="connected",
+                tool_count=len(bindings),
+            )
+            self.tool_bindings.extend(bindings)
+            self._bindings_by_exposed_name.update({binding.exposed_name: binding for binding in bindings})
+
+    def register_tools(self, registry) -> None:
+        for binding in self.tool_bindings:
+            registry.register(
+                binding.schema(),
+                self._handler_for(binding),
+                permission=binding.permission,
+            )
+
+    def call_tool(self, exposed_name: str, arguments: dict[str, Any]) -> ToolResult:
+        binding = self._bindings_by_exposed_name.get(exposed_name)
+        if binding is None:
+            return ToolResult(
+                tool=exposed_name,
+                status="failed",
+                output=f"[error] Unknown MCP tool: {exposed_name}",
+                error=f"Unknown MCP tool: {exposed_name}",
+                metadata={"status_source": "mcp"},
+            )
+        connection = self._connections.get(binding.server_name)
+        if connection is None:
+            return ToolResult(
+                tool=exposed_name,
+                status="failed",
+                output=f"[error] MCP server is not connected: {binding.server_name}",
+                error=f"MCP server is not connected: {binding.server_name}",
+                metadata={"status_source": "mcp", "server": binding.server_name, "tool": binding.tool_name},
+            )
+        try:
+            return self._run(self._call_tool(connection, binding, dict(arguments or {})))
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            return ToolResult(
+                tool=exposed_name,
+                status="failed",
+                output=f"[error] MCP tool call failed: {error}",
+                error=error,
+                metadata={"status_source": "mcp", "server": binding.server_name, "tool": binding.tool_name},
+            )
+
+    def status_report(self) -> str:
+        lines = ["MCP status"]
+        if self.config_error:
+            lines.append(f"config: failed - {self.config_error}")
+            return "\n".join(lines)
+        if not self.config.servers:
+            lines.append(f"config: {self.config.path}")
+            lines.append("no MCP servers configured")
+            return "\n".join(lines)
+        lines.append(f"config: {self.config.path}")
+        for status in self.statuses.values():
+            if status.state == "connected":
+                lines.append(f"server {status.name}: connected ({status.tool_count} tool(s), {status.transport})")
+            else:
+                lines.append(f"server {status.name}: failed - {status.error}")
+        missing = set(self.config.servers) - set(self.statuses)
+        for name in sorted(missing):
+            server = self.config.servers[name]
+            lines.append(f"server {name}: not connected ({server.transport})")
+        return "\n".join(lines)
+
+    def tools_report(self) -> str:
+        lines = ["MCP tools"]
+        if not self.tool_bindings:
+            lines.append("no MCP tools registered")
+            return "\n".join(lines)
+        for binding in self.tool_bindings:
+            lines.append(
+                f"{binding.exposed_name} -> {binding.server_name}/{binding.tool_name} "
+                f"permission={binding.permission}"
+            )
+        return "\n".join(lines)
+
+    def doctor_status(self) -> tuple[bool, str]:
+        if self.config_error:
+            return False, self.config_error
+        if not self.config.path.exists():
+            return True, "not configured"
+        failed = [status for status in self.statuses.values() if status.state != "connected"]
+        if failed:
+            details = "; ".join(f"{item.name}: {item.error}" for item in failed)
+            return False, details
+        return True, f"{len(self.config.servers)} server(s), {len(self.tool_bindings)} tool(s)"
+
+    def close(self) -> None:
+        if self._loop_thread is None:
+            return
+        try:
+            self._run(self._close_async())
+        finally:
+            self._loop_thread.close()
+            self._loop_thread = None
+
+    async def _connect_server(self, server: McpServerConfig) -> tuple[_McpConnection, list[McpToolBinding]]:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from mcp.client.streamable_http import streamable_http_client
+
+        stack = contextlib.AsyncExitStack()
+        try:
+            if server.transport == "stdio":
+                params = StdioServerParameters(
+                    command=server.command or "",
+                    args=list(server.args),
+                    env=dict(server.env) if server.env else None,
+                    cwd=_resolve_server_cwd(self.workspace, server.cwd),
+                )
+                read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
+            else:
+                import httpx
+
+                http_client = httpx.AsyncClient(headers=dict(server.headers), timeout=self.timeout_seconds)
+                await stack.enter_async_context(http_client)
+                read_stream, write_stream, _ = await stack.enter_async_context(
+                    streamable_http_client(server.url or "", http_client=http_client)
+                )
+
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            list_result = await session.list_tools()
+            tools = list(getattr(list_result, "tools", []) or [])
+            bindings = _bindings_for_server(server, tools)
+            return _McpConnection(config=server, session=session, exit_stack=stack), bindings
+        except Exception:
+            await stack.aclose()
+            raise
+
+    async def _call_tool(
+        self,
+        connection: _McpConnection,
+        binding: McpToolBinding,
+        arguments: dict[str, Any],
+    ) -> ToolResult:
+        result = await connection.session.call_tool(binding.tool_name, arguments)
+        return mcp_result_to_tool_result(binding.exposed_name, result, binding=binding)
+
+    async def _close_async(self) -> None:
+        connections = list(self._connections.values())
+        self._connections.clear()
+        for connection in reversed(connections):
+            await connection.exit_stack.aclose()
+
+    def _handler_for(self, binding: McpToolBinding) -> Callable[..., ToolResult]:
+        def handler(**kwargs) -> ToolResult:
+            arguments = {
+                key: value
+                for key, value in kwargs.items()
+                if key not in {"runtime_state", "agent_name", "tool_context"}
+            }
+            return self.call_tool(binding.exposed_name, arguments)
+
+        return handler
+
+    def _ensure_loop(self) -> None:
+        if self._loop_thread is None:
+            self._loop_thread = _AsyncLoopThread()
+
+    def _run(self, coro):
+        self._ensure_loop()
+        assert self._loop_thread is not None
+        return self._loop_thread.run(coro, timeout=self.timeout_seconds)
+
+
+def mcp_result_to_tool_result(
+    exposed_name: str,
+    result: Any,
+    *,
+    binding: McpToolBinding | None = None,
+) -> ToolResult:
+    parts: list[str] = []
+    for item in list(getattr(result, "content", []) or []):
+        parts.append(_content_item_to_text(item))
+    structured = getattr(result, "structuredContent", None)
+    if structured is not None:
+        parts.append("structuredContent:\n" + json.dumps(structured, ensure_ascii=False, indent=2, sort_keys=True))
+    output = "\n\n".join(part for part in parts if part)
+    if len(output) > MCP_OUTPUT_LIMIT:
+        output = output[:MCP_OUTPUT_LIMIT] + f"\n\n[TRUNCATED: {len(output) - MCP_OUTPUT_LIMIT} chars omitted]"
+    is_error = bool(getattr(result, "isError", False))
+    metadata: dict[str, Any] = {"status_source": "mcp"}
+    if binding is not None:
+        metadata.update(
+            {
+                "server": binding.server_name,
+                "tool": binding.tool_name,
+                "permission": binding.permission,
+                "annotations": binding.annotations,
+            }
+        )
+    return ToolResult(
+        tool=exposed_name,
+        status="failed" if is_error else "success",
+        output=output,
+        error="MCP tool returned isError=true" if is_error else None,
+        metadata=metadata,
+    )
+
+
+def _bindings_for_server(server: McpServerConfig, mcp_tools: list[Any]) -> list[McpToolBinding]:
+    used_names: set[str] = set()
+    bindings: list[McpToolBinding] = []
+    for tool in mcp_tools:
+        tool_name = str(getattr(tool, "name", "") or "").strip()
+        if not tool_name:
+            continue
+        exposed_name = _exposed_tool_name(server.name, tool_name, used_names)
+        used_names.add(exposed_name)
+        permission = server.tool_permissions.get(tool_name, server.permission)
+        description = str(getattr(tool, "description", "") or getattr(tool, "title", "") or "")
+        annotations = _model_to_dict(getattr(tool, "annotations", None))
+        bindings.append(
+            McpToolBinding(
+                exposed_name=exposed_name,
+                server_name=server.name,
+                tool_name=tool_name,
+                description=description,
+                input_schema=dict(getattr(tool, "inputSchema", None) or {"type": "object", "properties": {}}),
+                permission=permission,
+                annotations=annotations,
+            )
+        )
+    return bindings
+
+
+def _content_item_to_text(item: Any) -> str:
+    item_type = str(getattr(item, "type", "") or "")
+    if item_type == "text":
+        return str(getattr(item, "text", "") or "")
+    if item_type in {"image", "audio"}:
+        data = str(getattr(item, "data", "") or "")
+        mime = str(getattr(item, "mimeType", "") or "application/octet-stream")
+        return f"[{item_type} {mime}, {len(data)} base64 chars omitted]"
+    if item_type == "resource":
+        resource = getattr(item, "resource", None)
+        if resource is None:
+            return "[resource omitted]"
+        uri = str(getattr(resource, "uri", "") or "")
+        mime = str(getattr(resource, "mimeType", "") or "application/octet-stream")
+        if hasattr(resource, "text"):
+            return f"[resource {uri} {mime}]\n{getattr(resource, 'text', '')}"
+        blob = str(getattr(resource, "blob", "") or "")
+        return f"[resource {uri} {mime}, {len(blob)} base64 chars omitted]"
+    if item_type == "resource_link":
+        uri = str(getattr(item, "uri", "") or "")
+        name = str(getattr(item, "name", "") or "")
+        return f"[resource_link {name} {uri}]"
+    return f"[{item_type or type(item).__name__} content omitted]"
+
+
+def _expand_env(value: Any) -> Any:
+    if isinstance(value, str):
+        return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", lambda m: os.environ.get(m.group(1), ""), value)
+    if isinstance(value, list):
+        return [_expand_env(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _expand_env(item) for key, item in value.items()}
+    return value
+
+
+def _string_dict(value: Any, label: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise McpConfigError(f"MCP {label} must be an object")
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise McpConfigError(f"MCP {label} must contain only string keys and values")
+        result[key] = item
+    return result
+
+
+def _validate_permission(permission: str, label: str) -> None:
+    if permission not in VALID_TOOL_PERMISSIONS:
+        raise McpConfigError(f"Invalid MCP permission for {label}: {permission}")
+
+
+def _resolve_server_cwd(workspace: Path, cwd: str | None) -> str | None:
+    if not cwd:
+        return None
+    path = Path(cwd)
+    if not path.is_absolute():
+        path = workspace / path
+    return str(path.resolve())
+
+
+def _exposed_tool_name(server_name: str, tool_name: str, used_names: set[str]) -> str:
+    safe_server = _safe_name_segment(server_name)
+    safe_tool = _safe_name_segment(tool_name)
+    base = f"{MCP_TOOL_PREFIX}{safe_server}__{safe_tool}"
+    if len(base) > MCP_TOOL_NAME_LIMIT:
+        digest = hashlib.sha1(f"{server_name}/{tool_name}".encode("utf-8")).hexdigest()[:8]
+        server_budget = min(len(safe_server), 20)
+        tool_budget = max(1, MCP_TOOL_NAME_LIMIT - len(MCP_TOOL_PREFIX) - server_budget - len("__") - len("__") - 8)
+        base = f"{MCP_TOOL_PREFIX}{safe_server[:server_budget]}__{safe_tool[:tool_budget]}__{digest}"
+    candidate = base
+    index = 2
+    while candidate in used_names:
+        suffix = f"_{index}"
+        candidate = base[: MCP_TOOL_NAME_LIMIT - len(suffix)] + suffix
+        index += 1
+    return candidate
+
+
+def _safe_name_segment(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", value.strip())
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    return safe or "tool"
+
+
+def _model_to_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        return value.model_dump(exclude_none=True)
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+class _AsyncLoopThread:
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._queue = None
+        self._thread = threading.Thread(target=self._run_loop, name="hca-mcp-loop", daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def run(self, coro, *, timeout: float):
+        future: Future = Future()
+
+        def submit() -> None:
+            assert self._queue is not None
+            self._queue.put_nowait((coro, future))
+
+        self.loop.call_soon_threadsafe(submit)
+        return future.result(timeout=timeout)
+
+    def close(self) -> None:
+        if self._queue is not None:
+            future: Future = Future()
+
+            def submit_stop() -> None:
+                assert self._queue is not None
+                self._queue.put_nowait((None, future))
+
+            self.loop.call_soon_threadsafe(submit_stop)
+            try:
+                future.result(timeout=5)
+            except Exception:
+                pass
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self._thread.join(timeout=5)
+        self.loop.close()
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        self._queue = asyncio.Queue()
+        self.loop.create_task(self._actor())
+        self._ready.set()
+        self.loop.run_forever()
+
+    async def _actor(self) -> None:
+        assert self._queue is not None
+        while True:
+            coro, future = await self._queue.get()
+            if coro is None:
+                future.set_result(None)
+                return
+            try:
+                result = await coro
+            except Exception as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(result)

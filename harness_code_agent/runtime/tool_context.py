@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .approvals import ApprovalProvider, NoApprovalProvider
 from .questions import NoQuestionProvider, QuestionProvider
@@ -17,3 +18,4 @@ class ToolContext:
     session_id: str | None = None
     approval_provider: ApprovalProvider = NoApprovalProvider()
     question_provider: QuestionProvider = NoQuestionProvider()
+    tool_registry: Any | None = None

@@ -1,14 +1,19 @@
 """Textual-based TUI for Harness Code Agent."""
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import TextArea
+
+log = logging.getLogger("harness.tui")
 
 from .. import config
 from ..agent.cancellation import CancelledError, CancellationToken
@@ -17,10 +22,12 @@ from ..core.mentions import MentionResolutionError
 from .approval import TuiApprovalProvider
 from .commands import default_command_registry
 from .question import TuiQuestionProvider
+from .screens import ApprovalResult, QuestionResult
 from .state import SessionStatusSnapshot, TranscriptBlock, TuiState
 from .widgets import (
     ContextBar,
     InputArea,
+    PlanPanel,
     StatusBar,
     TranscriptView,
 )
@@ -62,6 +69,14 @@ class SubmitError(Message):
         self.error = error
 
 
+class OutputEvent(Message):
+    """Output a status block to the transcript from a worker thread."""
+    def __init__(self, text: str, title: str = "output") -> None:
+        super().__init__()
+        self.text = text
+        self.title = title
+
+
 # ── TuiApp ──────────────────────────────────────────────────────────────────
 
 class TuiApp(App):
@@ -72,6 +87,9 @@ class TuiApp(App):
         Binding("ctrl+t", "toggle_thought", "Toggle thought", show=False, priority=True),
         Binding("ctrl+k", "compact_context", "Compact", show=False, priority=True),
         Binding("ctrl+p", "toggle_permission", "Permissions", show=False, priority=True),
+        # Panel keys: check_action guards these to only fire when a panel is active.
+        # priority=True ensures they are checked before widget-level handlers so
+        # panel input works even if focus has drifted from the panel widget.
         Binding("enter", "panel_key('enter')", "", show=False, priority=True),
         Binding("escape", "panel_key('escape')", "", show=False, priority=True),
         Binding("1", "panel_key('1')", "", show=False, priority=True),
@@ -94,9 +112,21 @@ class TuiApp(App):
         layout: vertical;
     }
 
-    #transcript {
+    #main-area {
         height: 1fr;
+    }
+
+    #transcript {
+        width: 1fr;
+        height: 100%;
         border: solid #333333;
+    }
+
+    #plan-panel {
+        width: 38;
+        height: 100%;
+        border: solid #333333;
+        padding: 1;
     }
 
     #input-area {
@@ -199,7 +229,9 @@ class TuiApp(App):
         return True
 
     def compose(self) -> ComposeResult:
-        yield TranscriptView(id="transcript")
+        with Horizontal(id="main-area"):
+            yield TranscriptView(id="transcript")
+            yield PlanPanel(id="plan-panel")
         yield InputArea(registry=self.registry, id="input-area")
         yield StatusBar(id="status-bar")
         yield ContextBar(id="context-bar")
@@ -273,13 +305,21 @@ class TuiApp(App):
             try:
                 panel = self.query_one("#approval-panel")
                 return bool(panel.handle_key(key))
+            except NoMatches:
+                log.debug("Approval panel not found while routing key '%s'", key)
+                return False
             except Exception:
+                log.warning("Error routing key '%s' to approval panel", key, exc_info=True)
                 return False
         if self._active_panel == "question":
             try:
                 panel = self.query_one("#question-panel")
                 return bool(panel.handle_key(key))
+            except NoMatches:
+                log.debug("Question panel not found while routing key '%s'", key)
+                return False
             except Exception:
+                log.warning("Error routing key '%s' to question panel", key, exc_info=True)
                 return False
         return False
 
@@ -330,17 +370,17 @@ class TuiApp(App):
     # ── Message handlers (UI thread) ────────────────────────────────────────
 
     def on_stream_delta(self, msg: StreamDelta) -> None:
-        """Handle streaming delta from background thread."""
+        """Handle streaming delta from background thread.
+
+        Text is buffered in TranscriptView and written as a complete
+        Markdown Panel when streaming finishes, avoiding fragmentation.
+        """
+        transcript = self.query_one("#transcript", TranscriptView)
         if not self._stream_header_printed:
-            # Create a placeholder block for streaming
-            block = TranscriptBlock("assistant", "assistant", "")
-            self.state.add_block(block)
-            transcript = self.query_one("#transcript", TranscriptView)
-            transcript.append_block(block)
+            transcript.begin_streaming()
             self._stream_header_printed = True
         self._streaming_current_response = True
         self.state.append_streaming_text(msg.delta)
-        transcript = self.query_one("#transcript", TranscriptView)
         transcript.append_streaming(msg.delta)
 
     def on_session_event(self, msg: SessionEvent) -> None:
@@ -353,8 +393,10 @@ class TuiApp(App):
 
         block = self.state.apply_event(msg.event)
 
-        # Skip duplicate assistant_message if we already streamed it
+        # If we streamed the response, flush the buffered text as a complete block
         if event_type == "assistant_message" and self._streaming_current_response:
+            transcript = self.query_one("#transcript", TranscriptView)
+            transcript.flush_streaming()
             block = None
 
         self.state.add_block(block)
@@ -366,6 +408,9 @@ class TuiApp(App):
 
     def on_submit_complete(self, msg: SubmitComplete) -> None:
         """Handle submit completion."""
+        # Flush any remaining streaming buffer
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.flush_streaming()
         result = msg.result
         if hasattr(result, "notice") and result.notice:
             self._output(result.notice, title="notice")
@@ -376,18 +421,26 @@ class TuiApp(App):
 
     def on_submit_cancelled(self, msg: SubmitCancelled) -> None:
         """Handle submit cancellation."""
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.flush_streaming()
         block = TranscriptBlock("status", "turn cancelled", "Ctrl-C pressed", "cancelled")
         self.state.add_block(block)
-        transcript = self.query_one("#transcript", TranscriptView)
         transcript.append_block(block)
         self._submitting = False
         self._input_enabled(True)
 
     def on_submit_error(self, msg: SubmitError) -> None:
         """Handle submit error."""
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.flush_streaming()
         self._output(f"Error: {msg.error}", title="error")
         self._submitting = False
         self._input_enabled(True)
+
+    def on_output_event(self, msg: OutputEvent) -> None:
+        """Handle background thread output (compact, permission, etc.)."""
+        self._output(msg.text, title=msg.title)
+        self._refresh_bars()
 
     # ── Callbacks for InteractiveSession ────────────────────────────────────
 
@@ -418,7 +471,7 @@ class TuiApp(App):
             try:
                 self.session.interrupt_current_shell()
             except Exception:
-                pass
+                log.debug("Failed to interrupt shell during cancel", exc_info=True)
 
     def action_toggle_thought(self) -> None:
         """Toggle thought detail visibility."""
@@ -426,23 +479,31 @@ class TuiApp(App):
             self.state.toggle_thought_details()
 
     def action_compact_context(self) -> None:
-        """Manually compact conversation context and report the result."""
+        """Manually compact conversation context (dispatched to worker thread)."""
+        self._run_compact_context()
+
+    @work(thread=True, exclusive=True)
+    def _run_compact_context(self) -> None:
+        """Worker thread: compact context and post result to UI thread."""
         try:
             result = self.session.manual_compact_context()
-            self._output(result, title="context compacted")
-            self._refresh_bars()
+            self.post_message(OutputEvent(result, title="context compacted"))
         except Exception as exc:
-            self._output(f"Error: {exc}", title="context compact error")
+            self.post_message(OutputEvent(f"Error: {exc}", title="context compact error"))
 
     def action_toggle_permission(self) -> None:
-        """Toggle runtime permission mode and refresh the status surface."""
+        """Toggle runtime permission mode (dispatched to worker thread)."""
+        self._run_toggle_permission()
+
+    @work(thread=True, exclusive=True)
+    def _run_toggle_permission(self) -> None:
+        """Worker thread: toggle permission and post result to UI thread."""
         try:
             result = self.session.toggle_permission_mode()
             self.state.snapshot.permission_mode = self.session.permission_mode
-            self._output(result, title="permission mode switched")
-            self._refresh_bars()
+            self.post_message(OutputEvent(result, title="permission mode switched"))
         except Exception as exc:
-            self._output(f"Error: {exc}", title="permission mode error")
+            self.post_message(OutputEvent(f"Error: {exc}", title="permission mode error"))
 
     def action_panel_key(self, key: str) -> None:
         """High-priority key binding for active approval/question panels."""
@@ -470,12 +531,15 @@ class TuiApp(App):
         self.mount(panel, after=input_area)
         self.call_after_refresh(panel.focus)
 
-    def _on_approval_result(self, approved: bool) -> None:
-        """Called when user makes approval choice."""
+    def on_approval_result(self, msg: ApprovalResult) -> None:
+        """Handle ApprovalResult message from ApprovalPanel."""
+        approved = msg.approved
         try:
             self.query_one("#approval-panel").remove()
+        except NoMatches:
+            log.debug("Approval panel already removed")
         except Exception:
-            pass
+            log.warning("Error removing approval panel", exc_info=True)
         self._input_enabled(True)
         self._active_panel = None
         self._approval_result_holder[0] = approved
@@ -501,12 +565,15 @@ class TuiApp(App):
         self.mount(panel, after=input_area)
         self.call_after_refresh(panel.focus)
 
-    def _on_question_result(self, payload) -> None:
-        """Called when user answers question."""
+    def on_question_result(self, msg: QuestionResult) -> None:
+        """Handle QuestionResult message from QuestionPanel."""
+        payload = msg.payload
         try:
             self.query_one("#question-panel").remove()
+        except NoMatches:
+            log.debug("Question panel already removed")
         except Exception:
-            pass
+            log.warning("Error removing question panel", exc_info=True)
         self._input_enabled(True)
         self._active_panel = None
         self._question_result_holder[0] = payload
@@ -520,8 +587,10 @@ class TuiApp(App):
             input_area.display = enabled
             if enabled:
                 input_area.focus_input()
+        except NoMatches:
+            log.debug("Input area not found in _input_enabled(%s)", enabled)
         except Exception:
-            pass
+            log.warning("Error in _input_enabled(%s)", enabled, exc_info=True)
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -531,10 +600,13 @@ class TuiApp(App):
             return
         try:
             self._refresh_context_snapshot()
+            self.query_one("#plan-panel", PlanPanel).update_steps(self.state.plan_steps)
             self.query_one("#status-bar", StatusBar).update_from_snapshot(self.state.snapshot)
             self.query_one("#context-bar", ContextBar).update_from_snapshot(self.state.snapshot)
+        except NoMatches:
+            log.debug("Status/Context bar not found in _refresh_bars")
         except Exception:
-            pass
+            log.warning("Error refreshing bars", exc_info=True)
 
     def _refresh_context_snapshot(self) -> None:
         """Refresh context token counts."""
@@ -561,5 +633,5 @@ class TuiApp(App):
         try:
             self.session.close()
         except Exception:
-            pass
+            log.debug("Error closing session during exit", exc_info=True)
         super().exit(*args, **kwargs)

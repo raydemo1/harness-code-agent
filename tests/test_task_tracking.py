@@ -24,7 +24,7 @@ _install_fake_openai_module()
 from harness_code_agent import config
 from harness_code_agent.agent.loop import AgentRuntimeState
 from harness_code_agent.runtime.middlewares import TaskTrackingEnforcementMiddleware
-from harness_code_agent.runtime.tools import execute_tool
+from harness_code_agent.runtime.tools import execute_tool, execute_tool_result
 
 
 class UpdatePlanStateToolTests(unittest.TestCase):
@@ -77,6 +77,26 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertEqual(data["update_kind"], "start")
         self.assertFalse(data["requires_approval"])
         self.assertFalse(Path(self.temp_dir, "global_plan", "current", "plan.md").exists())
+
+    def test_plan_state_tool_result_exposes_planning_state_metadata(self):
+        state = AgentRuntimeState(session_id="test-session")
+
+        result = execute_tool_result(
+            "update_plan_state",
+            self._base_args(
+                current_step="edit",
+                completed_steps=["inspect"],
+                next_action="patch widgets",
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        planning_state = result.metadata.get("planning_state")
+        self.assertIsNotNone(planning_state)
+        self.assertEqual(planning_state["steps"], ["inspect", "edit", "verify"])
+        self.assertEqual(planning_state["current_step"], "edit")
+        self.assertEqual(planning_state["completed_steps"], ["inspect"])
 
     def test_full_start_writes_state_and_plan_with_approval_required(self):
         state = AgentRuntimeState(session_id="test-session")

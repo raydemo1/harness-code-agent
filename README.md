@@ -233,6 +233,46 @@ hca session show latest
 根据 @"docs/path with spaces.md" 补充测试说明
 ```
 
+## MCP 客户端
+
+HCA 可以作为 MCP client 连接外部 MCP server，并把 server 暴露的 tools 转成当前 agent 可调用的 function tools。第一版支持 `stdio` 本地进程和 `streamable_http`，只接入 MCP Tools，不接入 Resources 或 Prompts。
+
+配置文件位于工作区本地 `.harness/mcp.json`，默认不提交到仓库。示例：
+
+```json
+{
+  "servers": {
+    "docs": {
+      "enabled": true,
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" },
+      "permission": "network_read"
+    },
+    "local_fs": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": ["server.py"],
+      "env": { "TOKEN": "${LOCAL_TOKEN}" },
+      "permission": "dangerous",
+      "tool_permissions": { "search": "read" }
+    }
+  }
+}
+```
+
+MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具冲突。`permission` 是 server 级默认权限，`tool_permissions` 可按 tool 覆盖；未声明时默认 `dangerous`，在 `workspace-write` 模式会触发审批。配置中的 `${VAR}` 会从环境变量展开。
+
+交互模式中可用：
+
+```text
+/mcp status   # 查看 server 连接状态
+/mcp list     # 查看已注册 MCP tools
+/mcp reload   # 重新加载 .harness/mcp.json
+/doctor       # 同时检查 MCP 配置和连接状态
+```
+
 ## 配置项
 
 核心配置来自 `.env` 或环境变量：

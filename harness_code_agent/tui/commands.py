@@ -86,6 +86,7 @@ def default_command_registry() -> SlashCommandRegistry:
         CommandSpec("/fork", "Sessions", "/fork <session-id>", "Create a lineage-preserving fork record.", _fork),
         CommandSpec("/rollback", "Sessions", "/rollback <session-id> <path>", "Restore one file from the latest session snapshot.", _rollback),
         CommandSpec("/checkpoint", "Workflow", "/checkpoint [auto on|auto off|every turn|every <N> turns|status]", "Create or configure checkpoint commits.", _checkpoint),
+        CommandSpec("/mcp", "Diagnostics", "/mcp [status|list|reload]", "Show or reload configured MCP servers and tools.", _mcp),
         CommandSpec("/doctor", "Diagnostics", "/doctor", "Check API, workspace, git, and shell setup.", _doctor),
         CommandSpec("/config", "Diagnostics", "/config show", "Show effective Harness configuration.", _config),
         CommandSpec("/compact", "Workflow", "/compact show", "View the latest compacted summary.", _compact),
@@ -159,8 +160,18 @@ def _doctor(session: Any, args: list[str], registry: SlashCommandRegistry) -> Co
     _no_args(args, "Usage: /doctor")
     from ..core.interactive import format_doctor
 
-    text, _failures = format_doctor(session.cwd)
+    text, _failures = format_doctor(session.cwd, mcp_manager=getattr(session, "mcp_manager", None))
     return CommandResult(text)
+
+
+def _mcp(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
+    if args == ["status"]:
+        return CommandResult(session.mcp_status())
+    if args == ["list"]:
+        return CommandResult(session.mcp_list())
+    if args == ["reload"]:
+        return CommandResult(session.reload_mcp())
+    raise ValueError("Usage: /mcp [status|list|reload]")
 
 
 def _config(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:

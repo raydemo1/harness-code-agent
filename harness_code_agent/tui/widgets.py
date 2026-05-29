@@ -16,7 +16,7 @@ from textual.widgets import Input, RichLog, Static, TextArea
 
 if TYPE_CHECKING:
     from .commands import SlashCommandRegistry
-    from .state import SessionStatusSnapshot, TranscriptBlock
+    from .state import PlanStep, SessionStatusSnapshot, TranscriptBlock
 
 
 # ── SubmitTextArea ──────────────────────────────────────────────────────────
@@ -149,19 +149,70 @@ def welcome_rich(snapshot: SessionStatusSnapshot) -> Panel:
 
 
 class TranscriptView(RichLog):
-    """Transcript area built on RichLog."""
+    """Transcript area built on RichLog.
+
+    During streaming responses, text is buffered and written as a single
+    Markdown Panel when streaming completes, avoiding visual fragmentation.
+    """
 
     def __init__(self, **kwargs):
         super().__init__(highlight=True, markup=True, wrap=True, auto_scroll=True, **kwargs)
+        self._streaming_buffer: str = ""
+        self._streaming_active: bool = False
 
     def append_block(self, block: TranscriptBlock) -> None:
         self.write(block_to_rich(block))
 
+    def begin_streaming(self) -> None:
+        """Start buffering streaming text instead of writing immediately."""
+        self._streaming_active = True
+        self._streaming_buffer = ""
+
     def append_streaming(self, text: str) -> None:
-        self.write(Text(text))
+        """Accumulate streaming text in the buffer."""
+        self._streaming_buffer += text
+
+    def flush_streaming(self) -> None:
+        """Write the complete streaming response as a single Markdown Panel."""
+        if self._streaming_active and self._streaming_buffer:
+            block = TranscriptBlock("assistant", "assistant", self._streaming_buffer)
+            self.write(block_to_rich(block))
+        self._streaming_active = False
+        self._streaming_buffer = ""
 
     def show_welcome(self, snapshot: SessionStatusSnapshot) -> None:
         self.write(welcome_rich(snapshot))
+
+
+# ── PlanPanel ───────────────────────────────────────────────────────────────
+
+class PlanPanel(Static):
+    """Persistent compact plan step list."""
+
+    steps: reactive[list["PlanStep"]] = reactive(list)
+
+    def update_steps(self, steps: list["PlanStep"]) -> None:
+        self.steps = list(steps)
+        self.refresh()
+
+    def render(self) -> Text:
+        if not self.steps:
+            return Text("No plan yet", style="dim")
+
+        text = Text()
+        for index, step in enumerate(self.steps):
+            if index:
+                text.append("\n")
+            if step.status == "completed":
+                text.append("✓ ", style="#a3be8c")
+                text.append(step.text, style="dim strike")
+            elif step.status == "current":
+                text.append("→ ", style="bold #ebcb8b")
+                text.append(step.text, style="bold #ebcb8b")
+            else:
+                text.append("○ ", style="dim")
+                text.append(step.text, style="dim")
+        return text
 
 
 # ── StatusBar ───────────────────────────────────────────────────────────────
@@ -400,8 +451,11 @@ class InputArea(Vertical):
 
         # Handle slash commands
         if text.startswith("/"):
-            result = app.session.handle_slash_command(text)
-            if not result:
+            try:
+                should_continue = app.session.handle_slash_command(text)
+            except Exception:
+                return
+            if not should_continue:
                 app.exit()
             return
 

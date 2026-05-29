@@ -16,6 +16,7 @@ from ..profiles.base import BaseProfile
 from ..runtime import tools
 from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider
 from ..runtime.middlewares import StaticVerifierMiddleware, TimeBudgetMiddleware
+from ..runtime.mcp import McpClientManager, McpConfigError, load_mcp_config
 from ..runtime.permission_middleware import PermissionMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.questions import ConsoleQuestionProvider, QuestionProvider
@@ -109,6 +110,7 @@ class InteractiveSession:
             resumed_from=resume_session_id,
         )
         self.event_bus = self.session_store.event_bus(self.session, listener=self.event_listener)
+        self._load_mcp_tools()
         self.tool_context = ToolContext(
             workspace=WorkspaceService(
                 root=self.cwd,
@@ -119,6 +121,7 @@ class InteractiveSession:
             session_id=self.session.id,
             approval_provider=self.approval_provider,
             question_provider=self.question_provider,
+            tool_registry=self.tool_registry,
         )
         self.agent = self._build_agent()
         self.conversation: AgentConversation = self.agent.start_conversation()
@@ -174,7 +177,7 @@ class InteractiveSession:
         middlewares.append(
             PermissionMiddleware(
                 tool_context=self.tool_context,
-                tool_registry=tools.BUILTIN_TOOL_REGISTRY,
+                tool_registry=self.tool_registry,
             )
         )
         middlewares.append(
@@ -184,17 +187,39 @@ class InteractiveSession:
             "main_agent",
             prefix.content,
             use_tools=True,
-            tool_schemas=tools.tool_schemas_for_profile(
-                allowed_permissions=cfg.allowed_tool_permissions,
-                include_names=cfg.allowed_tool_names,
-                exclude_names=cfg.blocked_tool_names,
-            ),
+            tool_schemas=self._tool_schemas_for_agent_config(cfg),
             middlewares=middlewares,
             time_budget=cfg.time_budget,
             tool_context=self.tool_context,
             stream_callback=self.stream_sink,
             prompt_cache_identity=prefix.cache_identity,
         )
+
+    def _load_mcp_tools(self) -> None:
+        self.tool_registry = tools.BUILTIN_TOOL_REGISTRY.copy()
+        self.mcp_manager = McpClientManager.from_workspace(self.cwd)
+        self.mcp_manager.connect_all()
+        self.mcp_manager.register_tools(self.tool_registry)
+
+    def _tool_schemas_for_agent_config(self, cfg) -> list[dict]:
+        return tools.tool_schemas_for_profile(
+            allowed_permissions=cfg.allowed_tool_permissions,
+            include_names=cfg.allowed_tool_names,
+            exclude_names=cfg.blocked_tool_names,
+            registry=self.tool_registry,
+        )
+
+    def _refresh_agent_tool_schemas(self) -> None:
+        cfg = self.profile.main_agent()
+        schemas = self._tool_schemas_for_agent_config(cfg)
+        self.agent.tool_schemas = schemas
+        self.agent.allowed_tool_names = {
+            schema["function"]["name"]
+            for schema in schemas
+            if schema.get("function", {}).get("name")
+        }
+        if hasattr(self.conversation, "_cached_prompt_cache_key"):
+            self.conversation._cached_prompt_cache_key = None
 
     def _sync_time_budget(self) -> None:
         for mw in self.agent.middlewares:
@@ -458,6 +483,24 @@ class InteractiveSession:
         )
         return self.set_permission_mode(next_mode)
 
+    def mcp_status(self) -> str:
+        return self.mcp_manager.status_report()
+
+    def mcp_list(self) -> str:
+        return self.mcp_manager.tools_report()
+
+    def reload_mcp(self) -> str:
+        self.mcp_manager.close()
+        self._load_mcp_tools()
+        self.tool_context.tool_registry = self.tool_registry
+        self._refresh_agent_tool_schemas()
+        self.event_bus.emit(
+            "mcp_reloaded",
+            agent="main_agent",
+            payload={"tool_count": len(getattr(self.mcp_manager, "tool_bindings", []))},
+        )
+        return "MCP reloaded\n" + self.mcp_manager.status_report()
+
     def _inject_resume_context(self, session_id: str) -> str:
         context_text = _build_resume_context(self.session_store, session_id)
         self._append_conversation_message({
@@ -605,6 +648,7 @@ class InteractiveSession:
     def close(self) -> None:
         tools.stop_dev_server()
         self.conversation.close()
+        self.mcp_manager.close()
         try:
             metadata = self.session_store.read_metadata(self.session.id)
             events = self.session_store.read_events(self.session.id)
@@ -917,7 +961,7 @@ def print_config_show(workspace: Path) -> None:
     print(format_config_show(workspace))
 
 
-def format_doctor(workspace: Path) -> tuple[str, int]:
+def format_doctor(workspace: Path, *, mcp_manager: McpClientManager | None = None) -> tuple[str, int]:
     rows = []
     rows.append(("API key", bool(config.API_KEY), "configured" if config.API_KEY else "missing OPENAI_API_KEY"))
     rows.append(("API base URL", bool(config.BASE_URL), config.BASE_URL or "missing OPENAI_BASE_URL"))
@@ -925,6 +969,7 @@ def format_doctor(workspace: Path) -> tuple[str, int]:
     rows.append(("Git", shutil_which("git") is not None, shutil_which("git") or "not installed"))
     shell = shell_path()
     rows.append(("Shell", shell is not None, shell or "no shell found"))
+    rows.append(("MCP", *_mcp_doctor_status(workspace, mcp_manager=mcp_manager)))
     failures = sum(0 if ok else 1 for _, ok, _ in rows)
     lines = ["Harness doctor"]
     lines.extend(_format_doctor_line(label, ok, detail) for label, ok, detail in rows)
@@ -939,6 +984,18 @@ def run_doctor(workspace: Path) -> int:
 
 def _format_doctor_line(label: str, ok: bool, detail: str) -> str:
     return f"{'OK' if ok else 'FAIL':4s} {label:18s} {detail}"
+
+
+def _mcp_doctor_status(workspace: Path, *, mcp_manager: McpClientManager | None = None) -> tuple[bool, str]:
+    if mcp_manager is not None:
+        return mcp_manager.doctor_status()
+    try:
+        cfg = load_mcp_config(workspace)
+    except McpConfigError as exc:
+        return False, str(exc)
+    if not cfg.path.exists():
+        return True, "not configured"
+    return True, f"{len(cfg.servers)} configured server(s)"
 
 
 def shutil_which(name: str) -> str | None:

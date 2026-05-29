@@ -57,6 +57,7 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test() as pilot:
                 self.assertIsNotNone(app.query_one("#transcript"))
+                self.assertIsNotNone(app.query_one("#plan-panel"))
                 self.assertIsNotNone(app.query_one("#input-area"))
                 self.assertIsNotNone(app.query_one("#status-bar"))
                 self.assertIsNotNone(app.query_one("#context-bar"))
@@ -313,6 +314,36 @@ class TuiInteractiveTests(unittest.TestCase):
                 await pilot.pause()
                 self.assertEqual(app.state.snapshot.turn, 1)
                 self.assertEqual(app.state.snapshot.status, "running")
+        _run(_test())
+
+    def test_plan_panel_updates_from_plan_state_event(self):
+        async def _test():
+            app = self._make_app()
+            async with app.run_test() as pilot:
+                from harness_code_agent.tui.app import SessionEvent
+                event = SimpleNamespace(
+                    to_dict=lambda: {
+                        "type": "tool_result",
+                        "payload": {
+                            "tool": "update_plan_state",
+                            "status": "success",
+                            "metadata": {
+                                "planning_state": {
+                                    "steps": ["write failing test", "implement panel", "run tests"],
+                                    "current_step": "implement panel",
+                                    "completed_steps": ["write failing test"],
+                                }
+                            },
+                        },
+                    },
+                )
+                app.post_message(SessionEvent(event))
+                await pilot.pause()
+
+                text = app.query_one("#plan-panel").render()
+                self.assertIn("write failing test", text.plain)
+                self.assertIn("implement panel", text.plain)
+                self.assertIn("run tests", text.plain)
         _run(_test())
 
     def test_output_appears_in_transcript(self):
