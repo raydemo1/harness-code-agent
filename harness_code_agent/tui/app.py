@@ -1,34 +1,165 @@
+"""Textual-based TUI for Harness Code Agent."""
 from __future__ import annotations
 
-import queue
-import sys
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 
-from prompt_toolkit.application import Application
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.widgets import TextArea
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.message import Message
+from textual.widgets import TextArea
 
 from .. import config
-from ..agent.cancellation import CancellationToken
+from ..agent.cancellation import CancelledError, CancellationToken
 from ..core.interactive import InteractiveSession
 from ..core.mentions import MentionResolutionError
 from .approval import TuiApprovalProvider
 from .commands import default_command_registry
-from .completion import HcaCompleter
 from .question import TuiQuestionProvider
-from .render import (
-    context_bar_fragments,
-    welcome_fragments,
+from .state import SessionStatusSnapshot, TranscriptBlock, TuiState
+from .widgets import (
+    ContextBar,
+    InputArea,
+    StatusBar,
+    TranscriptView,
 )
-from .state import SessionStatusSnapshot, TuiState
 
 
-class TuiApp:
+# ── Messages (worker → UI thread) ──────────────────────────────────────────
+
+class StreamDelta(Message):
+    """A streaming text fragment from the agent."""
+    def __init__(self, delta: str) -> None:
+        super().__init__()
+        self.delta = delta
+
+
+class SessionEvent(Message):
+    """A session event from InteractiveSession."""
+    def __init__(self, event: object) -> None:
+        super().__init__()
+        self.event = event
+
+
+class SubmitComplete(Message):
+    """Submit finished successfully."""
+    def __init__(self, result: object) -> None:
+        super().__init__()
+        self.result = result
+
+
+class SubmitCancelled(Message):
+    """Submit was cancelled by user."""
+    def __init__(self) -> None:
+        super().__init__()
+
+
+class SubmitError(Message):
+    """Submit failed with an error."""
+    def __init__(self, error: str) -> None:
+        super().__init__()
+        self.error = error
+
+
+# ── TuiApp ──────────────────────────────────────────────────────────────────
+
+class TuiApp(App):
+    """Full-screen Textual TUI for Harness Code Agent."""
+
+    BINDINGS = [
+        Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
+        Binding("ctrl+t", "toggle_thought", "Toggle thought", show=False, priority=True),
+        Binding("ctrl+k", "compact_context", "Compact", show=False, priority=True),
+        Binding("ctrl+p", "toggle_permission", "Permissions", show=False, priority=True),
+        Binding("enter", "panel_key('enter')", "", show=False, priority=True),
+        Binding("escape", "panel_key('escape')", "", show=False, priority=True),
+        Binding("1", "panel_key('1')", "", show=False, priority=True),
+        Binding("2", "panel_key('2')", "", show=False, priority=True),
+        Binding("3", "panel_key('3')", "", show=False, priority=True),
+        Binding("4", "panel_key('4')", "", show=False, priority=True),
+        Binding("5", "panel_key('5')", "", show=False, priority=True),
+        Binding("6", "panel_key('6')", "", show=False, priority=True),
+        Binding("7", "panel_key('7')", "", show=False, priority=True),
+        Binding("8", "panel_key('8')", "", show=False, priority=True),
+        Binding("9", "panel_key('9')", "", show=False, priority=True),
+        Binding("up", "panel_key('up')", "", show=False, priority=True),
+        Binding("down", "panel_key('down')", "", show=False, priority=True),
+        Binding("left", "panel_key('left')", "", show=False, priority=True),
+        Binding("right", "panel_key('right')", "", show=False, priority=True),
+    ]
+
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+
+    #transcript {
+        height: 1fr;
+        border: solid #333333;
+    }
+
+    #input-area {
+        height: auto;
+        max-height: 10;
+        border: solid #333333;
+    }
+
+    #cmd-palette {
+        display: none;
+        height: auto;
+        max-height: 10;
+        background: $surface;
+        border: solid #555555;
+    }
+
+    #input-text {
+        height: 3;
+    }
+
+    #status-bar {
+        height: 1;
+        background: #2d2d3d;
+    }
+
+    #context-bar {
+        height: 1;
+        background: #2d2d3d;
+    }
+
+    /* Approval panel */
+    .approval-panel {
+        height: auto;
+        border: solid #b16286;
+        padding: 1;
+    }
+
+    .approval-panel Static.body {
+        height: auto;
+    }
+
+    .approval-panel Static.choices {
+        height: 1;
+        margin-top: 1;
+    }
+
+    /* Question panel */
+    .question-panel {
+        height: auto;
+        border: solid #3874cb;
+        padding: 1;
+    }
+
+    .question-panel Static.body {
+        height: auto;
+    }
+
+    .question-panel Input {
+        height: 3;
+        margin-top: 1;
+    }
+    """
+
     def __init__(
         self,
         *,
@@ -37,32 +168,56 @@ class TuiApp:
         resume_session_id: str | None = None,
         first_task: str = "",
     ):
+        super().__init__()
         self.cwd = Path(cwd).resolve()
         self.profile_name = profile_name
         self.resume_session_id = resume_session_id
         self.first_task = first_task
         self.registry = default_command_registry()
         self.state: TuiState | None = None
-        self._pending_events = []
+        self._pending_events: list = []
         self._streaming_current_response = False
         self._stream_header_printed = False
         self._submitting = False
         self._cancellation_token = CancellationToken()
 
-        # Async infrastructure
-        self._event_queue: queue.Queue = queue.Queue()
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hca-tui")
+        # Approval/question state
+        self._approval_event: threading.Event | None = None
+        self._approval_result_holder: list = []
+        self._question_event: threading.Event | None = None
+        self._question_result_holder: list = []
+        self._active_panel: str | None = None  # "approval" or "question"
 
-        self._question_provider = TuiQuestionProvider()
+    def run(self, *args, **kwargs) -> int:
+        """Run the Textual app and preserve the hca CLI exit-code contract."""
+        super().run(*args, **kwargs)
+        return 0
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "panel_key":
+            return self._active_panel is not None
+        return True
+
+    def compose(self) -> ComposeResult:
+        yield TranscriptView(id="transcript")
+        yield InputArea(registry=self.registry, id="input-area")
+        yield StatusBar(id="status-bar")
+        yield ContextBar(id="context-bar")
+
+    def on_mount(self) -> None:
+        """Create session and initialize state."""
+        # Build approval/question providers with reference to self
+        approval_provider = TuiApprovalProvider(project_root=self.cwd, app_tui=self)
+        question_provider = TuiQuestionProvider(app_tui=self)
 
         self.session = InteractiveSession(
             cwd=self.cwd,
-            profile_name=profile_name,
-            resume_session_id=resume_session_id,
+            profile_name=self.profile_name,
+            resume_session_id=self.resume_session_id,
             stream_sink=self._stream_delta,
             event_listener=self._event_listener,
-            approval_provider=TuiApprovalProvider(project_root=self.cwd),
-            question_provider=self._question_provider,
+            approval_provider=approval_provider,
+            question_provider=question_provider,
             output_sink=self._output,
         )
         self.state = TuiState(
@@ -75,262 +230,314 @@ class TuiApp:
                 cwd=self.session.cwd,
             )
         )
+        # Process any events that arrived before state was ready
         for event in self._pending_events:
             self._handle_event(event)
         self._pending_events.clear()
 
-        # Transcript control - dynamic content from state.blocks
-        self._transcript_control = FormattedTextControl(
-            text=self._get_transcript_text,
-        )
+        # Wire up input area
+        input_area = self.query_one("#input-area", InputArea)
+        input_area.set_session(self.session)
 
-        # Context bar control
-        self._context_bar_control = FormattedTextControl(
-            text=self._get_context_bar_text,
-        )
+        # Show welcome message
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.show_welcome(self.state.snapshot)
 
-        # Input area
-        self._input_area = TextArea(
-            multiline=True,
-            wrap_lines=False,
-            prompt="▶ ",
-            completer=HcaCompleter(registry=self.registry, session=self.session),
-            history=self._input_history(),
-            accept_handler=self._on_input_accept,
-        )
+        # Update status/context bars
+        self._refresh_bars()
 
-        # Key bindings
-        kb = KeyBindings()
+        # Focus input
+        input_area.focus_input()
 
-        @kb.add("c-c")
-        def _(event):
-            if self._submitting:
-                self._cancel_current_turn()
-            # Don't exit the application
-
-        @kb.add("c-t")
-        def _(event):
-            if self.state:
-                self.state.toggle_thought_details()
-                self._refresh_display()
-
-        @kb.add("escape", "enter", eager=True)
-        def _(event):
-            event.current_buffer.insert_text("\n")
-
-        # Build layout
-        from prompt_toolkit.layout.dimension import LayoutDimension as D
-
-        transcript_window = Window(
-            self._transcript_control,
-            dont_extend_height=False,
-            always_hide_cursor=True,
-        )
-
-        context_bar_window = Window(
-            self._context_bar_control,
-            height=D.exact(1),
-            dont_extend_height=True,
-            style="bg:#2d2d3d",
-        )
-
-        self.app = Application(
-            layout=Layout(
-                HSplit([
-                    transcript_window,
-                    Window(height=D.exact(1), char="─", style="#333333"),
-                    context_bar_window,
-                    Window(height=D.exact(1), char="─", style="#333333"),
-                    self._input_area,
-                ]),
-            ),
-            key_bindings=kb,
-            full_screen=False,
-            mouse_support=True,
-        )
-        self._question_provider.app = self.app
-
-    def run(self) -> int:
-        assert self.state is not None
-        self.state.add_transcript_fragments(welcome_fragments(self.state.snapshot))
+        # Submit first task if provided
         if self.first_task:
             self._submit_async(self.first_task)
-        try:
-            self.app.run()
-        except EOFError:
-            pass
-        finally:
-            self._executor.shutdown(wait=False)
-            self.session.close()
-        return 0
+
+    # ── Input handling ──────────────────────────────────────────────────────
+
+    @on(TextArea.Changed, "#input-text")
+    def _on_input_changed(self, event: TextArea.Changed) -> None:
+        """Update completion palette based on input text."""
+        input_area = self.query_one("#input-area", InputArea)
+        input_area._update_completions(event.text_area.text)
+
+    def on_key(self, event) -> None:
+        """Route keys to active inline panels even if terminal focus drifts."""
+        if self.route_active_panel_key(event.key):
+            event.prevent_default()
+            event.stop()
+
+    def route_active_panel_key(self, key: str) -> bool:
+        """Send a key to the active approval/question panel."""
+        if self._active_panel == "approval":
+            try:
+                panel = self.query_one("#approval-panel")
+                return bool(panel.handle_key(key))
+            except Exception:
+                return False
+        if self._active_panel == "question":
+            try:
+                panel = self.query_one("#question-panel")
+                return bool(panel.handle_key(key))
+            except Exception:
+                return False
+        return False
+
+    def _handle_event(self, event) -> None:
+        """Process a raw session event (not a Textual Message). Used in on_mount."""
+        data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        event_type = data.get("type")
+        if event_type == "turn_started":
+            self._streaming_current_response = False
+            self._stream_header_printed = False
+
+        block = self.state.apply_event(event)
+        if event_type == "assistant_message" and self._streaming_current_response:
+            block = None
+
+        self.state.add_block(block)
+        if block is not None:
+            transcript = self.query_one("#transcript", TranscriptView)
+            transcript.append_block(block)
+
+        self._refresh_bars()
+
+    # ── Async submit ────────────────────────────────────────────────────────
 
     def _submit_async(self, text: str) -> None:
-        """Dispatch submit to background thread. Non-blocking."""
+        """Dispatch submit to background worker. Non-blocking."""
         if self._submitting:
             return
         self._submitting = True
         self._streaming_current_response = False
         self._stream_header_printed = False
         self._cancellation_token = CancellationToken()
-        self._executor.submit(self._submit_worker, text)
+        self._submit_worker(text)
 
+    @work(thread=True, exclusive=True, exit_on_error=False)
     def _submit_worker(self, text: str) -> None:
-        """Runs in background thread."""
-        from ..agent.cancellation import CancelledError
+        """Run session.submit() in a background thread."""
         try:
             result = self.session.submit(text, cancellation_token=self._cancellation_token)
-            self._event_queue.put(("result", result))
+            self.post_message(SubmitComplete(result))
         except CancelledError:
-            self._event_queue.put(("cancelled", None))
+            self.post_message(SubmitCancelled())
         except MentionResolutionError as exc:
-            self._event_queue.put(("error", str(exc)))
+            self.post_message(SubmitError(str(exc)))
         except Exception as exc:
-            self._event_queue.put(("error", str(exc)))
-        finally:
-            self._event_queue.put(("done", None))
-            self._refresh_display()
+            self.post_message(SubmitError(str(exc)))
 
-    def _submit(self, text: str) -> None:
-        """Synchronous submit (for initial task before app.run)."""
-        self._submitting = True
-        self._streaming_current_response = False
-        self._stream_header_printed = False
-        try:
-            result = self.session.submit(text)
-        except MentionResolutionError as exc:
-            self._output(f"Error: {exc}", title="mention error")
-            self._submitting = False
-            return
-        if result.notice:
-            self._output(result.notice, title="notice")
-        if result.checkpoint:
-            self._output(result.checkpoint, title="checkpoint")
-        self._submitting = False
+    # ── Message handlers (UI thread) ────────────────────────────────────────
 
-    def _on_input_accept(self, buff: Buffer) -> None:
-        """Called when user presses Enter in the input area."""
-        text = buff.text.strip()
-        if not text:
-            return
-        if text.startswith("/"):
-            if not self.session.handle_slash_command(text):
-                self.app.exit()
-            buff.reset()
-            return
-        buff.reset()
-        self._submit_async(text)
+    def on_stream_delta(self, msg: StreamDelta) -> None:
+        """Handle streaming delta from background thread."""
+        if not self._stream_header_printed:
+            # Create a placeholder block for streaming
+            block = TranscriptBlock("assistant", "assistant", "")
+            self.state.add_block(block)
+            transcript = self.query_one("#transcript", TranscriptView)
+            transcript.append_block(block)
+            self._stream_header_printed = True
+        self._streaming_current_response = True
+        self.state.append_streaming_text(msg.delta)
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.append_streaming(msg.delta)
 
-    def _event_listener(self, event) -> None:
-        """Called from background thread. Queue event for UI thread."""
-        if self.state is None:
-            self._pending_events.append(event)
-            return
-        self._event_queue.put(("event", event))
-        self._refresh_display()
-
-    def _handle_event(self, event) -> None:
-        """Process an event on the UI thread."""
-        assert self.state is not None
-        data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+    def on_session_event(self, msg: SessionEvent) -> None:
+        """Handle session event from background thread."""
+        data = msg.event.to_dict() if hasattr(msg.event, "to_dict") else dict(msg.event)
         event_type = data.get("type")
         if event_type == "turn_started":
             self._streaming_current_response = False
             self._stream_header_printed = False
-        block = self.state.apply_event(event)
+
+        block = self.state.apply_event(msg.event)
+
+        # Skip duplicate assistant_message if we already streamed it
         if event_type == "assistant_message" and self._streaming_current_response:
             block = None
+
         self.state.add_block(block)
         if block is not None:
-            self.state.add_block_fragments(block)
+            transcript = self.query_one("#transcript", TranscriptView)
+            transcript.append_block(block)
 
-    def _drain_event_queue(self) -> None:
-        """Process all queued events on the UI thread. Called before paint."""
-        while True:
-            try:
-                kind, data = self._event_queue.get_nowait()
-            except queue.Empty:
-                break
-            if kind == "event":
-                self._handle_event(data)
-            elif kind == "result":
-                result = data
-                if result.notice:
-                    self._output(result.notice, title="notice")
-                if result.checkpoint:
-                    self._output(result.checkpoint, title="checkpoint")
-            elif kind == "error":
-                self._output(f"Error: {data}", title="error")
-            elif kind == "done":
-                self._submitting = False
-            elif kind == "stream":
-                self._handle_stream_delta(data)
-            elif kind == "cancelled":
-                from .state import TranscriptBlock
-                block = TranscriptBlock("status", "turn cancelled", "Ctrl-C pressed", "cancelled")
-                self.state.add_block(block)
-                self.state.add_block_fragments(block)
+        self._refresh_bars()
 
-    def _cancel_current_turn(self) -> None:
-        """Cancel the active turn and best-effort interrupt any running shell."""
-        self._cancellation_token.cancel()
-        try:
-            self.session.interrupt_current_shell()
-        except Exception:
-            pass
+    def on_submit_complete(self, msg: SubmitComplete) -> None:
+        """Handle submit completion."""
+        result = msg.result
+        if hasattr(result, "notice") and result.notice:
+            self._output(result.notice, title="notice")
+        if hasattr(result, "checkpoint") and result.checkpoint:
+            self._output(result.checkpoint, title="checkpoint")
+        self._submitting = False
+        self._input_enabled(True)
+
+    def on_submit_cancelled(self, msg: SubmitCancelled) -> None:
+        """Handle submit cancellation."""
+        block = TranscriptBlock("status", "turn cancelled", "Ctrl-C pressed", "cancelled")
+        self.state.add_block(block)
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.append_block(block)
+        self._submitting = False
+        self._input_enabled(True)
+
+    def on_submit_error(self, msg: SubmitError) -> None:
+        """Handle submit error."""
+        self._output(f"Error: {msg.error}", title="error")
+        self._submitting = False
+        self._input_enabled(True)
+
+    # ── Callbacks for InteractiveSession ────────────────────────────────────
 
     def _stream_delta(self, delta: str) -> None:
-        """Called from background thread. Queue streaming delta."""
-        self._event_queue.put(("stream", delta))
-        self._refresh_display()
+        """Called from background thread. Post message to UI thread."""
+        self.post_message(StreamDelta(delta))
 
-    def _handle_stream_delta(self, delta: str) -> None:
-        """Process streaming delta on UI thread."""
-        if not self._stream_header_printed:
-            self.state.add_block_fragments_simple("assistant", "assistant", "")
-            self._stream_header_printed = True
-        self._streaming_current_response = True
-        self.state.append_streaming_text(delta)
+    def _event_listener(self, event) -> None:
+        """Called from background thread. Post message to UI thread."""
+        if self.state is None:
+            self._pending_events.append(event)
+            return
+        self.post_message(SessionEvent(event))
 
     def _output(self, text: str, *, title: str = "output") -> None:
-        from .state import TranscriptBlock
+        """Write a status block to the transcript."""
         block = TranscriptBlock("status", title, text)
         self.state.add_block(block)
-        self.state.add_block_fragments(block)
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.append_block(block)
 
-    def _refresh_display(self) -> None:
-        """Trigger UI redraw from any thread."""
-        if self.app and self.app.is_running:
-            self.app.invalidate()
+    # ── Actions ─────────────────────────────────────────────────────────────
 
-    def _get_transcript_text(self):
-        """Dynamic text callback for the transcript control."""
-        # Drain any pending events before rendering
-        self._drain_event_queue()
-        if self.state is None:
-            return FormattedText([("", "")])
-        # Handle queued stream deltas
-        return FormattedText(self.state.transcript_fragments)
+    def action_cancel(self) -> None:
+        """Cancel the active turn."""
+        if self._submitting:
+            self._cancellation_token.cancel()
+            try:
+                self.session.interrupt_current_shell()
+            except Exception:
+                pass
 
-    def _get_context_bar_text(self):
-        """Dynamic text callback for the context bar."""
-        if self.state is None:
-            return FormattedText([("", "")])
-        self._refresh_context_snapshot()
-        return FormattedText(context_bar_fragments(
-            self.state.snapshot,
-            on_permission_click=self._toggle_permission_mode_from_bar,
-        ))
+    def action_toggle_thought(self) -> None:
+        """Toggle thought detail visibility."""
+        if self.state:
+            self.state.toggle_thought_details()
 
-    def _toggle_permission_mode_from_bar(self) -> None:
+    def action_compact_context(self) -> None:
+        """Manually compact conversation context and report the result."""
+        try:
+            result = self.session.manual_compact_context()
+            self._output(result, title="context compacted")
+            self._refresh_bars()
+        except Exception as exc:
+            self._output(f"Error: {exc}", title="context compact error")
+
+    def action_toggle_permission(self) -> None:
+        """Toggle runtime permission mode and refresh the status surface."""
         try:
             result = self.session.toggle_permission_mode()
             self.state.snapshot.permission_mode = self.session.permission_mode
             self._output(result, title="permission mode switched")
+            self._refresh_bars()
         except Exception as exc:
             self._output(f"Error: {exc}", title="permission mode error")
-        self._refresh_display()
+
+    def action_panel_key(self, key: str) -> None:
+        """High-priority key binding for active approval/question panels."""
+        self.route_active_panel_key(key)
+
+    # ── Approval/Question panel management ──────────────────────────────────
+
+    def show_approval_panel(
+        self,
+        request,
+        event: threading.Event,
+        result_holder: list,
+    ) -> None:
+        """Show approval panel replacing input area."""
+        self._approval_event = event
+        self._approval_result_holder = result_holder
+        self._active_panel = "approval"
+        self._input_enabled(False)
+
+        from .screens import ApprovalPanel
+        panel = ApprovalPanel(request, id="approval-panel")
+        input_area = self.query_one("#input-area", InputArea)
+        input_area.display = False
+        # Mount after input-area
+        self.mount(panel, after=input_area)
+        self.call_after_refresh(panel.focus)
+
+    def _on_approval_result(self, approved: bool) -> None:
+        """Called when user makes approval choice."""
+        try:
+            self.query_one("#approval-panel").remove()
+        except Exception:
+            pass
+        self._input_enabled(True)
+        self._active_panel = None
+        self._approval_result_holder[0] = approved
+        if self._approval_event:
+            self._approval_event.set()
+
+    def show_question_panel(
+        self,
+        request,
+        event: threading.Event,
+        result_holder: list,
+    ) -> None:
+        """Show question panel replacing input area."""
+        self._question_event = event
+        self._question_result_holder = result_holder
+        self._active_panel = "question"
+        self._input_enabled(False)
+
+        from .screens import QuestionPanel
+        panel = QuestionPanel(request, id="question-panel")
+        input_area = self.query_one("#input-area", InputArea)
+        input_area.display = False
+        self.mount(panel, after=input_area)
+        self.call_after_refresh(panel.focus)
+
+    def _on_question_result(self, payload) -> None:
+        """Called when user answers question."""
+        try:
+            self.query_one("#question-panel").remove()
+        except Exception:
+            pass
+        self._input_enabled(True)
+        self._active_panel = None
+        self._question_result_holder[0] = payload
+        if self._question_event:
+            self._question_event.set()
+
+    def _input_enabled(self, enabled: bool) -> None:
+        """Enable or disable the input area."""
+        try:
+            input_area = self.query_one("#input-area", InputArea)
+            input_area.display = enabled
+            if enabled:
+                input_area.focus_input()
+        except Exception:
+            pass
+
+    # ── Helpers ─────────────────────────────────────────────────────────────
+
+    def _refresh_bars(self) -> None:
+        """Update StatusBar and ContextBar from current state."""
+        if self.state is None:
+            return
+        try:
+            self._refresh_context_snapshot()
+            self.query_one("#status-bar", StatusBar).update_from_snapshot(self.state.snapshot)
+            self.query_one("#context-bar", ContextBar).update_from_snapshot(self.state.snapshot)
+        except Exception:
+            pass
 
     def _refresh_context_snapshot(self) -> None:
+        """Refresh context token counts."""
         from ..agent import context
         from ..agent.compaction import get_thresholds
         thresholds = get_thresholds()
@@ -341,6 +548,18 @@ class TuiApp:
         self.state.snapshot.context_allow_threshold = thresholds.allow
         self.state.snapshot.context_force_threshold = thresholds.force
 
-    def _input_history(self):
-        from prompt_toolkit.history import InMemoryHistory
-        return InMemoryHistory()
+    def exit(self, *args, **kwargs) -> None:
+        """Clean shutdown."""
+        if self._approval_event is not None and not self._approval_event.is_set():
+            if self._approval_result_holder:
+                self._approval_result_holder[0] = False
+            self._approval_event.set()
+        if self._question_event is not None and not self._question_event.is_set():
+            if self._question_result_holder:
+                self._question_result_holder[0] = None
+            self._question_event.set()
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        super().exit(*args, **kwargs)

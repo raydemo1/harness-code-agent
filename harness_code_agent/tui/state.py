@@ -5,8 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit.formatted_text import StyleAndTextTuples
-
 
 @dataclass
 class SessionStatusSnapshot:
@@ -55,29 +53,16 @@ class TuiState:
     snapshot: SessionStatusSnapshot
     blocks: list[TranscriptBlock] = field(default_factory=list)
     pending_approval: dict[str, Any] | None = None
-    transcript_fragments: StyleAndTextTuples = field(default_factory=list)
     _pending_tools: dict[str, float] = field(default_factory=dict)
     show_thought_details: bool = False
 
     def toggle_thought_details(self) -> None:
         self.show_thought_details = not self.show_thought_details
 
-    def add_transcript_fragments(self, fragments: StyleAndTextTuples) -> None:
-        self.transcript_fragments = list(self.transcript_fragments) + list(fragments)
-
-    def add_block_fragments(self, block: TranscriptBlock | None) -> None:
-        if block is None:
-            return
-        from .render import render_block_fragments
-        fragments = render_block_fragments(block)
-        self.add_transcript_fragments(fragments)
-
-    def add_block_fragments_simple(self, kind: str, title: str, body: str) -> None:
-        self.add_block_fragments(TranscriptBlock(kind, title, body))
-
     def append_streaming_text(self, text: str) -> None:
-        """Append streaming text to the transcript (inline with last content)."""
-        self.transcript_fragments = list(self.transcript_fragments) + [("", text)]
+        """Append streaming text to the last block's body."""
+        if self.blocks:
+            self.blocks[-1].body += text
 
     def apply_event(self, event: Any) -> TranscriptBlock | None:
         data = event.to_dict() if hasattr(event, "to_dict") else dict(event)

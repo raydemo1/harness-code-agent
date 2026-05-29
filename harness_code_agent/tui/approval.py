@@ -1,40 +1,22 @@
+"""Approval provider for the Textual TUI."""
 from __future__ import annotations
 
 import json
 import re
 import shlex
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pformat
 from textwrap import fill
-from typing import Callable
-
-from prompt_toolkit import print_formatted_text
-from prompt_toolkit.application import Application
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.styles import Style
+from typing import TYPE_CHECKING, Callable
 
 from ..runtime.approvals import ApprovalRequest, ApprovalResult
 
+if TYPE_CHECKING:
+    from .app import TuiApp
 
-_CHOICES = (
-    ("approve", "Approve"),
-    ("persist", "Persist project rule"),
-    ("deny", "Deny"),
-)
-_DEFAULT_CHOICE_INDEX = 0
 _PYTHON_COMMANDS = {"python", "python3", "python.exe", "python3.exe", "py", "py.exe"}
-
-_APPROVAL_STYLE = Style.from_dict(
-    {
-        "approval.choice": "ansigray",
-        "approval.choice.selected": "reverse ansimagenta bold",
-        "approval.help": "ansigray",
-    }
-)
 
 
 class TuiApprovalProvider:
@@ -42,10 +24,10 @@ class TuiApprovalProvider:
         self,
         *,
         project_root: str | Path | None = None,
-        choice_bar_factory: Callable[..., "ApprovalChoiceBar"] | None = None,
-        allowlist: "ApprovalAllowlist" | None = None,
+        app_tui: "TuiApp | None" = None,
+        allowlist: "ApprovalAllowlist | None" = None,
     ):
-        self.choice_bar_factory = choice_bar_factory or ApprovalChoiceBar
+        self.app_tui = app_tui
         self.allowlist = allowlist
         if self.allowlist is None and project_root is not None:
             self.allowlist = ApprovalAllowlist(project_root)
@@ -65,133 +47,29 @@ class TuiApprovalProvider:
                     },
                 )
 
-        show_details = False
-        while True:
-            try:
-                choice = self.choice_bar_factory(
-                    request,
-                    show_details=show_details,
-                    persistent_prefix=persistent_prefix,
-                ).run()
-            except (EOFError, KeyboardInterrupt):
-                print_formatted_text(HTML("\n<ansired>Approval cancelled/interrupted.</ansired>"))
-                return ApprovalResult(False, "interrupted in TUI", {"ui": "tui"})
+        if self.app_tui is None:
+            return ApprovalResult(False, "no TUI app available", {"ui": "tui"})
 
-            if choice == "approve":
-                return ApprovalResult(True, "approved in TUI", {"ui": "tui"})
-            if choice == "persist":
-                if self.allowlist is not None and persistent_prefix:
-                    self.allowlist.add_prefix_rule(
-                        persistent_prefix,
-                        command=str(request.args.get("command", "")),
-                    )
-                    return ApprovalResult(
-                        True,
-                        "approved and persisted project command prefix",
-                        {
-                            "ui": "tui",
-                            "approval_source": "project_allowlist",
-                            "persisted": True,
-                            "prefix": persistent_prefix,
-                        },
-                    )
-                return ApprovalResult(
-                    True,
-                    "approved in TUI; no persistent prefix available",
-                    {"ui": "tui", "persisted": False},
-                )
-            if choice in {None, "deny"}:
-                return ApprovalResult(False, "denied in TUI", {"ui": "tui"})
-            if choice == "details":
-                show_details = True
-                continue
+        # Bridge: worker thread → UI thread via call_from_thread + Event
+        event = threading.Event()
+        result_holder: list = [None]
 
+        def _show():
+            self.app_tui.show_approval_panel(request, event, result_holder)
 
-class ApprovalChoiceBar:
-    def __init__(
-        self,
-        request: ApprovalRequest,
-        *,
-        show_details: bool = False,
-        persistent_prefix: list[str] | None = None,
-    ):
-        self.request = request
-        self.show_details = show_details
-        self.persistent_prefix = persistent_prefix
-        self.selected_index = _DEFAULT_CHOICE_INDEX
+        try:
+            self.app_tui.call_from_thread(_show)
+        except Exception:
+            return ApprovalResult(False, "failed to show approval panel", {"ui": "tui"})
 
-    def run(self) -> str:
-        bindings = KeyBindings()
+        # Block until user makes a choice
+        event.wait()
 
-        @bindings.add("right")
-        @bindings.add("down")
-        @bindings.add("tab")
-        def _(event):
-            self.selected_index = (self.selected_index + 1) % len(_CHOICES)
-
-        @bindings.add("left")
-        @bindings.add("up")
-        @bindings.add("s-tab")
-        def _(event):
-            self.selected_index = (self.selected_index - 1) % len(_CHOICES)
-
-        @bindings.add("enter")
-        def _(event):
-            event.app.exit(result=_CHOICES[self.selected_index][0])
-
-        @bindings.add("y")
-        def _(event):
-            event.app.exit(result="approve")
-
-        @bindings.add("p")
-        def _(event):
-            event.app.exit(result="persist")
-
-        @bindings.add("n")
-        def _(event):
-            event.app.exit(result="deny")
-
-        @bindings.add("d")
-        def _(event):
-            event.app.exit(result="details")
-
-        @bindings.add("c-c")
-        def _(event):
-            event.app.exit(exception=KeyboardInterrupt())
-
-        @bindings.add("c-d")
-        def _(event):
-            event.app.exit(exception=EOFError())
-
-        body = Window(
-            FormattedTextControl(
-                lambda: _format_approval_body(
-                    self.request,
-                    show_details=self.show_details,
-                    persistent_prefix=self.persistent_prefix,
-                )
-            ),
-            wrap_lines=True,
-        )
-        spacer = Window(height=1)
-        choices = Window(
-            FormattedTextControl(
-                lambda: _format_choice_bar(
-                    self.selected_index,
-                    persistent_prefix=self.persistent_prefix,
-                )
-            ),
-            height=1,
-        )
-        root = HSplit([body, spacer, choices])
-        app: Application[str] = Application(
-            layout=Layout(root),
-            key_bindings=bindings,
-            full_screen=False,
-            erase_when_done=False,
-            style=_APPROVAL_STYLE,
-        )
-        return app.run() or "deny"
+        approved = result_holder[0] if result_holder else False
+        if approved:
+            # If persist was used, the panel already handled it
+            return ApprovalResult(True, "approved in TUI", {"ui": "tui"})
+        return ApprovalResult(False, "denied in TUI", {"ui": "tui"})
 
 
 class ApprovalAllowlist:
@@ -254,70 +132,6 @@ class ApprovalAllowlist:
             json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-
-
-def _format_approval_body(
-    request: ApprovalRequest,
-    *,
-    show_details: bool,
-    persistent_prefix: list[str] | None = None,
-) -> str:
-    lines = [
-        "",
-        "Approval required",
-        f"tool: {request.tool_name}",
-        f"risk: {request.risk}",
-        *_wrap_field("reason", request.reason),
-    ]
-    if request.tool_name == "run_bash":
-        lines.extend(_wrap_field("command", request.args.get("command", "")))
-        if persistent_prefix:
-            lines.extend(_wrap_field("project rule", _prefix_display(persistent_prefix)))
-        else:
-            lines.append("project rule: unavailable for this command")
-    else:
-        lines.extend(_format_args_summary(request.args))
-
-    if show_details:
-        lines.append("")
-        lines.append("details:")
-        lines.extend(f"  {line}" for line in pformat(request.args, width=88).splitlines())
-    return "\n".join(lines)
-
-
-def _format_choice_bar(selected_index: int, *, persistent_prefix: list[str] | None = None) -> list[tuple[str, str]]:
-    fragments: list[tuple[str, str]] = [("class:approval.help", "Use arrows/tab, Enter to choose  ")]
-    for index, (value, label) in enumerate(_CHOICES):
-        if value == "persist" and not persistent_prefix:
-            label = "Persist unavailable"
-        style = "class:approval.choice.selected" if index == selected_index else "class:approval.choice"
-        fragments.append((style, f" {label} "))
-        fragments.append(("", " "))
-    fragments.append(("class:approval.help", " shortcuts: y approve · p persist · n deny · d details"))
-    return fragments
-
-
-def _format_args_summary(args: dict) -> list[str]:
-    summary = _summarize_args(args)
-    lines = ["args:"]
-    for key, value in summary.items():
-        lines.extend(_wrap_field(f"  {key}", value))
-    return lines
-
-
-def _wrap_field(label: str, value: object, *, width: int = 100) -> list[str]:
-    prefix = f"{label}: "
-    text = str(value)
-    if not text:
-        return [prefix.rstrip()]
-    wrapped = fill(
-        prefix + text,
-        width=width,
-        subsequent_indent=" " * len(prefix),
-        break_long_words=False,
-        break_on_hyphens=False,
-    )
-    return wrapped.splitlines()
 
 
 def _persistent_prefix_for_request(request: ApprovalRequest) -> list[str] | None:

@@ -1,0 +1,451 @@
+"""Textual widgets for the Harness Code Agent TUI."""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
+from textual import on, work
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Vertical
+from textual.message import Message
+from textual.reactive import reactive
+from textual.widgets import Input, RichLog, Static, TextArea
+
+if TYPE_CHECKING:
+    from .commands import SlashCommandRegistry
+    from .state import SessionStatusSnapshot, TranscriptBlock
+
+
+# ── SubmitTextArea ──────────────────────────────────────────────────────────
+
+class InputSubmit(Message):
+    """Message posted when user presses Enter to submit input."""
+    pass
+
+
+class PaletteComplete(Message):
+    """Message posted when user accepts the highlighted completion."""
+    pass
+
+
+class PaletteDismiss(Message):
+    """Message posted when user closes the completion palette."""
+    pass
+
+
+class SubmitTextArea(TextArea):
+    """TextArea that submits on Enter and inserts newline on Shift+Enter."""
+
+    BINDINGS = TextArea.BINDINGS + [
+        Binding("enter", "submit", "Submit", show=False, priority=True),
+        Binding("shift+enter", "newline", "Newline", show=False, priority=True),
+        Binding("tab", "complete", "Complete", show=False, priority=True),
+        Binding("escape", "dismiss_palette", "Dismiss completions", show=False, priority=True),
+    ]
+
+    def action_submit(self) -> None:
+        """Post a submit message that InputArea handles."""
+        if self._route_active_panel_key("enter"):
+            return
+        self.post_message(InputSubmit())
+
+    def action_newline(self) -> None:
+        """Insert a newline at the cursor."""
+        if self._route_active_panel_key("enter"):
+            return
+        self.insert("\n")
+
+    def action_complete(self) -> None:
+        """Ask the parent input area to accept the active completion."""
+        if self._route_active_panel_key("tab"):
+            return
+        self.post_message(PaletteComplete())
+
+    def action_dismiss_palette(self) -> None:
+        """Ask the parent input area to hide completions."""
+        if self._route_active_panel_key("escape"):
+            return
+        self.post_message(PaletteDismiss())
+
+    def on_key(self, event) -> None:
+        if self._route_active_panel_key(event.key):
+            event.prevent_default()
+            event.stop()
+
+    def _route_active_panel_key(self, key: str) -> bool:
+        app = getattr(self, "app", None)
+        if app is None or getattr(app, "_active_panel", None) is None:
+            return False
+        return bool(app.route_active_panel_key(key))
+
+# ── TranscriptView ──────────────────────────────────────────────────────────
+
+_KIND_BORDER_COLORS = {
+    "user": "#3874cb",
+    "assistant": "#4caf50",
+    "tool": "#d79921",
+    "thought": "#b48ead",
+    "failure": "#bf616a",
+    "approval": "#b16286",
+    "plan": "#3874cb",
+    "profile": "#3874cb",
+    "file": "#d79921",
+    "session": "#555555",
+    "status": "#555555",
+}
+
+
+def block_to_rich(block: TranscriptBlock) -> Panel:
+    """Convert a TranscriptBlock to a Rich Panel renderable."""
+    border = _KIND_BORDER_COLORS.get(block.kind, "#555555")
+    status = f" [{block.status}]" if block.status else ""
+
+    if block.kind == "user":
+        title = f"You{status}"
+        return Panel(Text(block.body), title=title, border_style=border, expand=True)
+    if block.kind == "assistant":
+        title = f"Assistant{status}"
+        return Panel(Markdown(block.body) if block.body else Text(""), title=title, border_style=border)
+    if block.kind == "tool":
+        title = f"⚙️ {block.title}{status}"
+        return Panel(Text(block.body or ""), title=title, border_style=border)
+    if block.kind == "thought":
+        title = f"\U0001f4ad {block.title}{status}"
+        return Panel(Text(block.body or "(thinking)"), title=title, border_style=border)
+    if block.kind == "failure":
+        title = f"❌ Error{status}"
+        return Panel(Text(block.body or ""), title=title, border_style=border)
+    if block.kind == "approval":
+        title = f"Approval{status}"
+        return Panel(Text(block.body or ""), title=title, border_style=border)
+    if block.kind == "plan":
+        title = f"Plan{status}"
+        return Panel(Text(block.body or ""), title=title, border_style=border)
+    if block.kind == "profile":
+        title = f"Profile{status}"
+        return Panel(Text(block.body or ""), title=title, border_style=border)
+    if block.kind == "file":
+        title = f"File{status}"
+        return Panel(Text(block.body or ""), title=title, border_style=border)
+    # session, status, etc.
+    title = f"{block.title}{status}"
+    return Panel(Text(block.body or ""), title=title, border_style=border)
+
+
+def welcome_rich(snapshot: SessionStatusSnapshot) -> Panel:
+    """Render the welcome message as a Rich Panel."""
+    lines = [
+        f"[bold #3874cb]Harness Code Agent[/] [#888888]Textual TUI[/]",
+        f"[#888888]session[/] {snapshot.session_id}  [#888888]profile[/] {snapshot.profile}",
+        f"[#888888]workspace[/] {snapshot.cwd}",
+        "",
+        "[#888888]Use /help for commands. Ctrl-C cancels current turn.[/]",
+    ]
+    body = Text.from_markup("\n".join(lines))
+    return Panel(body, border_style="#555555")
+
+
+class TranscriptView(RichLog):
+    """Transcript area built on RichLog."""
+
+    def __init__(self, **kwargs):
+        super().__init__(highlight=True, markup=True, wrap=True, auto_scroll=True, **kwargs)
+
+    def append_block(self, block: TranscriptBlock) -> None:
+        self.write(block_to_rich(block))
+
+    def append_streaming(self, text: str) -> None:
+        self.write(Text(text))
+
+    def show_welcome(self, snapshot: SessionStatusSnapshot) -> None:
+        self.write(welcome_rich(snapshot))
+
+
+# ── StatusBar ───────────────────────────────────────────────────────────────
+
+class StatusBar(Static):
+    """Bottom status bar showing profile, model, turn, status."""
+
+    profile: reactive[str] = reactive("")
+    model: reactive[str] = reactive("")
+    turn: reactive[int] = reactive(0)
+    status: reactive[str] = reactive("idle")
+
+    def render(self) -> Text:
+        status_style = "green" if self.status == "idle" else "yellow" if self.status in ("running", "tool", "thinking") else "red"
+        text = Text()
+        text.append(f" {self.profile}", style="bold")
+        text.append(f" │ ", style="dim")
+        text.append(f"model: {self.model}", style="")
+        text.append(f" │ ", style="dim")
+        text.append(f"T: {self.turn}", style="bold")
+        text.append(f" │ ", style="dim")
+        text.append(f"{self.status}", style=status_style)
+        return text
+
+    def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
+        self.profile = snap.profile
+        self.model = snap.model
+        self.turn = snap.turn
+        self.status = snap.status
+
+
+# ── ContextBar ──────────────────────────────────────────────────────────────
+
+class ContextBar(Static):
+    """Context progress bar and permission mode indicator."""
+
+    context_percent: reactive[int] = reactive(0)
+    permission_mode: reactive[str] = reactive("workspace-write")
+    token_label: reactive[str] = reactive("0K/0K")
+
+    def render(self) -> Text:
+        pct = self.context_percent
+        bar_width = 20
+        filled = int(bar_width * min(pct, 100) / 100)
+        bar = "▓" * filled + "░" * (bar_width - filled)
+
+        if pct >= 82:
+            bar_color = "#bf616a"
+        elif pct >= 68:
+            bar_color = "#ebcb8b"
+        else:
+            bar_color = "#a3be8c"
+
+        perm_color = "#bf616a" if self.permission_mode == "danger-full-access" else "#a3be8c"
+
+        text = Text()
+        text.append(f" context ", style="dim")
+        text.append(bar, style=bar_color)
+        text.append(f" {pct}%", style=f"bold {bar_color}")
+        text.append(f" {self.token_label}", style="dim")
+        text.append(f" │ ", style="dim")
+        text.append(f"▶ {self.permission_mode}", style=perm_color)
+        text.append(" │ Ctrl+K compact │ Ctrl+P perms", style="dim")
+        return text
+
+    def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
+        if snap.context_window_tokens > 0:
+            self.context_percent = min(999, int(round(snap.context_tokens * 100 / snap.context_window_tokens)))
+        else:
+            self.context_percent = 0
+        self.token_label = f"{snap.context_tokens // 1000}K/{snap.context_window_tokens // 1000}K"
+        self.permission_mode = snap.permission_mode
+
+    def on_click(self) -> None:
+        if hasattr(self.app, "action_compact_context"):
+            self.app.action_compact_context()
+
+
+# ── CommandPalette ──────────────────────────────────────────────────────────
+
+class CommandPalette(Static):
+    """Dropdown completion list for slash commands and @mentions."""
+
+    candidates: reactive[list[tuple[str, str]]] = reactive(list)
+    selected_index: reactive[int] = reactive(0)
+
+    def __init__(self, **kwargs):
+        super().__init__("", **kwargs)
+
+    def update_candidates(self, candidates: list[tuple[str, str]]) -> None:
+        self.candidates = candidates
+        self.selected_index = 0
+        self._render_palette()
+
+    def _render_palette(self) -> None:
+        if not self.candidates:
+            self.display = False
+            self.update("")
+            return
+        self.display = True
+        lines = []
+        for i, (name, desc) in enumerate(self.candidates):
+            marker = "▶" if i == self.selected_index else " "
+            lines.append(f"{marker} {name}  {desc}")
+        self.update("\n".join(lines))
+
+    def move_up(self) -> None:
+        if self.candidates:
+            self.selected_index = (self.selected_index - 1) % len(self.candidates)
+            self._render_palette()
+
+    def move_down(self) -> None:
+        if self.candidates:
+            self.selected_index = (self.selected_index + 1) % len(self.candidates)
+            self._render_palette()
+
+    def get_selected(self) -> str | None:
+        if self.candidates and 0 <= self.selected_index < len(self.candidates):
+            return self.candidates[self.selected_index][0]
+        return None
+
+
+# ── InputArea ───────────────────────────────────────────────────────────────
+
+class InputArea(Vertical):
+    """Input area with TextArea and command palette dropdown."""
+
+    def __init__(self, registry: SlashCommandRegistry | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self._registry = registry
+        self._session = None
+
+    def set_session(self, session) -> None:
+        self._session = session
+
+    def compose(self) -> ComposeResult:
+        yield CommandPalette(id="cmd-palette")
+        yield SubmitTextArea.code_editor(
+            id="input-text",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#cmd-palette", CommandPalette).display = False
+
+    def on_key(self, event) -> None:
+        """Handle keys for palette navigation and selection."""
+        palette = self.query_one("#cmd-palette", CommandPalette)
+
+        # Arrow keys for palette navigation
+        if event.key == "up" and palette.display and palette.candidates:
+            palette.move_up()
+            event.prevent_default()
+            return
+        if event.key == "down" and palette.display and palette.candidates:
+            palette.move_down()
+            event.prevent_default()
+            return
+
+        # Tab selects the highlighted candidate when palette is open
+        if event.key == "tab" and palette.display and palette.candidates:
+            selected = palette.get_selected()
+            if selected:
+                text_area = self.query_one("#input-text", SubmitTextArea)
+                if selected.startswith("/") or selected.startswith("@"):
+                    text_area.text = selected + " "
+                palette.update_candidates([])
+                event.prevent_default()
+                return
+
+        # Escape closes palette
+        if event.key == "escape" and palette.display:
+            palette.update_candidates([])
+            event.prevent_default()
+            return
+
+    @on(InputSubmit)
+    def _on_submit(self, event: InputSubmit) -> None:
+        """Handle Enter key submission from SubmitTextArea."""
+        palette = self.query_one("#cmd-palette", CommandPalette)
+        text_area = self.query_one("#input-text", SubmitTextArea)
+        current_text = text_area.text.strip()
+        if (
+            palette.display
+            and current_text.startswith("/")
+            and self._registry is not None
+            and any(current_text in spec.names() for spec in self._registry.candidates())
+        ):
+            palette.update_candidates([])
+            self._submit_input()
+            return
+        # If palette is open, select the candidate instead of submitting
+        if palette.display and palette.candidates:
+            selected = palette.get_selected()
+            if selected:
+                if selected.startswith("/") or selected.startswith("@"):
+                    text_area.text = selected + " "
+                palette.update_candidates([])
+                return
+        # Otherwise submit
+        self._submit_input()
+
+    @on(PaletteComplete)
+    def _on_complete(self, event: PaletteComplete) -> None:
+        palette = self.query_one("#cmd-palette", CommandPalette)
+        if not palette.display or not palette.candidates:
+            return
+        selected = palette.get_selected()
+        if selected:
+            text_area = self.query_one("#input-text", SubmitTextArea)
+            if selected.startswith("/") or selected.startswith("@"):
+                text_area.text = selected + " "
+            palette.update_candidates([])
+            event.stop()
+
+    @on(PaletteDismiss)
+    def _on_dismiss_palette(self, event: PaletteDismiss) -> None:
+        palette = self.query_one("#cmd-palette", CommandPalette)
+        if palette.display:
+            palette.update_candidates([])
+            event.stop()
+
+    def _submit_input(self) -> None:
+        """Submit the current input text to the app."""
+        text_area = self.query_one("#input-text", TextArea)
+        text = text_area.text.strip()
+        if not text:
+            return
+
+        text_area.text = ""
+        self.query_one("#cmd-palette", CommandPalette).update_candidates([])
+
+        # Delegate to app for actual submission
+        app = self.app
+        if app is None:
+            return
+
+        # Handle slash commands
+        if text.startswith("/"):
+            result = app.session.handle_slash_command(text)
+            if not result:
+                app.exit()
+            return
+
+        # Submit to agent
+        app._submit_async(text)
+
+    @on(TextArea.Changed, "#input-text")
+    def _on_text_changed(self, event: TextArea.Changed) -> None:
+        text = event.text_area.text
+        self._update_completions(text)
+
+    def _update_completions(self, text: str) -> None:
+        palette = self.query_one("#cmd-palette", CommandPalette)
+        stripped = text.lstrip()
+
+        if stripped.startswith("/") and " " not in stripped:
+            if self._registry:
+                from .completion import fuzzy_command_candidates
+                candidates = [
+                    (spec.name, f"{spec.group} - {spec.description}")
+                    for spec in fuzzy_command_candidates(self._registry, stripped)
+                ]
+                palette.update_candidates(candidates)
+            return
+
+        from .completion import current_mention_query, mention_candidates
+        mention = current_mention_query(text)
+        if mention is not None and self._session:
+            prefix, _start = mention
+            candidates = [
+                (f"@{c.insert_text}", c.description)
+                for c in mention_candidates(self._session.cwd, prefix, self._session.session_store)
+            ]
+            palette.update_candidates(candidates)
+            return
+
+        palette.update_candidates([])
+
+    def get_text(self) -> str:
+        return self.query_one("#input-text", TextArea).text
+
+    def clear(self) -> None:
+        self.query_one("#input-text", TextArea).text = ""
+        self.query_one("#cmd-palette", CommandPalette).update_candidates([])
+
+    def focus_input(self) -> None:
+        self.query_one("#input-text", TextArea).focus()

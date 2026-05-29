@@ -1,11 +1,9 @@
+"""Completion logic for slash commands and @mentions (UI-agnostic)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
-
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.document import Document
 
 from .commands import SlashCommandRegistry
 
@@ -34,41 +32,8 @@ class MentionCandidate:
     description: str
 
 
-class HcaCompleter(Completer):
-    def __init__(self, *, registry: SlashCommandRegistry, session):
-        self.registry = registry
-        self.session = session
-
-    def get_completions(self, document: Document, complete_event):
-        text = document.text_before_cursor
-        stripped = text.lstrip()
-        if stripped.startswith("/"):
-            if " " in stripped:
-                return
-            token = stripped.split(maxsplit=1)[0]
-            for spec in fuzzy_command_candidates(self.registry, token):
-                yield Completion(
-                    spec.name,
-                    start_position=-len(token),
-                    display=spec.usage,
-                    display_meta=f"{spec.group} - {spec.description}",
-                )
-            return
-
-        mention = current_mention_query(text)
-        if mention is None:
-            return
-        prefix, start_position = mention
-        for candidate in mention_candidates(self.session.cwd, prefix, self.session.session_store):
-            yield Completion(
-                "@" + candidate.insert_text,
-                start_position=start_position,
-                display=candidate.display,
-                display_meta=candidate.description,
-            )
-
-
 def fuzzy_command_candidates(registry: SlashCommandRegistry, query: str):
+    """Return slash command specs matching the query, sorted by relevance."""
     query = query.strip()
     scored = [
         (fuzzy_score(query, spec.name), index, spec)
@@ -82,6 +47,7 @@ def fuzzy_command_candidates(registry: SlashCommandRegistry, query: str):
 
 
 def current_mention_query(text_before_cursor: str) -> tuple[str, int] | None:
+    """Extract the current @mention query from text before cursor."""
     quote_idx = text_before_cursor.rfind('@"')
     plain_idx = text_before_cursor.rfind("@")
     if quote_idx >= 0 and quote_idx + 2 >= plain_idx:
@@ -100,6 +66,7 @@ def current_mention_query(text_before_cursor: str) -> tuple[str, int] | None:
 
 
 def mention_candidates(root: Path, prefix: str, session_store, *, limit: int = 50) -> list[MentionCandidate]:
+    """Return file/session candidates matching the @mention prefix."""
     prefix = prefix.strip()
     if prefix.startswith("session:"):
         session_prefix = prefix.removeprefix("session:")
@@ -139,6 +106,7 @@ def mention_candidates(root: Path, prefix: str, session_store, *, limit: int = 5
 
 
 def iter_workspace_paths(root: Path, *, limit: int = 2000) -> Iterable[tuple[str, bool]]:
+    """Iterate workspace files and directories, excluding common dirs."""
     import os
     root = Path(root)
     results = []
@@ -168,8 +136,8 @@ def iter_workspace_paths(root: Path, *, limit: int = 2000) -> Iterable[tuple[str
         yield rel, is_dir
 
 
-
 def quote_mention_path(path: str) -> str:
+    """Quote a path containing spaces for @mention."""
     if any(ch.isspace() for ch in path):
         escaped = path.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
@@ -177,6 +145,7 @@ def quote_mention_path(path: str) -> str:
 
 
 def fuzzy_score(query: str, candidate: str) -> int:
+    """Score how well a candidate matches the query. Higher = better."""
     query = query.lower()
     candidate_lower = candidate.lower()
     if not query:

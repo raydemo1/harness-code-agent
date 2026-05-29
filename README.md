@@ -114,13 +114,24 @@ hca
 hca --list-profiles
 ```
 
-进入交互式本地开发助手。默认 profile 是 `coding-agent`，工作区就是启动 `hca` 时所在的当前目录；TTY 中会打开 Claude Code 风格的 inline TUI：
+进入交互式本地开发助手。默认 profile 是 `coding-agent`，工作区就是启动 `hca` 时所在的当前目录；TTY 中会打开 Textual 全屏 TUI：
 
 ```bash
 hca
 ```
 
-然后在 TUI 输入栏中提交任务，例如 `Fix the failing tests`。
+然后在 TUI 输入栏中提交任务，例如 `Fix the failing tests`。常用快捷键：
+
+```text
+Enter        提交当前输入；输入完整 slash command 时会直接执行
+Shift+Enter  插入换行
+Tab          接受当前补全候选
+Esc          关闭补全候选
+Ctrl-C       取消当前运行中的 turn
+Ctrl-T       切换 thought 元信息显示
+Ctrl-K       手动压缩上下文
+Ctrl-P       切换权限模式
+```
 
 也可以启动后立即提交第一个任务，然后继续留在交互模式：
 

@@ -1,4 +1,4 @@
-"""Inline terminal UI for Harness Code Agent."""
+"""Textual terminal UI for Harness Code Agent."""
 
 from .app import TuiApp
 
