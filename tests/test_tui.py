@@ -126,6 +126,33 @@ class TuiTests(unittest.TestCase):
         self.assertEqual(state.snapshot.running_tool, "")
         self.assertGreaterEqual(len(state.blocks), 5)
 
+    def test_fallback_events_update_tui_attention_state(self):
+        state = TuiState(
+            SessionStatusSnapshot(
+                profile="coding-agent",
+                model="model-a",
+                provider="auto",
+                permission_mode="workspace-write",
+                session_id="s1",
+                cwd=self.root,
+            )
+        )
+
+        warning = state.apply_event({
+            "type": "agent_budget_warning",
+            "payload": {"limit_type": "total_tokens", "used": 80, "limit": 100},
+        })
+        fallback = state.apply_event({
+            "type": "agent_fallback",
+            "payload": {"reason": "loop_detected", "limit_type": "tool_fingerprint"},
+        })
+
+        self.assertEqual(warning.kind, "status")
+        self.assertEqual(warning.status, "warning")
+        self.assertEqual(fallback.kind, "failure")
+        self.assertEqual(fallback.status, "blocked")
+        self.assertEqual(state.snapshot.status, "blocked")
+
     def test_update_plan_state_result_updates_plan_steps(self):
         state = TuiState(
             SessionStatusSnapshot(

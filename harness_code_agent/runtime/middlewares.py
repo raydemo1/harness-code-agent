@@ -18,6 +18,8 @@ profiles wire in the middlewares they need.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -82,12 +84,30 @@ class LoopDetectionMiddleware(AgentMiddleware):
       python3 app.py  /  python3 app.py 2>&1  /  python3 ./app.py
     """
 
-    def __init__(self, file_edit_threshold: int = 4, command_repeat_threshold: int = 3):
+    def __init__(
+        self,
+        file_edit_threshold: int = 4,
+        command_repeat_threshold: int = 3,
+        tool_fingerprint_repeat_threshold: int = 3,
+    ):
         self.file_edit_threshold = file_edit_threshold
         self.command_repeat_threshold = command_repeat_threshold
+        self.tool_fingerprint_repeat_threshold = tool_fingerprint_repeat_threshold
         self.file_edit_counts: dict[str, int] = {}
         self.recent_commands: list[str] = []
+        self.recent_tool_fingerprints: list[tuple[str, str]] = []
+        self.recent_tool_summaries: list[str] = []
+        self._fingerprint_warned: set[tuple[str, str]] = set()
         self._file_warned: set[str] = set()  # avoid spamming same warning
+
+    def begin_turn(self, task: str, messages: list[dict], runtime_state=None,
+                   agent_name: str | None = None) -> None:
+        self.file_edit_counts.clear()
+        self.recent_commands.clear()
+        self.recent_tool_fingerprints.clear()
+        self.recent_tool_summaries.clear()
+        self._fingerprint_warned.clear()
+        self._file_warned.clear()
 
     @staticmethod
     def _normalize_command(cmd: str) -> str:
@@ -103,6 +123,69 @@ class LoopDetectionMiddleware(AgentMiddleware):
         # Collapse whitespace
         cmd = re.sub(r'\s+', ' ', cmd)
         return cmd.strip()
+
+    @staticmethod
+    def _fingerprint(tool_name: str, tool_args: dict) -> tuple[str, str]:
+        normalized = json.dumps(tool_args or {}, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+        return tool_name, digest
+
+    @staticmethod
+    def _safe_args_preview(tool_args: dict) -> str:
+        safe: dict[str, object] = {}
+        for key, value in dict(tool_args or {}).items():
+            key_text = str(key)
+            try:
+                value_text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+            except TypeError:
+                value_text = str(value)
+            if key_text.lower() in {"content", "output", "text", "input", "code", "patch"} or len(value_text) > 120:
+                safe[key_text] = f"[{len(value_text)} chars]"
+            else:
+                safe[key_text] = value
+        return json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str)[:220]
+
+    def _observe_tool_fingerprint(self, tool_name: str, tool_args: dict, runtime_state=None) -> str | None:
+        threshold = self.tool_fingerprint_repeat_threshold
+        if threshold <= 1:
+            return None
+        fingerprint = self._fingerprint(tool_name, tool_args)
+        summary = f"{tool_name}({self._safe_args_preview(tool_args)})"
+        self.recent_tool_fingerprints.append(fingerprint)
+        self.recent_tool_summaries.append(summary)
+        self.recent_tool_fingerprints = self.recent_tool_fingerprints[-threshold:]
+        self.recent_tool_summaries = self.recent_tool_summaries[-5:]
+
+        fallback = getattr(runtime_state, "fallback", None)
+        if fallback is not None:
+            fallback.record_action(summary)
+
+        if len(self.recent_tool_fingerprints) < threshold:
+            return None
+        if len(set(self.recent_tool_fingerprints[-threshold:])) != 1:
+            return None
+
+        if fingerprint in self._fingerprint_warned:
+            if fallback is not None:
+                fallback.request_stop(
+                    reason="loop_detected",
+                    limit_type="tool_fingerprint",
+                    used=threshold + 1,
+                    limit=threshold,
+                    last_tool=tool_name,
+                    fingerprint_hash=fingerprint[1],
+                    recent_action_summary=self.recent_tool_summaries,
+                )
+            return None
+
+        self._fingerprint_warned.add(fingerprint)
+        log.warning("Loop detection: identical tool fingerprint repeated %sx", threshold)
+        return (
+            f"[SYSTEM] You have made the same tool call {threshold} times in a row.\n"
+            f"Tool call pattern: {summary}\n"
+            "This looks like a loop. Do not repeat it again. Change strategy, summarize what you know, "
+            "or ask for a decision if the task is blocked."
+        )
 
     def post_tool(self, tool_name: str, tool_args: dict, result: str,
                   messages: list[dict], runtime_state=None,
@@ -157,6 +240,10 @@ class LoopDetectionMiddleware(AgentMiddleware):
                         "Check: Is the required tool installed? Are you in the right directory? "
                         "Is there a dependency missing?"
                     )
+
+        fingerprint_warning = self._observe_tool_fingerprint(tool_name, tool_args, runtime_state)
+        if fingerprint_warning:
+            return fingerprint_warning
 
         return None
 

@@ -44,6 +44,8 @@ def format_session_summary(
     switches = _profile_switches(events)
     failures = _count_events(events, "failure")
     failure_categories = _failure_categories(events)
+    fallbacks = _count_events(events, "agent_fallback")
+    latest_fallback = _latest_fallback_reason(events)
     final_report = _latest_final_report(events)
     plans_ready = _count_events(events, "plan_ready")
     task_outcome = _latest_task_outcome(events)
@@ -72,6 +74,7 @@ def format_session_summary(
         f"changed_files: {_format_list(changed_files)} ({len(changed_files)})",
         f"failures: {failures}",
         f"failure_categories: {_format_counts(failure_categories)}",
+        f"fallbacks: {_format_fallbacks(fallbacks, latest_fallback)}",
         (
             "approvals: "
             f"{approvals['requested']} requested, "
@@ -170,6 +173,18 @@ def _latest_final_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
 
+def _latest_fallback_reason(events: list[dict[str, Any]]) -> str:
+    latest_report = _latest_final_report(events)
+    statistics = latest_report.get("statistics")
+    if isinstance(statistics, dict) and statistics.get("latest_fallback"):
+        return str(statistics["latest_fallback"])
+    for event in reversed(events):
+        if _event_type(event) == "agent_fallback":
+            reason = _payload(event).get("reason")
+            return str(reason or "unknown")
+    return ""
+
+
 def _latest_session_finished_payload(events: list[dict[str, Any]]) -> dict[str, Any]:
     for event in reversed(events):
         if _event_type(event) == "session_finished":
@@ -189,6 +204,14 @@ def _format_counts(counts: Counter[str]) -> str:
     if not counts:
         return "unknown"
     return ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+
+
+def _format_fallbacks(count: int, latest_reason: str) -> str:
+    if count <= 0:
+        return "0"
+    if latest_reason:
+        return f"{count} (latest: {latest_reason})"
+    return str(count)
 
 
 def _format_final_report(payload: dict[str, Any]) -> str:

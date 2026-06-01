@@ -138,6 +138,13 @@ class TuiState:
         if event_type == "failure":
             self.snapshot.status = "needs attention"
             return TranscriptBlock("failure", "failure", _payload_summary(payload), "failed")
+        if event_type == "agent_budget_warning":
+            self.snapshot.status = "needs attention"
+            return TranscriptBlock("status", "agent budget warning", _payload_summary(payload), "warning")
+        if event_type == "agent_fallback":
+            self.snapshot.status = "blocked"
+            self.snapshot.running_tool = ""
+            return TranscriptBlock("failure", "agent fallback", _payload_summary(payload), "blocked")
         if event_type == "approval_requested":
             self.pending_approval = payload
             return TranscriptBlock("approval", "approval requested", _approval_summary(payload), "pending")

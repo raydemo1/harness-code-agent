@@ -169,10 +169,59 @@ class RecoveryState:
 
 
 @dataclass
+class AgentFallbackState:
+    total_tokens: int = 0
+    llm_call_count: int = 0
+    tool_call_count: int = 0
+    budget_warnings: set[str] = field(default_factory=set)
+    stop_requested: bool = False
+    stop_reason: str = ""
+    stop_limit_type: str = ""
+    stop_used: int | None = None
+    stop_limit: int | None = None
+    stop_last_tool: str = ""
+    stop_fingerprint_hash: str = ""
+    recent_action_summary: list[str] = field(default_factory=list)
+    fallback_event_emitted: bool = False
+
+    def request_stop(
+        self,
+        *,
+        reason: str,
+        limit_type: str = "",
+        used: int | None = None,
+        limit: int | None = None,
+        last_tool: str = "",
+        fingerprint_hash: str = "",
+        recent_action_summary: list[str] | None = None,
+    ) -> None:
+        if self.stop_requested:
+            return
+        self.stop_requested = True
+        self.stop_reason = reason
+        self.stop_limit_type = limit_type
+        self.stop_used = used
+        self.stop_limit = limit
+        self.stop_last_tool = last_tool
+        self.stop_fingerprint_hash = fingerprint_hash
+        if recent_action_summary is not None:
+            self.recent_action_summary = list(recent_action_summary)[-5:]
+
+    def record_action(self, summary: str) -> None:
+        summary = summary.strip()
+        if not summary:
+            return
+        self.recent_action_summary.append(summary[:240])
+        if len(self.recent_action_summary) > 5:
+            self.recent_action_summary = self.recent_action_summary[-5:]
+
+
+@dataclass
 class AgentRuntimeState:
     shell_session: PersistentShellSession | None = None
     task_board: TaskBoard = field(default_factory=TaskBoard)
     recovery: RecoveryState = field(default_factory=RecoveryState)
+    fallback: AgentFallbackState = field(default_factory=AgentFallbackState)
     action_tool_count: int = 0
     current_turn_start_index: int = 0
     session_id: str = "default"
@@ -275,7 +324,7 @@ class AgentConversation:
         self._iteration_offset = 0
         self.compaction_gate = CompactionGate()
         self.compaction_mgr: CompactionManager | None = None
-        self._event_bus = None
+        self._event_bus = agent.tool_context.event_bus if agent.tool_context is not None else None
         self.fact_tracker = FactTracker()
         self.observation_store = ObservationStore(self._observation_dir())
         self._cached_prompt_cache_key: str | None = None
@@ -303,6 +352,7 @@ class AgentConversation:
         self.runtime_state.current_turn_start_index = len(self.messages)
         self.runtime_state.task_board = TaskBoard(goal=task)
         self.runtime_state.action_tool_count = 0
+        self.runtime_state.fallback = AgentFallbackState()
         for mw in self.agent.middlewares:
             mw.begin_turn(
                 task,
@@ -499,6 +549,20 @@ class AgentConversation:
         return self.provider.assistant_message_from_response(choice.message), choice.finish_reason
 
     def _emit_llm_usage(self, usage: dict | None, prompt_cache_key: str | None) -> None:
+        fallback = self.runtime_state.fallback
+        fallback.llm_call_count += 1
+        if usage:
+            total_tokens = usage.get("total_tokens")
+            if total_tokens is not None:
+                try:
+                    fallback.total_tokens += int(total_tokens)
+                except (TypeError, ValueError):
+                    pass
+            self._maybe_emit_budget_warning(
+                "total_tokens",
+                fallback.total_tokens,
+                config.MAX_AGENT_TOTAL_TOKENS,
+            )
         if not usage or self._event_bus is None:
             return
         from ..sessions.events import LlmUsageEvent
@@ -516,6 +580,135 @@ class AgentConversation:
                 agent=self.agent.name,
             ).to_event()
         )
+
+    def _limit_enabled(self, limit: int | float | None) -> bool:
+        try:
+            return limit is not None and float(limit) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _maybe_emit_budget_warning(self, limit_type: str, used: int, limit: int) -> None:
+        if not self._limit_enabled(limit):
+            return
+        fallback = self.runtime_state.fallback
+        if limit_type in fallback.budget_warnings:
+            return
+        fraction = config.AGENT_BUDGET_WARN_FRACTION
+        if fraction <= 0:
+            return
+        threshold = max(1, int(float(limit) * min(fraction, 1.0)))
+        if used < threshold:
+            return
+        fallback.budget_warnings.add(limit_type)
+        if self._event_bus is None:
+            return
+        from ..sessions.events import AgentBudgetWarningEvent
+
+        self._event_bus.emit_event(
+            AgentBudgetWarningEvent(
+                limit_type=limit_type,
+                used=int(used),
+                limit=int(limit),
+                fraction=min(float(used) / float(limit), 999.0),
+                agent=self.agent.name,
+            ).to_event()
+        )
+
+    def _request_token_budget_stop_if_needed(self) -> bool:
+        limit = config.MAX_AGENT_TOTAL_TOKENS
+        fallback = self.runtime_state.fallback
+        if not self._limit_enabled(limit) or fallback.total_tokens <= limit:
+            return False
+        fallback.request_stop(
+            reason="token_budget_exceeded",
+            limit_type="total_tokens",
+            used=fallback.total_tokens,
+            limit=limit,
+            recent_action_summary=fallback.recent_action_summary,
+        )
+        return True
+
+    def _record_tool_call_budget(self, tool_name: str, tool_args: dict) -> bool:
+        fallback = self.runtime_state.fallback
+        limit = config.MAX_AGENT_TOOL_CALLS
+        if self._limit_enabled(limit) and fallback.tool_call_count >= limit:
+            fallback.request_stop(
+                reason="tool_call_budget_exceeded",
+                limit_type="tool_calls",
+                used=fallback.tool_call_count,
+                limit=limit,
+                last_tool=tool_name,
+                recent_action_summary=fallback.recent_action_summary,
+            )
+            return False
+        fallback.tool_call_count += 1
+        fallback.record_action(_safe_tool_summary(tool_name, tool_args))
+        self._maybe_emit_budget_warning("tool_calls", fallback.tool_call_count, limit)
+        return True
+
+    def _emit_agent_fallback(self) -> None:
+        fallback = self.runtime_state.fallback
+        if fallback.fallback_event_emitted or not fallback.stop_requested:
+            return
+        fallback.fallback_event_emitted = True
+        if self._event_bus is None:
+            return
+        from ..sessions.events import AgentFallbackEvent
+
+        self._event_bus.emit_event(
+            AgentFallbackEvent(
+                reason=fallback.stop_reason,
+                limit_type=fallback.stop_limit_type or None,
+                used=fallback.stop_used,
+                limit=fallback.stop_limit,
+                last_tool=fallback.stop_last_tool or None,
+                fingerprint_hash=fallback.stop_fingerprint_hash or None,
+                recent_action_summary=fallback.recent_action_summary,
+                agent=self.agent.name,
+            ).to_event()
+        )
+
+    def _fallback_text(self) -> str:
+        fallback = self.runtime_state.fallback
+        details = [f"Agent fallback triggered: {fallback.stop_reason or 'unknown'}."]
+        if fallback.stop_limit_type:
+            used = "unknown" if fallback.stop_used is None else str(fallback.stop_used)
+            limit = "unknown" if fallback.stop_limit is None else str(fallback.stop_limit)
+            details.append(f"{fallback.stop_limit_type}: {used}/{limit}.")
+        if fallback.stop_last_tool:
+            details.append(f"Last tool: {fallback.stop_last_tool}.")
+        details.append("The current turn was stopped to prevent runaway execution; inspect the session events for details.")
+        return " ".join(details)
+
+    def _append_blocked_tool_results(self, tool_calls: list, reason: str) -> None:
+        status_source = "budget" if "budget" in reason else "fallback"
+        for tc in tool_calls:
+            fn_name = tc["function"]["name"]
+            fn_arguments = tc["function"].get("arguments") or "{}"
+            try:
+                fn_args = json.loads(fn_arguments)
+            except json.JSONDecodeError:
+                fn_args = {}
+            output = f"[blocked] Agent fallback triggered ({reason}); tool was not executed."
+            tool_result = tools.finalize_intercepted_tool_result(
+                ToolResult(
+                    tool=fn_name,
+                    status="failed",
+                    output=output,
+                    error=output.removeprefix("[blocked] "),
+                    metadata={"status_source": status_source, "fallback_reason": reason},
+                ),
+                arguments=fn_args,
+                tool_context=self.agent.tool_context,
+                agent_name=self.agent.name,
+            )
+            result = tool_result.to_text()
+            self.trace.tool_call(fn_name, fn_args, result)
+            self._append_message({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
 
     def run_until_idle(self, cancellation_token=None) -> str:
         agent = self.agent
@@ -681,8 +874,16 @@ class AgentConversation:
                 self.trace.finish("no_tool_calls", iteration)
                 break
 
+            if self._request_token_budget_stop_if_needed():
+                self._emit_agent_fallback()
+                self.last_text = self._fallback_text()
+                self._append_blocked_tool_results(tool_calls, self.runtime_state.fallback.stop_reason)
+                self.trace.finish("agent_fallback", iteration)
+                break
+
             # --- Execute tool calls ---
-            for tc in tool_calls:
+            stop_after_tool_loop = False
+            for tool_call_index, tc in enumerate(tool_calls):
                 self._check_cancelled(cancellation_token)
                 self.compaction_gate.begin_tool_call()
                 fn_name = tc["function"]["name"]
@@ -699,6 +900,17 @@ class AgentConversation:
                     })
                     self.compaction_gate.end_tool_call()
                     continue
+
+                if not self._record_tool_call_budget(fn_name, fn_args):
+                    self._emit_agent_fallback()
+                    self.last_text = self._fallback_text()
+                    self._append_blocked_tool_results(
+                        tool_calls[tool_call_index:],
+                        self.runtime_state.fallback.stop_reason,
+                    )
+                    self.compaction_gate.end_tool_call()
+                    stop_after_tool_loop = True
+                    break
 
                 intercepted_result = None
                 if agent.allowed_tool_names is not None and fn_name not in agent.allowed_tool_names:
@@ -810,6 +1022,16 @@ class AgentConversation:
                         self.trace.middleware_inject(type(mw).__name__, "post_tool", inject)
                         break
 
+                if self.runtime_state.fallback.stop_requested:
+                    self._emit_agent_fallback()
+                    self.last_text = self._fallback_text()
+                    self.trace.finish("agent_fallback", iteration)
+                    stop_after_tool_loop = True
+                    break
+
+            if stop_after_tool_loop:
+                break
+
             # --- Check finish reason ---
             if finish_reason == "stop":
                 log.info(f"[{agent.name}] Finished (stop).")
@@ -847,6 +1069,15 @@ class AgentConversation:
 
         else:
             log.warning(f"[{agent.name}] Hit max iterations ({config.MAX_AGENT_ITERATIONS}).")
+            self.runtime_state.fallback.request_stop(
+                reason="max_iterations",
+                limit_type="iterations",
+                used=config.MAX_AGENT_ITERATIONS,
+                limit=config.MAX_AGENT_ITERATIONS,
+                recent_action_summary=self.runtime_state.fallback.recent_action_summary,
+            )
+            self._emit_agent_fallback()
+            self.last_text = self._fallback_text()
             self.trace.finish("max_iterations", config.MAX_AGENT_ITERATIONS)
 
         self._iteration_offset += local_iteration
@@ -864,6 +1095,29 @@ class AgentConversation:
 
 def _truncate(s: str, n: int) -> str:
     return s[:n] + "..." if len(s) > n else s
+
+
+def _safe_tool_summary(tool_name: str, tool_args: dict) -> str:
+    return f"{tool_name}({_safe_args_preview(tool_args)})"
+
+
+def _safe_args_preview(tool_args: dict) -> str:
+    safe: dict[str, object] = {}
+    for key, value in dict(tool_args or {}).items():
+        key_text = str(key)
+        try:
+            value_text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        except TypeError:
+            value_text = str(value)
+        if key_text.lower() in {"content", "output", "text", "input", "code", "patch"} or len(value_text) > 120:
+            safe[key_text] = f"[{len(value_text)} chars]"
+        else:
+            safe[key_text] = value
+    try:
+        preview = json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        preview = str(safe)
+    return _truncate(preview, 200)
 
 
 def _tool_names_from_schemas(tool_schemas: list[dict] | None) -> set[str]:

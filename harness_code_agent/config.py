@@ -49,6 +49,9 @@ PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
 # --- Agent limits ---
 MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "60"))
+MAX_AGENT_TOTAL_TOKENS = int(os.environ.get("MAX_AGENT_TOTAL_TOKENS", "1000000"))
+MAX_AGENT_TOOL_CALLS = int(os.environ.get("MAX_AGENT_TOOL_CALLS", "200"))
+AGENT_BUDGET_WARN_FRACTION = float(os.environ.get("AGENT_BUDGET_WARN_FRACTION", "0.8"))
 MAX_TOOL_ERRORS = 5           # consecutive tool errors before abort
 TRACE_STDERR = os.environ.get("HARNESS_TRACE_STDERR", "").lower() in {"1", "true", "yes", "on"}
 WINDOWS_SHELL = os.environ.get("HARNESS_WINDOWS_SHELL", "auto")

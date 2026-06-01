@@ -293,6 +293,9 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 | `COMPRESS_THRESHOLD` | `96000` | 上下文压缩阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.75` |
 | `RESET_THRESHOLD` | `104960` | 上下文重置阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.82` |
 | `MAX_AGENT_ITERATIONS` | `60` | 单次 agent loop 最大迭代数 |
+| `MAX_AGENT_TOTAL_TOKENS` | `1000000` | 单个 turn 的累计 LLM token 预算；超过后触发本地 `agent_fallback` 并停止执行新工具 |
+| `MAX_AGENT_TOOL_CALLS` | `200` | 单个 turn 最大工具调用预算；超过后阻断未执行工具并触发本地 `agent_fallback` |
+| `AGENT_BUDGET_WARN_FRACTION` | `0.8` | token / tool call 预算达到该比例时发一次 `agent_budget_warning` |
 | `HARNESS_TRACE_STDERR` | 空 | 设置为 `1` / `true` / `yes` / `on` 时输出底层 API 错误追踪 |
 | `MAX_HARNESS_ROUNDS` | `5` | 兼容保留的 harness loop / benchmark 调参项 |
 | `PASS_THRESHOLD` | `7.0` | 兼容保留的 harness loop / benchmark 调参项 |

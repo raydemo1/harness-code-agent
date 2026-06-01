@@ -860,6 +860,8 @@ class ProductRuntimeTests(unittest.TestCase):
 
     def test_structured_event_schema_covers_mvp_event_types(self):
         from harness_code_agent.sessions.events import (
+            AgentBudgetWarningEvent,
+            AgentFallbackEvent,
             AssistantMessageEvent,
             FailureEvent,
             FileChangeEvent,
@@ -872,6 +874,8 @@ class ProductRuntimeTests(unittest.TestCase):
         )
 
         event_types = {
+            AgentBudgetWarningEvent(limit_type="total_tokens", used=80, limit=100).to_event().type,
+            AgentFallbackEvent(reason="loop_detected").to_event().type,
             UserInputEvent(text="fix").to_event().type,
             AssistantMessageEvent(text="done").to_event().type,
             ToolCallEvent(tool="read_file", args={"path": "README.md"}).to_event().type,
@@ -884,6 +888,8 @@ class ProductRuntimeTests(unittest.TestCase):
         }
 
         self.assertEqual(event_types, {
+            "agent_budget_warning",
+            "agent_fallback",
             "user_input",
             "assistant_message",
             "tool_call",
@@ -1399,7 +1405,8 @@ class ProductRuntimeTests(unittest.TestCase):
             },
             {"sequence": 8, "type": "plan_ready", "agent": "main_agent", "payload": {"profile": "plan"}},
             {"sequence": 9, "type": "task_outcome", "agent": "main_agent", "payload": {"status": "success", "summary": "done"}},
-            {"sequence": 10, "type": "session_finished", "agent": "main_agent", "payload": {"status": "closed", "reason": "user_exit"}},
+            {"sequence": 10, "type": "agent_fallback", "agent": "main_agent", "payload": {"reason": "loop_detected"}},
+            {"sequence": 11, "type": "session_finished", "agent": "main_agent", "payload": {"status": "closed", "reason": "user_exit"}},
         ]
 
         summary = format_session_summary(metadata, events)
@@ -1414,6 +1421,7 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIn("approvals: 1 requested, 0 approved, 1 denied", summary)
         self.assertIn("profile_switches: coding-agent -> plan (slash command)", summary)
         self.assertIn("plans_ready: 1", summary)
+        self.assertIn("fallbacks: 1 (latest: loop_detected)", summary)
         self.assertIn("task_outcome: success - done", summary)
         self.assertIn("recent_events:", summary)
 
@@ -1480,6 +1488,7 @@ class ProductRuntimeTests(unittest.TestCase):
             {"sequence": 3, "type": "tool_result", "agent": "main_agent", "payload": {"tool": "write_file", "status": "success"}},
             {"sequence": 4, "type": "file_change", "agent": "main_agent", "payload": {"path": "app.py"}},
             {"sequence": 5, "type": "failure", "agent": "main_agent", "payload": {"category": "validation_error", "message": "empty"}},
+            {"sequence": 6, "type": "agent_fallback", "agent": "main_agent", "payload": {"reason": "token_budget_exceeded"}},
         ]
 
         report = build_final_report(
@@ -1500,6 +1509,8 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(event.payload["statistics"]["assistant_messages"], 1)
         self.assertEqual(event.payload["statistics"]["tool_calls"], 1)
         self.assertEqual(event.payload["statistics"]["failures"], 1)
+        self.assertEqual(event.payload["statistics"]["fallbacks"], 1)
+        self.assertEqual(event.payload["statistics"]["latest_fallback"], "token_budget_exceeded")
         self.assertEqual(event.payload["failure_categories"], {"validation_error": 1})
         self.assertEqual(event.payload["tool_counts"], {"write_file": 1})
         self.assertEqual(event.payload["changed_files"], ["app.py"])
@@ -1907,6 +1918,284 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(tool_result.payload["status"], "failed")
             self.assertEqual(tool_result.payload["metadata"]["status_source"], "permission")
             self.assertIn("not available", tool_result.payload["output"])
+
+    def test_agent_loop_token_budget_fallback_blocks_pending_tool_calls(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.runtime import tools
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                message = SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tc_write",
+                            type="function",
+                            function=SimpleNamespace(
+                                name="write_file",
+                                arguments='{"path":"note.txt","content":"should not write"}',
+                            ),
+                        )
+                    ],
+                )
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=message, finish_reason="tool_calls")],
+                    usage=SimpleNamespace(prompt_tokens=7, completion_tokens=5, total_tokens=12),
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="danger-full-access"),
+                event_bus=EventBus(),
+            )
+            write_schemas = tools.tool_schemas_for_profile(allowed_permissions={"edit"})
+            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+                conversation = AgentConversation(
+                    Agent(
+                        "main_agent",
+                        "system",
+                        use_tools=True,
+                        tool_schemas=write_schemas,
+                        tool_context=context,
+                    )
+                )
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 10),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 100),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                text = conversation.run_until_idle()
+
+            self.assertFalse((root / "note.txt").exists())
+            self.assertIn("Agent fallback triggered", text)
+            fallback = [event for event in context.event_bus.events if event.type == "agent_fallback"][0]
+            self.assertEqual(fallback.payload["reason"], "token_budget_exceeded")
+            self.assertEqual(fallback.payload["limit_type"], "total_tokens")
+            tool_result = [event for event in context.event_bus.events if event.type == "tool_result"][0]
+            self.assertEqual(tool_result.payload["status"], "failed")
+            self.assertEqual(tool_result.payload["metadata"]["status_source"], "budget")
+
+    def test_agent_loop_tool_call_budget_blocks_unexecuted_pending_calls(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.runtime import tools
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                message = SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tc_first",
+                            type="function",
+                            function=SimpleNamespace(
+                                name="write_file",
+                                arguments='{"path":"first.txt","content":"one"}',
+                            ),
+                        ),
+                        SimpleNamespace(
+                            id="tc_second",
+                            type="function",
+                            function=SimpleNamespace(
+                                name="write_file",
+                                arguments='{"path":"second.txt","content":"two"}',
+                            ),
+                        ),
+                    ],
+                )
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=message, finish_reason="tool_calls")],
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="danger-full-access"),
+                event_bus=EventBus(),
+            )
+            write_schemas = tools.tool_schemas_for_profile(allowed_permissions={"edit"})
+            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+                conversation = AgentConversation(
+                    Agent(
+                        "main_agent",
+                        "system",
+                        use_tools=True,
+                        tool_schemas=write_schemas,
+                        tool_context=context,
+                    )
+                )
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 100),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 1),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                text = conversation.run_until_idle()
+
+            self.assertTrue((root / "first.txt").exists())
+            self.assertFalse((root / "second.txt").exists())
+            self.assertIn("Agent fallback triggered", text)
+            self.assertEqual(len([msg for msg in conversation.messages if msg.get("role") == "tool"]), 2)
+            fallback = [event for event in context.event_bus.events if event.type == "agent_fallback"][0]
+            self.assertEqual(fallback.payload["reason"], "tool_call_budget_exceeded")
+            results = [event for event in context.event_bus.events if event.type == "tool_result"]
+            self.assertEqual([event.payload["status"] for event in results], ["success", "failed"])
+            self.assertEqual(results[-1].payload["metadata"]["status_source"], "budget")
+
+    def test_agent_loop_max_iterations_emits_fallback_event(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.runtime import tools
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                message = SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tc_read",
+                            type="function",
+                            function=SimpleNamespace(
+                                name="read_file",
+                                arguments='{"path":"README.md"}',
+                            ),
+                        )
+                    ],
+                )
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=message, finish_reason="tool_calls")],
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("hello", encoding="utf-8")
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(),
+            )
+            read_schemas = tools.tool_schemas_for_profile(allowed_permissions={"read"})
+            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+                conversation = AgentConversation(
+                    Agent(
+                        "main_agent",
+                        "system",
+                        use_tools=True,
+                        tool_schemas=read_schemas,
+                        tool_context=context,
+                    )
+                )
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 100),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 100),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                text = conversation.run_until_idle()
+
+            self.assertIn("Agent fallback triggered", text)
+            fallback = [event for event in context.event_bus.events if event.type == "agent_fallback"][0]
+            self.assertEqual(fallback.payload["reason"], "max_iterations")
+            self.assertEqual(fallback.payload["limit_type"], "iterations")
+
+    def test_agent_loop_budget_warning_emits_once(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.runtime import tools
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    message = SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="tc_read",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="read_file",
+                                    arguments='{"path":"README.md"}',
+                                ),
+                            )
+                        ],
+                    )
+                else:
+                    message = SimpleNamespace(content="done", tool_calls=None)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=message, finish_reason="tool_calls" if self.calls == 1 else "stop")],
+                    usage=SimpleNamespace(prompt_tokens=30, completion_tokens=30, total_tokens=60),
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("hello", encoding="utf-8")
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(),
+            )
+            read_schemas = tools.tool_schemas_for_profile(allowed_permissions={"read"})
+            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+                conversation = AgentConversation(
+                    Agent(
+                        "main_agent",
+                        "system",
+                        use_tools=True,
+                        tool_schemas=read_schemas,
+                        tool_context=context,
+                    )
+                )
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 200),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 100),
+                patch("harness_code_agent.agent.loop.config.AGENT_BUDGET_WARN_FRACTION", 0.25),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                conversation.run_until_idle()
+
+            warnings = [event for event in context.event_bus.events if event.type == "agent_budget_warning"]
+            self.assertEqual(len(warnings), 1)
+            self.assertEqual(warnings[0].payload["limit_type"], "total_tokens")
 
     def test_permission_middleware_blocks_blacklisted_shell_without_approval(self):
         from harness_code_agent.sessions.events import EventBus

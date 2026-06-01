@@ -225,6 +225,53 @@ class TaskOutcomeEvent:
 
 
 @dataclass(frozen=True)
+class AgentBudgetWarningEvent:
+    limit_type: str
+    used: int
+    limit: int
+    fraction: float | None = None
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        payload: dict[str, Any] = {
+            "limit_type": self.limit_type,
+            "used": self.used,
+            "limit": self.limit,
+        }
+        if self.fraction is not None:
+            payload["fraction"] = self.fraction
+        return StructuredEvent("agent_budget_warning", payload, self.agent)
+
+
+@dataclass(frozen=True)
+class AgentFallbackEvent:
+    reason: str
+    limit_type: str | None = None
+    used: int | None = None
+    limit: int | None = None
+    last_tool: str | None = None
+    fingerprint_hash: str | None = None
+    recent_action_summary: list[str] | None = None
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        payload: dict[str, Any] = {"reason": self.reason}
+        if self.limit_type:
+            payload["limit_type"] = self.limit_type
+        if self.used is not None:
+            payload["used"] = self.used
+        if self.limit is not None:
+            payload["limit"] = self.limit
+        if self.last_tool:
+            payload["last_tool"] = self.last_tool
+        if self.fingerprint_hash:
+            payload["fingerprint_hash"] = self.fingerprint_hash
+        if self.recent_action_summary:
+            payload["recent_action_summary"] = list(self.recent_action_summary)
+        return StructuredEvent("agent_fallback", payload, self.agent)
+
+
+@dataclass(frozen=True)
 class LlmUsageEvent:
     provider: str
     model: str

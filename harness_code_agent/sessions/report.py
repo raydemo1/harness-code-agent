@@ -35,6 +35,8 @@ def build_final_report(
             "assistant_messages": _count_events(events, "assistant_message"),
             "tool_calls": _tool_result_count(events),
             "failures": _count_events(events, "failure"),
+            "fallbacks": _count_events(events, "agent_fallback"),
+            "latest_fallback": _latest_fallback_reason(events),
             "file_changes": len(_changed_files(events)),
         },
         "failure_categories": dict(_failure_categories(events)),
@@ -67,4 +69,12 @@ def _latest_assistant_message(events: list[dict[str, Any]]) -> str:
             text = _payload(event).get("text")
             if text:
                 return str(text)
+    return ""
+
+
+def _latest_fallback_reason(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        if _event_type(event) == "agent_fallback":
+            reason = _payload(event).get("reason")
+            return str(reason or "unknown")
     return ""

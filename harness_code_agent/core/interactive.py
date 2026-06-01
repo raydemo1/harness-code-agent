@@ -949,6 +949,9 @@ def format_config_show(workspace: Path) -> str:
         f"compress_threshold: {config.COMPRESS_THRESHOLD}",
         f"reset_threshold: {config.RESET_THRESHOLD}",
         f"max_agent_iterations: {config.MAX_AGENT_ITERATIONS}",
+        f"max_agent_total_tokens: {config.MAX_AGENT_TOTAL_TOKENS}",
+        f"max_agent_tool_calls: {config.MAX_AGENT_TOOL_CALLS}",
+        f"agent_budget_warn_fraction: {config.AGENT_BUDGET_WARN_FRACTION}",
     ])
     return "\n".join(lines)
 
