@@ -138,6 +138,45 @@ class PersistentShellSessionTests(unittest.TestCase):
             shell.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_docker_sandbox_mode_uses_docker_backend(self):
+        from harness_code_agent.workspace import shell_session
+
+        temp_dir = self._make_temp_dir()
+        try:
+            with (
+                patch.object(config, "SANDBOX_MODE", "docker"),
+                patch("harness_code_agent.workspace.shell_session._DockerShellBackend") as docker_backend,
+            ):
+                shell = PersistentShellSession(cwd=temp_dir)
+
+            docker_backend.assert_called_once_with(str(Path(temp_dir).resolve()))
+            self.assertIs(shell._backend, docker_backend.return_value)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_docker_run_args_mount_workspace_read_write_with_offline_network(self):
+        from harness_code_agent.workspace import shell_session
+
+        temp_dir = self._make_temp_dir()
+        try:
+            with (
+                patch.object(config, "DOCKER_IMAGE", "python:3.12"),
+                patch.object(config, "DOCKER_NETWORK", "none"),
+            ):
+                args = shell_session._docker_run_args("hca-test", str(Path(temp_dir).resolve()))
+
+            self.assertEqual(args[:4], ["docker", "run", "-d", "--name"])
+            self.assertIn("hca-test", args)
+            self.assertIn("--network", args)
+            self.assertIn("none", args)
+            self.assertIn("-v", args)
+            self.assertIn(f"{Path(temp_dir).resolve()}:/workspace", args)
+            self.assertIn("-w", args)
+            self.assertIn("/workspace", args)
+            self.assertEqual(args[-3:], ["python:3.12", "sleep", "infinity"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

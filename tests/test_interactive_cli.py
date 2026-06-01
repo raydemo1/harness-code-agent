@@ -846,6 +846,20 @@ class InteractiveCliTests(unittest.TestCase):
         with patch("harness_code_agent.cli.config.STREAM", "auto"):
             self.assertIsNone(cli._build_stream_callback())
 
+    def test_config_show_includes_sandbox_settings(self):
+        from harness_code_agent.core.interactive import format_config_show
+
+        with (
+            patch.object(config, "SANDBOX_MODE", "docker"),
+            patch.object(config, "DOCKER_IMAGE", "python:3.12"),
+            patch.object(config, "DOCKER_NETWORK", "none"),
+        ):
+            text = format_config_show(Path(self.temp_dir))
+
+        self.assertIn("sandbox_mode: docker", text)
+        self.assertIn("docker_image: python:3.12", text)
+        self.assertIn("docker_network: none", text)
+
     def test_print_turn_result_does_not_duplicate_streamed_text(self):
         from harness_code_agent.core.interactive import TurnResult, print_turn_result
 

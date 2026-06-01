@@ -27,7 +27,7 @@ from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
-from ..workspace.shell_session import windows_shell_hint, windows_shell_path
+from ..workspace.shell_session import docker_cli_path, docker_shell_hint, sandbox_mode, windows_shell_hint, windows_shell_path
 from .mentions import MentionResolutionError, format_turn_with_mentions, resolve_mentions
 
 
@@ -936,6 +936,9 @@ def format_config_show(workspace: Path) -> str:
         f"model: {config.MODEL}",
         f"workspace: {workspace}",
         f"permission_mode: {os.environ.get('HARNESS_PERMISSION_MODE', 'workspace-write')}",
+        f"sandbox_mode: {config.SANDBOX_MODE}",
+        f"docker_image: {config.DOCKER_IMAGE}",
+        f"docker_network: {config.DOCKER_NETWORK}",
         f"provider: {config.PROVIDER}",
         f"stream: {config.STREAM}",
     ]
@@ -960,8 +963,12 @@ def format_doctor(workspace: Path, *, mcp_manager: McpClientManager | None = Non
     rows.append(("API base URL", bool(config.BASE_URL), config.BASE_URL or "missing OPENAI_BASE_URL"))
     rows.append(("Workspace", workspace.exists() and workspace.is_dir(), str(workspace)))
     rows.append(("Git", shutil_which("git") is not None, shutil_which("git") or "not installed"))
-    shell = shell_path()
-    rows.append(("Shell", shell is not None, shell or "no shell found"))
+    if sandbox_mode() == "docker":
+        docker = docker_cli_path()
+        rows.append(("Docker", docker is not None, docker_shell_hint()))
+    else:
+        shell = shell_path()
+        rows.append(("Shell", shell is not None, shell or "no shell found"))
     rows.append(("MCP", *_mcp_doctor_status(workspace, mcp_manager=mcp_manager)))
     failures = sum(0 if ok else 1 for _, ok, _ in rows)
     lines = ["Harness doctor"]
@@ -998,6 +1005,8 @@ def shutil_which(name: str) -> str | None:
 
 
 def shell_path() -> str | None:
+    if sandbox_mode() == "docker":
+        return docker_cli_path()
     if os.name == "nt":
         return windows_shell_path()
     return shutil_which("pwsh") or shutil_which("powershell") or os.environ.get("ComSpec")

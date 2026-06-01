@@ -52,6 +52,9 @@ MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "60"))
 MAX_TOOL_ERRORS = 5           # consecutive tool errors before abort
 TRACE_STDERR = os.environ.get("HARNESS_TRACE_STDERR", "").lower() in {"1", "true", "yes", "on"}
 WINDOWS_SHELL = os.environ.get("HARNESS_WINDOWS_SHELL", "auto")
+SANDBOX_MODE = os.environ.get("HARNESS_SANDBOX_MODE", "host")
+DOCKER_IMAGE = os.environ.get("HARNESS_DOCKER_IMAGE", "python:3.12")
+DOCKER_NETWORK = os.environ.get("HARNESS_DOCKER_NETWORK", "none")
 
 # --- Paths ---
 WORKSPACE = os.path.abspath(os.environ.get("HARNESS_WORKSPACE", "./workspace"))

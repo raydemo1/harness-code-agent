@@ -1335,6 +1335,11 @@ CORE_TOOL_SCHEMAS = [
             "description": (
                 "Execute a shell command in the workspace directory. "
                 + (
+                    "When HARNESS_SANDBOX_MODE=docker this runs inside a Linux Bash Docker sandbox with the workspace mounted at /workspace. "
+                    if (config.SANDBOX_MODE or "host").strip().lower() == "docker"
+                    else ""
+                )
+                + (
                     "On Windows this runs PowerShell by default; prefer PowerShell syntax, or cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd. "
                     if os.name == "nt"
                     else "On POSIX this runs a shell suitable for standard Bash-style commands. "

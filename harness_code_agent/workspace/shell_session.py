@@ -29,7 +29,10 @@ class PersistentShellSession:
     def __init__(self, cwd: str):
         self.cwd = str(Path(cwd).resolve())
         self._backend: _BaseShellBackend
-        if os.name == "nt":
+        mode = sandbox_mode()
+        if mode == "docker":
+            self._backend = _DockerShellBackend(self.cwd)
+        elif os.name == "nt":
             self._backend = _make_windows_shell_backend(self.cwd)
         else:
             self._backend = _PosixShellBackend(self.cwd)
@@ -184,6 +187,78 @@ class _BaseShellBackend:
         )
 
 
+def sandbox_mode() -> str:
+    requested = (config.SANDBOX_MODE or "host").strip().lower()
+    if requested in {"host", "docker"}:
+        return requested
+    raise ValueError("HARNESS_SANDBOX_MODE must be host or docker")
+
+
+def docker_cli_path() -> str | None:
+    return shutil.which("docker")
+
+
+def docker_shell_hint() -> str:
+    if sandbox_mode() != "docker":
+        return "host shell"
+    path = docker_cli_path()
+    if not path:
+        return "Docker CLI not found"
+    return f"Docker sandbox ({config.DOCKER_IMAGE}, network={config.DOCKER_NETWORK})"
+
+
+def _docker_run_args(container_name: str, host_cwd: str) -> list[str]:
+    image = (config.DOCKER_IMAGE or "").strip()
+    if not image:
+        raise ValueError("HARNESS_DOCKER_IMAGE must not be empty")
+    network = (config.DOCKER_NETWORK or "none").strip().lower()
+    if network not in {"none", "bridge"}:
+        raise ValueError("HARNESS_DOCKER_NETWORK must be none or bridge")
+    return [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        container_name,
+        "--network",
+        network,
+        "-v",
+        f"{host_cwd}:/workspace",
+        "-w",
+        "/workspace",
+        image,
+        "sleep",
+        "infinity",
+    ]
+
+
+def _docker_exec_args(container_name: str) -> list[str]:
+    return [
+        "docker",
+        "exec",
+        "-i",
+        "-w",
+        "/workspace",
+        container_name,
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-s",
+    ]
+
+
+def _run_docker_checked(args: list[str], action: str) -> None:
+    try:
+        completed = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise RuntimeError("Docker sandbox requested but docker CLI was not found") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        if detail:
+            raise RuntimeError(f"Failed to {action}: {detail}")
+        raise RuntimeError(f"Failed to {action}: docker exited with code {completed.returncode}")
+
+
 def windows_shell_path() -> str | None:
     requested = (config.WINDOWS_SHELL or "auto").strip().lower()
     if requested == "auto":
@@ -233,6 +308,98 @@ def _make_windows_shell_backend(cwd: str) -> "_BaseShellBackend":
     if kind in {"pwsh", "powershell"}:
         return _PowerShellBackend(cwd, executable=path)
     return _CmdShellBackend(cwd, executable=path)
+
+
+class _DockerShellBackend(_BaseShellBackend):
+    def __init__(self, cwd: str):
+        self.host_cwd = str(Path(cwd).resolve())
+        self.container_name = f"hca-shell-{uuid.uuid4().hex[:12]}"
+        self._container_started = False
+        super().__init__("/workspace")
+
+    def _start(self) -> None:
+        if not self._container_started:
+            _run_docker_checked(
+                _docker_run_args(self.container_name, self.host_cwd),
+                "start Docker sandbox",
+            )
+            self._container_started = True
+        self._process = subprocess.Popen(
+            _docker_exec_args(self.container_name),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        if self._process.stdin is None or self._process.stdout is None:
+            raise RuntimeError("Failed to create Docker sandbox shell")
+
+    def _reader_loop(self) -> None:
+        assert self._process.stdout is not None
+        while not self._closed:
+            chunk = self._process.stdout.read(1)
+            if not chunk:
+                return
+            self._queue.put(chunk)
+
+    def _send(self, script: str) -> None:
+        assert self._process.stdin is not None
+        self._process.stdin.write(script.encode("utf-8"))
+        self._process.stdin.flush()
+
+    def _interrupt_impl(self) -> None:
+        self._stop_exec_process(timeout=2)
+        self._start()
+        self._start_reader()
+
+    def _cleanup_impl(self) -> None:
+        self._stop_exec_process(timeout=5)
+        if self._container_started:
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", self.container_name],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=10,
+                )
+            except Exception:
+                pass
+            self._container_started = False
+
+    def _stop_exec_process(self, *, timeout: int) -> None:
+        if getattr(self, "_process", None) is not None and self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+        if getattr(self, "_process", None) is not None:
+            if self._process.stdin is not None:
+                self._process.stdin.close()
+            if self._process.stdout is not None:
+                self._process.stdout.close()
+
+    def _build_sync_command(self, marker: str) -> str:
+        return f"printf '%s\\n' '{marker}'\n"
+
+    def _build_script(self, command: str, marker: str) -> str:
+        stdout_marker = f"__CODEX_STDOUT_{marker}__"
+        stderr_marker = f"__CODEX_STDERR_{marker}__"
+        exit_marker = f"__CODEX_EXIT_{marker}__"
+        return (
+            "__codex_out=$(mktemp)\n"
+            "__codex_err=$(mktemp)\n"
+            "{\n"
+            f"{command}\n"
+            "} 1>\"$__codex_out\" 2>\"$__codex_err\"\n"
+            "__codex_status=$?\n"
+            f"printf '%s\\n' '{stdout_marker}'\n"
+            "cat \"$__codex_out\"\n"
+            f"printf '\\n%s\\n' '{stderr_marker}'\n"
+            "cat \"$__codex_err\"\n"
+            f"printf '\\n%s:%s\\n' '{exit_marker}' \"$__codex_status\"\n"
+            "rm -f \"$__codex_out\" \"$__codex_err\"\n"
+        )
 
 
 class _CmdShellBackend(_BaseShellBackend):

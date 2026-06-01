@@ -286,6 +286,9 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 | `HARNESS_STREAM` | `auto` | CLI streaming：`auto` 表示仅 TTY 实时输出，`1` 强制开启，`0` 关闭 |
 | `HARNESS_WINDOWS_SHELL` | `auto` | Windows shell 后端：`auto` / `pwsh` / `powershell` / `cmd` |
 | `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式：`workspace-write` / `danger-full-access` |
+| `HARNESS_SANDBOX_MODE` | `host` | Shell sandbox：`host` 使用宿主 shell，`docker` 让 `run_bash` 在 Docker 容器内执行 |
+| `HARNESS_DOCKER_IMAGE` | `python:3.12` | Docker sandbox 使用的镜像 |
+| `HARNESS_DOCKER_NETWORK` | `none` | Docker sandbox 网络：`none` / `bridge` |
 | `HARNESS_CONTEXT_WINDOW_TOKENS` | `128000` | 上下文窗口估算值，用于推导默认压缩/重置阈值 |
 | `COMPRESS_THRESHOLD` | `96000` | 上下文压缩阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.75` |
 | `RESET_THRESHOLD` | `104960` | 上下文重置阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.82` |
@@ -318,6 +321,12 @@ PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.45
 
 文件写入会通过 `WorkspaceService` 做路径约束，防止写出工作区；默认也会拒绝写入 `.git/` 和敏感 `.env` 文件。
 受限调查/计划工作请使用 `--profile plan`；该 profile 只暴露必要读工具、只读 shell、用户提问/子 agent 咨询和 `update_plan_state`。
+
+## Docker Shell Sandbox
+
+设置 `HARNESS_SANDBOX_MODE=docker` 后，`run_bash` 会在按 session 懒启动并复用的 Docker 容器中执行。当前工作区会以读写方式挂载到容器 `/workspace`，容器内固定使用 Linux Bash；即使宿主机是 Windows，启用该模式后 shell 命令也应使用 Bash 语法。
+
+默认网络为 `HARNESS_DOCKER_NETWORK=none`，适合隔离不可信命令。需要在容器内安装依赖时，可显式改为 `bridge`。`read_file`、`write_file` 和 `apply_patch` 仍在宿主侧通过 `WorkspaceService` 执行，以保留路径保护、快照和敏感文件拒写能力。
 
 ## 测试
 
