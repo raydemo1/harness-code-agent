@@ -85,6 +85,7 @@ class TuiApp(App):
     BINDINGS = [
         Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
         Binding("ctrl+t", "toggle_thought", "Toggle thought", show=False, priority=True),
+        Binding("ctrl+d", "toggle_details", "Details", show=False, priority=True),
         Binding("ctrl+o", "observe", "Observe", show=False, priority=True),
         Binding("ctrl+k", "compact_context", "Compact", show=False, priority=True),
         Binding("ctrl+p", "toggle_permission", "Permissions", show=False, priority=True),
@@ -344,13 +345,14 @@ class TuiApp(App):
             self._stream_header_printed = False
 
         block = self.state.apply_event(event)
-        if event_type == "assistant_message" and self._streaming_current_response:
-            block = None
+        render_block = None if event_type == "assistant_message" and self._streaming_current_response else block
 
         self.state.add_block(block)
-        if block is not None:
+        if event_type == "turn_summary":
+            self._redraw_transcript()
+        elif render_block is not None:
             transcript = self.query_one("#transcript", TranscriptView)
-            transcript.append_block(block)
+            transcript.append_block(render_block)
 
         self._refresh_bars()
 
@@ -404,17 +406,20 @@ class TuiApp(App):
             self._stream_header_printed = False
 
         block = self.state.apply_event(msg.event)
+        render_block = block
 
         # If we streamed the response, flush the buffered text as a complete block
         if event_type == "assistant_message" and self._streaming_current_response:
             transcript = self.query_one("#transcript", TranscriptView)
             transcript.flush_streaming()
-            block = None
+            render_block = None
 
         self.state.add_block(block)
-        if block is not None:
+        if event_type == "turn_summary":
+            self._redraw_transcript()
+        elif render_block is not None:
             transcript = self.query_one("#transcript", TranscriptView)
-            transcript.append_block(block)
+            transcript.append_block(render_block)
 
         self._refresh_bars()
 
@@ -501,6 +506,11 @@ class TuiApp(App):
         """Toggle thought detail visibility."""
         if self.state:
             self.state.toggle_thought_details()
+
+    def action_toggle_details(self) -> None:
+        """Toggle the most recent folded turn details."""
+        if self.state and self.state.toggle_latest_turn_details():
+            self._redraw_transcript()
 
     def action_observe(self) -> None:
         """Open the temporary observability dashboard."""
@@ -652,6 +662,18 @@ class TuiApp(App):
         self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
         self.state.snapshot.context_compact_threshold = thresholds.compact
         self.state.snapshot.context_summary_target_threshold = thresholds.summary_target
+
+    def _redraw_transcript(self) -> None:
+        try:
+            transcript = self.query_one("#transcript", TranscriptView)
+            transcript.clear()
+            transcript.show_welcome(self.state.snapshot)
+            for block in self.state.visible_blocks():
+                transcript.append_block(block)
+        except NoMatches:
+            log.debug("Transcript not found while redrawing")
+        except Exception:
+            log.warning("Error redrawing transcript", exc_info=True)
 
     def exit(self, *args, **kwargs) -> None:
         """Clean shutdown."""

@@ -91,6 +91,7 @@ _KIND_BORDER_COLORS = {
     "failure": "#bf616a",
     "approval": "#b16286",
     "plan": "#3874cb",
+    "summary": "#4caf50",
     "profile": "#3874cb",
     "file": "#d79921",
     "session": "#555555",
@@ -124,6 +125,9 @@ def block_to_rich(block: TranscriptBlock) -> Panel:
     if block.kind == "plan":
         title = f"Plan{status}"
         return Panel(Text(block.body or ""), title=title, border_style=border)
+    if block.kind == "summary":
+        title = f"Turn Summary{status}"
+        return Panel(Markdown(block.body) if block.body else Text(""), title=title, border_style=border)
     if block.kind == "profile":
         title = f"Profile{status}"
         return Panel(Text(block.body or ""), title=title, border_style=border)
@@ -163,6 +167,11 @@ class TranscriptView(RichLog):
 
     def append_block(self, block: TranscriptBlock) -> None:
         self.write(block_to_rich(block))
+
+    def redraw_blocks(self, blocks: list[TranscriptBlock]) -> None:
+        self.clear()
+        for block in blocks:
+            self.append_block(block)
 
     def begin_streaming(self) -> None:
         """Start buffering streaming text instead of writing immediately."""

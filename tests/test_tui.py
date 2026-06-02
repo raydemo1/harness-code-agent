@@ -547,6 +547,60 @@ class TuiNoiseReductionTests(unittest.TestCase):
         self.assertEqual(stored_result.payload["output"], large_output)
         self.assertNotIn(large_output, state.blocks[-1].body)
 
+    def test_turn_summary_collapses_detail_blocks(self):
+        state = self._make_state()
+        events = [
+            {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
+            {"type": "turn_started", "payload": {"turn": 1}},
+            {"type": "tool_call", "payload": {"tool": "run_bash", "args": {"command": "pytest"}}},
+            {"type": "tool_result", "payload": {"tool": "run_bash", "status": "success", "output": "ok"}},
+            {"type": "file_change", "payload": {"path": "app.py"}},
+            {"type": "assistant_message", "payload": {"turn": 1, "text": "done"}},
+            {"type": "turn_summary", "payload": {"turn": 1, "summary": "- done", "fold_details": True}},
+        ]
+
+        for event in events:
+            state.add_block(state.apply_event(event))
+
+        visible = state.visible_blocks()
+        self.assertIn(1, state.collapsed_turns)
+        self.assertTrue(any(block.kind == "summary" for block in visible))
+        self.assertTrue(any(block.kind == "user" for block in visible))
+        self.assertTrue(any(block.kind == "assistant" for block in visible))
+        self.assertFalse(any(block.kind == "tool" for block in visible))
+        self.assertFalse(any(block.kind == "file" for block in visible))
+
+    def test_toggle_latest_turn_details_expands_and_recovers(self):
+        state = self._make_state()
+        for event in [
+            {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
+            {"type": "tool_result", "payload": {"tool": "run_bash", "status": "success"}},
+            {"type": "turn_summary", "payload": {"turn": 1, "summary": "- done", "fold_details": True}},
+        ]:
+            state.add_block(state.apply_event(event))
+
+        self.assertFalse(any(block.kind == "tool" for block in state.visible_blocks()))
+        self.assertTrue(state.toggle_latest_turn_details())
+        self.assertTrue(any(block.kind == "tool" for block in state.visible_blocks()))
+        self.assertTrue(state.toggle_latest_turn_details())
+        self.assertFalse(any(block.kind == "tool" for block in state.visible_blocks()))
+
+    def test_failure_and_approval_remain_visible_when_turn_is_collapsed(self):
+        state = self._make_state()
+        for event in [
+            {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
+            {"type": "failure", "payload": {"category": "runtime_error", "message": "failed"}},
+            {"type": "approval_requested", "payload": {"tool": "run_bash", "risk": "shell_risky"}},
+            {"type": "agent_fallback", "payload": {"reason": "max_iterations"}},
+            {"type": "turn_summary", "payload": {"turn": 1, "summary": "- blocked", "fold_details": True}},
+        ]:
+            state.add_block(state.apply_event(event))
+
+        visible_kinds = [block.kind for block in state.visible_blocks()]
+        self.assertIn("failure", visible_kinds)
+        self.assertIn("approval", visible_kinds)
+        self.assertIn("summary", visible_kinds)
+
 
 class TuiThoughtTests(unittest.TestCase):
     """Thought hiding tests."""

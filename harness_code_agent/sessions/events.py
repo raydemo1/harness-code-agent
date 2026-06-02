@@ -225,6 +225,37 @@ class TaskOutcomeEvent:
 
 
 @dataclass(frozen=True)
+class TurnSummaryEvent:
+    turn: int
+    summary: str
+    duration_seconds: float
+    tool_counts: dict[str, int] | None = None
+    changed_files: list[str] | None = None
+    checkpoint: str = ""
+    generated_by: dict[str, Any] | None = None
+    long_task: bool = True
+    fold_details: bool = True
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "turn_summary",
+            {
+                "turn": self.turn,
+                "summary": self.summary,
+                "long_task": self.long_task,
+                "fold_details": self.fold_details,
+                "duration_seconds": self.duration_seconds,
+                "tool_counts": dict(self.tool_counts or {}),
+                "changed_files": list(self.changed_files or []),
+                "checkpoint": self.checkpoint,
+                "generated_by": dict(self.generated_by or {}),
+            },
+            self.agent,
+        )
+
+
+@dataclass(frozen=True)
 class AgentBudgetWarningEvent:
     limit_type: str
     used: int

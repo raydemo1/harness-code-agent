@@ -226,6 +226,50 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_turn_summary_emits_only_for_tui_event_listener(self):
+        class ToolingConversation(FakeConversation):
+            def submit(self, task, cancellation_token=None):
+                self.submissions.append(task)
+                self._event_bus.emit_event(ToolResultEvent(tool="read_file", status="success").to_event())
+                self._event_bus.emit_event(ToolResultEvent(tool="read_file", status="success").to_event())
+                self._event_bus.emit_event(ToolResultEvent(tool="read_file", status="success").to_event())
+                return self.response_text
+
+        def fake_summary(*args, **kwargs):
+            return SimpleNamespace(
+                summary="- summarized",
+                tool_counts={"read_file": 3},
+                changed_files=[],
+                generated_by={"intensity": "fast", "model": "custom-fast"},
+            )
+
+        events = []
+        with (
+            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=ToolingConversation()),
+            patch("harness_code_agent.core.interactive.generate_turn_summary", side_effect=fake_summary),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, event_listener=events.append)
+            try:
+                session.submit("fix with tools")
+                event_types = [event.type for event in session.event_bus.events]
+                self.assertIn("turn_summary", event_types)
+                turn_summary = [event for event in session.event_bus.events if event.type == "turn_summary"][0]
+                self.assertEqual(turn_summary.payload["generated_by"]["intensity"], "fast")
+            finally:
+                session.close()
+
+        with (
+            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=ToolingConversation()),
+            patch("harness_code_agent.core.interactive.generate_turn_summary", side_effect=fake_summary),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir)
+            try:
+                session.submit("fix with tools")
+                event_types = [event.type for event in session.event_bus.events]
+                self.assertNotIn("turn_summary", event_types)
+            finally:
+                session.close()
+
     def test_cancelled_submit_does_not_emit_assistant_message_event(self):
         from harness_code_agent.agent.cancellation import CancelledError
 

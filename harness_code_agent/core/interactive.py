@@ -22,10 +22,11 @@ from ..runtime.permission_middleware import PermissionMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.questions import ConsoleQuestionProvider, QuestionProvider
 from ..runtime.tool_context import ToolContext
-from ..sessions.events import AssistantMessageEvent, FinalReportEvent, SessionFinishedEvent, UserInputEvent
+from ..sessions.events import AssistantMessageEvent, FinalReportEvent, SessionFinishedEvent, TurnSummaryEvent, UserInputEvent
 from ..sessions.report import build_final_report
 from ..sessions.summary import load_session_summary
 from ..sessions.store import Session, SessionStore
+from ..sessions.turn_summary import generate_turn_summary, should_summarize_turn
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
 from ..workspace.shell_session import docker_cli_path, docker_info_check, docker_shell_hint, sandbox_mode, windows_shell_hint, windows_shell_path
@@ -356,6 +357,7 @@ class InteractiveSession:
         return created
 
     def _submit_to_current_agent(self, user_prompt: str, cancellation_token=None) -> TurnResult:
+        turn_started_at = time.time()
         baseline_dirty = git_dirty_paths(self.cwd)
         baseline_staged = git_staged_paths(self.cwd)
         resolved = resolve_mentions(
@@ -381,6 +383,7 @@ class InteractiveSession:
                 "mentions": [item.raw for item in resolved],
             },
         )
+        turn_event_start = len(getattr(self.event_bus, "events", []))
         text = self.conversation.submit(task, cancellation_token=cancellation_token)
         if cancellation_token is not None and cancellation_token.is_cancelled:
             from ..agent.cancellation import CancelledError
@@ -399,6 +402,13 @@ class InteractiveSession:
             baseline_dirty=baseline_dirty,
             baseline_staged=baseline_staged,
         )
+        self._maybe_emit_turn_summary(
+            user_prompt=user_prompt,
+            assistant_text=text,
+            checkpoint=checkpoint,
+            turn_event_start=turn_event_start,
+            duration_seconds=time.time() - turn_started_at,
+        )
         self.event_bus.emit(
             "turn_finished",
             agent="main_agent",
@@ -408,6 +418,45 @@ class InteractiveSession:
             },
         )
         return TurnResult(text=text, checkpoint=checkpoint, notice=notice, streamed=streamed)
+
+    def _maybe_emit_turn_summary(
+        self,
+        *,
+        user_prompt: str,
+        assistant_text: str,
+        checkpoint: str,
+        turn_event_start: int,
+        duration_seconds: float,
+    ) -> None:
+        if self.event_bus is None or self.event_listener is None:
+            return
+        events = [
+            event.to_dict() if hasattr(event, "to_dict") else dict(event)
+            for event in getattr(self.event_bus, "events", [])[turn_event_start:]
+        ]
+        if not should_summarize_turn(
+            events,
+            profile_name=self.profile.name(),
+            duration_seconds=duration_seconds,
+        ):
+            return
+        summary = generate_turn_summary(
+            events,
+            user_prompt=user_prompt,
+            assistant_text=assistant_text,
+            checkpoint=checkpoint,
+        )
+        self.event_bus.emit_event(
+            TurnSummaryEvent(
+                turn=self.turn_count,
+                summary=summary.summary,
+                duration_seconds=duration_seconds,
+                tool_counts=summary.tool_counts,
+                changed_files=summary.changed_files,
+                checkpoint=checkpoint,
+                generated_by=summary.generated_by,
+            ).to_event()
+        )
 
     def interrupt_current_shell(self) -> bool:
         """Best-effort interrupt for a shell command owned by the active conversation."""

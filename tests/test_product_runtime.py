@@ -514,6 +514,106 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", completions.calls[0])
         self.assertEqual(completions.calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
 
+    def test_turn_summary_event_serializes_payload(self):
+        from harness_code_agent.sessions.events import TurnSummaryEvent
+
+        event = TurnSummaryEvent(
+            turn=2,
+            summary="- changed app.py",
+            duration_seconds=12.5,
+            tool_counts={"read_file": 1},
+            changed_files=["app.py"],
+            checkpoint="checkpoint created: abc",
+            generated_by={"intensity": "fast", "model": "custom-fast"},
+        ).to_event()
+
+        self.assertEqual(event.type, "turn_summary")
+        self.assertTrue(event.payload["long_task"])
+        self.assertTrue(event.payload["fold_details"])
+        self.assertEqual(event.payload["turn"], 2)
+        self.assertEqual(event.payload["tool_counts"], {"read_file": 1})
+        self.assertEqual(event.payload["changed_files"], ["app.py"])
+        self.assertEqual(event.payload["generated_by"]["intensity"], "fast")
+
+    def test_turn_summary_long_task_detection_rules(self):
+        from harness_code_agent.sessions.turn_summary import should_summarize_turn
+
+        simple = [{"type": "assistant_message", "payload": {"text": "hello"}}]
+        three_tools = [
+            {"type": "tool_result", "payload": {"tool": "read_file"}},
+            {"type": "tool_result", "payload": {"tool": "read_file"}},
+            {"type": "tool_result", "payload": {"tool": "read_file"}},
+        ]
+        final_plan_update = [{
+            "type": "tool_result",
+            "payload": {
+                "tool": "update_plan_state",
+                "metadata": {"planning_state": {"update_kind": "final"}},
+            },
+        }]
+
+        self.assertFalse(should_summarize_turn(simple, profile_name="coding-agent", duration_seconds=1))
+        self.assertFalse(should_summarize_turn(three_tools, profile_name="plan", duration_seconds=1))
+        self.assertTrue(should_summarize_turn(three_tools, profile_name="coding-agent", duration_seconds=1))
+        self.assertTrue(should_summarize_turn([{"type": "file_change", "payload": {"path": "app.py"}}], profile_name="coding-agent", duration_seconds=1))
+        self.assertTrue(should_summarize_turn([{"type": "tool_result", "payload": {"tool": "run_bash"}}], profile_name="coding-agent", duration_seconds=1))
+        self.assertTrue(should_summarize_turn([{"type": "agent_fallback", "payload": {"reason": "max_iterations"}}], profile_name="coding-agent", duration_seconds=1))
+        self.assertTrue(should_summarize_turn(simple, profile_name="coding-agent", duration_seconds=45))
+        self.assertTrue(should_summarize_turn(final_plan_update, profile_name="coding-agent", duration_seconds=1))
+
+    def test_generate_turn_summary_uses_configured_fast_profile(self):
+        from harness_code_agent.sessions import turn_summary
+        from harness_code_agent import config
+
+        calls = []
+
+        def fake_create(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="- summary from fast"))]
+            )
+
+        profile = config.ModelProfile(
+            provider="deepseek",
+            model="custom-fast",
+            thinking=False,
+            reasoning_effort=None,
+        )
+        with patch.object(turn_summary.config, "resolve_model_profile", return_value=profile):
+            result = turn_summary.generate_turn_summary(
+                [{"type": "tool_result", "payload": {"tool": "read_file"}}],
+                user_prompt="fix",
+                assistant_text="done",
+                checkpoint="",
+                llm_create=fake_create,
+            )
+
+        self.assertEqual(result.summary, "- summary from fast")
+        self.assertEqual(result.generated_by["model"], "custom-fast")
+        self.assertEqual(calls[0]["model"], "custom-fast")
+        self.assertEqual(calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_generate_turn_summary_falls_back_when_llm_fails(self):
+        from harness_code_agent.sessions import turn_summary
+
+        def broken_create(**kwargs):
+            raise RuntimeError("nope")
+
+        result = turn_summary.generate_turn_summary(
+            [
+                {"type": "tool_result", "payload": {"tool": "write_file"}},
+                {"type": "file_change", "payload": {"path": "app.py"}},
+            ],
+            user_prompt="fix app",
+            assistant_text="updated app.py",
+            checkpoint="checkpoint created: abc",
+            llm_create=broken_create,
+        )
+
+        self.assertIn("fix app", result.summary)
+        self.assertIn("app.py", result.summary)
+        self.assertEqual(result.tool_counts, {"write_file": 1})
+
     def test_openai_provider_accepts_prompt_cache_key_and_stream_usage_options(self):
         from harness_code_agent.agent.providers import ProviderAdapter
 

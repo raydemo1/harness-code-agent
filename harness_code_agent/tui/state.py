@@ -33,6 +33,8 @@ class TranscriptBlock:
     title: str
     body: str = ""
     status: str = ""
+    turn: int | None = None
+    detail: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,9 +62,32 @@ class TuiState:
     pending_approval: dict[str, Any] | None = None
     _pending_tools: dict[str, float] = field(default_factory=dict)
     show_thought_details: bool = False
+    collapsed_turns: set[int] = field(default_factory=set)
+    _latest_collapsed_turn: int | None = None
 
     def toggle_thought_details(self) -> None:
         self.show_thought_details = not self.show_thought_details
+
+    def toggle_latest_turn_details(self) -> bool:
+        if self._latest_collapsed_turn is None:
+            return False
+        turn = self._latest_collapsed_turn
+        if turn in self.collapsed_turns:
+            self.collapsed_turns.remove(turn)
+        else:
+            self.collapsed_turns.add(turn)
+        return True
+
+    def visible_blocks(self) -> list[TranscriptBlock]:
+        return [
+            block
+            for block in self.blocks
+            if not (
+                block.detail
+                and block.turn is not None
+                and block.turn in self.collapsed_turns
+            )
+        ]
 
     def append_streaming_text(self, text: str) -> None:
         """Append streaming text to the last block's body."""
@@ -82,21 +107,22 @@ class TuiState:
             return TranscriptBlock("session", "session started", _payload_summary(payload), "success")
         if event_type == "user_input":
             self.snapshot.turn = int(payload.get("turn") or self.snapshot.turn)
-            return TranscriptBlock("user", f"user turn {self.snapshot.turn}", str(payload.get("text", "")))
+            return TranscriptBlock("user", f"user turn {self.snapshot.turn}", str(payload.get("text", "")), turn=self.snapshot.turn)
         if event_type == "turn_started":
             self.snapshot.status = "running"
             self.snapshot.turn = int(payload.get("turn") or self.snapshot.turn)
-            return TranscriptBlock("status", f"turn {self.snapshot.turn} started", _payload_summary(payload))
+            return TranscriptBlock("status", f"turn {self.snapshot.turn} started", _payload_summary(payload), turn=self.snapshot.turn, detail=True)
         if event_type == "assistant_message":
             self.snapshot.status = "idle"
-            return TranscriptBlock("assistant", "assistant", str(payload.get("text", "")))
+            turn = _payload_turn(payload, self.snapshot.turn)
+            return TranscriptBlock("assistant", "assistant", str(payload.get("text", "")), turn=turn)
         if event_type == "tool_call":
             tool = str(payload.get("tool", "tool"))
             self.snapshot.running_tool = tool
             self.snapshot.status = "tool"
             self._pending_tools[tool] = time.time()
             args_summary = _summarize_tool_args(payload.get("args"))
-            return TranscriptBlock("tool", f"{tool}({args_summary})", "", "running")
+            return TranscriptBlock("tool", f"{tool}({args_summary})", "", "running", turn=self.snapshot.turn, detail=True)
         if event_type == "tool_result":
             tool = str(payload.get("tool", "tool"))
             if self.snapshot.running_tool == tool:
@@ -131,27 +157,27 @@ class TuiState:
             body = "  ".join(parts)
             if summary.error_summary:
                 body += f"\n{summary.error_summary}"
-            return TranscriptBlock("tool", tool, body, status)
+            return TranscriptBlock("tool", tool, body, status, turn=self.snapshot.turn, detail=True)
         if event_type == "file_change":
             self.snapshot.dirty_count += 1
-            return TranscriptBlock("file", "file changed", _payload_summary(payload), "changed")
+            return TranscriptBlock("file", "file changed", _payload_summary(payload), "changed", turn=self.snapshot.turn, detail=True)
         if event_type == "failure":
             self.snapshot.status = "needs attention"
-            return TranscriptBlock("failure", "failure", _payload_summary(payload), "failed")
+            return TranscriptBlock("failure", "failure", _payload_summary(payload), "failed", turn=self.snapshot.turn, detail=False)
         if event_type == "agent_budget_warning":
             self.snapshot.status = "needs attention"
-            return TranscriptBlock("status", "agent budget warning", _payload_summary(payload), "warning")
+            return TranscriptBlock("status", "agent budget warning", _payload_summary(payload), "warning", turn=self.snapshot.turn, detail=False)
         if event_type == "agent_fallback":
             self.snapshot.status = "blocked"
             self.snapshot.running_tool = ""
-            return TranscriptBlock("failure", "agent fallback", _payload_summary(payload), "blocked")
+            return TranscriptBlock("failure", "agent fallback", _payload_summary(payload), "blocked", turn=self.snapshot.turn, detail=False)
         if event_type == "approval_requested":
             self.pending_approval = payload
-            return TranscriptBlock("approval", "approval requested", _approval_summary(payload), "pending")
+            return TranscriptBlock("approval", "approval requested", _approval_summary(payload), "pending", turn=self.snapshot.turn, detail=False)
         if event_type == "approval_decided":
             self.pending_approval = None
             status = "approved" if payload.get("approved") else "denied"
-            return TranscriptBlock("approval", f"approval {status}", _payload_summary(payload), status)
+            return TranscriptBlock("approval", f"approval {status}", _payload_summary(payload), status, turn=self.snapshot.turn, detail=False)
         if event_type == "profile_switched":
             self.snapshot.profile = str(payload.get("profile") or self.snapshot.profile)
             self.snapshot.pending_plan = False
@@ -186,17 +212,28 @@ class TuiState:
             }
             label = labels.get(phase, "context compaction started")
             self.snapshot.status = label
-            return TranscriptBlock("status", label, _payload_summary(payload), "running")
+            return TranscriptBlock("status", label, _payload_summary(payload), "running", turn=self.snapshot.turn, detail=True)
         if event_type == "context_compaction_committed":
             self.snapshot.status = "idle"
             tokens_saved = payload.get("tokens_saved", 0)
             body = f"tokens saved: {tokens_saved}" if tokens_saved else _payload_summary(payload)
-            return TranscriptBlock("status", "context compacted", body, "success")
+            return TranscriptBlock("status", "context compacted", body, "success", turn=self.snapshot.turn, detail=True)
+        if event_type == "turn_summary":
+            turn = _payload_turn(payload, self.snapshot.turn)
+            self.snapshot.status = "idle"
+            if payload.get("fold_details", True):
+                self.collapsed_turns.add(turn)
+                self._latest_collapsed_turn = turn
+            summary = str(payload.get("summary") or "")
+            if payload.get("fold_details", True):
+                summary = summary.rstrip() + "\n\n[Ctrl+D toggles details]"
+            return TranscriptBlock("summary", f"turn {turn} summary", summary, "collapsed" if turn in self.collapsed_turns else "", turn=turn)
         if event_type == "turn_finished":
             self.snapshot.status = "idle"
             self.snapshot.running_tool = ""
             self.snapshot.checkpoint = str(payload.get("checkpoint") or "")
-            return TranscriptBlock("status", f"turn {payload.get('turn', self.snapshot.turn)} finished", self.snapshot.checkpoint)
+            turn = _payload_turn(payload, self.snapshot.turn)
+            return TranscriptBlock("status", f"turn {turn} finished", self.snapshot.checkpoint, turn=turn, detail=True)
         if event_type == "session_finished":
             self.snapshot.status = str(payload.get("status") or "closed")
             return TranscriptBlock("session", "session finished", _payload_summary(payload))
@@ -215,7 +252,7 @@ class TuiState:
                 if truncated:
                     parts.append("truncated: yes")
                 body = "  ·  ".join(parts)
-            return TranscriptBlock("thought", "thinking", body, "thought")
+            return TranscriptBlock("thought", "thinking", body, "thought", turn=self.snapshot.turn, detail=True)
         return None
 
     def add_block(self, block: TranscriptBlock | None) -> None:
@@ -266,6 +303,13 @@ def _payload_summary(payload: dict[str, Any]) -> str:
             text = text[:157] + "..."
         parts.append(f"{key}={text}")
     return ", ".join(parts)
+
+
+def _payload_turn(payload: dict[str, Any], default: int) -> int:
+    try:
+        return int(payload.get("turn") or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _approval_summary(payload: dict[str, Any]) -> str:
