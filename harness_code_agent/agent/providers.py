@@ -88,7 +88,8 @@ class ProviderAdapter:
     def chat_kwargs(
         self,
         *,
-        model: str,
+        model: str | None = None,
+        profile: config.ModelProfile | None = None,
         messages: list[dict],
         max_tokens: int,
         tools: list[dict] | None = None,
@@ -97,6 +98,10 @@ class ProviderAdapter:
         prompt_cache_key: str | None = None,
         stream_options: dict | None = None,
     ) -> dict:
+        if profile is not None:
+            model = profile.model
+        if model is None:
+            raise ValueError("model or profile is required")
         kwargs = {
             "model": model,
             "messages": messages,
@@ -112,6 +117,12 @@ class ProviderAdapter:
             kwargs["prompt_cache_key"] = prompt_cache_key
         if stream_options:
             kwargs["stream_options"] = stream_options
+        if profile is not None:
+            if profile.reasoning_effort and self.supports_reasoning_effort:
+                kwargs["reasoning_effort"] = profile.reasoning_effort
+            if self.name == "deepseek" and profile.thinking is not None:
+                thinking_type = "enabled" if profile.thinking else "disabled"
+                kwargs["extra_body"] = {"thinking": {"type": thinking_type}}
         return kwargs
 
     def assistant_message_from_response(self, msg) -> dict:
@@ -220,6 +231,10 @@ class ProviderAdapter:
     def supports_prompt_cache_key(self) -> bool:
         return self.name == "openai"
 
+    @property
+    def supports_reasoning_effort(self) -> bool:
+        return self.name in {"deepseek", "openai"}
+
 
 def _check_cancelled(cancellation_token) -> None:
     if cancellation_token is not None and getattr(cancellation_token, "is_cancelled", False):
@@ -244,5 +259,4 @@ def _reasoning_content_from(value) -> str | None:
     if reasoning_content is None:
         reasoning_content = _get(_get(value, "model_extra") or {}, "reasoning_content")
     return reasoning_content
-
 

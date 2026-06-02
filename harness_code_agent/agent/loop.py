@@ -110,13 +110,15 @@ def llm_call_simple(messages: list[dict]) -> str:
     """Simple LLM call without tools — used for summarization.
     Retries on rate limits to avoid crashing the agent during context compaction."""
     import random
+    profile = config.resolve_model_profile("fast")
+    adapter = ProviderAdapter(profile.provider)
     for attempt in range(4):
         try:
-            resp = get_client().chat.completions.create(
-                model=config.MODEL,
+            resp = get_client().chat.completions.create(**adapter.chat_kwargs(
+                profile=profile,
                 messages=messages,
                 max_tokens=10000,
-            )
+            ))
             return resp.choices[0].message.content or ""
         except Exception as e:
             err_str = str(e)
@@ -852,8 +854,9 @@ class AgentConversation:
 
             # --- Build prompt and LLM call ---
             prompt_messages = self._build_prompt()
+            profile = config.resolve_model_profile(config.MODEL_INTENSITY)
             chat_args = {
-                "model": config.MODEL,
+                "profile": profile,
                 "messages": prompt_messages,
                 "max_tokens": 32768,
             }

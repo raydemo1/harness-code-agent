@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
-from ..agent.providers import get_client
+from ..agent.providers import ProviderAdapter, get_client
 from . import list_profiles
 
 
@@ -89,11 +89,13 @@ def _call_router_llm(*, user_prompt: str, workspace: Path, profiles: list[dict[s
             ),
         },
     ]
-    response = get_client().chat.completions.create(
-        model=config.MODEL,
+    profile = config.resolve_model_profile("fast")
+    adapter = ProviderAdapter(profile.provider)
+    response = get_client().chat.completions.create(**adapter.chat_kwargs(
+        profile=profile,
         messages=messages,
         max_tokens=512,
-    )
+    ))
     return response.choices[0].message.content or ""
 
 

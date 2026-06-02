@@ -6,6 +6,7 @@ Setup:
   cp .env.template .env   # then fill in your real values
 """
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,9 +35,104 @@ _load_dotenv()
 # --- API ---
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
+BASE_MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
 PROVIDER = os.environ.get("HARNESS_PROVIDER", "auto")
 STREAM = os.environ.get("HARNESS_STREAM", "auto")
+
+MODEL_INTENSITIES = ("fast", "normal", "hard", "max")
+MODEL_OVERRIDES = {
+    intensity: os.environ.get(f"HARNESS_MODEL_{intensity.upper()}")
+    for intensity in MODEL_INTENSITIES
+}
+
+
+@dataclass(frozen=True)
+class ModelProfile:
+    provider: str
+    model: str
+    thinking: bool | None = None
+    reasoning_effort: str | None = None
+
+
+def _normalize_model_intensity(value: str | None) -> str:
+    intensity = (value or "hard").strip().lower()
+    if intensity not in MODEL_INTENSITIES:
+        allowed = ", ".join(MODEL_INTENSITIES)
+        raise ValueError(f"Unsupported HARNESS_MODEL_INTENSITY: {value!r}; expected one of: {allowed}")
+    return intensity
+
+
+def _resolve_provider_name(*, provider: str | None, base_url: str | None, model: str | None) -> str:
+    requested = (provider or "auto").strip().lower()
+    if requested in {"openai-compatible", "compatible"}:
+        return "openai-compatible"
+    if requested in {"openai", "deepseek"}:
+        return requested
+    if requested != "auto":
+        raise ValueError(f"Unsupported HARNESS_PROVIDER: {provider}")
+
+    signature = f"{base_url or ''} {model or ''}".lower()
+    if "deepseek" in signature:
+        return "deepseek"
+    if "api.openai.com" in (base_url or "").lower():
+        return "openai"
+    return "openai-compatible"
+
+
+def _model_override_for_intensity(intensity: str) -> str | None:
+    return MODEL_OVERRIDES.get(intensity)
+
+
+def _default_model_profile(provider: str, intensity: str) -> ModelProfile:
+    if provider == "deepseek":
+        defaults = {
+            "fast": ModelProfile(provider=provider, model="deepseek-v4-flash", thinking=False),
+            "normal": ModelProfile(
+                provider=provider,
+                model="deepseek-v4-flash",
+                thinking=True,
+                reasoning_effort="high",
+            ),
+            "hard": ModelProfile(
+                provider=provider,
+                model="deepseek-v4-pro",
+                thinking=True,
+                reasoning_effort="high",
+            ),
+            "max": ModelProfile(
+                provider=provider,
+                model="deepseek-v4-pro",
+                thinking=True,
+                reasoning_effort="max",
+            ),
+        }
+        return defaults[intensity]
+    return ModelProfile(provider=provider, model=BASE_MODEL)
+
+
+def resolve_model_profile(intensity: str) -> ModelProfile:
+    normalized = _normalize_model_intensity(intensity)
+    override_model = _model_override_for_intensity(normalized)
+    provider = _resolve_provider_name(
+        provider=PROVIDER,
+        base_url=BASE_URL,
+        model=override_model or BASE_MODEL,
+    )
+    profile = _default_model_profile(provider, normalized)
+    if override_model:
+        profile = ModelProfile(
+            provider=profile.provider,
+            model=override_model,
+            thinking=profile.thinking,
+            reasoning_effort=profile.reasoning_effort,
+        )
+    return profile
+
+
+MODEL_INTENSITY = _normalize_model_intensity(os.environ.get("HARNESS_MODEL_INTENSITY", "hard"))
+MODEL_PROFILES = {intensity: resolve_model_profile(intensity) for intensity in MODEL_INTENSITIES}
+MODEL_PROFILE = MODEL_PROFILES[MODEL_INTENSITY]
+MODEL = MODEL_PROFILE.model
 
 # --- Token budgets ---
 CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKENS", "200000"))

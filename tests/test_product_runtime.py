@@ -1,4 +1,6 @@
 import json
+import importlib
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -9,6 +11,56 @@ from unittest.mock import patch
 
 
 class ProductRuntimeTests(unittest.TestCase):
+    def test_deepseek_model_profiles_use_intensity_defaults(self):
+        from harness_code_agent import config
+
+        try:
+            with (
+                patch.dict(os.environ, {
+                    "OPENAI_BASE_URL": "https://api.deepseek.com",
+                    "HARNESS_MODEL_INTENSITY": "hard",
+                }, clear=True),
+                patch("pathlib.Path.exists", return_value=False),
+            ):
+                importlib.reload(config)
+
+            fast = config.resolve_model_profile("fast")
+            normal = config.resolve_model_profile("normal")
+            hard = config.resolve_model_profile("hard")
+            max_profile = config.resolve_model_profile("max")
+
+            self.assertEqual(config.MODEL, "deepseek-v4-pro")
+            self.assertEqual(config.MODEL_INTENSITY, "hard")
+            self.assertEqual((fast.model, fast.thinking, fast.reasoning_effort), ("deepseek-v4-flash", False, None))
+            self.assertEqual((normal.model, normal.thinking, normal.reasoning_effort), ("deepseek-v4-flash", True, "high"))
+            self.assertEqual((hard.model, hard.thinking, hard.reasoning_effort), ("deepseek-v4-pro", True, "high"))
+            self.assertEqual((max_profile.model, max_profile.thinking, max_profile.reasoning_effort), ("deepseek-v4-pro", True, "max"))
+        finally:
+            importlib.reload(config)
+
+    def test_model_intensity_and_profile_model_overrides(self):
+        from harness_code_agent import config
+
+        try:
+            with (
+                patch.dict(os.environ, {
+                    "OPENAI_BASE_URL": "https://api.deepseek.com",
+                    "HARNESS_MODEL_INTENSITY": "max",
+                    "HARNESS_MODEL_FAST": "custom-fast",
+                    "HARNESS_MODEL_MAX": "custom-max",
+                }, clear=True),
+                patch("pathlib.Path.exists", return_value=False),
+            ):
+                importlib.reload(config)
+
+            self.assertEqual(config.MODEL_INTENSITY, "max")
+            self.assertEqual(config.MODEL, "custom-max")
+            self.assertEqual(config.resolve_model_profile("fast").model, "custom-fast")
+            self.assertEqual(config.resolve_model_profile("max").model, "custom-max")
+            self.assertEqual(config.resolve_model_profile("max").reasoning_effort, "max")
+        finally:
+            importlib.reload(config)
+
     def test_deepseek_reasoning_content_round_trips_on_tool_call_assistant_message(self):
         from harness_code_agent.agent.loop import _assistant_message_from_response
 
@@ -330,8 +382,9 @@ class ProductRuntimeTests(unittest.TestCase):
                 return self.delegate.supports_prompt_cache_key
 
             def chat_kwargs(self, **kwargs):
-                self.calls.append(kwargs)
-                return self.delegate.chat_kwargs(**kwargs)
+                chat_kwargs = self.delegate.chat_kwargs(**kwargs)
+                self.calls.append(chat_kwargs)
+                return chat_kwargs
 
             def assistant_message_from_response(self, msg):
                 return self.delegate.assistant_message_from_response(msg)
@@ -353,6 +406,114 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(provider.calls[0]["tools"], schema)
         self.assertEqual(provider.calls[0]["tool_choice"], "auto")
 
+    def test_agent_loop_uses_configured_model_intensity_profile(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.agent.providers import ProviderAdapter
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="done", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        class CapturingProvider:
+            def __init__(self):
+                self.calls = []
+                self.delegate = ProviderAdapter("deepseek")
+
+            @property
+            def supports_prompt_cache_key(self):
+                return self.delegate.supports_prompt_cache_key
+
+            def chat_kwargs(self, **kwargs):
+                chat_kwargs = self.delegate.chat_kwargs(**kwargs)
+                self.calls.append(chat_kwargs)
+                return chat_kwargs
+
+            def assistant_message_from_response(self, msg):
+                return self.delegate.assistant_message_from_response(msg)
+
+        provider = CapturingProvider()
+        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False))
+        conversation.provider = provider
+
+        with (
+            patch("harness_code_agent.agent.loop.config.BASE_URL", "https://api.deepseek.com"),
+            patch("harness_code_agent.agent.loop.config.MODEL_INTENSITY", "hard"),
+            patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+        ):
+            conversation.run_until_idle()
+
+        self.assertEqual(provider.calls[0]["model"], "deepseek-v4-pro")
+        self.assertEqual(provider.calls[0]["reasoning_effort"], "high")
+        self.assertEqual(provider.calls[0]["extra_body"], {"thinking": {"type": "enabled"}})
+
+    def test_llm_call_simple_uses_fast_profile(self):
+        from harness_code_agent.agent import loop
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))]
+                )
+
+        completions = FakeCompletions()
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with (
+            patch("harness_code_agent.agent.loop.get_client", return_value=fake_client),
+            patch.object(loop.config, "BASE_URL", "https://api.deepseek.com"),
+        ):
+            result = loop.llm_call_simple([{"role": "user", "content": "summarize"}])
+
+        self.assertEqual(result, "summary")
+        self.assertEqual(completions.calls[0]["model"], "deepseek-v4-flash")
+        self.assertNotIn("reasoning_effort", completions.calls[0])
+        self.assertEqual(completions.calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_profile_router_uses_fast_profile(self):
+        from harness_code_agent.profiles import router
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content='{"profile_name":"coding-agent","confidence":0.9,"reason":"coding"}'))]
+                )
+
+        completions = FakeCompletions()
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch("harness_code_agent.profiles.router.get_client", return_value=fake_client),
+                patch.object(router.config, "BASE_URL", "https://api.deepseek.com"),
+            ):
+                decision = router.route_profile_for_task("fix tests", workspace=Path(tmpdir))
+
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertEqual(completions.calls[0]["model"], "deepseek-v4-flash")
+        self.assertNotIn("reasoning_effort", completions.calls[0])
+        self.assertEqual(completions.calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
+
     def test_openai_provider_accepts_prompt_cache_key_and_stream_usage_options(self):
         from harness_code_agent.agent.providers import ProviderAdapter
 
@@ -366,6 +527,37 @@ class ProductRuntimeTests(unittest.TestCase):
 
         self.assertEqual(kwargs["prompt_cache_key"], "cache-key")
         self.assertEqual(kwargs["stream_options"], {"include_usage": True})
+
+    def test_provider_adapter_maps_model_profile_kwargs(self):
+        from harness_code_agent import config
+        from harness_code_agent.agent.providers import ProviderAdapter
+
+        deepseek = ProviderAdapter("deepseek").chat_kwargs(
+            profile=config.ModelProfile(
+                provider="deepseek",
+                model="deepseek-v4-pro",
+                thinking=True,
+                reasoning_effort="high",
+            ),
+            messages=[],
+            max_tokens=10,
+        )
+        openai = ProviderAdapter("openai").chat_kwargs(
+            profile=config.ModelProfile(
+                provider="openai",
+                model="gpt-4o",
+                thinking=True,
+                reasoning_effort="high",
+            ),
+            messages=[],
+            max_tokens=10,
+        )
+
+        self.assertEqual(deepseek["model"], "deepseek-v4-pro")
+        self.assertEqual(deepseek["reasoning_effort"], "high")
+        self.assertEqual(deepseek["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertEqual(openai["reasoning_effort"], "high")
+        self.assertNotIn("extra_body", openai)
 
     def test_agent_loop_uses_prompt_cache_key_only_for_openai_provider(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation

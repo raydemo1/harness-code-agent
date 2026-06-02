@@ -89,6 +89,11 @@ Copy-Item .env.template .env
 OPENAI_API_KEY=sk-your-deepseek-key-here
 OPENAI_BASE_URL=https://api.deepseek.com
 HARNESS_MODEL=deepseek-v4-flash
+HARNESS_MODEL_INTENSITY=hard
+# HARNESS_MODEL_FAST=deepseek-v4-flash
+# HARNESS_MODEL_NORMAL=deepseek-v4-flash
+# HARNESS_MODEL_HARD=deepseek-v4-pro
+# HARNESS_MODEL_MAX=deepseek-v4-pro
 ```
 
 ## 快速开始
@@ -281,7 +286,12 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 | --- | --- | --- |
 | `OPENAI_API_KEY` | 空 | API key，必填 |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API 地址 |
-| `HARNESS_MODEL` | `gpt-4o` | 使用的模型名 |
+| `HARNESS_MODEL` | `gpt-4o` | 全局兜底模型名；非 DeepSeek provider 和自定义档位默认使用它 |
+| `HARNESS_MODEL_INTENSITY` | `hard` | 主 agent 默认任务强度：`fast` / `normal` / `hard` / `max` |
+| `HARNESS_MODEL_FAST` | provider 默认 | 覆盖 `fast` 档模型；router 和 summary 固定使用该档 |
+| `HARNESS_MODEL_NORMAL` | provider 默认 | 覆盖 `normal` 档模型 |
+| `HARNESS_MODEL_HARD` | provider 默认 | 覆盖 `hard` 档模型；DeepSeek 默认是主 agent 档位 |
+| `HARNESS_MODEL_MAX` | provider 默认 | 覆盖 `max` 档模型 |
 | `HARNESS_PROVIDER` | `auto` | Provider adapter：`auto` / `openai` / `deepseek` / `openai-compatible` |
 | `HARNESS_STREAM` | `auto` | CLI streaming：`auto` 表示仅 TTY 实时输出，`1` 强制开启，`0` 关闭 |
 | `HARNESS_WINDOWS_SHELL` | `auto` | Windows shell 后端：`auto` / `pwsh` / `powershell` / `cmd` |
@@ -415,7 +425,7 @@ python benchmarks/run_terminal_bench.py --task fix-git --env daytona
 ## 注意事项
 
 - `.env` 不应提交到版本库，使用 `.env.template` 作为配置模板。
-- `HARNESS_MODEL` 必须是目标 provider 可识别的模型名。
+- `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名；DeepSeek 默认 `fast/normal/hard/max` 映射为 flash non-thinking、flash high、pro high、pro max，router/summary 固定使用 `fast`。
 - `app-builder` 的浏览器能力依赖 Playwright；未安装时相关工具会不可用或报错。
 - `terminal` profile 针对非交互式 CLI 任务优化，会更积极地执行 shell 命令和本地验证。
 - 默认 `workspace-write` 模式会对白名单外 shell 命令和未知工具触发批准流程；自动化 benchmark 可按需切换权限模式。

@@ -1077,6 +1077,13 @@ def format_config_show(workspace: Path) -> str:
         f"api_key: {_redact_secret(config.API_KEY)}",
         f"base_url: {config.BASE_URL}",
         f"model: {config.MODEL}",
+        f"model_intensity: {config.MODEL_INTENSITY}",
+        *[
+            f"model_profile_{intensity}: {profile.model}"
+            f" thinking={profile.thinking}"
+            f" reasoning_effort={profile.reasoning_effort or 'none'}"
+            for intensity, profile in config.MODEL_PROFILES.items()
+        ],
         f"workspace: {workspace}",
         f"permission_mode: {os.environ.get('HARNESS_PERMISSION_MODE', 'workspace-write')}",
         f"sandbox_mode: {config.SANDBOX_MODE}",

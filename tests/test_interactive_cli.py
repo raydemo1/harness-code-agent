@@ -1034,6 +1034,9 @@ class InteractiveCliTests(unittest.TestCase):
             text = format_config_show(Path(self.temp_dir))
 
         self.assertIn("docker_user: 1000:1000", text)
+        self.assertIn(f"model_intensity: {config.MODEL_INTENSITY}", text)
+        self.assertIn(f"model_profile_fast: {config.MODEL_PROFILES['fast'].model}", text)
+        self.assertIn(f"model_profile_hard: {config.MODEL_PROFILES['hard'].model}", text)
         self.assertIn(f"max_agent_total_tokens: {config.MAX_AGENT_TOTAL_TOKENS}", text)
 
     def test_readme_documents_docker_root_opt_in(self):
