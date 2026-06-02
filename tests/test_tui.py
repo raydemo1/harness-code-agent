@@ -684,21 +684,25 @@ class TuiRichRenderTests(unittest.TestCase):
         from rich.text import Text
         bar = ContextBar()
 
-        # Green below 68%
+        # Green below the warning band.
         bar.context_percent = 50
         bar.permission_mode = "workspace-write"
         text = bar.render()
         self.assertIsInstance(text, Text)
+        self.assertIn("auto-compact @90%", text.plain)
+        self.assertTrue(any("50%" in text.plain[span.start:span.end] and "#a3be8c" in str(span.style) for span in text.spans))
 
-        # Yellow 68-80%
-        bar.context_percent = 70
-        text = bar.render()
-        self.assertIn("70%", text.plain)
-
-        # Red above 82%
+        # Yellow near the single 90% auto-compact trigger.
         bar.context_percent = 85
         text = bar.render()
         self.assertIn("85%", text.plain)
+        self.assertTrue(any("85%" in text.plain[span.start:span.end] and "#ebcb8b" in str(span.style) for span in text.spans))
+
+        # Red at or above 90%.
+        bar.context_percent = 90
+        text = bar.render()
+        self.assertIn("90%", text.plain)
+        self.assertTrue(any("90%" in text.plain[span.start:span.end] and "#bf616a" in str(span.style) for span in text.spans))
 
     def test_plan_panel_renders_completed_steps_with_strike_style(self):
         panel = PlanPanel()

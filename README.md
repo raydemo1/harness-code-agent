@@ -291,8 +291,8 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 | `HARNESS_DOCKER_NETWORK` | `none` | Docker sandbox 网络：`none` / `bridge` |
 | `HARNESS_DOCKER_USER` | 空 | 空值时 POSIX 非 root 自动使用 `uid:gid`，Windows 不映射；非空值原样传递为 `--user` |
 | `HARNESS_CONTEXT_WINDOW_TOKENS` | `200000` | 上下文窗口估算值，用于推导默认压缩/重置阈值 |
-| `COMPRESS_THRESHOLD` | `150000` | 上下文压缩阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.75` |
-| `RESET_THRESHOLD` | `184000` | 上下文重置阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.92` |
+| `COMPRESS_THRESHOLD` | `180000` | 自动压缩触发阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.90` |
+| `SUMMARY_TARGET_THRESHOLD` | `150000` | 必要时摘要旧 conversation 的目标水位；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.75` |
 | `MAX_AGENT_ITERATIONS` | `60` | 单次 agent loop 最大迭代数 |
 | `MAX_AGENT_TOTAL_TOKENS` | `300000` | 单个 turn 的累计 LLM token 预算；超过后触发本地 `agent_fallback` 并停止执行新工具 |
 | `MAX_AGENT_TOOL_CALLS` | `200` | 单个 turn 最大工具调用预算；超过后阻断未执行工具并触发本地 `agent_fallback` |

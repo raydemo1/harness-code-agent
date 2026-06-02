@@ -1,14 +1,9 @@
-"""Compaction gate and manager — controls when and how context compaction happens.
-
-CompactionGate: tracks active tool calls, dirty state, message revision, coalescing.
-CompactionManager: generates async candidates, validates revision on commit, persists results.
-"""
+"""Compaction gate and summary persistence helpers."""
 from __future__ import annotations
 
 import json
 import logging
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -26,40 +21,22 @@ COALESCE_SECONDS = 30
 
 @dataclass(frozen=True)
 class CompactionThresholds:
-    observe: int    # 60% — log only
-    prepare: int    # 68% — async candidate generation
-    allow: int      # 75% — allow boundary commit / sync fallback
-    force: int      # 82% — forced synchronous compaction
-    reset: int      # 92% — reset / hard truncate fallback
-    target: int     # 50% — ideal post-compaction waterline
+    compact: int          # 90% — start lightweight auto-compaction
+    summary_target: int   # 75% — target only when summary is necessary
 
 
 def get_thresholds(context_window: int | None = None) -> CompactionThresholds:
     w = context_window or config.CONTEXT_WINDOW_TOKENS
-    allow = int(w * 0.75) if context_window is not None else config.COMPRESS_THRESHOLD
-    reset = int(w * 0.92) if context_window is not None else config.RESET_THRESHOLD
     return CompactionThresholds(
-        observe=int(w * 0.60),
-        prepare=int(w * 0.68),
-        allow=allow,
-        force=int(w * 0.82),
-        reset=reset,
-        target=int(w * 0.50),
+        compact=int(w * 0.90) if context_window is not None else config.COMPRESS_THRESHOLD,
+        summary_target=int(w * 0.75) if context_window is not None else config.SUMMARY_TARGET_THRESHOLD,
     )
 
 
 def compaction_action(token_count: int, thresholds: CompactionThresholds) -> str:
     """Determine what compaction action to take given current token usage."""
-    if token_count >= thresholds.reset:
-        return "reset"
-    if token_count >= thresholds.force:
-        return "force_sync"
-    if token_count >= thresholds.allow:
-        return "sync_compact"
-    if token_count >= thresholds.prepare:
-        return "async_prepare"
-    if token_count >= thresholds.observe:
-        return "observe"
+    if token_count >= thresholds.compact:
+        return "auto_compact"
     return "none"
 
 
@@ -105,7 +82,7 @@ class CompactionGate:
 
 
 # ---------------------------------------------------------------------------
-# CompactionManager — async candidate + revision-guarded commit
+# CompactionManager — summary candidate persistence
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -126,24 +103,17 @@ class CommitResult:
 
 
 class CompactionManager:
-    """Manages compaction candidates and persists compaction history."""
+    """Generates synchronous summary candidates and persists compaction history."""
 
     def __init__(self, compacted_dir: Path) -> None:
         self.compacted_dir = compacted_dir
         self.compacted_dir.mkdir(parents=True, exist_ok=True)
         (self.compacted_dir / "history").mkdir(parents=True, exist_ok=True)
         self._candidate: CompactionCandidate | None = None
-        self._future: Future | None = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="harness-compact")
 
     @property
     def candidate(self) -> CompactionCandidate | None:
-        self.poll_candidate()
         return self._candidate
-
-    @property
-    def has_pending_async(self) -> bool:
-        return self._future is not None and not self._future.done()
 
     def generate_candidate(
         self,
@@ -173,39 +143,6 @@ class CompactionManager:
         )
         self._candidate = candidate
         return candidate
-
-    def prepare_candidate_async(
-        self,
-        messages: list[dict],
-        *,
-        llm_call: Callable,
-        split_index: int,
-        revision: int,
-    ) -> bool:
-        """Start background candidate generation if one is not already running."""
-        self.poll_candidate()
-        if self.has_pending_async:
-            return False
-        snapshot = [dict(msg) for msg in messages]
-        self._future = self._executor.submit(
-            self.generate_candidate,
-            snapshot,
-            llm_call=llm_call,
-            split_index=split_index,
-            revision=revision,
-        )
-        return True
-
-    def poll_candidate(self) -> CompactionCandidate | None:
-        if self._future is None or not self._future.done():
-            return self._candidate
-        future = self._future
-        self._future = None
-        try:
-            self._candidate = future.result()
-        except Exception as exc:
-            log.warning("Async compaction candidate failed: %s", exc)
-        return self._candidate
 
     def commit_candidate(
         self,
@@ -292,7 +229,7 @@ class CompactionManager:
         return entries
 
     def close(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        return None
 
 
 def _messages_to_text(messages: list[dict]) -> str:

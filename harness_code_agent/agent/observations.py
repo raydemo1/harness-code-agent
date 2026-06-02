@@ -220,7 +220,7 @@ class ObservationStore:
     def detach_message_indexes(self, messages: list[dict]) -> None:
         """Drop durable message indexes after context replacement.
 
-        Compaction/reset can reorder or replace messages, so stored indexes are
+        Compaction/rebuild can reorder or replace messages, so stored indexes are
         no longer trustworthy. Any observation messages that survived in the
         new list are rewritten to historical summaries before indexes are
         cleared, preventing stale raw detail from lingering indefinitely.

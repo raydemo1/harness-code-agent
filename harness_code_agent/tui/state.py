@@ -22,10 +22,8 @@ class SessionStatusSnapshot:
     dirty_count: int = 0
     context_tokens: int = 0
     context_window_tokens: int = 0
-    context_observe_threshold: int = 0
-    context_prepare_threshold: int = 0
-    context_allow_threshold: int = 0
-    context_force_threshold: int = 0
+    context_compact_threshold: int = 0
+    context_summary_target_threshold: int = 0
     context_hint: bool = False
 
 
@@ -179,21 +177,21 @@ class TuiState:
                 "pending",
             )
         if event_type == "context_compaction_started":
-            forced = payload.get("forced", False)
-            self.snapshot.status = "compacting (forced)" if forced else "compacting"
-            label = "forced compaction started" if forced else "context compaction started"
+            phase = str(payload.get("phase") or "")
+            labels = {
+                "cleaning_older_outputs": "cleaning older outputs",
+                "summarizing_history": "summarizing history",
+                "auto_compaction_suspended": "auto-compaction suspended",
+                "rebuilding_working_context": "rebuilding working context",
+            }
+            label = labels.get(phase, "context compaction started")
+            self.snapshot.status = label
             return TranscriptBlock("status", label, _payload_summary(payload), "running")
         if event_type == "context_compaction_committed":
             self.snapshot.status = "idle"
             tokens_saved = payload.get("tokens_saved", 0)
             body = f"tokens saved: {tokens_saved}" if tokens_saved else _payload_summary(payload)
             return TranscriptBlock("status", "context compacted", body, "success")
-        if event_type == "context_compaction_failed":
-            self.snapshot.status = "compaction failed"
-            return TranscriptBlock("failure", "compaction failed", _payload_summary(payload), "failed")
-        if event_type == "context_compaction_forced":
-            self.snapshot.status = "compacting (forced)"
-            return TranscriptBlock("status", "forced compaction", _payload_summary(payload), "running")
         if event_type == "turn_finished":
             self.snapshot.status = "idle"
             self.snapshot.running_tool = ""

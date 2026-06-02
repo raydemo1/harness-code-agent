@@ -260,9 +260,9 @@ class ContextBar(Static):
         filled = int(bar_width * min(pct, 100) / 100)
         bar = "▓" * filled + "░" * (bar_width - filled)
 
-        if pct >= 82:
+        if pct >= 90:
             bar_color = "#bf616a"
-        elif pct >= 68:
+        elif pct >= 85:
             bar_color = "#ebcb8b"
         else:
             bar_color = "#a3be8c"
@@ -271,9 +271,10 @@ class ContextBar(Static):
 
         text = Text()
         text.append(f" context ", style="dim")
-        text.append(bar, style=bar_color)
+        text.append(bar, style="dim")
         text.append(f" {pct}%", style=f"bold {bar_color}")
         text.append(f" {self.token_label}", style="dim")
+        text.append(" auto-compact @90%", style="dim")
         text.append(f" │ ", style="dim")
         text.append(f"▶ {self.permission_mode}", style=perm_color)
         text.append(" │ Ctrl+K compact │ Ctrl+P perms", style="dim")

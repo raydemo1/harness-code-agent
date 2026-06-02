@@ -649,7 +649,7 @@ class InteractiveSession:
             split_index = context.choose_compaction_split_index(
                 conv.messages,
                 force=True,
-                target_tokens=get_thresholds().target,
+                target_tokens=get_thresholds().summary_target,
             )
             system_len = 1 if conv.messages and conv.messages[0].get("role") == "system" else 0
             if split_index <= system_len:
@@ -674,7 +674,7 @@ class InteractiveSession:
                 llm_call_simple,
                 role=conv.agent.name,
                 force=True,
-                target_tokens=get_thresholds().target,
+                target_tokens=get_thresholds().summary_target,
             )
         msg_count_after = len(conv.messages)
         conv.runtime_state.current_turn_start_index = max(1, len(conv.messages) - 1)
@@ -1091,7 +1091,8 @@ def format_config_show(workspace: Path) -> str:
     lines.extend([
         "checkpoint_auto: interactive default",
         f"compress_threshold: {config.COMPRESS_THRESHOLD}",
-        f"reset_threshold: {config.RESET_THRESHOLD}",
+        f"summary_target_threshold: {config.SUMMARY_TARGET_THRESHOLD}",
+        "auto_reset: disabled",
         f"max_agent_iterations: {config.MAX_AGENT_ITERATIONS}",
         f"max_agent_total_tokens: {config.MAX_AGENT_TOTAL_TOKENS}",
         f"max_agent_tool_calls: {config.MAX_AGENT_TOOL_CALLS}",

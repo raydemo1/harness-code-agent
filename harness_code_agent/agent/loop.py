@@ -226,6 +226,9 @@ class AgentRuntimeState:
     action_tool_count: int = 0
     current_turn_start_index: int = 0
     session_id: str = "default"
+    auto_compaction_turn_start_index: int = -1
+    auto_compaction_suspended: bool = False
+    context_refill_streak: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +242,7 @@ class Agent:
     This is the 'managed agent loop' from the architecture:
     - while loop with llm.call(prompt)
     - tool execution
-    - context lifecycle (compaction / reset)
+    - context lifecycle (lightweight compaction / REBUILD_WORKING_CONTEXT)
 
     Skills are handled via progressive disclosure:
     - Level 1: skill catalog (name + description) is baked into system_prompt
@@ -354,6 +357,8 @@ class AgentConversation:
         self.runtime_state.task_board = TaskBoard(goal=task)
         self.runtime_state.action_tool_count = 0
         self.runtime_state.fallback = AgentFallbackState()
+        self.runtime_state.auto_compaction_turn_start_index = -1
+        self.runtime_state.auto_compaction_suspended = False
         for mw in self.agent.middlewares:
             mw.begin_turn(
                 task,
@@ -368,138 +373,210 @@ class AgentConversation:
         self.compaction_gate.bump_revision()
 
     def _replace_messages(self, messages: list[dict]) -> None:
-        self.messages = messages
+        self.messages = list(messages)
         self.observation_store.detach_message_indexes(self.messages)
         self.compaction_gate.bump_revision()
 
-    def _reset_context(self, agent: Agent, reason: str) -> None:
-        log.warning(f"[{agent.name}] Context reset triggered ({reason}). Writing checkpoint...")
-        self.trace.context_event("reset", reason)
-        checkpoint = context.create_checkpoint(self.messages, llm_call_simple)
-        self._replace_messages(context.restore_from_checkpoint(checkpoint, agent.system_prompt))
-        self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
-        self.compaction_gate.mark_compacted()
-
-    def _compact_context(
-        self,
-        agent: Agent,
-        *,
-        token_count: int,
-        forced: bool,
-        threshold: int,
-        target_tokens: int | None = None,
-    ) -> bool:
-        log.info(f"[{agent.name}] Compacting context (role={agent.name}, forced={forced})...")
-        self.trace.context_event("compact", f"tokens={token_count} forced={forced}")
-        if hasattr(self, '_event_bus') and self._event_bus is not None:
-            from ..sessions.events import ContextCompactionStartedEvent
-            self._event_bus.emit_event(
-                ContextCompactionStartedEvent(
-                    token_count=token_count,
-                    threshold=threshold,
-                    forced=forced,
-                ).to_event()
-            )
-        msg_count_before = len(self.messages)
-        target_tokens = target_tokens or threshold
-        committed_summary = ""
-
-        if self.compaction_mgr is not None:
-            candidate = self.compaction_mgr.candidate
-            result = None
-            if candidate is not None:
-                result = self.compaction_mgr.commit_candidate_to_messages(
-                    candidate,
-                    self.messages,
-                    current_revision=self.compaction_gate.revision,
-                )
-            if result is None or not result.committed:
-                split_index = context.choose_compaction_split_index(
-                    self.messages,
-                    force=forced,
-                    target_tokens=target_tokens,
-                )
-                system_len = 1 if self.messages and self.messages[0].get("role") == "system" else 0
-                if split_index <= system_len:
-                    return False
-                candidate = self.compaction_mgr.generate_candidate(
-                    self.messages,
-                    llm_call=llm_call_simple,
-                    split_index=split_index,
-                    revision=self.compaction_gate.revision,
-                )
-                result = self.compaction_mgr.commit_candidate_to_messages(
-                    candidate,
-                    self.messages,
-                    current_revision=self.compaction_gate.revision,
-                )
-            if result.committed and result.messages is not None:
-                committed_summary = result.summary
-                self._replace_messages(result.messages)
-            else:
-                if hasattr(self, '_event_bus') and self._event_bus is not None:
-                    from ..sessions.events import ContextCompactionFailedEvent
-                    self._event_bus.emit_event(
-                        ContextCompactionFailedEvent(
-                            reason=result.reason if result is not None else "unable to generate summary",
-                        ).to_event()
-                    )
-                return False
-        else:
-            self._replace_messages(context.compact_messages(
-                self.messages,
-                llm_call_simple,
-                role=agent.name,
-                force=forced,
-                target_tokens=target_tokens,
-            ))
-            if len(self.messages) > 1:
-                committed_summary = self.messages[1].get("content", "")
-
-        msg_count_after = len(self.messages)
-        self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
-        self.compaction_gate.mark_compacted()
-        if hasattr(self, '_event_bus') and self._event_bus is not None:
-            from ..sessions.events import (
-                ContextCompactionCommittedEvent,
-                ContextCompactionForcedEvent,
-            )
-            tokens_after = context.count_tokens(self.messages)
-            tokens_saved = max(0, token_count - tokens_after)
-            if forced:
-                self._event_bus.emit_event(
-                    ContextCompactionForcedEvent(
-                        token_count=token_count,
-                        threshold=threshold,
-                    ).to_event()
-                )
-            self._event_bus.emit_event(
-                ContextCompactionCommittedEvent(
-                    summary_chars=len(committed_summary),
-                    messages_before=msg_count_before,
-                    messages_after=msg_count_after,
-                    tokens_saved=tokens_saved,
-                ).to_event()
-            )
-        return msg_count_after < msg_count_before or bool(committed_summary)
-
-    def _degrade_context(self, agent: Agent, *, target_tokens: int) -> None:
-        log.info(f"[{agent.name}] Degrading oversized context toward target≈{target_tokens}...")
-        self.trace.context_event("degrade", f"target={target_tokens}")
-        protected_start = max(0, len(self.messages) - 12)
-        replaced = self.observation_store.replace_long_stale_messages(
-            self.messages,
-            min_chars=0,
-            protect_from_index=protected_start,
+    def _emit_compaction_started(self, *, token_count: int, threshold: int, phase: str) -> None:
+        if self._event_bus is None:
+            return
+        from ..sessions.events import ContextCompactionStartedEvent
+        self._event_bus.emit_event(
+            ContextCompactionStartedEvent(
+                token_count=token_count,
+                threshold=threshold,
+                forced=False,
+                phase=phase,
+            ).to_event()
         )
-        if replaced:
-            log.info(f"[{agent.name}] Folded stale observations during degradation: {', '.join(replaced)}")
-        degraded = context.degrade_messages(self.messages)
-        if degraded != self.messages:
-            self.messages = degraded
+
+    def _emit_compaction_committed(self, *, messages_before: int, token_count_before: int, summary_chars: int = 0) -> None:
+        if self._event_bus is None:
+            return
+        from ..sessions.events import ContextCompactionCommittedEvent
+        tokens_after = context.count_tokens(self.messages)
+        self._event_bus.emit_event(
+            ContextCompactionCommittedEvent(
+                summary_chars=summary_chars,
+                messages_before=messages_before,
+                messages_after=len(self.messages),
+                tokens_saved=max(0, token_count_before - tokens_after),
+            ).to_event()
+        )
+
+    def _maybe_auto_compact(self, agent: Agent, *, token_count: int, thresholds) -> None:
+        state = self.runtime_state
+        if state.auto_compaction_suspended:
+            self.trace.context_event("auto_compaction_suspended", f"tokens={token_count}")
+            return
+        if state.auto_compaction_turn_start_index == state.current_turn_start_index:
+            state.auto_compaction_suspended = True
+            self.trace.context_event("auto_compaction_suspended", "already attempted this turn")
+            return
+        if not self.compaction_gate.can_compact(coalesce_seconds=0):
+            return
+
+        state.auto_compaction_turn_start_index = state.current_turn_start_index
+        messages_before = len(self.messages)
+        token_count_before = token_count
+
+        self._emit_compaction_started(
+            token_count=token_count,
+            threshold=thresholds.compact,
+            phase="cleaning_older_outputs",
+        )
+        cleaned, changed = context.clean_older_tool_outputs(
+            self.messages,
+            current_turn_start_index=state.current_turn_start_index,
+        )
+        if changed:
+            self.messages = cleaned
             self.compaction_gate.bump_revision()
-        elif replaced:
-            self.compaction_gate.bump_revision()
+            self.compaction_gate.mark_compacted()
+            self._emit_compaction_committed(
+                messages_before=messages_before,
+                token_count_before=token_count_before,
+            )
+
+        tokens_after_clean = context.count_tokens(self.messages)
+        if tokens_after_clean < thresholds.compact:
+            state.context_refill_streak = 0
+            return
+
+        self._emit_compaction_started(
+            token_count=tokens_after_clean,
+            threshold=thresholds.compact,
+            phase="summarizing_history",
+        )
+        summarized = context.summarize_older_conversation(
+            self.messages,
+            llm_call_simple,
+            current_turn_start_index=state.current_turn_start_index,
+        )
+        summary_chars = 0
+        if summarized != self.messages:
+            summary_chars = len(summarized[1].get("content", "")) if len(summarized) > 1 else 0
+            self._replace_messages(summarized)
+            self.compaction_gate.mark_compacted()
+            self._emit_compaction_committed(
+                messages_before=messages_before,
+                token_count_before=token_count_before,
+                summary_chars=summary_chars,
+            )
+
+        tokens_after_summary = context.count_tokens(self.messages)
+        if tokens_after_summary < thresholds.compact:
+            state.context_refill_streak = 0
+            return
+
+        state.context_refill_streak += 1
+        state.auto_compaction_suspended = True
+        self._emit_compaction_started(
+            token_count=tokens_after_summary,
+            threshold=thresholds.compact,
+            phase="auto_compaction_suspended",
+        )
+        self.trace.context_event("auto_compaction_suspended", f"streak={state.context_refill_streak}")
+        if state.context_refill_streak >= 2:
+            self._rebuild_working_context(agent, token_count=tokens_after_summary, thresholds=thresholds)
+
+    def _rebuild_working_context(self, agent: Agent, *, token_count: int, thresholds) -> None:
+        self._emit_compaction_started(
+            token_count=token_count,
+            threshold=thresholds.compact,
+            phase="rebuilding_working_context",
+        )
+        rebuilt = context.rebuild_working_context(
+            self.messages,
+            self._working_context_state(),
+            current_turn_start_index=self.runtime_state.current_turn_start_index,
+            max_turns=5,
+        )
+        self._replace_messages(rebuilt)
+        if context.count_tokens(self.messages) >= thresholds.compact:
+            rebuilt = context.rebuild_working_context(
+                self.messages,
+                self._working_context_state(),
+                current_turn_start_index=min(self.runtime_state.current_turn_start_index, len(self.messages)),
+                max_turns=3,
+            )
+            self._replace_messages(rebuilt)
+        self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
+        self.compaction_gate.mark_compacted()
+        self.runtime_state.context_refill_streak = 0
+        self.runtime_state.auto_compaction_suspended = True
+
+    def _working_context_state(self) -> dict:
+        board = self.runtime_state.task_board
+        recent_errors, failed_commands = self._recent_error_state()
+        files = list(dict.fromkeys(board.changed_files))
+        return {
+            "current_user_task": board.goal or self._latest_user_message(),
+            "active_plan_status": self._task_board_status(),
+            "changed_files": files,
+            "files_touched": files,
+            "recent_errors": recent_errors,
+            "failed_commands": failed_commands,
+            "active_constraints": self._active_constraints(),
+            "latest_checkpoint_summary": self._latest_checkpoint_summary(),
+            "next_recommended_action": board.next_action or "continue from the active task and verify the next smallest change",
+        }
+
+    def _latest_user_message(self) -> str:
+        for msg in reversed(self.messages):
+            if msg.get("role") == "user" and msg.get("content"):
+                return str(msg.get("content"))
+        return ""
+
+    def _task_board_status(self) -> str:
+        board = self.runtime_state.task_board
+        parts = []
+        if board.current_step:
+            parts.append(f"current_step: {board.current_step}")
+        if board.completed_steps:
+            parts.append("completed: " + ", ".join(board.completed_steps[-5:]))
+        if board.blockers:
+            parts.append("blockers: " + ", ".join(board.blockers[-5:]))
+        if board.result_status:
+            parts.append(f"result_status: {board.result_status}")
+        return "; ".join(parts) if parts else "none"
+
+    def _recent_error_state(self) -> tuple[list[str], list[str]]:
+        errors: list[str] = []
+        failed_commands: list[str] = []
+        for msg in self.messages[-30:]:
+            content = str(msg.get("content") or "")
+            lowered = content.lower()
+            if "[error]" in lowered or "failed" in lowered or "traceback" in lowered:
+                errors.append(content[:500])
+            if msg.get("role") == "tool" and ("return_code:" in lowered or "status: failed" in lowered or "[error]" in lowered):
+                failed_commands.append(content[:300])
+        return errors[-5:], failed_commands[-5:]
+
+    def _active_constraints(self) -> list[str]:
+        constraints = []
+        for msg in self.messages[-20:]:
+            content = str(msg.get("content") or "")
+            lowered = content.lower()
+            if "constraint" in lowered or "不要" in content or "must" in lowered or "only" in lowered:
+                constraints.append(content[:300])
+        return constraints[-5:]
+
+    def _latest_checkpoint_summary(self) -> str:
+        if self.agent.tool_context is not None:
+            root = self.agent.tool_context.workspace.root
+        else:
+            root = Path(config.WORKSPACE)
+        for rel in ("progress.md", ".harness/checkpoints/latest.md"):
+            path = root / rel
+            if path.exists() and path.is_file():
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace").strip()
+                    if text:
+                        return text[:4_000]
+                except OSError:
+                    continue
+        return "none"
 
     def submit(self, task: str, cancellation_token=None) -> str:
         self.add_user_turn(task)
@@ -768,46 +845,10 @@ class AgentConversation:
             thresholds = get_thresholds()
             action = compaction_action(token_count, thresholds)
             anxiety = context.detect_anxiety(self.messages)
-
-            if action == "reset" or anxiety:
-                reason = "anxiety detected" if anxiety else f"tokens {token_count} > threshold"
-                self._reset_context(agent, reason)
-            elif action == "force_sync" or (action == "sync_compact" and self.compaction_gate.can_compact()):
-                forced = action == "force_sync"
-                compacted = self._compact_context(
-                    agent,
-                    token_count=token_count,
-                    forced=forced,
-                    threshold=thresholds.force if forced else thresholds.allow,
-                    target_tokens=thresholds.target,
-                )
-                if forced:
-                    tokens_after = context.count_tokens(self.messages)
-                    if not compacted or tokens_after > thresholds.target:
-                        self._degrade_context(agent, target_tokens=thresholds.target)
-                        tokens_after = context.count_tokens(self.messages)
-                    if tokens_after > thresholds.reset:
-                        self._reset_context(agent, f"tokens {tokens_after} > reset threshold {thresholds.reset}")
-            elif action == "async_prepare" and self.compaction_mgr is not None and self.compaction_gate.can_compact():
-                # Async candidate generation — only if gate allows
-                log.info(f"[{agent.name}] Async compaction candidate preparation (tokens≈{token_count})...")
-                self.trace.context_event("async_prepare", f"tokens={token_count}")
-                try:
-                    split_index = context.choose_compaction_split_index(
-                        self.messages,
-                        force=False,
-                        target_tokens=thresholds.target,
-                    )
-                    self.compaction_mgr.prepare_candidate_async(
-                        self.messages,
-                        llm_call=llm_call_simple,
-                        split_index=split_index,
-                        revision=self.compaction_gate.revision,
-                    )
-                except Exception as exc:
-                    log.warning(f"[{agent.name}] Async compaction candidate failed: {exc}")
-            elif action == "observe":
-                self.trace.context_event("pressure", f"tokens={token_count}")
+            if anxiety:
+                self.trace.context_event("context_anxiety", f"tokens={token_count}")
+            if action == "auto_compact":
+                self._maybe_auto_compact(agent, token_count=token_count, thresholds=thresholds)
 
             # --- Build prompt and LLM call ---
             prompt_messages = self._build_prompt()

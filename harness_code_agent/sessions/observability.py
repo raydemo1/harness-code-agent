@@ -128,7 +128,6 @@ class AuditMetrics:
     latest_fallback: str = ""
     compactions_started: int = 0
     compactions_committed: int = 0
-    compactions_failed: int = 0
     tokens_saved: int = 0
     approvals_requested: int = 0
     approvals_approved: int = 0
@@ -143,7 +142,6 @@ class AuditMetrics:
             self.latest_fallback = other.latest_fallback
         self.compactions_started += other.compactions_started
         self.compactions_committed += other.compactions_committed
-        self.compactions_failed += other.compactions_failed
         self.tokens_saved += other.tokens_saved
         self.approvals_requested += other.approvals_requested
         self.approvals_approved += other.approvals_approved
@@ -160,7 +158,6 @@ class AuditMetrics:
             "latest_fallback": self.latest_fallback,
             "compactions_started": self.compactions_started,
             "compactions_committed": self.compactions_committed,
-            "compactions_failed": self.compactions_failed,
             "tokens_saved": self.tokens_saved,
             "approvals_requested": self.approvals_requested,
             "approvals_approved": self.approvals_approved,
@@ -281,8 +278,6 @@ def build_session_observability(metadata: dict[str, Any], events: list[dict[str,
         elif event_name == "context_compaction_committed":
             snapshot.audit.compactions_committed += 1
             snapshot.audit.tokens_saved += _int_value(data.get("tokens_saved"))
-        elif event_name == "context_compaction_failed":
-            snapshot.audit.compactions_failed += 1
         elif event_name == "approval_requested":
             snapshot.audit.approvals_requested += 1
         elif event_name == "approval_decided":
@@ -468,7 +463,7 @@ def _audit_line(audit: AuditMetrics) -> str:
         "audit: "
         f"failures={audit.failures}, categories={categories}, "
         f"fallbacks={audit.fallbacks}, latest_fallback={audit.latest_fallback or 'none'}, "
-        f"compactions={audit.compactions_committed} committed/{audit.compactions_failed} failed, "
+        f"compactions={audit.compactions_committed} committed, "
         f"tokens_saved={audit.tokens_saved}, "
         f"approvals={audit.approvals_requested} requested/{audit.approvals_approved} approved/{audit.approvals_denied} denied, "
         f"changed_files={len(audit.changed_files)}"

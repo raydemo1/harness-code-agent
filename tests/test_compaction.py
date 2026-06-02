@@ -105,57 +105,24 @@ class CompactionThresholdTests(unittest.TestCase):
     def test_thresholds_derived_from_context_window(self):
         """Thresholds should be percentages of HARNESS_CONTEXT_WINDOW_TOKENS."""
         with patch.dict(os.environ, {"HARNESS_CONTEXT_WINDOW_TOKENS": "100000"}):
-            # Reload config to pick up env var
             from harness_code_agent.agent import compaction
             thresholds = compaction.get_thresholds(100000)
-            self.assertEqual(thresholds.observe, 60000)    # 60%
-            self.assertEqual(thresholds.prepare, 68000)    # 68%
-            self.assertEqual(thresholds.allow, 75000)      # 75%
-            self.assertEqual(thresholds.force, 82000)      # 82%
-            self.assertEqual(thresholds.reset, 92000)      # 92%
-            self.assertEqual(thresholds.target, 50000)     # 50%
+            self.assertEqual(thresholds.compact, 90000)          # 90%
+            self.assertEqual(thresholds.summary_target, 75000)   # 75%
 
-    def test_observe_zone_no_action(self):
+    def test_below_compact_threshold_no_action(self):
         from harness_code_agent.agent.compaction import compaction_action
         from harness_code_agent.agent.compaction import get_thresholds
         thresholds = get_thresholds(128000)
-        action = compaction_action(50000, thresholds)
+        action = compaction_action(thresholds.compact - 1, thresholds)
         self.assertEqual(action, "none")
 
-    def test_observe_pressure_zone_records_without_intervention(self):
+    def test_at_compact_threshold_triggers_auto_compact(self):
         from harness_code_agent.agent.compaction import compaction_action
         from harness_code_agent.agent.compaction import get_thresholds
         thresholds = get_thresholds(128000)
-        action = compaction_action(80000, thresholds)  # ~62%
-        self.assertEqual(action, "observe")
-
-    def test_prepare_zone_triggers_async(self):
-        from harness_code_agent.agent.compaction import compaction_action
-        from harness_code_agent.agent.compaction import get_thresholds
-        thresholds = get_thresholds(128000)
-        action = compaction_action(90000, thresholds)  # ~70%
-        self.assertEqual(action, "async_prepare")
-
-    def test_allow_zone_allows_boundary_commit(self):
-        from harness_code_agent.agent.compaction import compaction_action
-        from harness_code_agent.agent.compaction import get_thresholds
-        thresholds = get_thresholds(128000)
-        action = compaction_action(97000, thresholds)  # ~76%
-        self.assertEqual(action, "sync_compact")
-
-    def test_force_zone_triggers_forced_sync(self):
-        from harness_code_agent.agent.compaction import compaction_action
-        from harness_code_agent.agent.compaction import get_thresholds
-        thresholds = get_thresholds(128000)
-        action = compaction_action(106000, thresholds)  # ~83%
-        self.assertEqual(action, "force_sync")
-
-    def test_reset_zone_triggers_reset(self):
-        from harness_code_agent.agent.compaction import compaction_action
-        from harness_code_agent.agent.compaction import get_thresholds
-        thresholds = get_thresholds(128000)
-        action = compaction_action(118000, thresholds)  # ~92%+
-        self.assertEqual(action, "reset")
+        action = compaction_action(thresholds.compact, thresholds)
+        self.assertEqual(action, "auto_compact")
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +401,8 @@ class CompactMessagesTests(unittest.TestCase):
         self.assertLessEqual(count_tokens(result), 1200)
         self.assertEqual(result[-1]["content"], "current task")
 
-    def test_degrade_messages_folds_old_long_tool_output_but_keeps_recent_tail(self):
-        from harness_code_agent.agent.context import degrade_messages
+    def test_clean_older_tool_outputs_keeps_current_turn(self):
+        from harness_code_agent.agent.context import clean_older_tool_outputs
 
         old_output = "[OBS obs_0001 observed]\n" + ("stdout line\n" * 1000)
         recent_output = "[OBS obs_0002 observed]\n" + ("recent line\n" * 1000)
@@ -448,19 +415,86 @@ class CompactMessagesTests(unittest.TestCase):
             {"role": "tool", "tool_call_id": "recent", "content": recent_output},
         ]
 
-        degraded = degrade_messages(messages, keep_recent=2, max_tool_chars=800)
+        cleaned, changed = clean_older_tool_outputs(
+            messages,
+            current_turn_start_index=4,
+            max_tool_chars=800,
+        )
 
-        self.assertIn("[DEGRADED TOOL OUTPUT]", degraded[2]["content"])
-        self.assertLess(len(degraded[2]["content"]), len(old_output))
-        self.assertEqual(degraded[-1]["content"], recent_output)
+        self.assertTrue(changed)
+        self.assertIn("[CLEANED OLDER TOOL OUTPUT]", cleaned[2]["content"])
+        self.assertLess(len(cleaned[2]["content"]), len(old_output))
+        self.assertEqual(cleaned[-1]["content"], recent_output)
+
+    def test_summarize_older_conversation_preserves_current_turn(self):
+        from harness_code_agent.agent.context import summarize_older_conversation
+
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old task"},
+            {"role": "assistant", "content": "old result"},
+            {"role": "user", "content": "current task"},
+            {"role": "assistant", "content": "current work"},
+        ]
+
+        summarized = summarize_older_conversation(
+            messages,
+            self._mock_llm("older summary"),
+            current_turn_start_index=3,
+        )
+
+        self.assertEqual(summarized[0], messages[0])
+        self.assertIn("older summary", summarized[1]["content"])
+        self.assertEqual(summarized[-2:], messages[-2:])
+
+    def test_rebuild_working_context_keeps_working_state_and_drops_old_outputs(self):
+        from harness_code_agent.agent.context import rebuild_working_context
+
+        old_output = "OLD_FULL_TOOL_OUTPUT" * 500
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old branch solved"},
+            {"role": "tool", "tool_call_id": "old", "content": old_output},
+            {"role": "assistant", "content": "old branch resolved"},
+            {"role": "user", "content": "current task"},
+            {"role": "assistant", "content": "recent error: pytest failed"},
+        ]
+        state = {
+            "current_user_task": "current task",
+            "active_plan_status": "step 2 in progress",
+            "changed_files": ["app.py"],
+            "files_touched": ["app.py", "tests/test_app.py"],
+            "recent_errors": ["pytest failed"],
+            "failed_commands": ["pytest tests/test_app.py"],
+            "active_constraints": ["do not reset profile"],
+            "latest_checkpoint_summary": "checkpoint summary",
+            "next_recommended_action": "fix failing assertion",
+        }
+
+        rebuilt = rebuild_working_context(
+            messages,
+            state,
+            current_turn_start_index=4,
+            max_turns=5,
+        )
+        text = "\n".join(str(item.get("content", "")) for item in rebuilt)
+
+        self.assertEqual(rebuilt[0], messages[0])
+        self.assertIn("REBUILD_WORKING_CONTEXT", text)
+        self.assertIn("current task", text)
+        self.assertIn("step 2 in progress", text)
+        self.assertIn("app.py", text)
+        self.assertIn("pytest failed", text)
+        self.assertIn("fix failing assertion", text)
+        self.assertNotIn("OLD_FULL_TOOL_OUTPUT", text)
 
 
 # ---------------------------------------------------------------------------
-# Reset regression — no implicit git context injection
+# Manual checkpoint restore regression — no implicit git context injection
 # ---------------------------------------------------------------------------
 
-class ResetRegressionTests(unittest.TestCase):
-    """Reset should only be a final fallback and must not inject git context."""
+class CheckpointRestoreRegressionTests(unittest.TestCase):
+    """Manual checkpoint restore must not inject git context."""
 
     def test_restore_from_checkpoint_no_git_injection(self):
         from harness_code_agent.agent.context import restore_from_checkpoint
@@ -550,23 +584,23 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
         self.assertGreater(conv.compaction_gate.revision, initial)
 
-    def test_force_compaction_runs_before_reset_fallback(self):
+    def test_auto_compaction_cleans_outputs_before_summary(self):
         from harness_code_agent.agent.compaction import get_thresholds
         from harness_code_agent.agent.loop import Agent
 
         thresholds = get_thresholds()
         agent = Agent("test_agent", "sys", use_tools=False)
         conv = agent.start_conversation("task")
-        compacted_messages = [
+        cleaned_messages = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "[COMPACTED CONTEXT]\nsummary"},
             {"role": "user", "content": "task"},
         ]
 
         with (
-            patch("harness_code_agent.agent.loop.context.count_tokens", side_effect=[thresholds.force + 1, 1000]),
+            patch("harness_code_agent.agent.loop.context.count_tokens", side_effect=[thresholds.compact, thresholds.compact - 1]),
             patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.loop.context.compact_messages", return_value=compacted_messages) as compact,
+            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(cleaned_messages, True)) as clean,
+            patch("harness_code_agent.agent.loop.context.summarize_older_conversation") as summarize,
             patch("harness_code_agent.agent.loop.context.create_checkpoint", return_value="checkpoint") as checkpoint,
             patch.object(
                 conv,
@@ -576,18 +610,22 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         ):
             conv.run_until_idle()
 
-        compact.assert_called_once()
-        self.assertTrue(compact.call_args.kwargs["force"])
+        clean.assert_called_once()
+        summarize.assert_not_called()
         checkpoint.assert_not_called()
 
-    def test_forced_compaction_targets_half_window_without_reset_below_reset_threshold(self):
+    def test_auto_compaction_summarizes_when_cleaning_is_not_enough(self):
         from harness_code_agent.agent.compaction import get_thresholds
         from harness_code_agent.agent.loop import Agent
 
         thresholds = get_thresholds()
         agent = Agent("test_agent", "sys", use_tools=False)
         conv = agent.start_conversation("task")
-        compacted_messages = [
+        cleaned_messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+        ]
+        summarized_messages = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "[COMPACTED CONTEXT]\nsummary"},
             {"role": "user", "content": "task"},
@@ -597,14 +635,14 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             patch(
                 "harness_code_agent.agent.loop.context.count_tokens",
                 side_effect=[
-                    thresholds.force + 1,
-                    thresholds.target + 1,
-                    thresholds.target + 1,
+                    thresholds.compact,
+                    thresholds.compact,
+                    thresholds.summary_target - 1,
                 ],
             ),
             patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.loop.context.compact_messages", return_value=compacted_messages) as compact,
-            patch.object(conv.observation_store, "replace_long_stale_messages", return_value=[]) as degrade,
+            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(cleaned_messages, False)) as clean,
+            patch("harness_code_agent.agent.loop.context.summarize_older_conversation", return_value=summarized_messages) as summarize,
             patch("harness_code_agent.agent.loop.context.create_checkpoint", return_value="checkpoint") as checkpoint,
             patch.object(
                 conv,
@@ -614,56 +652,85 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         ):
             conv.run_until_idle()
 
-        compact.assert_called_once()
-        self.assertEqual(compact.call_args.kwargs["target_tokens"], thresholds.target)
-        degrade.assert_called_once()
+        clean.assert_called_once()
+        summarize.assert_called_once()
         checkpoint.assert_not_called()
 
-    def test_allow_zone_commits_prepared_candidate_to_messages_and_storage(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            from harness_code_agent.agent.compaction import (
-                CompactionCandidate,
-                CompactionManager,
-                get_thresholds,
-            )
-            from harness_code_agent.agent.loop import Agent
+    def test_auto_compaction_suspends_for_turn_when_summary_still_over_threshold(self):
+        from harness_code_agent.agent.compaction import get_thresholds
+        from harness_code_agent.agent.loop import Agent
 
-            agent = Agent("test_agent", "sys", use_tools=False)
-            conv = agent.start_conversation()
-            conv.messages = [
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "old task"},
-                {"role": "assistant", "content": "old result"},
-                {"role": "user", "content": "recent task"},
-            ]
-            conv.compaction_mgr = CompactionManager(Path(tmpdir))
-            conv.compaction_mgr._candidate = CompactionCandidate(
-                summary="Prepared async summary",
-                revision=conv.compaction_gate.revision,
-                split_index=3,
-                old_count=3,
-            )
+        thresholds = get_thresholds()
+        agent = Agent("test_agent", "sys", use_tools=False)
+        conv = agent.start_conversation("task")
 
-            with (
-                patch(
-                    "harness_code_agent.agent.loop.context.count_tokens",
-                    return_value=get_thresholds().allow + 1,
-                ),
-                patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
-                patch("harness_code_agent.agent.loop.llm_call_simple", return_value="Sync summary"),
-                patch.object(
-                    conv,
-                    "_request_assistant_message",
-                    return_value=({"role": "assistant", "content": "done"}, "stop"),
-                ),
-            ):
-                conv.run_until_idle()
+        with (
+            patch(
+                "harness_code_agent.agent.loop.context.count_tokens",
+                side_effect=[
+                    thresholds.compact,
+                    thresholds.compact,
+                    thresholds.compact,
+                    thresholds.summary_target,
+                ],
+            ),
+            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
+            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(conv.messages, False)) as clean,
+            patch("harness_code_agent.agent.loop.context.summarize_older_conversation", return_value=conv.messages) as summarize,
+            patch("harness_code_agent.agent.loop.context.rebuild_working_context") as rebuild,
+            patch.object(
+                conv,
+                "_request_assistant_message",
+                side_effect=[
+                    ({"role": "assistant", "content": "continue"}, None),
+                    ({"role": "assistant", "content": "done"}, "stop"),
+                ],
+            ),
+        ):
+            conv.run_until_idle()
 
-            self.assertIn("Prepared async summary", conv.messages[1]["content"])
-            self.assertIn(
-                "Prepared async summary",
-                (Path(tmpdir) / "latest.md").read_text(encoding="utf-8"),
-            )
+        self.assertEqual(clean.call_count, 1)
+        self.assertEqual(summarize.call_count, 1)
+        rebuild.assert_not_called()
+        self.assertTrue(conv.runtime_state.auto_compaction_suspended)
+
+    def test_rebuild_working_context_after_two_rapid_refills(self):
+        from harness_code_agent.agent.compaction import get_thresholds
+        from harness_code_agent.agent.loop import Agent
+
+        thresholds = get_thresholds()
+        agent = Agent("test_agent", "sys", use_tools=False)
+        conv = agent.start_conversation("first")
+        conv.runtime_state.context_refill_streak = 1
+        rebuilt_messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "[REBUILD_WORKING_CONTEXT]\ncurrent task"},
+        ]
+
+        with (
+            patch(
+                "harness_code_agent.agent.loop.context.count_tokens",
+                side_effect=[
+                    thresholds.compact,
+                    thresholds.compact,
+                    thresholds.compact,
+                    thresholds.summary_target,
+                ],
+            ),
+            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
+            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(conv.messages, False)),
+            patch("harness_code_agent.agent.loop.context.summarize_older_conversation", return_value=conv.messages),
+            patch("harness_code_agent.agent.loop.context.rebuild_working_context", return_value=rebuilt_messages) as rebuild,
+            patch.object(
+                conv,
+                "_request_assistant_message",
+                return_value=({"role": "assistant", "content": "done"}, "stop"),
+            ),
+        ):
+            conv.run_until_idle()
+
+        rebuild.assert_called_once()
+        self.assertEqual(conv.messages, rebuilt_messages + [{"role": "assistant", "content": "done"}])
 
 
 # ---------------------------------------------------------------------------
@@ -733,19 +800,6 @@ class CompactionEventTests(unittest.TestCase):
         self.assertEqual(structured.type, "context_compaction_committed")
         self.assertIn("tokens_saved", structured.payload)
 
-    def test_compaction_failed_event(self):
-        from harness_code_agent.sessions.events import ContextCompactionFailedEvent
-        event = ContextCompactionFailedEvent(reason="LLM call failed")
-        structured = event.to_event()
-        self.assertEqual(structured.type, "context_compaction_failed")
-
-    def test_compaction_forced_event(self):
-        from harness_code_agent.sessions.events import ContextCompactionForcedEvent
-        event = ContextCompactionForcedEvent(token_count=106000, threshold=104960)
-        structured = event.to_event()
-        self.assertEqual(structured.type, "context_compaction_forced")
-
-
 # ---------------------------------------------------------------------------
 # TUI state — compaction events update status bar
 # ---------------------------------------------------------------------------
@@ -786,17 +840,17 @@ class TuiStateCompactionTests(unittest.TestCase):
         block = state.apply_event(event)
         self.assertIsNotNone(block)
 
-    def test_compaction_forced_shows_notice(self):
+    def test_rebuild_working_context_shows_notice(self):
         state = self._make_state()
         event = MagicMock()
         event.to_dict.return_value = {
-            "type": "context_compaction_forced",
-            "payload": {"token_count": 120000},
+            "type": "context_compaction_started",
+            "payload": {"token_count": 180000, "phase": "rebuilding_working_context"},
         }
         block = state.apply_event(event)
         self.assertIsNotNone(block)
-        self.assertIn("forced", block.title.lower())
-        self.assertIn("forced", state.snapshot.status.lower())
+        self.assertIn("rebuilding working context", block.title.lower())
+        self.assertIn("rebuilding working context", state.snapshot.status.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -810,24 +864,27 @@ class ContextWindowConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HARNESS_CONTEXT_WINDOW_TOKENS", None)
             os.environ.pop("COMPRESS_THRESHOLD", None)
-            os.environ.pop("RESET_THRESHOLD", None)
+            os.environ.pop("SUMMARY_TARGET_THRESHOLD", None)
             import importlib
             from harness_code_agent import config
             importlib.reload(config)
             self.assertEqual(config.CONTEXT_WINDOW_TOKENS, 200000)
-            self.assertEqual(config.COMPRESS_THRESHOLD, 150000)
-            self.assertEqual(config.RESET_THRESHOLD, 184000)
+            self.assertEqual(config.COMPRESS_THRESHOLD, 180000)
+            self.assertEqual(config.SUMMARY_TARGET_THRESHOLD, 150000)
             # Restore default for later tests in this process.
             importlib.reload(config)
 
     def test_context_window_configurable(self):
         with patch.dict(os.environ, {"HARNESS_CONTEXT_WINDOW_TOKENS": "64000"}):
+            os.environ.pop("COMPRESS_THRESHOLD", None)
+            os.environ.pop("SUMMARY_TARGET_THRESHOLD", None)
             # Need to reload to pick up env change
             import importlib
             from harness_code_agent import config
             importlib.reload(config)
             self.assertEqual(config.CONTEXT_WINDOW_TOKENS, 64000)
-            self.assertEqual(config.RESET_THRESHOLD, 58880)
+            self.assertEqual(config.COMPRESS_THRESHOLD, 57600)
+            self.assertEqual(config.SUMMARY_TARGET_THRESHOLD, 48000)
             # Restore default
             importlib.reload(config)
 

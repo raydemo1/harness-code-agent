@@ -650,10 +650,8 @@ class TuiApp(App):
         thresholds = get_thresholds()
         self.state.snapshot.context_tokens = context.count_tokens(self.session.conversation.messages)
         self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
-        self.state.snapshot.context_observe_threshold = thresholds.observe
-        self.state.snapshot.context_prepare_threshold = thresholds.prepare
-        self.state.snapshot.context_allow_threshold = thresholds.allow
-        self.state.snapshot.context_force_threshold = thresholds.force
+        self.state.snapshot.context_compact_threshold = thresholds.compact
+        self.state.snapshot.context_summary_target_threshold = thresholds.summary_target
 
     def exit(self, *args, **kwargs) -> None:
         """Clean shutdown."""

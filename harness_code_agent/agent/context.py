@@ -1,20 +1,13 @@
-"""
-Context lifecycle management — compaction and reset.
+"""Context lifecycle helpers for lightweight auto-compaction.
 
-Implements the strategies from the Anthropic article:
-  1. Compaction: summarize old messages, keep recent ones (same session).
-     Preserves continuity but does NOT give a clean slate.
-  2. Reset: write a structured checkpoint to file, start a brand-new message list.
-     Solves "context anxiety" — the model gets a fresh window and stops
-     trying to wrap up prematurely.
-
-The article notes that compaction alone is insufficient for models that exhibit
-context anxiety. Reset is the stronger intervention.
+Auto-compaction starts near the context limit, first folds older tool outputs,
+then summarizes older conversation only if necessary. It never rewrites the
+system prompt or tools schema.
 """
 from __future__ import annotations
 
 import re
-import subprocess
+import hashlib
 import logging
 
 from .. import config
@@ -172,48 +165,108 @@ def compact_messages(
     return system + [summary_msg] + recent
 
 
-def degrade_messages(
+def clean_older_tool_outputs(
     messages: list[dict],
     *,
-    keep_recent: int = 12,
+    current_turn_start_index: int,
     max_tool_chars: int = 2_000,
-    max_message_chars: int = 6_000,
-) -> list[dict]:
-    """Fold oversized old messages while preserving system and recent tail.
+) -> tuple[list[dict], bool]:
+    """Replace long tool/read_file outputs before the current turn with metadata.
 
-    This is a deterministic pressure-relief step used before reset. It does not
-    try to prove the context reached the ideal waterline; it just removes the
-    noisiest old payloads such as long stdout, stale observations, and old file
-    content.
+    This is the first and cheapest auto-compaction step. It preserves the
+    current turn exactly so the active task is not disturbed.
     """
+    if not messages:
+        return messages, False
+
+    protected_start = max(1, min(current_turn_start_index, len(messages)))
+    cleaned: list[dict] = []
+    changed = False
+    for idx, msg in enumerate(messages):
+        if idx >= protected_start or msg.get("role") != "tool":
+            cleaned.append(msg)
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or len(content) <= max_tool_chars:
+            cleaned.append(msg)
+            continue
+        new_msg = dict(msg)
+        new_msg["content"] = _cleaned_tool_output(content)
+        cleaned.append(new_msg)
+        changed = True
+    return cleaned, changed
+
+
+def summarize_older_conversation(
+    messages: list[dict],
+    llm_call,
+    *,
+    current_turn_start_index: int,
+) -> list[dict]:
+    """Summarize conversation before the current turn and keep current turn raw."""
     if not messages:
         return messages
 
-    system_len = 1 if messages and messages[0].get("role") == "system" else 0
-    protected_start = max(system_len, len(messages) - max(0, keep_recent))
-    degraded: list[dict] = []
-    for idx, msg in enumerate(messages):
-        if idx < system_len or idx >= protected_start:
-            degraded.append(msg)
-            continue
+    system = [messages[0]] if messages[0].get("role") == "system" else []
+    system_len = len(system)
+    split = max(system_len, min(current_turn_start_index, len(messages)))
+    older = messages[system_len:split]
+    current = messages[split:]
+    if not older:
+        return messages
 
-        new_msg = dict(msg)
-        content = new_msg.get("content")
-        if isinstance(content, str):
-            if msg.get("role") == "tool" and len(content) > max_tool_chars:
-                new_msg["content"] = _fold_long_text(
-                    content,
-                    max_tool_chars,
-                    label="DEGRADED TOOL OUTPUT",
-                )
-            elif len(content) > max_message_chars:
-                new_msg["content"] = _fold_long_text(
-                    content,
-                    max_message_chars,
-                    label="DEGRADED OLD MESSAGE",
-                )
-        degraded.append(new_msg)
-    return degraded
+    old_text = _messages_to_text(older)
+    summary = llm_call([
+        {"role": "system", "content": (
+            "You are summarizing older conversation history for a coding agent. "
+            "Preserve decisions, active constraints, changed files, files touched, "
+            "failed commands, recent errors, current status, and next action. "
+            "Discard old full tool output, repeated logs, and resolved branches."
+        )},
+        {"role": "user", "content": old_text},
+    ])
+    summary_msg = {
+        "role": "user",
+        "content": f"[COMPACTED CONTEXT — summary of older conversation]\n{summary}",
+    }
+    return system + [summary_msg] + current
+
+
+def rebuild_working_context(
+    messages: list[dict],
+    state: dict,
+    *,
+    current_turn_start_index: int,
+    max_turns: int = 5,
+) -> list[dict]:
+    """Rebuild a concise working context without carrying old raw payloads."""
+    if not messages:
+        return messages
+
+    system = [messages[0]] if messages[0].get("role") == "system" else []
+    recent = _last_turn_messages(messages, max_turns=max_turns)
+    recent_text = _messages_to_text([
+        _sanitize_message_for_rebuild(msg)
+        for msg in recent
+        if msg.get("role") != "system"
+    ])
+    content = (
+        "[REBUILD_WORKING_CONTEXT]\n"
+        "The previous context was rebuilt to avoid repeated auto-compaction. "
+        "Use this as the active working state.\n\n"
+        f"## Current User Task\n{_state_value(state, 'current_user_task')}\n\n"
+        f"## Active Plan / Status\n{_state_value(state, 'active_plan_status')}\n\n"
+        f"## Changed Files\n{_state_list(state, 'changed_files')}\n\n"
+        f"## Files Touched\n{_state_list(state, 'files_touched')}\n\n"
+        f"## Recent Errors\n{_state_list(state, 'recent_errors')}\n\n"
+        f"## Failed Commands\n{_state_list(state, 'failed_commands')}\n\n"
+        f"## Active Constraints\n{_state_list(state, 'active_constraints')}\n\n"
+        f"## Latest Checkpoint Summary\n{_state_value(state, 'latest_checkpoint_summary')}\n\n"
+        f"## Last {max_turns} Turns\n{recent_text or 'none'}\n\n"
+        f"## Next Recommended Action\n{_state_value(state, 'next_recommended_action')}\n\n"
+        "Discarded: old full tool output, old full read_file content, repeated logs, and resolved branches."
+    )
+    return system + [{"role": "user", "content": content}]
 
 
 def choose_compaction_split_index(
@@ -319,7 +372,7 @@ def _fit_tail_start_to_budget(
 
 
 # ---------------------------------------------------------------------------
-# Reset (checkpoint + fresh start)
+# Manual checkpoint restore helpers
 # ---------------------------------------------------------------------------
 
 def create_checkpoint(messages: list[dict], llm_call) -> str:
@@ -364,8 +417,8 @@ def restore_from_checkpoint(checkpoint: str, system_prompt: str) -> list[dict]:
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": (
-            "You are resuming an in-progress project. Your previous session's "
-            "context was reset to give you a clean slate.\n\n"
+            "You are resuming an in-progress project. The previous working "
+            "context was rebuilt to give you a concise slate.\n\n"
             "Here is the handoff document from the previous session:\n\n"
             + checkpoint
             + "\n\nContinue from where the previous session left off. "
@@ -394,6 +447,90 @@ def _messages_to_text(messages: list[dict]) -> str:
             fn = tc.get("function", {})
             parts.append(f"[tool_call] {fn.get('name', '?')}({fn.get('arguments', '')[:500]})")
     return "\n".join(parts)
+
+
+def _cleaned_tool_output(content: str) -> str:
+    metadata = _observation_metadata(content)
+    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:16]
+    header = "[CLEANED OLDER TOOL OUTPUT]"
+    if "tool: read_file" in content:
+        header = "[CLEANED OLDER READ_FILE OUTPUT]"
+    return (
+        f"{header}\n"
+        f"original_chars: {len(content)}\n"
+        f"output_sha256: {digest}\n"
+        f"{metadata}\n"
+        "detail: older full output was discarded; rerun the tool or inspect raw observation artifacts if exact output is needed."
+    )
+
+
+def _observation_metadata(content: str) -> str:
+    lines = []
+    allowed_prefixes = (
+        "[OBS ",
+        "tool:",
+        "args:",
+        "output_chars:",
+        "output_sha256:",
+        "resource_keys:",
+        "observed_workspace_generation:",
+        "summary:",
+    )
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("observation:"):
+            break
+        if stripped.startswith(allowed_prefixes):
+            lines.append(line)
+        if len(lines) >= 12:
+            break
+    return "\n".join(lines) if lines else "metadata: none"
+
+
+def _sanitize_message_for_rebuild(message: dict) -> dict:
+    msg = dict(message)
+    content = msg.get("content")
+    if msg.get("role") == "tool" and isinstance(content, str):
+        msg["content"] = _cleaned_tool_output(content)
+    elif isinstance(content, str) and len(content) > 2_000:
+        msg["content"] = _fold_long_text(content, 2_000, label="REBUILD_CONTEXT_MESSAGE_SUMMARY")
+    return msg
+
+
+def _last_turn_messages(messages: list[dict], *, max_turns: int) -> list[dict]:
+    if max_turns <= 0:
+        return []
+    user_seen = 0
+    start = 1 if messages and messages[0].get("role") == "system" else 0
+    for idx in range(len(messages) - 1, start - 1, -1):
+        if messages[idx].get("role") == "user":
+            user_seen += 1
+            if user_seen >= max_turns:
+                return messages[idx:]
+    return messages[start:]
+
+
+def _state_value(state: dict, key: str) -> str:
+    value = state.get(key)
+    if value is None or value == "":
+        return "none"
+    if isinstance(value, list):
+        return _format_list(value)
+    return str(value)
+
+
+def _state_list(state: dict, key: str) -> str:
+    value = state.get(key)
+    if not value:
+        return "none"
+    if isinstance(value, list):
+        return _format_list(value)
+    return str(value)
+
+
+def _format_list(values: list) -> str:
+    items = [str(item).strip() for item in values if str(item).strip()]
+    return "\n".join(f"- {item}" for item in items) if items else "none"
 
 
 def _fold_long_text(text: str, limit: int, *, label: str) -> str:

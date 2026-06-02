@@ -305,6 +305,7 @@ class ContextCompactionStartedEvent:
     token_count: int
     threshold: int
     forced: bool = False
+    phase: str = ""
     agent: str | None = "main_agent"
 
     def to_event(self) -> StructuredEvent:
@@ -314,6 +315,7 @@ class ContextCompactionStartedEvent:
                 "token_count": self.token_count,
                 "threshold": self.threshold,
                 "forced": self.forced,
+                "phase": self.phase,
             },
             self.agent,
         )
@@ -335,36 +337,6 @@ class ContextCompactionCommittedEvent:
                 "messages_before": self.messages_before,
                 "messages_after": self.messages_after,
                 "tokens_saved": self.tokens_saved,
-            },
-            self.agent,
-        )
-
-
-@dataclass(frozen=True)
-class ContextCompactionFailedEvent:
-    reason: str
-    agent: str | None = "main_agent"
-
-    def to_event(self) -> StructuredEvent:
-        return StructuredEvent(
-            "context_compaction_failed",
-            {"reason": self.reason},
-            self.agent,
-        )
-
-
-@dataclass(frozen=True)
-class ContextCompactionForcedEvent:
-    token_count: int
-    threshold: int
-    agent: str | None = "main_agent"
-
-    def to_event(self) -> StructuredEvent:
-        return StructuredEvent(
-            "context_compaction_forced",
-            {
-                "token_count": self.token_count,
-                "threshold": self.threshold,
             },
             self.agent,
         )
