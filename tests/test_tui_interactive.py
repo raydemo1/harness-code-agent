@@ -14,9 +14,23 @@ from harness_code_agent.tui.widgets import CommandPalette, InputArea, SubmitText
 
 def _mock_session(root: Path):
     """Create a mock InteractiveSession."""
+    from harness_code_agent.sessions.store import SessionStore
+
+    store = SessionStore(root / ".harness")
+    session_record = store.create(
+        profile="coding-agent",
+        cwd=root,
+        model="model-a",
+        permission_mode="workspace-write",
+    )
+    store.event_bus(session_record).emit(
+        "llm_usage",
+        payload={"prompt_tokens": 100, "cached_tokens": 80, "total_tokens": 120},
+    )
     return SimpleNamespace(
         profile=SimpleNamespace(name=lambda: "coding-agent"),
-        session=SimpleNamespace(id="test-session-001"),
+        session=SimpleNamespace(id=session_record.id),
+        session_store=store,
         cwd=str(root),
         permission_mode="workspace-write",
         conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
@@ -245,6 +259,37 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertTrue(app.state.show_thought_details)
                 await pilot.press("ctrl+t")
                 self.assertFalse(app.state.show_thought_details)
+        _run(_test())
+
+    def test_ctrl_o_opens_observability_screen_with_mode_toggle_and_escape(self):
+        async def _test():
+            mock = _mock_session(self.root)
+            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
+                MockSession.return_value = mock
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test(size=(120, 40)) as pilot:
+                    from harness_code_agent.tui.screens import ObservabilityScreen
+
+                    await pilot.press("ctrl+o")
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, ObservabilityScreen)
+                    body = str(app.screen.query_one("#observability-body").renderable)
+                    self.assertIn("Observability dashboard", body)
+                    self.assertIn("cache hit ratio: 80.0%", body)
+
+                    await pilot.press("tab")
+                    await pilot.pause()
+                    body = str(app.screen.query_one("#observability-body").renderable)
+                    self.assertIn("Project observability", body)
+
+                    await pilot.press("e")
+                    await pilot.pause()
+                    footer = str(app.screen.query_one("#observability-footer").renderable)
+                    self.assertIn("observability_export_markdown:", footer)
+
+                    await pilot.press("escape")
+                    await pilot.pause()
+                    self.assertNotIsInstance(app.screen, ObservabilityScreen)
         _run(_test())
 
     # ── Submit behavior ─────────────────────────────────────────────────────

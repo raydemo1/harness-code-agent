@@ -89,6 +89,7 @@ def default_command_registry() -> SlashCommandRegistry:
         CommandSpec("/mcp", "Diagnostics", "/mcp [status|list|reload]", "Show or reload configured MCP servers and tools.", _mcp),
         CommandSpec("/doctor", "Diagnostics", "/doctor", "Check API, workspace, git, and shell setup.", _doctor),
         CommandSpec("/config", "Diagnostics", "/config show", "Show effective Harness configuration.", _config),
+        CommandSpec("/observe", "Diagnostics", "/observe [current|project|export current|export project]", "Show or export observability metrics.", _observe),
         CommandSpec("/compact", "Workflow", "/compact show", "View the latest compacted summary.", _compact),
     ])
 
@@ -180,6 +181,42 @@ def _config(session: Any, args: list[str], registry: SlashCommandRegistry) -> Co
     from ..core.interactive import format_config_show
 
     return CommandResult(format_config_show(session.cwd))
+
+
+def _observe(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
+    from ..sessions.observability import (
+        export_observability_report,
+        format_export_result,
+        format_project_observability,
+        format_session_observability,
+    )
+
+    export = False
+    mode = "current"
+    if args:
+        if args[0] == "export":
+            export = True
+            if len(args) > 2:
+                raise ValueError("Usage: /observe [current|project|export current|export project]")
+            mode = args[1] if len(args) == 2 else "current"
+        else:
+            if len(args) != 1:
+                raise ValueError("Usage: /observe [current|project|export current|export project]")
+            mode = args[0]
+    if mode not in {"current", "project"}:
+        raise ValueError("Usage: /observe [current|project|export current|export project]")
+
+    session_id = session.session.id if mode == "current" else None
+    if export:
+        result = export_observability_report(
+            session.session_store,
+            mode=mode,
+            session_id=session_id,
+        )
+        return CommandResult(format_export_result(result))
+    if mode == "project":
+        return CommandResult(format_project_observability(session.session_store))
+    return CommandResult(format_session_observability(session.session_store, session.session.id))
 
 
 def _require_arg(args: list[str], usage: str) -> None:

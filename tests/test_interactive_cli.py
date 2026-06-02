@@ -680,6 +680,58 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertIn(f"id: {latest.id}", text)
         self.assertNotIn(f"id: {older.id}", text)
 
+    def test_hca_session_observe_latest_prints_dashboard_without_api_key(self):
+        from harness_code_agent import cli
+
+        config.API_KEY = ""
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = store.create(
+            profile="coding-agent",
+            cwd=self.temp_dir,
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(session).emit(
+            "llm_usage",
+            agent="main_agent",
+            payload={"prompt_tokens": 100, "cached_tokens": 90, "total_tokens": 120},
+        )
+
+        output = StringIO()
+        with redirect_stdout(output):
+            result = cli.main(["session", "observe", "latest"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("Observability dashboard", output.getvalue())
+        self.assertIn("cache hit ratio: 90.0%", output.getvalue())
+
+    def test_hca_session_observe_project_export_writes_audit_artifacts(self):
+        from harness_code_agent import cli
+
+        config.API_KEY = ""
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = store.create(
+            profile="coding-agent",
+            cwd=self.temp_dir,
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(session).emit(
+            "llm_usage",
+            agent="main_agent",
+            payload={"prompt_tokens": 100, "cached_tokens": 50, "total_tokens": 120},
+        )
+
+        output = StringIO()
+        with redirect_stdout(output):
+            result = cli.main(["session", "observe", "project", "--export"])
+
+        text = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("observability_export_markdown:", text)
+        self.assertIn("observability_export_json:", text)
+        self.assertTrue((Path(self.temp_dir) / ".harness" / "reports" / "observability").exists())
+
     def test_clean_checkpoint_is_skipped(self):
         session = self._session()
         try:

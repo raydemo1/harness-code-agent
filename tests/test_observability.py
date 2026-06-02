@@ -1,0 +1,136 @@
+import json
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+from harness_code_agent.sessions.store import SessionStore
+
+
+def _event(sequence, event_type, payload, agent="main_agent"):
+    return {
+        "sequence": sequence,
+        "timestamp": 0.0,
+        "type": event_type,
+        "agent": agent,
+        "payload": payload,
+    }
+
+
+class ObservabilityAggregationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.root = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_session_observability_aggregates_tokens_tools_and_audit_events(self):
+        from harness_code_agent.sessions.observability import build_session_observability
+
+        metadata = {
+            "id": "session-a",
+            "profile": "coding-agent",
+            "model": "model-a",
+            "created_at": "2026-06-01T00:00:00+00:00",
+        }
+        events = [
+            _event(1, "llm_usage", {"prompt_tokens": 100, "cached_tokens": 80, "completion_tokens": 20, "total_tokens": 120}),
+            _event(2, "llm_usage", {"prompt_tokens": None, "cached_tokens": 4, "completion_tokens": None, "total_tokens": None}),
+            _event(3, "tool_call", {"tool": "read_file", "args": {"path": "README.md"}}),
+            _event(4, "tool_result", {"tool": "read_file", "status": "success", "output": "ok"}),
+            _event(5, "tool_call", {"tool": "run_bash", "args": {"command": "pytest"}}),
+            _event(6, "tool_result", {"tool": "run_bash", "status": "failed", "error": "exit 1"}),
+            _event(7, "tool_call", {"tool": "write_file", "args": {"path": "app.py"}}),
+            _event(8, "tool_result", {"tool": "inspect_state", "status": "unknown"}),
+            _event(9, "failure", {"category": "runtime_error", "message": "exit 1"}),
+            _event(10, "failure", {"category": "validation_error", "message": "bad args"}),
+            _event(11, "agent_fallback", {"reason": "token_budget_exceeded"}),
+            _event(12, "context_compaction_committed", {"tokens_saved": 40000}),
+            _event(13, "approval_requested", {"tool": "run_bash"}),
+            _event(14, "approval_decided", {"approved": True}),
+            _event(15, "approval_decided", {"approved": False}),
+            _event(16, "file_change", {"path": "app.py"}),
+            _event(17, "file_change", {"path": "app.py"}),
+        ]
+
+        snapshot = build_session_observability(metadata, events)
+
+        self.assertEqual(snapshot.session_id, "session-a")
+        self.assertEqual(snapshot.tokens.llm_calls, 2)
+        self.assertEqual(snapshot.tokens.prompt_tokens, 100)
+        self.assertEqual(snapshot.tokens.cached_tokens, 84)
+        self.assertEqual(snapshot.tokens.completion_tokens, 20)
+        self.assertEqual(snapshot.tokens.total_tokens, 120)
+        self.assertEqual(snapshot.tokens.cache_hit_ratio, 0.84)
+        self.assertEqual(snapshot.tools.tool_results, 3)
+        self.assertEqual(snapshot.tools.successes, 1)
+        self.assertEqual(snapshot.tools.failures, 1)
+        self.assertEqual(snapshot.tools.unknown, 1)
+        self.assertEqual(snapshot.tools.pending_calls, 1)
+        self.assertAlmostEqual(snapshot.tools.success_rate, 1 / 3)
+        self.assertEqual(snapshot.tools.by_tool["read_file"].successes, 1)
+        self.assertEqual(snapshot.tools.by_tool["run_bash"].failures, 1)
+        self.assertEqual(snapshot.audit.failure_categories["runtime_error"], 1)
+        self.assertEqual(snapshot.audit.failure_categories["validation_error"], 1)
+        self.assertEqual(snapshot.audit.fallbacks, 1)
+        self.assertEqual(snapshot.audit.latest_fallback, "token_budget_exceeded")
+        self.assertEqual(snapshot.audit.compactions_committed, 1)
+        self.assertEqual(snapshot.audit.tokens_saved, 40000)
+        self.assertEqual(snapshot.audit.approvals_requested, 1)
+        self.assertEqual(snapshot.audit.approvals_approved, 1)
+        self.assertEqual(snapshot.audit.approvals_denied, 1)
+        self.assertEqual(snapshot.audit.changed_files, ["app.py"])
+
+    def test_project_observability_aggregates_sessions_and_skips_bad_records(self):
+        from harness_code_agent.sessions.observability import build_project_observability
+
+        store = SessionStore(self.root / ".harness")
+        first = store.create(profile="coding-agent", cwd=self.root, model="model-a", permission_mode="workspace-write")
+        second = store.create(profile="plan", cwd=self.root, model="model-a", permission_mode="workspace-write")
+        store.event_bus(first).emit("llm_usage", payload={"prompt_tokens": 100, "cached_tokens": 50, "total_tokens": 150})
+        store.event_bus(first).emit("tool_result", payload={"tool": "run_bash", "status": "failed"})
+        store.event_bus(first).emit("failure", payload={"category": "runtime_error", "message": "failed"})
+        store.event_bus(second).emit("llm_usage", payload={"prompt_tokens": 20, "cached_tokens": 20, "total_tokens": 30})
+        bad = store.sessions_dir / "bad-session"
+        bad.mkdir(parents=True)
+        (bad / "session.json").write_text("{not json", encoding="utf-8")
+
+        snapshot = build_project_observability(store)
+
+        self.assertEqual(snapshot.session_count, 2)
+        self.assertEqual(snapshot.tokens.prompt_tokens, 120)
+        self.assertEqual(snapshot.tokens.cached_tokens, 70)
+        self.assertEqual(snapshot.tokens.total_tokens, 180)
+        self.assertEqual(snapshot.tools.tool_results, 1)
+        self.assertEqual(snapshot.audit.failures, 1)
+        self.assertEqual(snapshot.top_token_sessions[0].session_id, first.id)
+        self.assertEqual(snapshot.top_failure_sessions[0].session_id, first.id)
+        self.assertEqual(snapshot.low_cache_sessions[0].session_id, first.id)
+
+    def test_observability_report_renders_and_exports_markdown_and_json(self):
+        from harness_code_agent.sessions.observability import (
+            export_observability_report,
+            format_session_observability,
+        )
+
+        store = SessionStore(self.root / ".harness")
+        session = store.create(profile="coding-agent", cwd=self.root, model="model-a", permission_mode="workspace-write")
+        store.event_bus(session).emit("llm_usage", payload={"prompt_tokens": 100, "cached_tokens": 75, "total_tokens": 120})
+        store.event_bus(session).emit("tool_result", payload={"tool": "read_file", "status": "success"})
+
+        report = format_session_observability(store, session.id)
+        exported = export_observability_report(store, mode="current", session_id=session.id)
+
+        self.assertIn("Observability dashboard", report)
+        self.assertIn("cache hit ratio: 75.0%", report)
+        self.assertTrue(exported.markdown_path.exists())
+        self.assertTrue(exported.json_path.exists())
+        self.assertIn("Observability dashboard", exported.markdown_path.read_text(encoding="utf-8"))
+        payload = json.loads(exported.json_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["mode"], "current")
+        self.assertEqual(payload["snapshot"]["session_id"], session.id)
+
+
+if __name__ == "__main__":
+    unittest.main()

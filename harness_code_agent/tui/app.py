@@ -85,6 +85,7 @@ class TuiApp(App):
     BINDINGS = [
         Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
         Binding("ctrl+t", "toggle_thought", "Toggle thought", show=False, priority=True),
+        Binding("ctrl+o", "observe", "Observe", show=False, priority=True),
         Binding("ctrl+k", "compact_context", "Compact", show=False, priority=True),
         Binding("ctrl+p", "toggle_permission", "Permissions", show=False, priority=True),
         # Panel keys: check_action guards these to only fire when a panel is active.
@@ -477,6 +478,13 @@ class TuiApp(App):
         """Toggle thought detail visibility."""
         if self.state:
             self.state.toggle_thought_details()
+
+    def action_observe(self) -> None:
+        """Open the temporary observability dashboard."""
+        from .screens import ObservabilityScreen
+
+        if hasattr(self, "session"):
+            self.push_screen(ObservabilityScreen(self.session))
 
     def action_compact_context(self) -> None:
         """Manually compact conversation context (dispatched to worker thread)."""

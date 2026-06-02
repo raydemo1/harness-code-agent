@@ -50,6 +50,52 @@ class TuiTests(unittest.TestCase):
         self.assertIn("Usage: /config show", result.text)
         self.assertTrue(result.should_continue)
 
+    def test_observe_command_formats_and_exports_current_session(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session_record = store.create(
+            profile="coding-agent",
+            cwd=self.temp_dir,
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(session_record).emit(
+            "llm_usage",
+            payload={"prompt_tokens": 100, "cached_tokens": 80, "total_tokens": 120},
+        )
+        session = SimpleNamespace(
+            session_store=store,
+            session=SimpleNamespace(id=session_record.id),
+        )
+        registry = default_command_registry()
+
+        report = registry.execute("/observe current", session)
+        exported = registry.execute("/observe export current", session)
+
+        self.assertIn("Observability dashboard", report.text)
+        self.assertIn("cache hit ratio: 80.0%", report.text)
+        self.assertIn("observability_export_markdown:", exported.text)
+        self.assertIn("observability_export_json:", exported.text)
+
+    def test_observe_command_formats_project_overview(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session_record = store.create(
+            profile="coding-agent",
+            cwd=self.temp_dir,
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(session_record).emit(
+            "llm_usage",
+            payload={"prompt_tokens": 100, "cached_tokens": 20, "total_tokens": 120},
+        )
+        registry = default_command_registry()
+        session = SimpleNamespace(session_store=store, session=SimpleNamespace(id=session_record.id))
+
+        report = registry.execute("/observe project", session)
+
+        self.assertIn("Project observability", report.text)
+        self.assertIn("sessions: 1", report.text)
+
     def test_quoted_file_mention_resolves_paths_with_spaces(self):
         Path(self.temp_dir, "space name.md").write_text("hello space\n", encoding="utf-8")
         store = SessionStore(Path(self.temp_dir) / ".harness")

@@ -10,6 +10,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 if TYPE_CHECKING:
@@ -295,3 +296,100 @@ class QuestionPanel(Vertical):
 
     def _cancel(self) -> None:
         self.post_message(QuestionResult(None))
+
+
+# ── ObservabilityScreen ─────────────────────────────────────────────────────
+
+class ObservabilityScreen(ModalScreen[None]):
+    """Temporary observability dashboard opened by keyboard shortcut."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close", show=False, priority=True),
+        Binding("tab", "toggle_mode", "Toggle mode", show=False, priority=True),
+        Binding("r", "refresh", "Refresh", show=False, priority=True),
+        Binding("e", "export", "Export", show=False, priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    ObservabilityScreen {
+        align: center middle;
+    }
+
+    #observability-panel {
+        width: 96;
+        height: 80%;
+        border: solid #4f6f8f;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #observability-title {
+        height: 1;
+        color: #8ec07c;
+    }
+
+    #observability-body {
+        height: 1fr;
+        overflow-y: auto;
+    }
+
+    #observability-footer {
+        height: auto;
+        color: #9a9a9a;
+    }
+    """
+
+    def __init__(self, session: Any, *, initial_mode: str = "current", **kwargs):
+        super().__init__(**kwargs)
+        self._session = session
+        self._mode = "project" if initial_mode == "project" else "current"
+        self._message = ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="observability-panel"):
+            yield Static("", id="observability-title")
+            yield Static("", id="observability-body")
+            yield Static("", id="observability-footer")
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+    def action_toggle_mode(self) -> None:
+        self._mode = "project" if self._mode == "current" else "current"
+        self._message = ""
+        self._refresh()
+
+    def action_refresh(self) -> None:
+        self._message = "refreshed"
+        self._refresh()
+
+    def action_export(self) -> None:
+        from ..sessions.observability import export_observability_report, format_export_result
+
+        session_id = self._session.session.id if self._mode == "current" else None
+        result = export_observability_report(
+            self._session.session_store,
+            mode=self._mode,
+            session_id=session_id,
+        )
+        self._message = format_export_result(result)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        from ..sessions.observability import format_project_observability, format_session_observability
+
+        if self._mode == "project":
+            title = "Observability - project overview"
+            body = format_project_observability(self._session.session_store)
+        else:
+            title = "Observability - current session"
+            body = format_session_observability(self._session.session_store, self._session.session.id)
+        footer = "Tab: mode  r: refresh  e: export  Esc: close"
+        if self._message:
+            footer += f"\n{self._message}"
+        self.query_one("#observability-title", Static).update(title)
+        self.query_one("#observability-body", Static).update(body)
+        self.query_one("#observability-footer", Static).update(footer)

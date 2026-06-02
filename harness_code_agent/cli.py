@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if argv == ["session", "show", "latest"]:
         return show_latest_session(Path.cwd())
+    if len(argv) >= 2 and argv[:2] == ["session", "observe"]:
+        return observe_session(Path.cwd(), argv[2:])
 
     parser = argparse.ArgumentParser(prog="hca", description="Interactive local coding agent")
     parser.add_argument("task", nargs="*", help="Optional first task to submit after startup")
@@ -145,6 +147,44 @@ def show_latest_session(cwd: Path) -> int:
     try:
         latest = store.latest_session()
         print_session(store, latest["id"])
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        print(f"Error: {e}")
+        return 1
+    return 0
+
+
+def observe_session(cwd: Path, args: list[str]) -> int:
+    from .sessions.observability import (
+        export_observability_report,
+        format_export_result,
+        format_project_observability,
+        format_session_observability,
+    )
+
+    export = False
+    target_args = list(args)
+    if "--export" in target_args:
+        export = True
+        target_args.remove("--export")
+    if len(target_args) != 1:
+        print("Error: Usage: hca session observe latest|<session-id>|project [--export]")
+        return 2
+
+    target = target_args[0]
+    store = SessionStore(cwd / ".harness")
+    try:
+        if target == "project":
+            if export:
+                print(format_export_result(export_observability_report(store, mode="project")))
+            else:
+                print(format_project_observability(store))
+            return 0
+
+        session_id = store.latest_session()["id"] if target == "latest" else target
+        if export:
+            print(format_export_result(export_observability_report(store, mode="current", session_id=session_id)))
+        else:
+            print(format_session_observability(store, session_id))
     except (FileNotFoundError, ValueError, KeyError) as e:
         print(f"Error: {e}")
         return 1
