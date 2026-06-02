@@ -289,11 +289,12 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 | `HARNESS_SANDBOX_MODE` | `host` | Shell sandbox：`host` 使用宿主 shell，`docker` 让 `run_bash` 在 Docker 容器内执行 |
 | `HARNESS_DOCKER_IMAGE` | `python:3.12` | Docker sandbox 使用的镜像 |
 | `HARNESS_DOCKER_NETWORK` | `none` | Docker sandbox 网络：`none` / `bridge` |
+| `HARNESS_DOCKER_USER` | 空 | 空值时 POSIX 非 root 自动使用 `uid:gid`，Windows 不映射；非空值原样传递为 `--user` |
 | `HARNESS_CONTEXT_WINDOW_TOKENS` | `128000` | 上下文窗口估算值，用于推导默认压缩/重置阈值 |
 | `COMPRESS_THRESHOLD` | `96000` | 上下文压缩阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.75` |
 | `RESET_THRESHOLD` | `104960` | 上下文重置阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.82` |
 | `MAX_AGENT_ITERATIONS` | `60` | 单次 agent loop 最大迭代数 |
-| `MAX_AGENT_TOTAL_TOKENS` | `1000000` | 单个 turn 的累计 LLM token 预算；超过后触发本地 `agent_fallback` 并停止执行新工具 |
+| `MAX_AGENT_TOTAL_TOKENS` | `300000` | 单个 turn 的累计 LLM token 预算；超过后触发本地 `agent_fallback` 并停止执行新工具 |
 | `MAX_AGENT_TOOL_CALLS` | `200` | 单个 turn 最大工具调用预算；超过后阻断未执行工具并触发本地 `agent_fallback` |
 | `AGENT_BUDGET_WARN_FRACTION` | `0.8` | token / tool call 预算达到该比例时发一次 `agent_budget_warning` |
 | `HARNESS_TRACE_STDERR` | 空 | 设置为 `1` / `true` / `yes` / `on` 时输出底层 API 错误追踪 |
@@ -329,7 +330,17 @@ PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.45
 
 设置 `HARNESS_SANDBOX_MODE=docker` 后，`run_bash` 会在按 session 懒启动并复用的 Docker 容器中执行。当前工作区会以读写方式挂载到容器 `/workspace`，容器内固定使用 Linux Bash；即使宿主机是 Windows，启用该模式后 shell 命令也应使用 Bash 语法。
 
+容器默认启用 `--security-opt=no-new-privileges`，禁止容器内进程获取额外内核权限。
+
 默认网络为 `HARNESS_DOCKER_NETWORK=none`，适合隔离不可信命令。需要在容器内安装依赖时，可显式改为 `bridge`。`read_file`、`write_file` 和 `apply_patch` 仍在宿主侧通过 `WorkspaceService` 执行，以保留路径保护、快照和敏感文件拒写能力。
+
+### 安全边界
+
+- **工作区挂载为读写**：容器可读取和修改挂载的工作区目录。如果 agent 执行了破坏性命令，工作区中的文件可能被删除或篡改。Git checkpoint 可在每次 turn 后自动创建恢复点。
+- **用户隔离**：`HARNESS_DOCKER_USER` 未设置时，POSIX 环境会自动使用当前用户的 `uid:gid` 运行容器进程，避免以 root 身份写入文件。Windows / Docker Desktop 环境不强制做 UID 映射，以保持兼容性。如需更强的用户隔离，请显式设置 `HARNESS_DOCKER_USER=1000:1000`（或对应值），或通过外部容器策略（如 Docker `userns-remap`）管理。
+- **root 命令 opt-in**：如果需要在容器内执行 `apt-get` 等 root 权限命令，可显式设置 `HARNESS_DOCKER_USER=root` 或 `HARNESS_DOCKER_USER=0:0`。这种模式可能把 `/workspace` 中新建或修改的文件变成 root 所有，后续宿主侧编辑、删除或 Git 操作可能需要手动修复权限。
+- **宿主命令隔离**：`run_bash` 的命令在容器内执行，不受宿主 shell 环境影响。但文件类工具（`read_file`、`write_file`、`apply_patch`）仍然在宿主侧运行。
+- **强隔离需求**：如果需要在完全不可信的环境下运行 agent，建议将整个项目运行在外部虚拟机或使用 `userns-remap` 等 Docker 安全策略，而不依赖 `HARNESS_DOCKER_USER` 默认映射。
 
 ## 测试
 

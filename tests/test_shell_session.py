@@ -7,7 +7,14 @@ from unittest.mock import patch
 from pathlib import Path
 
 from harness_code_agent import config
-from harness_code_agent.workspace.shell_session import PersistentShellSession, windows_shell_kind
+from harness_code_agent.workspace.shell_session import (
+    PersistentShellSession,
+    _DockerShellBackend,
+    _docker_user_arg,
+    docker_shell_hint,
+    sandbox_mode,
+    windows_shell_kind,
+)
 
 
 def _commands_for_platform(temp_dir: str) -> dict[str, str]:
@@ -162,6 +169,8 @@ class PersistentShellSessionTests(unittest.TestCase):
             with (
                 patch.object(config, "DOCKER_IMAGE", "python:3.12"),
                 patch.object(config, "DOCKER_NETWORK", "none"),
+                patch.object(config, "DOCKER_USER", ""),
+                patch("harness_code_agent.workspace.shell_session._docker_user_arg", return_value=[]),
             ):
                 args = shell_session._docker_run_args("hca-test", str(Path(temp_dir).resolve()))
 
@@ -169,6 +178,7 @@ class PersistentShellSessionTests(unittest.TestCase):
             self.assertIn("hca-test", args)
             self.assertIn("--network", args)
             self.assertIn("none", args)
+            self.assertIn("--security-opt=no-new-privileges", args)
             self.assertIn("-v", args)
             self.assertIn(f"{Path(temp_dir).resolve()}:/workspace", args)
             self.assertIn("-w", args)
@@ -177,8 +187,214 @@ class PersistentShellSessionTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_docker_run_args_includes_security_opt(self):
+        from harness_code_agent.workspace import shell_session
+
+        temp_dir = self._make_temp_dir()
+        try:
+            with (
+                patch.object(config, "DOCKER_IMAGE", "python:3.12"),
+                patch.object(config, "DOCKER_NETWORK", "none"),
+                patch.object(config, "DOCKER_USER", ""),
+            ):
+                args = shell_session._docker_run_args("hca-test", str(Path(temp_dir).resolve()))
+
+            self.assertIn("--security-opt=no-new-privileges", args)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_docker_run_args_explicit_user(self):
+        from harness_code_agent.workspace import shell_session
+
+        temp_dir = self._make_temp_dir()
+        try:
+            with (
+                patch.object(config, "DOCKER_IMAGE", "python:3.12"),
+                patch.object(config, "DOCKER_NETWORK", "none"),
+                patch.object(config, "DOCKER_USER", "1000:1000"),
+            ):
+                args = shell_session._docker_run_args("hca-test", str(Path(temp_dir).resolve()))
+
+            self.assertIn("--user", args)
+            user_idx = args.index("--user")
+            self.assertEqual(args[user_idx + 1], "1000:1000")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_docker_user_arg_auto_posix_non_root(self):
+        with (
+            patch.object(config, "DOCKER_USER", ""),
+            patch("os.name", "posix"),
+            patch("os.getuid", return_value=1000, create=True),
+            patch("os.getgid", return_value=1000, create=True),
+        ):
+            result = _docker_user_arg()
+            self.assertEqual(result, ["--user", "1000:1000"])
+
+    def test_docker_user_arg_no_mapping_for_root(self):
+        with (
+            patch.object(config, "DOCKER_USER", ""),
+            patch("os.name", "posix"),
+            patch("os.getuid", return_value=0, create=True),
+            patch("os.getgid", return_value=0, create=True),
+        ):
+            result = _docker_user_arg()
+            self.assertEqual(result, [])
+
+    def test_docker_user_arg_maps_non_root_uid_even_with_root_gid(self):
+        with (
+            patch.object(config, "DOCKER_USER", ""),
+            patch("os.name", "posix"),
+            patch("os.getuid", return_value=1000, create=True),
+            patch("os.getgid", return_value=0, create=True),
+        ):
+            result = _docker_user_arg()
+            self.assertEqual(result, ["--user", "1000:0"])
+
+    def test_docker_user_arg_no_mapping_on_windows(self):
+        with (
+            patch.object(config, "DOCKER_USER", ""),
+            patch("os.name", "nt"),
+        ):
+            result = _docker_user_arg()
+            self.assertEqual(result, [])
+
+    def test_docker_user_arg_no_uid_available(self):
+        with (
+            patch.object(config, "DOCKER_USER", ""),
+            patch("os.name", "posix"),
+            patch("os.getuid", side_effect=AttributeError, create=True),
+        ):
+            result = _docker_user_arg()
+            self.assertEqual(result, [])
+
+    def test_sandbox_mode_invalid_value_raises(self):
+        with patch.object(config, "SANDBOX_MODE", "lxc"):
+            with self.assertRaises(ValueError):
+                sandbox_mode()
+
+    def test_docker_shell_hint_host_mode(self):
+        with patch.object(config, "SANDBOX_MODE", "host"):
+            self.assertEqual(docker_shell_hint(), "host shell")
+
+    def test_docker_shell_hint_cli_missing(self):
+        with (
+            patch.object(config, "SANDBOX_MODE", "docker"),
+            patch("harness_code_agent.workspace.shell_session.docker_cli_path", return_value=None),
+        ):
+            self.assertEqual(docker_shell_hint(), "Docker CLI not found")
+
+    def test_docker_shell_hint_docker_available(self):
+        with (
+            patch.object(config, "SANDBOX_MODE", "docker"),
+            patch.object(config, "DOCKER_IMAGE", "python:3.12"),
+            patch.object(config, "DOCKER_NETWORK", "none"),
+            patch("harness_code_agent.workspace.shell_session.docker_cli_path", return_value="/usr/bin/docker"),
+        ):
+            hint = docker_shell_hint()
+            self.assertIn("Docker sandbox", hint)
+            self.assertIn("python:3.12", hint)
+
+    def test_docker_shell_hint_includes_user_when_set(self):
+        with (
+            patch.object(config, "SANDBOX_MODE", "docker"),
+            patch.object(config, "DOCKER_IMAGE", "python:3.12"),
+            patch.object(config, "DOCKER_NETWORK", "none"),
+            patch.object(config, "DOCKER_USER", "1000:1000"),
+            patch("harness_code_agent.workspace.shell_session.docker_cli_path", return_value="/usr/bin/docker"),
+        ):
+            hint = docker_shell_hint()
+            self.assertIn("user=1000:1000", hint)
+
+    def test_docker_cleanup_swallows_docker_rm_errors(self):
+        import subprocess as sp
+
+        backend = _DockerShellBackend.__new__(_DockerShellBackend)
+        backend.container_name = "hca-test-xyz"
+        backend._container_started = True
+
+        def fake_run(*args, **kwargs):
+            raise Exception("docker rm failed")
+
+        with patch("harness_code_agent.workspace.shell_session.subprocess.run", side_effect=fake_run):
+            # Should not raise
+            backend._cleanup_impl()
+            self.assertFalse(backend._container_started)
+
+    def test_stop_exec_process_waits_for_reader_thread(self):
+        import threading
+
+        backend = _DockerShellBackend.__new__(_DockerShellBackend)
+        # Simulate a stopped process
+        proc = unittest.mock.MagicMock()
+        proc.poll.return_value = 0
+        proc.stdin = unittest.mock.MagicMock()
+        proc.stdout = unittest.mock.MagicMock()
+        backend._process = proc
+
+        reader_started = threading.Event()
+        reader_exited = threading.Event()
+
+        def reader_run():
+            reader_started.set()
+            reader_exited.wait()  # block until told to exit
+
+        reader = threading.Thread(target=reader_run)
+        reader.start()
+        reader_started.wait()
+        backend._reader = reader
+
+        backend._stop_exec_process(timeout=2)
+
+        reader_exited.set()
+        reader.join(timeout=2)
+        self.assertFalse(reader.is_alive())
+
+    def test_docker_backend_interrupt_does_not_set_closed(self):
+        backend = _DockerShellBackend.__new__(_DockerShellBackend)
+        backend._closed = False
+        backend.container_name = "hca-test-interrupt"
+        backend._container_started = False
+        backend._reader = unittest.mock.MagicMock()
+        backend._reader.is_alive.return_value = False
+        backend._queue = unittest.mock.MagicMock()
+        backend._process = unittest.mock.MagicMock()
+        backend._process.poll.return_value = 0
+        backend._process.stdin = unittest.mock.MagicMock()
+        backend._process.stdout = unittest.mock.MagicMock()
+
+        with (
+            patch.object(backend, "_interrupt_impl") as mock_interrupt,
+            patch.object(backend, "_sync") as mock_sync,
+        ):
+            backend.interrupt()
+            mock_interrupt.assert_called_once()
+            mock_sync.assert_called_once()
+
+        # interrupt() should NOT set _closed
+        self.assertFalse(backend._closed)
+
+    def test_docker_backend_close_sets_closed(self):
+        import queue
+
+        backend = _DockerShellBackend.__new__(_DockerShellBackend)
+        backend._closed = False
+        backend.container_name = "hca-test-close"
+        backend._container_started = False
+        backend._reader = unittest.mock.MagicMock()
+        backend._queue = unittest.mock.MagicMock()
+        backend._queue.get_nowait.side_effect = queue.Empty
+
+        with patch.object(backend, "_cleanup_impl"):
+            backend.close()
+            self.assertTrue(backend._closed)
+
+        # Second close is a no-op
+        with patch.object(backend, "_cleanup_impl") as mock_cleanup:
+            backend.close()
+            mock_cleanup.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
-
 

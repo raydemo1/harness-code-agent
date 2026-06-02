@@ -27,7 +27,7 @@ from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
-from ..workspace.shell_session import docker_cli_path, docker_shell_hint, sandbox_mode, windows_shell_hint, windows_shell_path
+from ..workspace.shell_session import docker_cli_path, docker_info_check, docker_shell_hint, sandbox_mode, windows_shell_hint, windows_shell_path
 from .mentions import MentionResolutionError, format_turn_with_mentions, resolve_mentions
 
 
@@ -939,6 +939,7 @@ def format_config_show(workspace: Path) -> str:
         f"sandbox_mode: {config.SANDBOX_MODE}",
         f"docker_image: {config.DOCKER_IMAGE}",
         f"docker_network: {config.DOCKER_NETWORK}",
+        f"docker_user: {config.DOCKER_USER or 'auto'}",
         f"provider: {config.PROVIDER}",
         f"stream: {config.STREAM}",
     ]
@@ -968,7 +969,8 @@ def format_doctor(workspace: Path, *, mcp_manager: McpClientManager | None = Non
     rows.append(("Git", shutil_which("git") is not None, shutil_which("git") or "not installed"))
     if sandbox_mode() == "docker":
         docker = docker_cli_path()
-        rows.append(("Docker", docker is not None, docker_shell_hint()))
+        rows.append(("Docker CLI", docker is not None, docker_shell_hint()))
+        rows.append(("Docker daemon", *_docker_daemon_doctor_status(docker)))
     else:
         shell = shell_path()
         rows.append(("Shell", shell is not None, shell or "no shell found"))
@@ -1005,6 +1007,13 @@ def shutil_which(name: str) -> str | None:
     import shutil
 
     return shutil.which(name)
+
+
+def _docker_daemon_doctor_status(docker_cli: str | None) -> tuple[bool, str]:
+    if not docker_cli:
+        return False, "Docker CLI not available"
+    ok, detail = docker_info_check()
+    return ok, detail
 
 
 def shell_path() -> str | None:

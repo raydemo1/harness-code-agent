@@ -2418,6 +2418,79 @@ class ProductRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result, [])
 
+    # ------------------------------------------------------------------
+    # safe_args_preview
+    # ------------------------------------------------------------------
+
+    def test_safe_args_preview_masks_sensitive_fields(self):
+        from harness_code_agent.agent.loop import safe_args_preview
+
+        result = safe_args_preview({"path": "x.py", "content": "print('hello' * 999)"})
+        self.assertNotIn("print", result)
+        self.assertIn("chars", result)
+        self.assertIn("path", result)
+
+        result2 = safe_args_preview({"path": "x.py", "patch": "+def foo():\n    pass"})
+        self.assertNotIn("def foo", result2)
+        self.assertIn("chars", result2)
+
+    def test_safe_args_preview_handles_large_fields(self):
+        from harness_code_agent.agent.loop import safe_args_preview
+
+        large = "x" * 500
+        result = safe_args_preview({"key": large})
+        self.assertIn("chars", result)
+        # JSON-serialized string includes quotes, so the char count is 500 + 2
+        self.assertIn("502 chars", result)
+
+    def test_safe_args_preview_sorts_keys_stably(self):
+        from harness_code_agent.agent.loop import safe_args_preview
+
+        # Call multiple times — result should be identical
+        args = {"z": 3, "a": 1, "path": "f.py"}
+        r1 = safe_args_preview(args)
+        r2 = safe_args_preview(args)
+        self.assertEqual(r1, r2)
+        # 'a' should come before 'z'
+        self.assertLess(r1.index("a"), r1.index("z"))
+
+    def test_safe_args_preview_respects_max_chars(self):
+        from harness_code_agent.agent.loop import safe_args_preview
+
+        args = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6}
+        result = safe_args_preview(args, max_chars=30)
+        self.assertLessEqual(len(result), 33)  # 30 + "..."
+
+    def test_loop_detection_preview_does_not_import_agent_loop(self):
+        middleware_source = Path("harness_code_agent/runtime/middlewares.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("agent.loop", middleware_source)
+
+    # ------------------------------------------------------------------
+    # _file_warned reset per turn
+    # ------------------------------------------------------------------
+
+    def test_loop_detection_file_warned_resets_per_turn(self):
+        from harness_code_agent.runtime.middlewares import LoopDetectionMiddleware
+
+        mw = LoopDetectionMiddleware(file_edit_threshold=2)
+
+        # First turn — writes to file twice, triggers warning
+        mw.begin_turn("task 1", [])
+        self.assertEqual(len(mw._file_warned), 0)
+
+        mw.post_tool("write_file", {"path": "a.py", "content": "x"}, "ok", [])
+        mw.post_tool("write_file", {"path": "a.py", "content": "y"}, "ok", [])
+        self.assertIn("a.py", mw._file_warned)
+
+        # Next turn — _file_warned is cleared, same file triggers warning again
+        mw.begin_turn("task 2", [])
+        self.assertEqual(len(mw._file_warned), 0)
+
+        mw.post_tool("write_file", {"path": "a.py", "content": "z"}, "ok", [])
+        mw.post_tool("write_file", {"path": "a.py", "content": "w"}, "ok", [])
+        self.assertIn("a.py", mw._file_warned)
+
 
 if __name__ == "__main__":
     unittest.main()

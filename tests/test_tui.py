@@ -758,6 +758,35 @@ class TuiAppTests(unittest.TestCase):
 
             self.assertEqual(app.run(headless=True, auto_pilot=auto_exit), 0)
 
+    def test_tui_state_recovers_from_blocked_after_turn_started(self):
+        from harness_code_agent.tui.state import TuiState, SessionStatusSnapshot
+
+        state = TuiState(
+            SessionStatusSnapshot(
+                profile="coding-agent",
+                model="gpt-4o",
+                provider="auto",
+                permission_mode="workspace-write",
+                session_id="s1",
+                cwd=self.root,
+                status="running",
+            )
+        )
+
+        # Simulate agent_fallback → status becomes blocked
+        state.apply_event({
+            "type": "agent_fallback",
+            "payload": {"reason": "loop_detected", "limit_type": "tool_fingerprint"},
+        })
+        self.assertEqual(state.snapshot.status, "blocked")
+
+        # Simulate next turn_started → status recovers to running
+        state.apply_event({
+            "type": "turn_started",
+            "payload": {"turn": 2},
+        })
+        self.assertEqual(state.snapshot.status, "running")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ from .observations import (
 from .providers import ProviderAdapter, current_adapter, get_client
 from .utils import _prompt_cache_key, _short_hash, _usage_to_dict
 from ..runtime import tools
+from ..runtime.arg_preview import safe_args_preview
 from ..runtime.tool_context import ToolContext
 from ..runtime.tool_result import ToolResult
 from ..workspace.shell_session import PersistentShellSession
@@ -1102,22 +1103,8 @@ def _safe_tool_summary(tool_name: str, tool_args: dict) -> str:
 
 
 def _safe_args_preview(tool_args: dict) -> str:
-    safe: dict[str, object] = {}
-    for key, value in dict(tool_args or {}).items():
-        key_text = str(key)
-        try:
-            value_text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-        except TypeError:
-            value_text = str(value)
-        if key_text.lower() in {"content", "output", "text", "input", "code", "patch"} or len(value_text) > 120:
-            safe[key_text] = f"[{len(value_text)} chars]"
-        else:
-            safe[key_text] = value
-    try:
-        preview = json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str)
-    except TypeError:
-        preview = str(safe)
-    return _truncate(preview, 200)
+    """Backward-compatible wrapper (200-char limit)."""
+    return safe_args_preview(tool_args, max_chars=200)
 
 
 def _tool_names_from_schemas(tool_schemas: list[dict] | None) -> set[str]:

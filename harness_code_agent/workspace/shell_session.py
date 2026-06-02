@@ -12,7 +12,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import logging
+
 from .. import config
+
+log = logging.getLogger("harness")
 
 
 @dataclass
@@ -204,7 +208,61 @@ def docker_shell_hint() -> str:
     path = docker_cli_path()
     if not path:
         return "Docker CLI not found"
-    return f"Docker sandbox ({config.DOCKER_IMAGE}, network={config.DOCKER_NETWORK})"
+    user_hint = ""
+    user_arg = _docker_user_arg()
+    if user_arg:
+        user_hint = f", user={user_arg[1]}"
+    return f"Docker sandbox ({config.DOCKER_IMAGE}, network={config.DOCKER_NETWORK}{user_hint})"
+
+
+def docker_info_check() -> tuple[bool, str]:
+    """Check Docker daemon connectivity for doctor diagnostics.
+
+    Returns (ok, detail) tuple.
+    """
+    docker = docker_cli_path()
+    if not docker:
+        return False, "Docker CLI not found"
+    try:
+        completed = subprocess.run(
+            [docker, "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=15,
+        )
+    except FileNotFoundError:
+        return False, "Docker CLI not found"
+    except subprocess.TimeoutExpired:
+        return False, "Docker daemon unreachable (timeout)"
+    except Exception as exc:
+        return False, f"Docker connectivity check failed: {exc}"
+    if completed.returncode == 0:
+        version = completed.stdout.strip()
+        if version:
+            return True, f"Docker {version}"
+        return True, "Docker available"
+    detail = (completed.stderr or completed.stdout or "").strip()
+    if detail:
+        return False, f"Docker daemon unreachable: {detail[:120]}"
+    return False, f"Docker daemon unreachable (exit code {completed.returncode})"
+
+
+def _docker_user_arg() -> list[str]:
+    explicit = (config.DOCKER_USER or "").strip()
+    if explicit:
+        return ["--user", explicit]
+    # Auto-detect: on POSIX, avoid container root whenever the host UID is non-root.
+    if os.name == "posix":
+        try:
+            uid = os.getuid()
+            gid = os.getgid()
+        except AttributeError:
+            return []
+        if uid != 0:
+            return ["--user", f"{uid}:{gid}"]
+    # Windows / Docker Desktop: do not force UID mapping by default
+    return []
 
 
 def _docker_run_args(container_name: str, host_cwd: str) -> list[str]:
@@ -214,7 +272,7 @@ def _docker_run_args(container_name: str, host_cwd: str) -> list[str]:
     network = (config.DOCKER_NETWORK or "none").strip().lower()
     if network not in {"none", "bridge"}:
         raise ValueError("HARNESS_DOCKER_NETWORK must be none or bridge")
-    return [
+    args = [
         "docker",
         "run",
         "-d",
@@ -222,14 +280,15 @@ def _docker_run_args(container_name: str, host_cwd: str) -> list[str]:
         container_name,
         "--network",
         network,
+        "--security-opt=no-new-privileges",
         "-v",
         f"{host_cwd}:/workspace",
         "-w",
         "/workspace",
-        image,
-        "sleep",
-        "infinity",
     ]
+    args.extend(_docker_user_arg())
+    args.extend([image, "sleep", "infinity"])
+    return args
 
 
 def _docker_exec_args(container_name: str) -> list[str]:
@@ -251,12 +310,21 @@ def _run_docker_checked(args: list[str], action: str) -> None:
     try:
         completed = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
     except FileNotFoundError as exc:
-        raise RuntimeError("Docker sandbox requested but docker CLI was not found") from exc
+        raise RuntimeError(
+            f"Docker sandbox requested but docker CLI was not found. "
+            f"Install Docker or set HARNESS_SANDBOX_MODE=host."
+        ) from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()
         if detail:
-            raise RuntimeError(f"Failed to {action}: {detail}")
-        raise RuntimeError(f"Failed to {action}: docker exited with code {completed.returncode}")
+            raise RuntimeError(
+                f"Failed to {action}: {detail}\n"
+                f"Check that Docker daemon is running and the image is available."
+            )
+        raise RuntimeError(
+            f"Failed to {action}: docker exited with code {completed.returncode}. "
+            f"Check that Docker daemon is running."
+        )
 
 
 def windows_shell_path() -> str | None:
@@ -378,6 +446,10 @@ class _DockerShellBackend(_BaseShellBackend):
                 self._process.stdin.close()
             if self._process.stdout is not None:
                 self._process.stdout.close()
+        # Give the reader thread a moment to exit gracefully
+        reader = getattr(self, "_reader", None)
+        if reader is not None and reader.is_alive():
+            reader.join(timeout=2)
 
     def _build_sync_command(self, marker: str) -> str:
         return f"printf '%s\\n' '{marker}'\n"

@@ -860,6 +860,53 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertIn("docker_image: python:3.12", text)
         self.assertIn("docker_network: none", text)
 
+    def test_config_show_includes_docker_user_and_token_defaults(self):
+        from harness_code_agent.core.interactive import format_config_show
+
+        with (
+            patch.object(config, "DOCKER_USER", "1000:1000"),
+        ):
+            text = format_config_show(Path(self.temp_dir))
+
+        self.assertIn("docker_user: 1000:1000", text)
+        self.assertIn(f"max_agent_total_tokens: {config.MAX_AGENT_TOTAL_TOKENS}", text)
+
+    def test_readme_documents_docker_root_opt_in(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        text = (repo_root / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("HARNESS_DOCKER_USER=root", text)
+        self.assertIn("HARNESS_DOCKER_USER=0:0", text)
+
+    def test_doctor_docker_mode_with_working_daemon(self):
+        from harness_code_agent.core.interactive import format_doctor
+
+        with (
+            patch.object(config, "SANDBOX_MODE", "docker"),
+            patch("harness_code_agent.core.interactive.docker_cli_path", return_value="/usr/bin/docker"),
+            patch("harness_code_agent.core.interactive.docker_info_check", return_value=(True, "Docker 27.0.3")),
+        ):
+            text, failures = format_doctor(Path(self.temp_dir))
+
+        self.assertIn("Docker CLI", text)
+        self.assertIn("Docker daemon", text)
+        self.assertIn("Docker 27.0.3", text)
+        self.assertEqual(failures, 0)
+
+    def test_doctor_docker_mode_cli_present_daemon_unreachable(self):
+        from harness_code_agent.core.interactive import format_doctor
+
+        with (
+            patch.object(config, "SANDBOX_MODE", "docker"),
+            patch("harness_code_agent.core.interactive.docker_cli_path", return_value="/usr/bin/docker"),
+            patch("harness_code_agent.core.interactive.docker_info_check", return_value=(False, "Docker daemon unreachable (exit code 1)")),
+        ):
+            text, failures = format_doctor(Path(self.temp_dir))
+
+        self.assertIn("FAIL", text)
+        self.assertIn("Docker daemon", text)
+        self.assertGreater(failures, 0)
+
     def test_print_turn_result_does_not_duplicate_streamed_text(self):
         from harness_code_agent.core.interactive import TurnResult, print_turn_result
 

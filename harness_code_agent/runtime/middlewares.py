@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .arg_preview import safe_args_preview as _shared_safe_args_preview
 from .permissions import is_read_only_command
 
 log = logging.getLogger("harness")
@@ -132,18 +133,8 @@ class LoopDetectionMiddleware(AgentMiddleware):
 
     @staticmethod
     def _safe_args_preview(tool_args: dict) -> str:
-        safe: dict[str, object] = {}
-        for key, value in dict(tool_args or {}).items():
-            key_text = str(key)
-            try:
-                value_text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-            except TypeError:
-                value_text = str(value)
-            if key_text.lower() in {"content", "output", "text", "input", "code", "patch"} or len(value_text) > 120:
-                safe[key_text] = f"[{len(value_text)} chars]"
-            else:
-                safe[key_text] = value
-        return json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str)[:220]
+        """Preview for loop-detection traces (220-char limit, consistent with legacy behavior)."""
+        return _shared_safe_args_preview(tool_args, max_chars=220)
 
     def _observe_tool_fingerprint(self, tool_name: str, tool_args: dict, runtime_state=None) -> str | None:
         threshold = self.tool_fingerprint_repeat_threshold
