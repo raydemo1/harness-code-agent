@@ -43,6 +43,28 @@ def _mock_session(root: Path):
     )
 
 
+def _mock_pending_session(root: Path):
+    from harness_code_agent.sessions.store import SessionStore
+
+    return SimpleNamespace(
+        is_bound=False,
+        profile=SimpleNamespace(name=lambda: "coding-agent"),
+        session=None,
+        session_id=None,
+        display_profile="pending",
+        session_store=SessionStore(root / ".harness"),
+        cwd=str(root),
+        permission_mode="workspace-write",
+        conversation=None,
+        close=lambda: None,
+        handle_slash_command=lambda line: True,
+        manual_compact_context=lambda: "No active session yet. Submit a task first.",
+        submit=lambda text, cancellation_token=None: SimpleNamespace(notice="", checkpoint=""),
+        interrupt_current_shell=lambda: None,
+        toggle_permission_mode=lambda: "permission mode switched: workspace-write -> danger-full-access",
+    )
+
+
 def _run(coro):
     """Run an async test coroutine."""
     return asyncio.run(coro)
@@ -188,6 +210,25 @@ class TuiInteractiveTests(unittest.TestCase):
                     await pilot.press("escape")
                     await pilot.pause()
                     self.assertNotIsInstance(app.screen, ObservabilityScreen)
+        _run(_test())
+
+    def test_ctrl_o_handles_pending_current_session(self):
+        async def _test():
+            mock = _mock_pending_session(self.root)
+            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
+                MockSession.return_value = mock
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.press("ctrl+o")
+                    await pilot.pause()
+
+                    body = str(app.screen.query_one("#observability-body").renderable)
+                    self.assertIn("No active session yet", body)
+
+                    await pilot.press("e")
+                    await pilot.pause()
+                    footer = str(app.screen.query_one("#observability-footer").renderable)
+                    self.assertIn("No active session yet", footer)
         _run(_test())
 
     # ── Submit behavior ─────────────────────────────────────────────────────

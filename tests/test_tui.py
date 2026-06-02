@@ -96,6 +96,20 @@ class TuiTests(unittest.TestCase):
         self.assertIn("Project observability", report.text)
         self.assertIn("sessions: 1", report.text)
 
+    def test_observability_screen_handles_pending_current_session(self):
+        from harness_code_agent.tui.screens import ObservabilityScreen
+
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        session = SimpleNamespace(
+            is_bound=False,
+            session=None,
+            session_store=store,
+        )
+        screen = ObservabilityScreen(session)
+
+        self.assertIsNone(screen._current_session_id())
+        self.assertIn("No active session yet", screen._current_session_body())
+
     def test_quoted_file_mention_resolves_paths_with_spaces(self):
         Path(self.temp_dir, "space name.md").write_text("hello space\n", encoding="utf-8")
         store = SessionStore(Path(self.temp_dir) / ".harness")

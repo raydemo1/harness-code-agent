@@ -38,20 +38,32 @@ def _commands_for_platform(temp_dir: str) -> dict[str, str]:
             "sleep": "powershell -NoLogo -NoProfile -Command \"Start-Sleep -Seconds 5\"",
             "alive": "echo alive",
         }
-        return {
-            "make_and_cd": "mkdir -p subdir && cd subdir",
-            "pwd": "pwd",
-            "pwd_expected": str(Path(temp_dir, "subdir").resolve()),
-            "set_env": "export FOO=bar",
-            "get_env": "printf '%s' \"$FOO\"",
-            "sleep": "sleep 5",
-            "alive": "echo alive",
-        }
+    return {
+        "make_and_cd": "mkdir -p subdir && cd subdir",
+        "pwd": "pwd",
+        "pwd_expected": os.path.abspath(os.path.join(temp_dir, "subdir")),
+        "set_env": "export FOO=bar",
+        "get_env": "printf '%s' \"$FOO\"",
+        "sleep": "sleep 5",
+        "alive": "echo alive",
+    }
 
 
 class PersistentShellSessionTests(unittest.TestCase):
     def _make_temp_dir(self) -> str:
         return tempfile.mkdtemp(dir=os.getcwd())
+
+    def test_commands_for_platform_returns_posix_commands(self):
+        temp_dir = self._make_temp_dir()
+        try:
+            with patch("os.name", "posix"):
+                commands = _commands_for_platform(temp_dir)
+
+            self.assertEqual(commands["make_and_cd"], "mkdir -p subdir && cd subdir")
+            self.assertEqual(commands["pwd"], "pwd")
+            self.assertEqual(commands["set_env"], "export FOO=bar")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_shell_preserves_working_directory(self):
         temp_dir = self._make_temp_dir()
@@ -397,4 +409,3 @@ class PersistentShellSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

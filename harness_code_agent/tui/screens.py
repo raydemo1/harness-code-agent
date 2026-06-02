@@ -369,7 +369,11 @@ class ObservabilityScreen(ModalScreen[None]):
     def action_export(self) -> None:
         from ..sessions.observability import export_observability_report, format_export_result
 
-        session_id = self._session.session.id if self._mode == "current" else None
+        session_id = self._current_session_id() if self._mode == "current" else None
+        if self._mode == "current" and not session_id:
+            self._message = "No active session yet. Submit a task first."
+            self._refresh()
+            return
         result = export_observability_report(
             self._session.session_store,
             mode=self._mode,
@@ -386,10 +390,23 @@ class ObservabilityScreen(ModalScreen[None]):
             body = format_project_observability(self._session.session_store)
         else:
             title = "Observability - current session"
-            body = format_session_observability(self._session.session_store, self._session.session.id)
+            session_id = self._current_session_id()
+            body = (
+                format_session_observability(self._session.session_store, session_id)
+                if session_id
+                else self._current_session_body()
+            )
         footer = "Tab: mode  r: refresh  e: export  Esc: close"
         if self._message:
             footer += f"\n{self._message}"
         self.query_one("#observability-title", Static).update(title)
         self.query_one("#observability-body", Static).update(body)
         self.query_one("#observability-footer", Static).update(footer)
+
+    def _current_session_id(self) -> str | None:
+        session = getattr(self._session, "session", None)
+        session_id = getattr(session, "id", None)
+        return str(session_id) if session_id else None
+
+    def _current_session_body(self) -> str:
+        return "No active session yet. Submit a task first."
