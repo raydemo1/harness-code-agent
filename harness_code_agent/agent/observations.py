@@ -199,11 +199,14 @@ class ObservationStore:
         messages: list[dict],
         *,
         min_chars: int = STALE_REPLACEMENT_MIN_CHARS,
+        protect_from_index: int | None = None,
     ) -> list[str]:
         """Replace only long stale observation messages with compact summaries."""
         replaced: list[str] = []
         for observation in self.observations:
             if not observation.stale or observation.message_index is None:
+                continue
+            if protect_from_index is not None and observation.message_index >= protect_from_index:
                 continue
             if observation.message_index >= len(messages):
                 continue

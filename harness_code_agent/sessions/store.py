@@ -36,6 +36,7 @@ class SessionStore:
         model: str,
         permission_mode: str,
         resumed_from: str | None = None,
+        profile_source: str | None = None,
     ) -> Session:
         session_id = self._new_session_id()
         session_root = self.sessions_dir / session_id
@@ -60,6 +61,7 @@ class SessionStore:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "cwd": str(Path(cwd).resolve()),
             "profile": profile,
+            "profile_source": profile_source or "explicit",
             "model": model,
             "permission_mode": permission_mode,
             "status": "running",

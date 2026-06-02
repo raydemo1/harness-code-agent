@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--list-profiles", action="store_true", help="List profiles and exit")
     args = parser.parse_args(argv)
+    profile_explicit = any(arg == "--profile" or arg.startswith("--profile=") for arg in argv)
 
     from .core.logging_config import setup_logging
     setup_logging(verbose=args.verbose)
@@ -65,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_batch(
             cwd=cwd,
             profile_name=args.profile,
+            profile_explicit=profile_explicit,
             resume_session_id=args.resume,
             first_task=first_task,
             stream_sink=stream_sink,
@@ -74,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         app = TuiApp(
             cwd=cwd,
             profile_name=args.profile,
+            profile_explicit=profile_explicit,
             resume_session_id=args.resume,
             first_task=first_task,
         )
@@ -90,11 +93,13 @@ def run_batch(
     resume_session_id: str | None,
     first_task: str,
     stream_sink=None,
+    profile_explicit: bool = False,
 ) -> int:
     try:
         session = InteractiveSession(
             cwd=cwd,
             profile_name=profile_name,
+            profile_explicit=profile_explicit,
             resume_session_id=resume_session_id,
             stream_sink=stream_sink,
         )
@@ -102,11 +107,14 @@ def run_batch(
         print(f"Error: {e}")
         return 1
 
-    print(f"hca session: {session.session.id}")
-    print(f"workspace: {session.cwd}")
-
     try:
-        _submit_and_print(session, first_task)
+        result = session.submit(first_task)
+        if session.session_id:
+            print(f"hca session: {session.session_id}")
+        print(f"workspace: {session.cwd}")
+        print_turn_result(result)
+    except MentionResolutionError as e:
+        print(f"Error: {e}")
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130

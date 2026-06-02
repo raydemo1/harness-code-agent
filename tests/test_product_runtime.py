@@ -468,6 +468,50 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertNotEqual(first, third)
 
+    def test_prompt_cache_key_canonicalizes_tool_schema_order(self):
+        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.utils import _prompt_cache_key
+
+        agent = Agent(
+            "test",
+            "rendered system",
+            use_tools=True,
+            prompt_cache_identity={"global_rules_hash": "a"},
+        )
+        read_schema = {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "required": ["path", "max_lines"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "max_lines": {"type": "integer"},
+                    },
+                },
+            },
+        }
+        write_schema = {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "required": ["content", "path"],
+                    "properties": {
+                        "content": {"type": "string"},
+                        "path": {"type": "string"},
+                    },
+                },
+            },
+        }
+
+        first = _prompt_cache_key(agent, [read_schema, write_schema])
+        second = _prompt_cache_key(agent, [write_schema, read_schema])
+
+        self.assertEqual(first, second)
+
     def test_context_replacement_detaches_observation_indexes_and_summarizes_survivors(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
         from harness_code_agent.runtime.tool_result import ToolResult
@@ -1665,6 +1709,9 @@ class ProductRuntimeTests(unittest.TestCase):
             session = InteractiveSession(cwd=tmp, profile_name="coding-agent")
             try:
                 result = session.toggle_permission_mode()
+                self.assertFalse(session.is_bound)
+
+                session.ensure_profile_bound_for_first_task("inspect permissions")
                 metadata = session.session_store.read_metadata(session.session.id)
 
                 self.assertIn("workspace-write -> danger-full-access", result)

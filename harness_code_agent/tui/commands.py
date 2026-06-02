@@ -120,6 +120,7 @@ def _session(session: Any, args: list[str], registry: SlashCommandRegistry) -> C
 
 def _resume(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     _require_arg(args, "Usage: /resume <session-id>")
+    _require_bound(session)
     return CommandResult(session._inject_resume_context(args[0]))
 
 
@@ -206,6 +207,8 @@ def _observe(session: Any, args: list[str], registry: SlashCommandRegistry) -> C
     if mode not in {"current", "project"}:
         raise ValueError("Usage: /observe [current|project|export current|export project]")
 
+    if mode == "current":
+        _require_bound(session)
     session_id = session.session.id if mode == "current" else None
     if export:
         result = export_observability_report(
@@ -229,10 +232,16 @@ def _no_args(args: list[str], usage: str) -> None:
         raise ValueError(usage)
 
 
+def _require_bound(session: Any) -> None:
+    if not getattr(session, "is_bound", True):
+        raise ValueError("No active session yet. Submit a task first.")
+
+
 def _compact(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     """Handle /compact and its subcommands."""
     if args != ["show"]:
         raise ValueError("Usage: /compact show")
+    _require_bound(session)
     mgr = getattr(session.conversation, "compaction_mgr", None)
     if mgr is None:
         return CommandResult("No compaction manager available.")

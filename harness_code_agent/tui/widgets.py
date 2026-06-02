@@ -137,9 +137,10 @@ def block_to_rich(block: TranscriptBlock) -> Panel:
 
 def welcome_rich(snapshot: SessionStatusSnapshot) -> Panel:
     """Render the welcome message as a Rich Panel."""
+    session_text = snapshot.session_id if snapshot.session_id else "pending"
     lines = [
         f"[bold #3874cb]Harness Code Agent[/] [#888888]Textual TUI[/]",
-        f"[#888888]session[/] {snapshot.session_id}  [#888888]profile[/] {snapshot.profile}",
+        f"[#888888]session[/] {session_text}  [#888888]profile[/] {snapshot.profile}",
         f"[#888888]workspace[/] {snapshot.cwd}",
         "",
         "[#888888]Use /help for commands. Ctrl-C cancels current turn.[/]",

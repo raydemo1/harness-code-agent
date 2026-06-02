@@ -36,7 +36,12 @@ def _usage_to_dict(usage) -> dict | None:
 
 
 def _prompt_cache_key(agent: Agent, tool_schemas: list[dict] | None) -> str:
-    tool_text = json.dumps(tool_schemas or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    tool_text = json.dumps(
+        _canonical_tool_schemas(tool_schemas or []),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     stable_prefix = getattr(agent, "prompt_cache_identity", None) or {
         "system_prompt_hash": _short_hash(agent.system_prompt),
     }
@@ -48,6 +53,27 @@ def _prompt_cache_key(agent: Agent, tool_schemas: list[dict] | None) -> str:
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "hca:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:48]
+
+
+def _canonical_tool_schemas(tool_schemas: list[dict]) -> list[dict]:
+    return sorted(
+        (_canonical_schema_value(schema) for schema in tool_schemas),
+        key=lambda schema: str(schema.get("function", {}).get("name") or ""),
+    )
+
+
+def _canonical_schema_value(value, *, parent_key: str = ""):
+    if isinstance(value, dict):
+        return {
+            key: _canonical_schema_value(item, parent_key=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        items = [_canonical_schema_value(item, parent_key=parent_key) for item in value]
+        if parent_key == "required" and all(isinstance(item, str) for item in items):
+            return sorted(items)
+        return items
+    return value
 
 
 def _short_hash(text: str) -> str:

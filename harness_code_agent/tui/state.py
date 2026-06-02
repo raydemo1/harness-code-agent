@@ -12,7 +12,7 @@ class SessionStatusSnapshot:
     model: str
     provider: str
     permission_mode: str
-    session_id: str
+    session_id: str | None
     cwd: Path
     turn: int = 0
     pending_plan: bool = False
@@ -79,6 +79,8 @@ class TuiState:
         if event_type == "session_started":
             self.snapshot.status = "ready"
             self.snapshot.profile = str(payload.get("profile") or self.snapshot.profile)
+            if payload.get("session_id"):
+                self.snapshot.session_id = str(payload.get("session_id"))
             return TranscriptBlock("session", "session started", _payload_summary(payload), "success")
         if event_type == "user_input":
             self.snapshot.turn = int(payload.get("turn") or self.snapshot.turn)

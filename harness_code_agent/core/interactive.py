@@ -13,6 +13,7 @@ from ..agent.loop import AgentConversation
 from ..agent.prompts import GlobalRulesDoc, PromptPrefixBuilder
 from ..profiles import get_profile, list_profiles
 from ..profiles.base import BaseProfile
+from ..profiles.router import RouteDecision, route_profile_for_task
 from ..runtime import tools
 from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider
 from ..runtime.middlewares import StaticVerifierMiddleware, TimeBudgetMiddleware
@@ -24,7 +25,7 @@ from ..runtime.tool_context import ToolContext
 from ..sessions.events import AssistantMessageEvent, FinalReportEvent, SessionFinishedEvent, UserInputEvent
 from ..sessions.report import build_final_report
 from ..sessions.summary import load_session_summary
-from ..sessions.store import SessionStore
+from ..sessions.store import Session, SessionStore
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
 from ..workspace.shell_session import docker_cli_path, docker_info_check, docker_shell_hint, sandbox_mode, windows_shell_hint, windows_shell_path
@@ -65,6 +66,13 @@ class ProfileSwitchEvent:
     reason: str
 
 
+@dataclass
+class ProfileSlot:
+    profile: BaseProfile
+    agent: object
+    conversation: AgentConversation
+
+
 class InteractiveSession:
     def __init__(
         self,
@@ -78,6 +86,7 @@ class InteractiveSession:
         question_provider: QuestionProvider | None = None,
         output_sink: Callable[[str], None] | None = None,
         stream_callback=None,
+        profile_explicit: bool | None = None,
     ):
         self.cwd = Path(cwd).resolve()
         config.WORKSPACE = str(self.cwd)
@@ -86,85 +95,72 @@ class InteractiveSession:
         self.approval_provider = approval_provider or ConsoleApprovalProvider()
         self.question_provider = question_provider or ConsoleQuestionProvider()
         self.output_sink = output_sink or print
-        self.profile = get_profile(profile_name)
         self.skill_registry = SkillRegistry()
         self.session_store = SessionStore(self.cwd / ".harness")
+        self.session_store.root.mkdir(parents=True, exist_ok=True)
         self.resume_session_id = resume_session_id
         self.resume_context: str | None = None
-        self.force_profile_name = profile_name
+        inferred_explicit = profile_name != PRODUCT_DEFAULT_PROFILE
+        self.profile_explicit = inferred_explicit if profile_explicit is None else profile_explicit
+        self._pending_profile_name = profile_name
+        self._profile_source = "explicit" if self.profile_explicit else "default"
         if resume_session_id:
             metadata = self.session_store.read_metadata(resume_session_id)
             self.cwd = Path(metadata["cwd"]).resolve()
             config.WORKSPACE = str(self.cwd)
             self.session_store = SessionStore(self.cwd / ".harness")
-            self.profile = get_profile(metadata.get("profile") or profile_name)
+            self.session_store.root.mkdir(parents=True, exist_ok=True)
+            self._pending_profile_name = metadata.get("profile") or profile_name
+            self._profile_source = "resume"
             self.resume_context = _build_resume_context(self.session_store, resume_session_id)
 
+        self.profile = get_profile(self._pending_profile_name)
         _ensure_git_repository(self.cwd)
         self.permission_mode = os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write")
-        self.session = self.session_store.create(
-            profile=self.profile.name(),
-            cwd=self.cwd,
-            model=config.MODEL,
-            permission_mode=self.permission_mode,
-            resumed_from=resume_session_id,
-        )
-        self.event_bus = self.session_store.event_bus(self.session, listener=self.event_listener)
-        self._load_mcp_tools()
-        self.tool_context = ToolContext(
-            workspace=WorkspaceService(
-                root=self.cwd,
-                snapshots_dir=self.session.snapshots_dir,
-            ),
-            permission_policy=PermissionPolicy(mode=self.permission_mode),
-            event_bus=self.event_bus,
-            session_id=self.session.id,
-            approval_provider=self.approval_provider,
-            question_provider=self.question_provider,
-            tool_registry=self.tool_registry,
-        )
-        self.agent = self._build_agent()
-        self.conversation: AgentConversation = self.agent.start_conversation()
+        self.session: Session | None = None
+        self.event_bus = None
+        self.tool_context: ToolContext | None = None
+        self.tool_registry = None
+        self.mcp_manager = None
+        self.agent = None
+        self.conversation: AgentConversation | None = None
+        self.profile_slots: dict[str, ProfileSlot] = {}
+        self._active_profile_name: str | None = None
         self.turn_count = 0
         self.checkpoint = CheckpointConfig()
-        # Wire compaction manager
-        from ..agent.compaction import CompactionManager
-        self.conversation.compaction_mgr = CompactionManager(
-            compacted_dir=self.session.compacted_dir,
-        )
-        self.conversation._event_bus = self.event_bus
         self.pending_plan_markdown: str | None = None
         self.pending_plan_revision = 0
         self.last_user_task: str = ""
         self.last_assistant_text: str = ""
         self.profile_history: list[ProfileSwitchEvent] = []
-        self._started_at = time.time()
-        self._sync_time_budget()
-        self.event_bus.emit(
-            "session_started",
-            agent="main_agent",
-            payload={
-                "profile": self.profile.name(),
-                "workspace": str(self.cwd),
-                "resumed_from": resume_session_id,
-                "interactive": True,
-            },
-        )
-        if self.resume_context:
-            self._append_conversation_message({
-                "role": "user",
-                "content": f"Resume context:\n{self.resume_context}",
-            })
+        self._started_at: float | None = None
+        self._closed = False
 
-    def _build_agent(self):
+    @property
+    def is_bound(self) -> bool:
+        return self.session is not None and self.conversation is not None
+
+    @property
+    def session_id(self) -> str | None:
+        return self.session.id if self.session is not None else None
+
+    @property
+    def display_profile(self) -> str:
+        if self.is_bound or self._profile_source in {"explicit", "resume"}:
+            return self.profile.name()
+        return "pending"
+
+    def _build_agent(self, profile: BaseProfile):
         from ..agent.loop import Agent
 
-        cfg = self.profile.main_agent()
+        if self.tool_context is None:
+            raise RuntimeError("Cannot build agent before the session is bound.")
+        cfg = profile.main_agent()
         harness_rules = _load_harness_rules(self.cwd)
         catalog = self.skill_registry.build_catalog_prompt()
         acceptance_criteria = (
-            self.profile.acceptance_criteria()
-            if hasattr(self.profile, "acceptance_criteria")
+            profile.acceptance_criteria()
+            if hasattr(profile, "acceptance_criteria")
             else []
         )
         prefix = PromptPrefixBuilder().build(
@@ -201,6 +197,10 @@ class InteractiveSession:
         self.mcp_manager.connect_all()
         self.mcp_manager.register_tools(self.tool_registry)
 
+    def _ensure_mcp_tools_loaded(self) -> None:
+        if self.mcp_manager is None or self.tool_registry is None:
+            self._load_mcp_tools()
+
     def _tool_schemas_for_agent_config(self, cfg) -> list[dict]:
         return tools.tool_schemas_for_profile(
             allowed_permissions=cfg.allowed_tool_permissions,
@@ -210,11 +210,16 @@ class InteractiveSession:
         )
 
     def _refresh_agent_tool_schemas(self) -> None:
-        cfg = self.profile.main_agent()
-        schemas = self._tool_schemas_for_agent_config(cfg)
-        self.agent.update_tool_schemas(schemas)
+        if not self.profile_slots:
+            return
+        for slot in self.profile_slots.values():
+            cfg = slot.profile.main_agent()
+            schemas = self._tool_schemas_for_agent_config(cfg)
+            slot.agent.update_tool_schemas(schemas)
 
     def _sync_time_budget(self) -> None:
+        if self.agent is None:
+            return
         for mw in self.agent.middlewares:
             if isinstance(mw, TimeBudgetMiddleware):
                 mw.sync_start_time(self._started_at)
@@ -223,11 +228,132 @@ class InteractiveSession:
         return f"Task:\n{user_prompt}"
 
     def submit(self, user_prompt: str, cancellation_token=None) -> TurnResult:
+        self.ensure_profile_bound_for_first_task(user_prompt)
         if self.pending_plan_markdown and self.profile.name() == "plan":
             if _is_plan_execution_confirmation(user_prompt):
                 return self.execute_pending_plan()
             return self.revise_pending_plan(user_prompt)
         return self._submit_to_current_agent(user_prompt, cancellation_token=cancellation_token)
+
+    def ensure_profile_bound_for_first_task(self, user_prompt: str) -> None:
+        if self.is_bound:
+            return
+        route_decision: RouteDecision | None = None
+        profile_name = self._pending_profile_name
+        source = self._profile_source
+        if source == "default":
+            route_decision = route_profile_for_task(user_prompt, workspace=self.cwd)
+            profile_name = route_decision.profile_name
+            source = "router" if not route_decision.fallback_used else "default"
+        self._bind_profile(profile_name, source=source, route_decision=route_decision)
+
+    def _bind_profile(
+        self,
+        profile_name: str,
+        *,
+        source: str,
+        route_decision: RouteDecision | None = None,
+    ) -> None:
+        if self.is_bound:
+            return
+        self.profile = get_profile(profile_name)
+        self._pending_profile_name = self.profile.name()
+        self._profile_source = source
+        self.session = self.session_store.create(
+            profile=self.profile.name(),
+            cwd=self.cwd,
+            model=config.MODEL,
+            permission_mode=self.permission_mode,
+            resumed_from=self.resume_session_id,
+            profile_source=source,
+        )
+        self.event_bus = self.session_store.event_bus(self.session, listener=self.event_listener)
+        self._ensure_mcp_tools_loaded()
+        self.tool_context = ToolContext(
+            workspace=WorkspaceService(
+                root=self.cwd,
+                snapshots_dir=self.session.snapshots_dir,
+            ),
+            permission_policy=PermissionPolicy(mode=self.permission_mode),
+            event_bus=self.event_bus,
+            session_id=self.session.id,
+            approval_provider=self.approval_provider,
+            question_provider=self.question_provider,
+            tool_registry=self.tool_registry,
+        )
+        self._started_at = time.time()
+        self._activate_profile_slot(self.profile.name(), create_handoff=False)
+        self.event_bus.emit(
+            "session_started",
+            agent="main_agent",
+            payload={
+                "session_id": self.session.id,
+                "profile": self.profile.name(),
+                "profile_source": source,
+                "workspace": str(self.cwd),
+                "resumed_from": self.resume_session_id,
+                "interactive": True,
+            },
+        )
+        if route_decision is not None:
+            self.event_bus.emit(
+                "profile_route_decision",
+                agent="main_agent",
+                payload={
+                    "profile": route_decision.profile_name,
+                    "confidence": route_decision.confidence,
+                    "reason": route_decision.reason,
+                    "fallback_used": route_decision.fallback_used,
+                    "fallback_reason": route_decision.fallback_reason,
+                },
+            )
+        if self.resume_context:
+            self._append_conversation_message({
+                "role": "user",
+                "content": f"Resume context:\n{self.resume_context}",
+            })
+
+    def _activate_profile_slot(
+        self,
+        profile_name: str,
+        *,
+        create_handoff: bool,
+        reason: str = "slash command",
+        previous_profile: str | None = None,
+        plan_markdown: str | None = None,
+    ) -> bool:
+        if self.session is None or self.event_bus is None or self.tool_context is None:
+            raise RuntimeError("Cannot activate a profile slot before the session is bound.")
+        created = False
+        slot = self.profile_slots.get(profile_name)
+        if slot is None:
+            profile = get_profile(profile_name)
+            agent = self._build_agent(profile)
+            conversation = agent.start_conversation()
+            from ..agent.compaction import CompactionManager
+            safe_profile = profile.name().replace("/", "_").replace("\\", "_")
+            conversation.compaction_mgr = CompactionManager(
+                compacted_dir=self.session.compacted_dir / "profiles" / safe_profile,
+            )
+            conversation._event_bus = self.event_bus
+            slot = ProfileSlot(profile=profile, agent=agent, conversation=conversation)
+            self.profile_slots[profile.name()] = slot
+            created = True
+        self._active_profile_name = slot.profile.name()
+        self.profile = slot.profile
+        self.agent = slot.agent
+        self.conversation = slot.conversation
+        if create_handoff and (created or plan_markdown):
+            handoff = self._build_profile_handoff_context(
+                previous_profile=previous_profile or "",
+                current_profile=self.profile.name(),
+                reason=reason,
+                plan_markdown=plan_markdown,
+            )
+            if handoff:
+                self._append_conversation_message({"role": "user", "content": handoff})
+        self._sync_time_budget()
+        return created
 
     def _submit_to_current_agent(self, user_prompt: str, cancellation_token=None) -> TurnResult:
         baseline_dirty = git_dirty_paths(self.cwd)
@@ -285,6 +411,8 @@ class InteractiveSession:
 
     def interrupt_current_shell(self) -> bool:
         """Best-effort interrupt for a shell command owned by the active conversation."""
+        if self.conversation is None:
+            return False
         runtime_state = getattr(self.conversation, "runtime_state", None)
         shell_session = getattr(runtime_state, "shell_session", None)
         if shell_session is None:
@@ -364,27 +492,19 @@ class InteractiveSession:
         previous = self.profile.name()
         if previous == profile_name:
             return
-        self.conversation.close()
-        self.profile = get_profile(profile_name)
-        self.agent = self._build_agent()
-        self.conversation = self.agent.start_conversation()
-        from ..agent.compaction import CompactionManager
-        self.conversation.compaction_mgr = CompactionManager(
-            compacted_dir=self.session.compacted_dir,
-        )
-        self.conversation._event_bus = self.event_bus
-        handoff = self._build_profile_handoff_context(
-            previous_profile=previous,
-            current_profile=self.profile.name(),
+        if not self.is_bound:
+            self.profile = get_profile(profile_name)
+            self._pending_profile_name = self.profile.name()
+            self._profile_source = "explicit"
+            return
+        target_existed = profile_name in self.profile_slots
+        self._activate_profile_slot(
+            profile_name,
+            create_handoff=True,
             reason=reason,
+            previous_profile=previous,
             plan_markdown=plan_markdown,
         )
-        if handoff:
-            self._append_conversation_message({
-                "role": "user",
-                "content": handoff,
-            })
-        self._sync_time_budget()
         self.profile_history.append(ProfileSwitchEvent(
             previous=previous,
             current=self.profile.name(),
@@ -397,7 +517,7 @@ class InteractiveSession:
                 "previous_profile": previous,
                 "profile": self.profile.name(),
                 "reason": reason,
-                "handoff_context": bool(handoff),
+                "handoff_context": (not target_existed) or bool(plan_markdown),
                 "plan_included": bool(plan_markdown),
             },
         )
@@ -413,7 +533,7 @@ class InteractiveSession:
         lines = [
             "Profile handoff context:",
             f"- Workspace: {self.cwd}",
-            f"- Session: {self.session.id}",
+            f"- Session: {self.session.id if self.session is not None else '<pending>'}",
             f"- Previous profile: {previous_profile}",
             f"- Current profile: {current_profile}",
             f"- Switch reason: {reason}",
@@ -448,6 +568,8 @@ class InteractiveSession:
         current = self.profile.name()
         if current == previous:
             return f"profile already active: {current}"
+        if not self.is_bound:
+            return f"profile selected: {current}"
         return f"profile switched: {previous} -> {current}"
 
     def set_permission_mode(self, permission_mode: str) -> str:
@@ -456,16 +578,19 @@ class InteractiveSession:
         if previous == permission_mode:
             return f"permission mode already active: {permission_mode}"
         self.permission_mode = permission_mode
-        self.tool_context.permission_policy = PermissionPolicy(mode=permission_mode)
-        self.session_store.update_permission_mode(self.session.id, permission_mode)
-        self.event_bus.emit(
-            "permission_mode_switched",
-            agent="main_agent",
-            payload={
-                "previous_permission_mode": previous,
-                "permission_mode": permission_mode,
-            },
-        )
+        if self.tool_context is not None:
+            self.tool_context.permission_policy = PermissionPolicy(mode=permission_mode)
+        if self.session is not None:
+            self.session_store.update_permission_mode(self.session.id, permission_mode)
+        if self.event_bus is not None:
+            self.event_bus.emit(
+                "permission_mode_switched",
+                agent="main_agent",
+                payload={
+                    "previous_permission_mode": previous,
+                    "permission_mode": permission_mode,
+                },
+            )
         return f"permission mode switched: {previous} -> {permission_mode}"
 
     def toggle_permission_mode(self) -> str:
@@ -477,24 +602,31 @@ class InteractiveSession:
         return self.set_permission_mode(next_mode)
 
     def mcp_status(self) -> str:
+        self._ensure_mcp_tools_loaded()
         return self.mcp_manager.status_report()
 
     def mcp_list(self) -> str:
+        self._ensure_mcp_tools_loaded()
         return self.mcp_manager.tools_report()
 
     def reload_mcp(self) -> str:
+        self._ensure_mcp_tools_loaded()
         self.mcp_manager.close()
         self._load_mcp_tools()
-        self.tool_context.tool_registry = self.tool_registry
+        if self.tool_context is not None:
+            self.tool_context.tool_registry = self.tool_registry
         self._refresh_agent_tool_schemas()
-        self.event_bus.emit(
-            "mcp_reloaded",
-            agent="main_agent",
-            payload={"tool_count": len(getattr(self.mcp_manager, "tool_bindings", []))},
-        )
+        if self.event_bus is not None:
+            self.event_bus.emit(
+                "mcp_reloaded",
+                agent="main_agent",
+                payload={"tool_count": len(getattr(self.mcp_manager, "tool_bindings", []))},
+            )
         return "MCP reloaded\n" + self.mcp_manager.status_report()
 
     def _inject_resume_context(self, session_id: str) -> str:
+        if not self.is_bound:
+            raise ValueError("No active session yet. Submit a task first.")
         context_text = _build_resume_context(self.session_store, session_id)
         self._append_conversation_message({
             "role": "user",
@@ -503,6 +635,8 @@ class InteractiveSession:
         return f"Resumed context injected for session: {session_id}"
 
     def manual_compact_context(self) -> str:
+        if not self.is_bound or self.conversation is None:
+            return "No active session yet. Submit a task first."
         from ..agent import context
         from ..agent.compaction import get_thresholds
         from ..agent.loop import llm_call_simple
@@ -515,7 +649,7 @@ class InteractiveSession:
             split_index = context.choose_compaction_split_index(
                 conv.messages,
                 force=True,
-                target_tokens=get_thresholds().allow,
+                target_tokens=get_thresholds().target,
             )
             system_len = 1 if conv.messages and conv.messages[0].get("role") == "system" else 0
             if split_index <= system_len:
@@ -540,7 +674,7 @@ class InteractiveSession:
                 llm_call_simple,
                 role=conv.agent.name,
                 force=True,
-                target_tokens=get_thresholds().allow,
+                target_tokens=get_thresholds().target,
             )
         msg_count_after = len(conv.messages)
         conv.runtime_state.current_turn_start_index = max(1, len(conv.messages) - 1)
@@ -606,6 +740,8 @@ class InteractiveSession:
         manual: bool,
         baseline_dirty: set[str] | None = None,
     ) -> str:
+        if self.session is None:
+            return "checkpoint skipped: no active session"
         if not git_has_committable_changes(self.cwd):
             return "no changes to checkpoint"
         paths_to_add = None
@@ -639,9 +775,16 @@ class InteractiveSession:
         return f"checkpoint created: {rev}"
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         tools.stop_dev_server()
-        self.conversation.close()
-        self.mcp_manager.close()
+        for slot in list(self.profile_slots.values()):
+            slot.conversation.close()
+        if self.mcp_manager is not None:
+            self.mcp_manager.close()
+        if self.session is None or self.event_bus is None:
+            return
         try:
             metadata = self.session_store.read_metadata(self.session.id)
             events = self.session_store.read_events(self.session.id)

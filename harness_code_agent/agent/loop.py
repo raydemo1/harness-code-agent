@@ -380,7 +380,15 @@ class AgentConversation:
         self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
         self.compaction_gate.mark_compacted()
 
-    def _compact_context(self, agent: Agent, *, token_count: int, forced: bool, threshold: int) -> bool:
+    def _compact_context(
+        self,
+        agent: Agent,
+        *,
+        token_count: int,
+        forced: bool,
+        threshold: int,
+        target_tokens: int | None = None,
+    ) -> bool:
         log.info(f"[{agent.name}] Compacting context (role={agent.name}, forced={forced})...")
         self.trace.context_event("compact", f"tokens={token_count} forced={forced}")
         if hasattr(self, '_event_bus') and self._event_bus is not None:
@@ -393,7 +401,7 @@ class AgentConversation:
                 ).to_event()
             )
         msg_count_before = len(self.messages)
-        target_tokens = threshold
+        target_tokens = target_tokens or threshold
         committed_summary = ""
 
         if self.compaction_mgr is not None:
@@ -474,6 +482,24 @@ class AgentConversation:
                 ).to_event()
             )
         return msg_count_after < msg_count_before or bool(committed_summary)
+
+    def _degrade_context(self, agent: Agent, *, target_tokens: int) -> None:
+        log.info(f"[{agent.name}] Degrading oversized context toward target≈{target_tokens}...")
+        self.trace.context_event("degrade", f"target={target_tokens}")
+        protected_start = max(0, len(self.messages) - 12)
+        replaced = self.observation_store.replace_long_stale_messages(
+            self.messages,
+            min_chars=0,
+            protect_from_index=protected_start,
+        )
+        if replaced:
+            log.info(f"[{agent.name}] Folded stale observations during degradation: {', '.join(replaced)}")
+        degraded = context.degrade_messages(self.messages)
+        if degraded != self.messages:
+            self.messages = degraded
+            self.compaction_gate.bump_revision()
+        elif replaced:
+            self.compaction_gate.bump_revision()
 
     def submit(self, task: str, cancellation_token=None) -> str:
         self.add_user_turn(task)
@@ -743,21 +769,25 @@ class AgentConversation:
             action = compaction_action(token_count, thresholds)
             anxiety = context.detect_anxiety(self.messages)
 
-            if action == "force_sync" or (action == "sync_compact" and self.compaction_gate.can_compact()):
+            if action == "reset" or anxiety:
+                reason = "anxiety detected" if anxiety else f"tokens {token_count} > threshold"
+                self._reset_context(agent, reason)
+            elif action == "force_sync" or (action == "sync_compact" and self.compaction_gate.can_compact()):
                 forced = action == "force_sync"
                 compacted = self._compact_context(
                     agent,
                     token_count=token_count,
                     forced=forced,
                     threshold=thresholds.force if forced else thresholds.allow,
+                    target_tokens=thresholds.target,
                 )
                 if forced:
                     tokens_after = context.count_tokens(self.messages)
-                    if not compacted or tokens_after > thresholds.allow:
-                        self._reset_context(agent, f"compaction failed to reach safe threshold ({tokens_after} > {thresholds.allow})")
-            elif token_count > config.RESET_THRESHOLD or anxiety:
-                reason = "anxiety detected" if token_count <= config.RESET_THRESHOLD else f"tokens {token_count} > threshold"
-                self._reset_context(agent, reason)
+                    if not compacted or tokens_after > thresholds.target:
+                        self._degrade_context(agent, target_tokens=thresholds.target)
+                        tokens_after = context.count_tokens(self.messages)
+                    if tokens_after > thresholds.reset:
+                        self._reset_context(agent, f"tokens {tokens_after} > reset threshold {thresholds.reset}")
             elif action == "async_prepare" and self.compaction_mgr is not None and self.compaction_gate.can_compact():
                 # Async candidate generation — only if gate allows
                 log.info(f"[{agent.name}] Async compaction candidate preparation (tokens≈{token_count})...")
@@ -766,7 +796,7 @@ class AgentConversation:
                     split_index = context.choose_compaction_split_index(
                         self.messages,
                         force=False,
-                        target_tokens=thresholds.allow,
+                        target_tokens=thresholds.target,
                     )
                     self.compaction_mgr.prepare_candidate_async(
                         self.messages,
@@ -776,6 +806,8 @@ class AgentConversation:
                     )
                 except Exception as exc:
                     log.warning(f"[{agent.name}] Async compaction candidate failed: {exc}")
+            elif action == "observe":
+                self.trace.context_event("pressure", f"tokens={token_count}")
 
             # --- Build prompt and LLM call ---
             prompt_messages = self._build_prompt()

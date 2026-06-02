@@ -237,6 +237,45 @@ class McpRuntimeTests(unittest.TestCase):
         self.assertIn("mcp__docs__search", names)
         self.assertNotIn("mcp__danger__delete", names)
 
+    def test_profile_schema_filtering_returns_tools_in_name_order(self):
+        from harness_code_agent.runtime import tools
+
+        registry = tools.ToolRegistry()
+        registry.register(
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__zeta__search",
+                    "description": "Search zeta",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            lambda **_: "ok",
+            permission="read",
+        )
+        registry.register(
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__alpha__search",
+                    "description": "Search alpha",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            lambda **_: "ok",
+            permission="read",
+        )
+
+        names = [
+            schema["function"]["name"]
+            for schema in tools.tool_schemas_for_profile(
+                allowed_permissions={"read"},
+                registry=registry,
+            )
+        ]
+
+        self.assertEqual(names, ["mcp__alpha__search", "mcp__zeta__search"])
+
     def test_doctor_reports_mcp_config_errors_without_starting_a_session(self):
         from harness_code_agent.core.interactive import format_doctor
 

@@ -8,6 +8,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -100,8 +101,19 @@ class InteractiveCliTests(unittest.TestCase):
         ).stdout.strip()
 
     def _session(self):
-        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()):
-            return InteractiveSession(cwd=self.temp_dir)
+        patcher = patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation())
+        patcher.start()
+        session = InteractiveSession(cwd=self.temp_dir)
+        close = session.close
+
+        def close_with_patcher():
+            try:
+                close()
+            finally:
+                patcher.stop()
+
+        session.close = close_with_patcher
+        return session
 
     def test_interactive_session_uses_current_directory_workspace(self):
         session = self._session()
@@ -111,6 +123,98 @@ class InteractiveCliTests(unittest.TestCase):
             self.assertTrue((Path(self.temp_dir) / ".harness").exists())
         finally:
             session.close()
+
+    def test_interactive_session_starts_pending_without_session_record(self):
+        with patch("harness_code_agent.agent.loop.Agent.start_conversation") as start:
+            session = InteractiveSession(cwd=self.temp_dir)
+        try:
+            self.assertFalse(session.is_bound)
+            self.assertIsNone(session.session)
+            self.assertIsNone(session.session_id)
+            self.assertEqual(session.display_profile, "pending")
+            self.assertEqual(session.session_store.list_sessions(), [])
+            start.assert_not_called()
+        finally:
+            session.close()
+
+    def test_first_task_routes_before_creating_session_metadata(self):
+        decision = SimpleNamespace(
+            profile_name="plan",
+            confidence=0.91,
+            reason="User asked for a design plan.",
+            fallback_used=False,
+            fallback_reason="",
+        )
+
+        with (
+            patch("harness_code_agent.core.interactive.route_profile_for_task", return_value=decision),
+            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir)
+            try:
+                result = session.submit("帮我设计一个修复方案")
+
+                self.assertEqual(result.text, "assistant done")
+                self.assertTrue(session.is_bound)
+                self.assertEqual(session.profile.name(), "plan")
+                metadata = session.session_store.read_metadata(session.session.id)
+                self.assertEqual(metadata["profile"], "plan")
+                self.assertEqual(metadata["profile_source"], "router")
+                event_types = [event.type for event in session.event_bus.events]
+                self.assertIn("profile_route_decision", event_types)
+            finally:
+                session.close()
+
+    def test_pending_profile_slash_command_defers_session_creation_until_task(self):
+        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()):
+            session = InteractiveSession(cwd=self.temp_dir)
+            try:
+                self.assertTrue(session.handle_slash_command("/plan"))
+
+                self.assertFalse(session.is_bound)
+                self.assertIsNone(session.session)
+                self.assertEqual(session.profile.name(), "plan")
+                self.assertEqual(session.display_profile, "plan")
+                self.assertEqual(session.session_store.list_sessions(), [])
+
+                session.submit("plan the parser fix")
+
+                self.assertTrue(session.is_bound)
+                metadata = session.session_store.read_metadata(session.session.id)
+                self.assertEqual(metadata["profile"], "plan")
+                self.assertEqual(metadata["profile_source"], "explicit")
+            finally:
+                session.close()
+
+    def test_profile_switch_reuses_profile_slots_without_closing_old_context(self):
+        coding_conversation = FakeConversation()
+        plan_conversation = FakeConversation()
+        coding_conversation.response_text = "coding output"
+        plan_conversation.response_text = "plan output"
+
+        with patch(
+            "harness_code_agent.agent.loop.Agent.start_conversation",
+            side_effect=[coding_conversation, plan_conversation],
+        ):
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="coding-agent",
+                profile_explicit=True,
+            )
+            try:
+                session.submit("fix the bug")
+                self.assertIs(session.conversation, coding_conversation)
+
+                self.assertTrue(session.handle_slash_command("/plan"))
+                self.assertIs(session.conversation, plan_conversation)
+                self.assertFalse(coding_conversation.closed)
+
+                self.assertTrue(session.handle_slash_command("/code"))
+                self.assertIs(session.conversation, coding_conversation)
+                self.assertEqual(coding_conversation.submissions, ["Task:\nfix the bug"])
+                self.assertFalse(plan_conversation.closed)
+            finally:
+                session.close()
 
     def test_initial_task_path_submits_to_live_conversation(self):
         session = self._session()
@@ -134,22 +238,23 @@ class InteractiveCliTests(unittest.TestCase):
 
         with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=CancellingConversation()):
             session = InteractiveSession(cwd=self.temp_dir)
-        try:
-            with self.assertRaises(CancelledError):
-                session.submit("cancel this")
+            try:
+                with self.assertRaises(CancelledError):
+                    session.submit("cancel this")
 
-            event_types = [event.type for event in session.event_bus.events]
-            self.assertIn("user_input", event_types)
-            self.assertIn("turn_started", event_types)
-            self.assertNotIn("assistant_message", event_types)
-        finally:
-            session.close()
+                event_types = [event.type for event in session.event_bus.events]
+                self.assertIn("user_input", event_types)
+                self.assertIn("turn_started", event_types)
+                self.assertNotIn("assistant_message", event_types)
+            finally:
+                session.close()
 
     def test_interrupt_current_shell_delegates_to_active_shell_session(self):
         session = self._session()
         try:
             interrupted = []
             shell = types.SimpleNamespace(interrupt=lambda: interrupted.append(True))
+            session.ensure_profile_bound_for_first_task("noop")
             session.conversation.runtime_state = types.SimpleNamespace(shell_session=shell)
 
             self.assertTrue(session.interrupt_current_shell())
@@ -175,19 +280,20 @@ class InteractiveCliTests(unittest.TestCase):
             patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-permissions")
-        try:
-            tool_names = {
-                schema["function"]["name"]
-                for schema in RecordingInteractiveAgent.init_kwargs["tool_schemas"]
-            }
+            try:
+                session.ensure_profile_bound_for_first_task("inspect")
+                tool_names = {
+                    schema["function"]["name"]
+                    for schema in RecordingInteractiveAgent.init_kwargs["tool_schemas"]
+                }
 
-            self.assertIn("read_file", tool_names)
-            self.assertIn("web_search", tool_names)
-            self.assertNotIn("ask_user", tool_names)
-            self.assertNotIn("write_file", tool_names)
-            self.assertNotIn("run_bash", tool_names)
-        finally:
-            session.close()
+                self.assertIn("read_file", tool_names)
+                self.assertIn("web_search", tool_names)
+                self.assertNotIn("ask_user", tool_names)
+                self.assertNotIn("write_file", tool_names)
+                self.assertNotIn("run_bash", tool_names)
+            finally:
+                session.close()
 
     def test_interactive_session_registers_mcp_tools_from_session_registry(self):
         from harness_code_agent.runtime import tools
@@ -236,18 +342,19 @@ class InteractiveCliTests(unittest.TestCase):
             patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
-        try:
-            tool_names = {
-                schema["function"]["name"]
-                for schema in RecordingInteractiveAgent.init_kwargs["tool_schemas"]
-            }
+            try:
+                session.ensure_profile_bound_for_first_task("inspect docs")
+                tool_names = {
+                    schema["function"]["name"]
+                    for schema in RecordingInteractiveAgent.init_kwargs["tool_schemas"]
+                }
 
-            self.assertIn("read_file", tool_names)
-            self.assertIn("mcp__docs__search", tool_names)
-            self.assertIsNot(session.tool_registry, tools.BUILTIN_TOOL_REGISTRY)
-            self.assertIs(session.tool_context.tool_registry, session.tool_registry)
-        finally:
-            session.close()
+                self.assertIn("read_file", tool_names)
+                self.assertIn("mcp__docs__search", tool_names)
+                self.assertIsNot(session.tool_registry, tools.BUILTIN_TOOL_REGISTRY)
+                self.assertIs(session.tool_context.tool_registry, session.tool_registry)
+            finally:
+                session.close()
 
     def test_mcp_slash_commands_show_status_list_and_reload(self):
         class FakeMcpManager:
@@ -317,15 +424,16 @@ class InteractiveCliTests(unittest.TestCase):
             patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
-        try:
-            prompt = RecordingInteractiveAgent.init_args[1]
-            self.assertIn("## HARNESS.md", prompt)
-            self.assertIn("Always prefer focused tests.", prompt)
-            self.assertIn("## Profile Acceptance Criteria", prompt)
-            self.assertIn("## Main-Agent Ownership Rules", prompt)
-            self.assertEqual(session.format_task("hello"), "Task:\nhello")
-        finally:
-            session.close()
+            try:
+                session.ensure_profile_bound_for_first_task("inspect")
+                prompt = RecordingInteractiveAgent.init_args[1]
+                self.assertIn("## HARNESS.md", prompt)
+                self.assertIn("Always prefer focused tests.", prompt)
+                self.assertIn("## Profile Acceptance Criteria", prompt)
+                self.assertIn("## Main-Agent Ownership Rules", prompt)
+                self.assertEqual(session.format_task("hello"), "Task:\nhello")
+            finally:
+                session.close()
 
     def test_interactive_session_missing_harness_md_does_not_change_prompt(self):
         class FakeToolProfile:
@@ -340,30 +448,31 @@ class InteractiveCliTests(unittest.TestCase):
             patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
-        try:
-            prompt = RecordingInteractiveAgent.init_args[1]
-            self.assertNotIn("## HARNESS.md", prompt)
-        finally:
-            session.close()
+            try:
+                session.ensure_profile_bound_for_first_task("inspect")
+                prompt = RecordingInteractiveAgent.init_args[1]
+                self.assertNotIn("## HARNESS.md", prompt)
+            finally:
+                session.close()
 
     def test_plan_profile_captures_markdown_and_offers_handoff_choice(self):
         FakeConversation.response_text = "# Title\n\n## Summary\n\nPlan body"
         with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
-        try:
-            result = session.submit("plan the parser fix")
+            try:
+                result = session.submit("plan the parser fix")
 
-            self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan body")
-            self.assertIn("执行计划", result.notice)
-            self.assertIn("修改计划", result.notice)
-            self.assertEqual(result.checkpoint, "no changes to checkpoint")
-            plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
-            self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Title\n\n## Summary\n\nPlan body\n")
-            self.assertFalse(Path(self.temp_dir, ".harness", "sessions", session.session.id, "planning", "state.json").exists())
-            self.assertFalse(Path(self.temp_dir, "global_plan", "current", "status.md").exists())
-            self.assertFalse(Path(self.temp_dir, "global_plan", "current", "final.md").exists())
-        finally:
-            session.close()
+                self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan body")
+                self.assertIn("执行计划", result.notice)
+                self.assertIn("修改计划", result.notice)
+                self.assertEqual(result.checkpoint, "no changes to checkpoint")
+                plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
+                self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Title\n\n## Summary\n\nPlan body\n")
+                self.assertFalse(Path(self.temp_dir, ".harness", "sessions", session.session.id, "planning", "state.json").exists())
+                self.assertFalse(Path(self.temp_dir, "global_plan", "current", "status.md").exists())
+                self.assertFalse(Path(self.temp_dir, "global_plan", "current", "final.md").exists())
+            finally:
+                session.close()
 
     def test_plan_continue_switches_to_coding_agent_and_injects_markdown(self):
         plan_conversation = FakeConversation()
@@ -403,20 +512,20 @@ class InteractiveCliTests(unittest.TestCase):
 
         with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=plan_conversation):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
-        try:
-            session.submit("plan the parser fix")
-            plan_conversation.response_text = "# Title\n\n## Summary\n\nPlan v2"
-            result = session.submit("add migration risk")
+            try:
+                session.submit("plan the parser fix")
+                plan_conversation.response_text = "# Title\n\n## Summary\n\nPlan v2"
+                result = session.submit("add migration risk")
 
-            self.assertEqual(result.text, "# Title\n\n## Summary\n\nPlan v2")
-            self.assertEqual(session.profile.name(), "plan")
-            self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan v2")
-            self.assertEqual(session.pending_plan_revision, 2)
-            plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
-            self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Title\n\n## Summary\n\nPlan v2\n")
-            self.assertIn("User feedback:\nadd migration risk", plan_conversation.submissions[-1])
-        finally:
-            session.close()
+                self.assertEqual(result.text, "# Title\n\n## Summary\n\nPlan v2")
+                self.assertEqual(session.profile.name(), "plan")
+                self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan v2")
+                self.assertEqual(session.pending_plan_revision, 2)
+                plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
+                self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Title\n\n## Summary\n\nPlan v2\n")
+                self.assertIn("User feedback:\nadd migration risk", plan_conversation.submissions[-1])
+            finally:
+                session.close()
 
     def test_short_slash_commands_switch_profiles(self):
         conversations = [FakeConversation() for _ in range(6)]
@@ -590,9 +699,9 @@ class InteractiveCliTests(unittest.TestCase):
 
     def test_interactive_close_writes_session_summary(self):
         session = self._session()
-        session_id = session.session.id
         try:
             session.submit("summarize this session")
+            session_id = session.session.id
         finally:
             session.close()
 
@@ -627,6 +736,7 @@ class InteractiveCliTests(unittest.TestCase):
 
     def test_interactive_close_finishes_session_when_final_report_event_read_fails(self):
         session = self._session()
+        session.ensure_profile_bound_for_first_task("noop")
         session_id = session.session.id
         original_read_events = session.session_store.read_events
         calls = 0
@@ -735,6 +845,7 @@ class InteractiveCliTests(unittest.TestCase):
     def test_clean_checkpoint_is_skipped(self):
         session = self._session()
         try:
+            session.ensure_profile_bound_for_first_task("noop")
             self.assertEqual(session.create_checkpoint(manual=True), "no changes to checkpoint")
         finally:
             session.close()
@@ -766,6 +877,7 @@ class InteractiveCliTests(unittest.TestCase):
     def test_dirty_checkpoint_commits_changes(self):
         session = self._session()
         try:
+            session.ensure_profile_bound_for_first_task("noop")
             Path(self.temp_dir, "app.py").write_text("print('hi')\n", encoding="utf-8")
 
             result = session.create_checkpoint(manual=True)
@@ -781,6 +893,7 @@ class InteractiveCliTests(unittest.TestCase):
         baseline = git_dirty_paths(Path(self.temp_dir))
         session = self._session()
         try:
+            session.ensure_profile_bound_for_first_task("noop")
             Path(self.temp_dir, "new.txt").write_text("new\n", encoding="utf-8")
 
             result = session.create_checkpoint(manual=False, baseline_dirty=baseline)

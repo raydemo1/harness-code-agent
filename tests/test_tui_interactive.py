@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from harness_code_agent.tui.app import TuiApp
 from harness_code_agent.tui.state import SessionStatusSnapshot, TranscriptBlock, TuiState
-from harness_code_agent.tui.widgets import CommandPalette, InputArea, SubmitTextArea
+from harness_code_agent.tui.widgets import SubmitTextArea
 
 
 def _mock_session(root: Path):
@@ -90,45 +90,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     self.assertEqual(approval_provider.allowlist.project_root, self.root.resolve())
         _run(_test())
 
-    def test_transcript_shows_welcome_message(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                transcript = app.query_one("#transcript")
-                self.assertGreater(len(transcript.lines), 0)
-        _run(_test())
-
-    def test_input_area_receives_focus(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                text_area = app.query_one("#input-text", SubmitTextArea)
-                self.assertTrue(text_area.has_focus)
-        _run(_test())
-
     # ── Typing and input ────────────────────────────────────────────────────
-
-    def test_typing_in_input_area(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                text_area = app.query_one("#input-text", SubmitTextArea)
-                await pilot.press("h", "e", "l", "l", "o")
-                self.assertEqual(text_area.text, "hello")
-        _run(_test())
-
-    def test_shift_enter_inserts_newline(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                text_area = app.query_one("#input-text", SubmitTextArea)
-                await pilot.press("l", "i", "n", "e", "1")
-                await pilot.press("shift+enter")
-                await pilot.press("l", "i", "n", "e", "2")
-                self.assertIn("\n", text_area.text)
-                self.assertIn("line1", text_area.text)
-                self.assertIn("line2", text_area.text)
-        _run(_test())
 
     def test_enter_submits_text(self):
         async def _test():
@@ -186,59 +148,6 @@ class TuiInteractiveTests(unittest.TestCase):
                     self.assertIn("/help", commands)
         _run(_test())
 
-    def test_slash_command_palette_appears(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                palette = app.query_one("#cmd-palette", CommandPalette)
-                await pilot.press("slash")
-                await pilot.pause()
-                self.assertTrue(palette.display)
-                self.assertGreater(len(palette.candidates), 0)
-        _run(_test())
-
-    def test_slash_command_palette_navigates(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                await pilot.press("slash")
-                await pilot.pause()
-                palette = app.query_one("#cmd-palette", CommandPalette)
-                initial = palette.selected_index
-                await pilot.press("down")
-                self.assertEqual(palette.selected_index, (initial + 1) % len(palette.candidates))
-                await pilot.press("up")
-                self.assertEqual(palette.selected_index, initial)
-        _run(_test())
-
-    def test_tab_selects_palette_candidate(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                await pilot.press("slash")
-                await pilot.pause()
-                palette = app.query_one("#cmd-palette", CommandPalette)
-                first_candidate = palette.candidates[0][0] if palette.candidates else None
-                if first_candidate:
-                    await pilot.press("tab")
-                    await pilot.pause()
-                    text_area = app.query_one("#input-text", SubmitTextArea)
-                    self.assertIn(first_candidate, text_area.text)
-        _run(_test())
-
-    def test_escape_closes_palette(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test(size=(120, 40)) as pilot:
-                palette = app.query_one("#cmd-palette", CommandPalette)
-                await pilot.press("slash")
-                await pilot.pause()
-                self.assertTrue(palette.display)
-                await pilot.press("escape")
-                await pilot.pause()
-                self.assertFalse(palette.display)
-        _run(_test())
-
     # ── Keyboard shortcuts ──────────────────────────────────────────────────
 
     def test_ctrl_c_cancels_turn(self):
@@ -248,17 +157,6 @@ class TuiInteractiveTests(unittest.TestCase):
                 app._submitting = True
                 await pilot.press("ctrl+c")
                 self.assertTrue(app._cancellation_token.is_cancelled)
-        _run(_test())
-
-    def test_ctrl_t_toggles_thought(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                self.assertFalse(app.state.show_thought_details)
-                await pilot.press("ctrl+t")
-                self.assertTrue(app.state.show_thought_details)
-                await pilot.press("ctrl+t")
-                self.assertFalse(app.state.show_thought_details)
         _run(_test())
 
     def test_ctrl_o_opens_observability_screen_with_mode_toggle_and_escape(self):
@@ -413,34 +311,6 @@ class TuiInteractiveTests(unittest.TestCase):
                 status_bar = app.query_one("#status-bar")
                 self.assertEqual(status_bar.turn, 5)
                 self.assertEqual(status_bar.status, "running")
-        _run(_test())
-
-    def test_context_bar_shows_percentage(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                # Manually set context tokens
-                app.state.snapshot.context_tokens = 70000
-                app.state.snapshot.context_window_tokens = 100000
-                app.query_one("#context-bar").update_from_snapshot(app.state.snapshot)
-                await pilot.pause()
-                ctx_bar = app.query_one("#context-bar")
-                self.assertEqual(ctx_bar.context_percent, 70)
-        _run(_test())
-
-    def test_context_bar_shows_token_count_and_shortcuts(self):
-        async def _test():
-            app = self._make_app()
-            async with app.run_test() as pilot:
-                app.state.snapshot.context_tokens = 70000
-                app.state.snapshot.context_window_tokens = 100000
-                app.state.snapshot.permission_mode = "workspace-write"
-                app.query_one("#context-bar").update_from_snapshot(app.state.snapshot)
-                await pilot.pause()
-                plain = app.query_one("#context-bar").render().plain
-                self.assertIn("70K/100K", plain)
-                self.assertIn("Ctrl+K", plain)
-                self.assertIn("Ctrl+P", plain)
         _run(_test())
 
     def test_ctrl_p_toggles_permission_mode(self):

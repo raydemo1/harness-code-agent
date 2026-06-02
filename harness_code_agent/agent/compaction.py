@@ -30,26 +30,36 @@ class CompactionThresholds:
     prepare: int    # 68% — async candidate generation
     allow: int      # 75% — allow boundary commit / sync fallback
     force: int      # 82% — forced synchronous compaction
+    reset: int      # 92% — reset / hard truncate fallback
+    target: int     # 50% — ideal post-compaction waterline
 
 
 def get_thresholds(context_window: int | None = None) -> CompactionThresholds:
     w = context_window or config.CONTEXT_WINDOW_TOKENS
+    allow = int(w * 0.75) if context_window is not None else config.COMPRESS_THRESHOLD
+    reset = int(w * 0.92) if context_window is not None else config.RESET_THRESHOLD
     return CompactionThresholds(
         observe=int(w * 0.60),
         prepare=int(w * 0.68),
-        allow=int(w * 0.75),
+        allow=allow,
         force=int(w * 0.82),
+        reset=reset,
+        target=int(w * 0.50),
     )
 
 
 def compaction_action(token_count: int, thresholds: CompactionThresholds) -> str:
     """Determine what compaction action to take given current token usage."""
+    if token_count >= thresholds.reset:
+        return "reset"
     if token_count >= thresholds.force:
         return "force_sync"
     if token_count >= thresholds.allow:
         return "sync_compact"
     if token_count >= thresholds.prepare:
         return "async_prepare"
+    if token_count >= thresholds.observe:
+        return "observe"
     return "none"
 
 

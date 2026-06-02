@@ -779,6 +779,25 @@ class TuiAppTests(unittest.TestCase):
         # Before mount, state is None (created in on_mount)
         self.assertIsNone(app.state)
 
+    def test_welcome_omits_session_id_when_session_is_pending(self):
+        from harness_code_agent.tui.state import SessionStatusSnapshot
+        from harness_code_agent.tui.widgets import welcome_rich
+
+        snapshot = SessionStatusSnapshot(
+            profile="pending",
+            model="gpt-4o",
+            provider="auto",
+            permission_mode="workspace-write",
+            session_id=None,
+            cwd=self.root,
+            status="pending",
+        )
+
+        plain = welcome_rich(snapshot).renderable.plain
+
+        self.assertIn("session pending", plain)
+        self.assertNotIn("None", plain)
+
     def test_tui_app_run_returns_zero_for_cli_contract(self):
         """run() should preserve the CLI contract of returning process code 0."""
         from harness_code_agent.tui.app import TuiApp

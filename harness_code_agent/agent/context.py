@@ -172,6 +172,50 @@ def compact_messages(
     return system + [summary_msg] + recent
 
 
+def degrade_messages(
+    messages: list[dict],
+    *,
+    keep_recent: int = 12,
+    max_tool_chars: int = 2_000,
+    max_message_chars: int = 6_000,
+) -> list[dict]:
+    """Fold oversized old messages while preserving system and recent tail.
+
+    This is a deterministic pressure-relief step used before reset. It does not
+    try to prove the context reached the ideal waterline; it just removes the
+    noisiest old payloads such as long stdout, stale observations, and old file
+    content.
+    """
+    if not messages:
+        return messages
+
+    system_len = 1 if messages and messages[0].get("role") == "system" else 0
+    protected_start = max(system_len, len(messages) - max(0, keep_recent))
+    degraded: list[dict] = []
+    for idx, msg in enumerate(messages):
+        if idx < system_len or idx >= protected_start:
+            degraded.append(msg)
+            continue
+
+        new_msg = dict(msg)
+        content = new_msg.get("content")
+        if isinstance(content, str):
+            if msg.get("role") == "tool" and len(content) > max_tool_chars:
+                new_msg["content"] = _fold_long_text(
+                    content,
+                    max_tool_chars,
+                    label="DEGRADED TOOL OUTPUT",
+                )
+            elif len(content) > max_message_chars:
+                new_msg["content"] = _fold_long_text(
+                    content,
+                    max_message_chars,
+                    label="DEGRADED OLD MESSAGE",
+                )
+        degraded.append(new_msg)
+    return degraded
+
+
 def choose_compaction_split_index(
     messages: list[dict],
     *,
@@ -350,3 +394,19 @@ def _messages_to_text(messages: list[dict]) -> str:
             fn = tc.get("function", {})
             parts.append(f"[tool_call] {fn.get('name', '?')}({fn.get('arguments', '')[:500]})")
     return "\n".join(parts)
+
+
+def _fold_long_text(text: str, limit: int, *, label: str) -> str:
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head_budget = max(200, limit // 2)
+    tail_budget = max(200, limit - head_budget)
+    omitted = max(0, len(text) - head_budget - tail_budget)
+    return (
+        f"[{label}]\n"
+        f"original_chars: {len(text)}\n"
+        f"omitted_chars: {omitted}\n\n"
+        f"{text[:head_budget]}"
+        f"\n\n...[{omitted} chars omitted]...\n\n"
+        f"{text[-tail_budget:]}"
+    )

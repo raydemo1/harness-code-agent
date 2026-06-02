@@ -1080,11 +1080,11 @@ class ToolRegistry:
     def specs(self) -> list[ToolSpec]:
         return [
             ToolSpec(name, self._schemas[name], self._handlers[name], self._permissions[name])
-            for name in self._schemas
+            for name in sorted(self._schemas)
         ]
 
     def schemas(self) -> list[dict]:
-        return list(self._schemas.values())
+        return [self._schemas[name] for name in sorted(self._schemas)]
 
     def dispatch(self) -> dict[str, Callable]:
         return dict(self._handlers)

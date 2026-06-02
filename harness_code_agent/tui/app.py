@@ -196,12 +196,14 @@ class TuiApp(App):
         *,
         cwd: str | Path,
         profile_name: str,
+        profile_explicit: bool = False,
         resume_session_id: str | None = None,
         first_task: str = "",
     ):
         super().__init__()
         self.cwd = Path(cwd).resolve()
         self.profile_name = profile_name
+        self.profile_explicit = profile_explicit
         self.resume_session_id = resume_session_id
         self.first_task = first_task
         self.registry = default_command_registry()
@@ -246,6 +248,7 @@ class TuiApp(App):
         self.session = InteractiveSession(
             cwd=self.cwd,
             profile_name=self.profile_name,
+            profile_explicit=self.profile_explicit,
             resume_session_id=self.resume_session_id,
             stream_sink=self._stream_delta,
             event_listener=self._event_listener,
@@ -253,14 +256,22 @@ class TuiApp(App):
             question_provider=question_provider,
             output_sink=self._output,
         )
+        display_profile = getattr(self.session, "display_profile", self.session.profile.name())
+        session_id = getattr(
+            self.session,
+            "session_id",
+            getattr(getattr(self.session, "session", None), "id", None),
+        )
+        is_bound = getattr(self.session, "is_bound", True)
         self.state = TuiState(
             snapshot=SessionStatusSnapshot(
-                profile=self.session.profile.name(),
+                profile=display_profile,
                 model=config.MODEL,
                 provider=config.PROVIDER,
                 permission_mode=self.session.permission_mode,
-                session_id=self.session.session.id,
+                session_id=session_id,
                 cwd=self.session.cwd,
+                status="idle" if is_bound else "pending",
             )
         )
         # Process any events that arrived before state was ready
@@ -410,8 +421,12 @@ class TuiApp(App):
     def on_submit_complete(self, msg: SubmitComplete) -> None:
         """Handle submit completion."""
         # Flush any remaining streaming buffer
-        transcript = self.query_one("#transcript", TranscriptView)
-        transcript.flush_streaming()
+        try:
+            transcript = self.query_one("#transcript", TranscriptView)
+            transcript.flush_streaming()
+        except NoMatches:
+            self._submitting = False
+            return
         result = msg.result
         if hasattr(result, "notice") and result.notice:
             self._output(result.notice, title="notice")
@@ -422,8 +437,12 @@ class TuiApp(App):
 
     def on_submit_cancelled(self, msg: SubmitCancelled) -> None:
         """Handle submit cancellation."""
-        transcript = self.query_one("#transcript", TranscriptView)
-        transcript.flush_streaming()
+        try:
+            transcript = self.query_one("#transcript", TranscriptView)
+            transcript.flush_streaming()
+        except NoMatches:
+            self._submitting = False
+            return
         block = TranscriptBlock("status", "turn cancelled", "Ctrl-C pressed", "cancelled")
         self.state.add_block(block)
         transcript.append_block(block)
@@ -432,8 +451,12 @@ class TuiApp(App):
 
     def on_submit_error(self, msg: SubmitError) -> None:
         """Handle submit error."""
-        transcript = self.query_one("#transcript", TranscriptView)
-        transcript.flush_streaming()
+        try:
+            transcript = self.query_one("#transcript", TranscriptView)
+            transcript.flush_streaming()
+        except NoMatches:
+            self._submitting = False
+            return
         self._output(f"Error: {msg.error}", title="error")
         self._submitting = False
         self._input_enabled(True)
@@ -618,6 +641,10 @@ class TuiApp(App):
 
     def _refresh_context_snapshot(self) -> None:
         """Refresh context token counts."""
+        if not getattr(self.session, "is_bound", True) or self.session.conversation is None:
+            self.state.snapshot.context_tokens = 0
+            self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
+            return
         from ..agent import context
         from ..agent.compaction import get_thresholds
         thresholds = get_thresholds()
