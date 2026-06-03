@@ -3,9 +3,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -183,6 +185,43 @@ class InteractiveCliTests(unittest.TestCase):
                 metadata = session.session_store.read_metadata(session.session.id)
                 self.assertEqual(metadata["profile"], "plan")
                 self.assertEqual(metadata["profile_source"], "explicit")
+            finally:
+                session.close()
+
+    def test_resume_slash_command_before_first_task_queues_resume_context(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        previous = store.create(
+            profile="plan",
+            cwd=self.temp_dir,
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(previous).emit("user_input", agent="main_agent", payload={"text": "previous task"})
+        conversation = FakeConversation()
+
+        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=conversation):
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="coding-agent",
+                profile_explicit=True,
+            )
+            try:
+                output = StringIO()
+                session.output_sink = lambda text: print(text, file=output)
+
+                self.assertTrue(session.handle_slash_command(f"/resume {previous.id}"))
+
+                self.assertFalse(session.is_bound)
+                self.assertEqual(session.resume_session_id, previous.id)
+                self.assertIn("queued", output.getvalue())
+
+                session.submit("continue the work")
+
+                metadata = session.session_store.read_metadata(session.session.id)
+                self.assertEqual(metadata["resumed_from"], previous.id)
+                self.assertIn("Resume context:", conversation.messages[1]["content"])
+                self.assertIn(previous.id, conversation.messages[1]["content"])
+                self.assertIn("previous task", conversation.messages[1]["content"])
             finally:
                 session.close()
 
@@ -803,6 +842,54 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertEqual(events[-1]["payload"]["reason"], "user_exit")
         self.assertNotIn("final_report", [event["type"] for event in events])
 
+    def test_interactive_close_check_and_set_is_thread_safe(self):
+        class SlowFalse:
+            def __bool__(self):
+                time.sleep(0.05)
+                return False
+
+        class CountingConversation(FakeConversation):
+            close_count = 0
+            close_lock = threading.Lock()
+
+            def close(self):
+                with self.close_lock:
+                    type(self).close_count += 1
+                super().close()
+
+        conversation = CountingConversation()
+        barrier = threading.Barrier(2)
+        errors = []
+
+        with (
+            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=conversation),
+            patch("harness_code_agent.core.interactive.tools.stop_dev_server") as stop_dev_server,
+        ):
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="coding-agent",
+                profile_explicit=True,
+            )
+            session.submit("noop")
+            session._closed = SlowFalse()
+
+            def close_session():
+                try:
+                    barrier.wait()
+                    session.close()
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=close_session) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(CountingConversation.close_count, 1)
+        self.assertEqual(stop_dev_server.call_count, 1)
+
     def test_hca_session_show_latest_prints_latest_summary_without_api_key(self):
         from harness_code_agent import cli
 
@@ -1021,15 +1108,15 @@ class InteractiveCliTests(unittest.TestCase):
     def test_hca_print_mode_requires_task(self):
         from harness_code_agent import cli
 
-        output = StringIO()
+        errors = StringIO()
         with (
-            redirect_stdout(output),
+            redirect_stderr(errors),
             patch.object(sys, "argv", ["hca", "-p"]),
         ):
             result = cli.main()
 
         self.assertEqual(result, 2)
-        self.assertIn("no task provided", output.getvalue())
+        self.assertIn("no task provided", errors.getvalue())
 
     def test_stream_callback_auto_uses_tty_and_writes_deltas(self):
         from harness_code_agent import cli
@@ -1132,16 +1219,16 @@ class InteractiveCliTests(unittest.TestCase):
     def test_hca_interactive_requires_tty(self):
         from harness_code_agent import cli
 
-        output = StringIO()
+        errors = StringIO()
         with (
-            redirect_stdout(output),
+            redirect_stderr(errors),
             patch.object(sys, "argv", ["hca"]),
             patch.object(sys.stdin, "read", return_value=""),
         ):
             result = cli.main()
 
         self.assertEqual(result, 2)
-        self.assertIn("no task provided", output.getvalue())
+        self.assertIn("no task provided", errors.getvalue())
 
     def test_hca_no_tty_auto_degrades_to_batch(self):
         from harness_code_agent import cli

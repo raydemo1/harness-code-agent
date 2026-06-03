@@ -129,6 +129,10 @@ class ProductRuntimeTests(unittest.TestCase):
             resolve_provider_name(provider="auto", base_url="https://example.invalid/v1", model="custom"),
             "openai-compatible",
         )
+        self.assertEqual(
+            resolve_provider_name(provider="auto", base_url="https://example.invalid/v1", model="my-deepseek-fork-v1"),
+            "openai-compatible",
+        )
 
     def test_cached_provider_client_refreshes_when_config_changes(self):
         from harness_code_agent.agent import providers
@@ -513,6 +517,26 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(completions.calls[0]["model"], "deepseek-v4-flash")
         self.assertNotIn("reasoning_effort", completions.calls[0])
         self.assertEqual(completions.calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_profile_router_falls_back_when_profile_catalog_fails(self):
+        from harness_code_agent.profiles import router
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("harness_code_agent.profiles.router.list_profiles", side_effect=RuntimeError("catalog failed")):
+                decision = router.route_profile_for_task("fix tests", workspace=Path(tmpdir))
+
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertTrue(decision.fallback_used)
+        self.assertIn("catalog failed", decision.fallback_reason)
+
+    def test_router_json_parser_strips_only_outer_code_fence(self):
+        from harness_code_agent.profiles.router import _parse_router_json
+
+        parsed = _parse_router_json(
+            '```json\n{"profile_name":"coding-agent","confidence":0.9,"reason":"keep `literal` ticks"}\n```'
+        )
+
+        self.assertEqual(parsed["reason"], "keep `literal` ticks")
 
     def test_turn_summary_event_serializes_payload(self):
         from harness_code_agent.sessions.events import TurnSummaryEvent
@@ -2799,6 +2823,21 @@ class ProductRuntimeTests(unittest.TestCase):
         args = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6}
         result = safe_args_preview(args, max_chars=30)
         self.assertLessEqual(len(result), 33)  # 30 + "..."
+
+    def test_safe_args_preview_redacts_sensitive_key_names(self):
+        from harness_code_agent.agent.loop import safe_args_preview
+
+        result = safe_args_preview({
+            "path": "x.py",
+            "api_key": "sk-1234567890",
+            "jwt": "header.payload.signature",
+            "token": "short-secret",
+        })
+
+        self.assertIn('"api_key": "[redacted]"', result)
+        self.assertIn('"jwt": "[redacted]"', result)
+        self.assertIn('"token": "[redacted]"', result)
+        self.assertNotIn("short-secret", result)
 
     def test_loop_detection_preview_does_not_import_agent_loop(self):
         middleware_source = Path("harness_code_agent/runtime/middlewares.py").read_text(encoding="utf-8")

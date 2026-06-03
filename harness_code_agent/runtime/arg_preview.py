@@ -3,11 +3,27 @@ from __future__ import annotations
 import json
 
 
+_SENSITIVE_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "password",
+    "secret",
+    "token",
+    "jwt",
+    "authorization",
+    "credential",
+    "private_key",
+)
+
+
 def safe_args_preview(tool_args: dict, max_chars: int = 200) -> str:
     """Return a sanitized, bounded preview of tool arguments."""
     safe: dict[str, object] = {}
     for key, value in dict(tool_args or {}).items():
         key_text = str(key)
+        if _is_sensitive_key(key_text):
+            safe[key_text] = "[redacted]"
+            continue
         try:
             value_text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
         except TypeError:
@@ -23,3 +39,8 @@ def safe_args_preview(tool_args: dict, max_chars: int = 200) -> str:
     if len(preview) <= max_chars:
         return preview
     return preview[:max(0, max_chars)] + "..."
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)

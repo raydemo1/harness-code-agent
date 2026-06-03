@@ -39,9 +39,9 @@ def route_profile_for_task(
     Invalid model output, low confidence, unknown profiles, and provider
     failures all fall back to the product default.
     """
-    profiles = list_profiles()
-    valid_profiles = {item["name"] for item in profiles}
     try:
+        profiles = list_profiles()
+        valid_profiles = {item["name"] for item in profiles}
         raw = _call_router_llm(
             user_prompt=user_prompt,
             workspace=Path(workspace),
@@ -102,9 +102,12 @@ def _call_router_llm(*, user_prompt: str, workspace: Path, profiles: list[dict[s
 def _parse_router_json(raw: str) -> dict[str, Any]:
     text = raw.strip()
     if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:].strip()
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
     return json.loads(text)
 
 

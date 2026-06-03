@@ -120,7 +120,6 @@ def _session(session: Any, args: list[str], registry: SlashCommandRegistry) -> C
 
 def _resume(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     _require_arg(args, "Usage: /resume <session-id>")
-    _require_bound(session)
     return CommandResult(session._inject_resume_context(args[0]))
 
 
@@ -242,10 +241,21 @@ def _compact(session: Any, args: list[str], registry: SlashCommandRegistry) -> C
     if args != ["show"]:
         raise ValueError("Usage: /compact show")
     _require_bound(session)
-    mgr = getattr(session.conversation, "compaction_mgr", None)
-    if mgr is None:
-        return CommandResult("No compaction manager available.")
-    summary = mgr.get_latest_summary()
+    summary = _latest_compacted_summary(getattr(session.conversation, "messages", []))
     if summary is None:
         return CommandResult("No compacted summary available yet.")
     return CommandResult(f"Latest compacted summary:\n\n{summary}")
+
+
+def _latest_compacted_summary(messages: list[dict]) -> str | None:
+    for message in reversed(list(messages or [])):
+        content = str(message.get("content") or "")
+        if not (
+            content.startswith("[COMPACTED CONTEXT")
+            or content.startswith("[REBUILD_WORKING_CONTEXT]")
+        ):
+            continue
+        _header, _sep, body = content.partition("\n")
+        summary = body.strip() or content.strip()
+        return summary or None
+    return None

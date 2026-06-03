@@ -66,11 +66,11 @@ def resolve_provider_name(*, provider: str | None, base_url: str | None, model: 
     if requested != "auto":
         raise ValueError(f"Unsupported HARNESS_PROVIDER: {provider}")
 
-    signature = f"{base_url or ''} {model or ''}".lower()
-    if "deepseek" in signature:
-        return "deepseek"
-    if "api.openai.com" in (base_url or "").lower():
+    base_signature = (base_url or "").lower()
+    if "api.openai.com" in base_signature:
         return "openai"
+    if "deepseek" in base_signature:
+        return "deepseek"
     return "openai-compatible"
 
 
@@ -259,4 +259,3 @@ def _reasoning_content_from(value) -> str | None:
     if reasoning_content is None:
         reasoning_content = _get(_get(value, "model_extra") or {}, "reasoning_content")
     return reasoning_content
-

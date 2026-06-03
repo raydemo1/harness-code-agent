@@ -541,7 +541,7 @@ def _state_value(state: dict, key: str) -> str:
 
 def _state_list(state: dict, key: str) -> str:
     value = state.get(key)
-    if not value:
+    if value is None or value == "":
         return "none"
     if isinstance(value, list):
         return _format_list(value)

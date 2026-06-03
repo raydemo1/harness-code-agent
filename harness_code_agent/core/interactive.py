@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import logging
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -136,6 +137,7 @@ class InteractiveSession:
         self.profile_history: list[ProfileSwitchEvent] = []
         self._started_at: float | None = None
         self._closed = False
+        self._close_lock = threading.Lock()
 
     @property
     def is_bound(self) -> bool:
@@ -331,11 +333,6 @@ class InteractiveSession:
             profile = get_profile(profile_name)
             agent = self._build_agent(profile)
             conversation = agent.start_conversation()
-            from ..agent.compaction import CompactionManager
-            safe_profile = profile.name().replace("/", "_").replace("\\", "_")
-            conversation.compaction_mgr = CompactionManager(
-                compacted_dir=self.session.compacted_dir / "profiles" / safe_profile,
-            )
             conversation._event_bus = self.event_bus
             slot = ProfileSlot(profile=profile, agent=agent, conversation=conversation)
             self.profile_slots[profile.name()] = slot
@@ -674,9 +671,11 @@ class InteractiveSession:
         return "MCP reloaded\n" + self.mcp_manager.status_report()
 
     def _inject_resume_context(self, session_id: str) -> str:
-        if not self.is_bound:
-            raise ValueError("No active session yet. Submit a task first.")
         context_text = _build_resume_context(self.session_store, session_id)
+        self.resume_session_id = session_id
+        self.resume_context = context_text
+        if not self.is_bound:
+            return f"Resume context queued for session: {session_id}"
         self._append_conversation_message({
             "role": "user",
             "content": f"Resume context:\n{context_text}",
@@ -693,41 +692,21 @@ class InteractiveSession:
         conv = self.conversation
         token_count = context.count_tokens(conv.messages)
         msg_count_before = len(conv.messages)
-        mgr = getattr(conv, "compaction_mgr", None)
-        if mgr is not None:
-            split_index = context.choose_compaction_split_index(
-                conv.messages,
-                force=True,
-                target_tokens=get_thresholds().summary_target,
-            )
-            system_len = 1 if conv.messages and conv.messages[0].get("role") == "system" else 0
-            if split_index <= system_len:
-                return "Compaction skipped: not enough old context to summarize."
-            candidate = mgr.generate_candidate(
-                conv.messages,
-                llm_call=llm_call_simple,
-                split_index=split_index,
-                revision=conv.compaction_gate.revision,
-            )
-            commit = mgr.commit_candidate_to_messages(
-                candidate,
-                conv.messages,
-                current_revision=conv.compaction_gate.revision,
-            )
-            if not commit.committed or commit.messages is None:
-                return f"Compaction skipped: {commit.reason or 'unable to commit summary'}"
-            conv.messages = commit.messages
+        compacted = context.compact_messages(
+            conv.messages,
+            llm_call_simple,
+            role=conv.agent.name,
+            force=True,
+            target_tokens=get_thresholds().summary_target,
+        )
+        replace = getattr(conv, "_replace_messages", None)
+        if replace is not None:
+            replace(compacted)
         else:
-            conv.messages = context.compact_messages(
-                conv.messages,
-                llm_call_simple,
-                role=conv.agent.name,
-                force=True,
-                target_tokens=get_thresholds().summary_target,
-            )
+            conv.messages = compacted
+            conv.compaction_gate.bump_revision()
         msg_count_after = len(conv.messages)
         conv.runtime_state.current_turn_start_index = max(1, len(conv.messages) - 1)
-        conv.compaction_gate.bump_revision()
         conv.compaction_gate.mark_compacted()
         tokens_saved = max(0, token_count - context.count_tokens(conv.messages))
         return f"Compacted: {msg_count_before} -> {msg_count_after} messages, ~{tokens_saved} tokens saved."
@@ -824,9 +803,10 @@ class InteractiveSession:
         return f"checkpoint created: {rev}"
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
         tools.stop_dev_server()
         for slot in list(self.profile_slots.values()):
             slot.conversation.close()

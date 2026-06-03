@@ -50,6 +50,20 @@ class TuiTests(unittest.TestCase):
         self.assertIn("Usage: /config show", result.text)
         self.assertTrue(result.should_continue)
 
+    def test_resume_command_can_run_before_session_is_bound(self):
+        registry = default_command_registry()
+        calls = []
+        session = SimpleNamespace(
+            is_bound=False,
+            _inject_resume_context=lambda session_id: calls.append(session_id) or f"queued {session_id}",
+        )
+
+        result = registry.execute("/resume previous-session", session)
+
+        self.assertEqual(result.text, "queued previous-session")
+        self.assertEqual(calls, ["previous-session"])
+        self.assertTrue(result.should_continue)
+
     def test_observe_command_formats_and_exports_current_session(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
         session_record = store.create(
@@ -771,6 +785,24 @@ class TuiRichRenderTests(unittest.TestCase):
         text = bar.render()
         self.assertIn("90%", text.plain)
         self.assertTrue(any("90%" in text.plain[span.start:span.end] and "#bf616a" in str(span.style) for span in text.spans))
+
+    def test_context_bar_uses_configured_compaction_threshold_label(self):
+        bar = ContextBar()
+        snapshot = SessionStatusSnapshot(
+            profile="coding-agent",
+            model="gpt-4o",
+            provider="auto",
+            permission_mode="workspace-write",
+            session_id="s1",
+            cwd=self.root,
+            context_tokens=10_000,
+            context_window_tokens=100_000,
+            context_compact_threshold=80_000,
+        )
+
+        bar.update_from_snapshot(snapshot)
+
+        self.assertIn("auto-compact @80%", bar.render().plain)
 
     def test_plan_panel_renders_completed_steps_with_strike_style(self):
         panel = PlanPanel()

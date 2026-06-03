@@ -262,6 +262,7 @@ class ContextBar(Static):
     context_percent: reactive[int] = reactive(0)
     permission_mode: reactive[str] = reactive("workspace-write")
     token_label: reactive[str] = reactive("0K/0K")
+    compact_percent: reactive[int] = reactive(90)
 
     def render(self) -> Text:
         pct = self.context_percent
@@ -280,10 +281,10 @@ class ContextBar(Static):
 
         text = Text()
         text.append(f" context ", style="dim")
-        text.append(bar, style="dim")
+        text.append(bar, style=bar_color)
         text.append(f" {pct}%", style=f"bold {bar_color}")
         text.append(f" {self.token_label}", style="dim")
-        text.append(" auto-compact @90%", style="dim")
+        text.append(f" auto-compact @{self.compact_percent}%", style="dim")
         text.append(f" │ ", style="dim")
         text.append(f"▶ {self.permission_mode}", style=perm_color)
         text.append(" │ Ctrl+K compact │ Ctrl+P perms", style="dim")
@@ -296,6 +297,10 @@ class ContextBar(Static):
             self.context_percent = 0
         self.token_label = f"{snap.context_tokens // 1000}K/{snap.context_window_tokens // 1000}K"
         self.permission_mode = snap.permission_mode
+        if snap.context_window_tokens > 0 and snap.context_compact_threshold > 0:
+            self.compact_percent = int(round(snap.context_compact_threshold * 100 / snap.context_window_tokens))
+        else:
+            self.compact_percent = 90
 
     def on_click(self) -> None:
         if hasattr(self.app, "action_compact_context"):

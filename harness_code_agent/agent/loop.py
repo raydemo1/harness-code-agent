@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .. import config
 from . import context
-from .compaction import CompactionGate, CompactionManager, get_thresholds, compaction_action
+from .compaction import CompactionGate, get_thresholds, compaction_action
 from .observations import (
     FactTracker,
     ObservationStore,
@@ -330,7 +330,6 @@ class AgentConversation:
         self._closed = False
         self._iteration_offset = 0
         self.compaction_gate = CompactionGate()
-        self.compaction_mgr: CompactionManager | None = None
         self._event_bus = agent.tool_context.event_bus if agent.tool_context is not None else None
         self.fact_tracker = FactTracker()
         self.observation_store = ObservationStore(self._observation_dir())
@@ -448,8 +447,7 @@ class AgentConversation:
             current_turn_start_index=state.current_turn_start_index,
         )
         if changed:
-            self.messages = cleaned
-            self.compaction_gate.bump_revision()
+            self._replace_messages(cleaned)
             self.compaction_gate.mark_compacted()
             self._emit_compaction_committed(
                 messages_before=messages_before,
@@ -528,11 +526,18 @@ class AgentConversation:
         board = self.runtime_state.task_board
         recent_errors, failed_commands = self._recent_error_state()
         files = list(dict.fromkeys(board.changed_files))
+        observed_files = [
+            key.removeprefix("file:")
+            for observation in self.observation_store.observations
+            for key in observation.resource_keys
+            if key.startswith("file:")
+        ]
+        files_touched = list(dict.fromkeys([*files, *observed_files]))
         return {
             "current_user_task": board.goal or self._latest_user_message(),
             "active_plan_status": self._task_board_status(),
             "changed_files": files,
-            "files_touched": files,
+            "files_touched": files_touched,
             "recent_errors": recent_errors,
             "failed_commands": failed_commands,
             "active_constraints": self._active_constraints(),
@@ -1189,8 +1194,6 @@ class AgentConversation:
         self._closed = True
         if self.runtime_state.shell_session is not None:
             self.runtime_state.shell_session.close()
-        if self.compaction_mgr is not None:
-            self.compaction_mgr.close()
 
 
 def _truncate(s: str, n: int) -> str:

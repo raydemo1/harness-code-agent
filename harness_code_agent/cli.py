@@ -16,7 +16,7 @@ from .tui import TuiApp
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "run":
-        print("Error: 'run' is no longer supported. Use 'hca \"<task>\"' or start 'hca' interactively.")
+        _print_error("Error: 'run' is no longer supported. Use 'hca \"<task>\"' or start 'hca' interactively.")
         return 1
     if argv == ["session", "show", "latest"]:
         return show_latest_session(Path.cwd())
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     first_task = " ".join(args.task).strip()
 
     if not config.API_KEY:
-        print("Error: Set OPENAI_API_KEY in .env or environment.")
+        _print_error("Error: Set OPENAI_API_KEY in .env or environment.")
         return 1
 
     cwd = Path.cwd()
@@ -56,12 +56,12 @@ def main(argv: list[str] | None = None) -> int:
             # Only read stdin when auto-degrading (no TTY). -p requires argv.
             first_task = sys.stdin.read().strip()
         if not first_task:
-            print("Error: no task provided (pass a task argument or pipe input)")
+            _print_error("Error: no task provided (pass a task argument or pipe input)")
             return 2
         try:
             stream_sink = _build_stream_callback()
         except ValueError as e:
-            print(f"Error: {e}")
+            _print_error(f"Error: {e}")
             return 2
         return run_batch(
             cwd=cwd,
@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             first_task=first_task,
         )
     except Exception as e:
-        print(f"Error: {e}")
+        _print_error(f"Error: {e}")
         return 1
     return app.run()
 
@@ -104,7 +104,7 @@ def run_batch(
             stream_sink=stream_sink,
         )
     except Exception as e:
-        print(f"Error: {e}")
+        _print_error(f"Error: {e}")
         return 1
 
     try:
@@ -114,9 +114,9 @@ def run_batch(
         print(f"workspace: {session.cwd}")
         print_turn_result(result)
     except MentionResolutionError as e:
-        print(f"Error: {e}")
+        _print_error(f"Error: {e}")
     except KeyboardInterrupt:
-        print("\nInterrupted.")
+        _print_error("\nInterrupted.")
         return 130
     finally:
         session.close()
@@ -153,10 +153,9 @@ def _build_stream_callback():
 def show_latest_session(cwd: Path) -> int:
     store = SessionStore(cwd / ".harness")
     try:
-        latest = store.latest_session()
-        print_session(store, latest["id"])
+        print_session(store, _latest_session_id(store))
     except (FileNotFoundError, ValueError, KeyError) as e:
-        print(f"Error: {e}")
+        _print_error(f"Error: {e}")
         return 1
     return 0
 
@@ -175,7 +174,7 @@ def observe_session(cwd: Path, args: list[str]) -> int:
         export = True
         target_args.remove("--export")
     if len(target_args) != 1:
-        print("Error: Usage: hca session observe latest|<session-id>|project [--export]")
+        _print_error("Error: Usage: hca session observe latest|<session-id>|project [--export]")
         return 2
 
     target = target_args[0]
@@ -188,13 +187,13 @@ def observe_session(cwd: Path, args: list[str]) -> int:
                 print(format_project_observability(store))
             return 0
 
-        session_id = store.latest_session()["id"] if target == "latest" else target
+        session_id = _latest_session_id(store) if target == "latest" else target
         if export:
             print(format_export_result(export_observability_report(store, mode="current", session_id=session_id)))
         else:
             print(format_session_observability(store, session_id))
     except (FileNotFoundError, ValueError, KeyError) as e:
-        print(f"Error: {e}")
+        _print_error(f"Error: {e}")
         return 1
     return 0
 
@@ -203,9 +202,20 @@ def _submit_and_print(session: InteractiveSession, line: str) -> None:
     try:
         result = session.submit(line)
     except MentionResolutionError as e:
-        print(f"Error: {e}")
+        _print_error(f"Error: {e}")
         return
     print_turn_result(result)
+
+
+def _latest_session_id(store: SessionStore) -> str:
+    latest = store.latest_session()
+    if latest is None:
+        raise FileNotFoundError("No sessions found.")
+    return latest["id"]
+
+
+def _print_error(message: str) -> None:
+    print(message, file=sys.stderr)
 
 
 

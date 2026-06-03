@@ -559,7 +559,6 @@ class CompactCommandTests(unittest.TestCase):
             {"role": "user", "content": "task"},
             {"role": "assistant", "content": "done"},
         ]
-        session._compaction_mgr = None  # Will be set by implementation
         return session
 
     def test_compact_command_is_registered_for_summary_view(self):
@@ -581,9 +580,11 @@ class CompactCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             from harness_code_agent.tui.commands import default_command_registry
 
-            Path(tmpdir, "latest.md").write_text("Latest summary text", encoding="utf-8")
-            session = MagicMock()
-            session.conversation.compaction_mgr.get_latest_summary.return_value = "Latest summary text"
+            session = self._make_session(tmpdir)
+            session.conversation.messages.insert(1, {
+                "role": "user",
+                "content": "[COMPACTED CONTEXT — summary of older conversation]\nLatest summary text",
+            })
             registry = default_command_registry()
 
             show = registry.execute("/compact show", session)
@@ -601,6 +602,14 @@ class CompactCommandTests(unittest.TestCase):
 
 
 class AgentConversationCompactionLifecycleTests(unittest.TestCase):
+    def test_agent_conversation_no_longer_owns_compaction_manager(self):
+        from harness_code_agent.agent.loop import Agent
+
+        agent = Agent("test_agent", "sys", use_tools=False)
+        conv = agent.start_conversation()
+
+        self.assertFalse(hasattr(conv, "compaction_mgr"))
+
     def test_message_revision_tracks_user_assistant_tool_and_middleware_appends(self):
         from harness_code_agent.agent.loop import Agent
 
@@ -630,6 +639,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(cleaned_messages, True)) as clean,
             patch("harness_code_agent.agent.loop.context.summarize_older_conversation") as summarize,
             patch("harness_code_agent.agent.loop.context.create_checkpoint", return_value="checkpoint") as checkpoint,
+            patch.object(conv, "_replace_messages", wraps=conv._replace_messages) as replace_messages,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -639,6 +649,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             conv.run_until_idle()
 
         clean.assert_called_once()
+        replace_messages.assert_called_once_with(cleaned_messages)
         summarize.assert_not_called()
         checkpoint.assert_not_called()
 
