@@ -27,8 +27,10 @@ from .permissions import (
     VALID_TOOL_PERMISSIONS,
 )
 from .questions import ConsoleQuestionProvider, QuestionRequest, normalize_question_options
+from .shell_classification import is_long_running_shell_command
 from .tool_context import ToolContext
 from .tool_result import ToolResult, unstructured_tool_result_from_text
+from ..workspace.shell_jobs import ShellJobNotFound
 
 # Playwright is optional — only needed for browser UI testing
 try:
@@ -637,7 +639,49 @@ def run_bash(
     execution_lane: ToolExecutionLane | str | None = None,
 ) -> ToolResult:
     """Run a shell command inside the agent's persistent shell session."""
-    lane = _coerce_tool_lane(execution_lane) if execution_lane is not None else ToolExecutionLane.SHELL_SERIAL
+    if execution_lane is not None:
+        lane = _coerce_tool_lane(execution_lane)
+    elif is_long_running_shell_command(command):
+        lane = ToolExecutionLane.SHELL_LONG_RUNNING
+    else:
+        lane = ToolExecutionLane.SHELL_SERIAL
+    if lane == ToolExecutionLane.SHELL_LONG_RUNNING:
+        manager = _shell_job_manager(runtime_state)
+        if manager is None:
+            return ToolResult(
+                tool="run_bash",
+                status="failed",
+                output="[error] No shell job manager available for long-running run_bash command",
+                error="No shell job manager available",
+                metadata={"status_source": "runtime"},
+            )
+        job = manager.start(command, early_exit_seconds=0.5)
+        metadata = {
+            "status_source": "shell_job",
+            "job_id": job.job_id,
+            "pid": job.pid,
+            "job_status": job.status,
+            "exit_code": job.exit_code,
+        }
+        if job.status == "running":
+            output = (
+                f"Started background shell job {job.job_id} (pid={job.pid}). "
+                "Use read_shell_output to inspect logs and stop_shell_job to stop it."
+            )
+            return ToolResult(tool="run_bash", status="success", output=output, metadata=metadata)
+        tail = job.output_tail
+        output = f"[error] Long-running command exited immediately as {job.status}."
+        if tail:
+            output += f"\n\nRecent output:\n{tail}"
+        return ToolResult(
+            tool="run_bash",
+            status="failed",
+            output=output,
+            error=f"Long-running command exited immediately as {job.status}",
+            return_code=job.exit_code,
+            metadata=metadata,
+        )
+
     use_temporary_shell = lane in {ToolExecutionLane.SHELL_READ, ToolExecutionLane.SHELL_VERIFY}
     shell_session = None
     owns_shell = False
@@ -694,6 +738,121 @@ def run_bash(
     finally:
         if owns_shell and shell_session is not None:
             shell_session.close()
+
+
+def list_shell_jobs(runtime_state=None) -> ToolResult:
+    manager = _shell_job_manager(runtime_state)
+    if manager is None:
+        return ToolResult(
+            tool="list_shell_jobs",
+            status="failed",
+            output="[error] No shell job manager available",
+            error="No shell job manager available",
+            metadata={"status_source": "runtime"},
+        )
+    jobs = [
+        {
+            "job_id": job.job_id,
+            "command": job.command,
+            "pid": job.pid,
+            "status": job.status,
+            "exit_code": job.exit_code,
+            "started_at": job.started_at,
+            "ended_at": job.ended_at,
+            "uptime_seconds": job.uptime_seconds(),
+        }
+        for job in manager.list_jobs()
+    ]
+    return ToolResult(
+        tool="list_shell_jobs",
+        status="success",
+        output=json.dumps({"jobs": jobs}, ensure_ascii=False),
+        metadata={"status_source": "shell_job", "job_count": len(jobs)},
+    )
+
+
+def read_shell_output(job_id: str, max_chars: int = 12_000, runtime_state=None) -> ToolResult:
+    manager = _shell_job_manager(runtime_state)
+    if manager is None:
+        return ToolResult(
+            tool="read_shell_output",
+            status="failed",
+            output="[error] No shell job manager available",
+            error="No shell job manager available",
+            metadata={"status_source": "runtime", "job_id": job_id},
+        )
+    max_chars = _clamp_shell_output_chars(max_chars)
+    try:
+        output = manager.read_output(job_id, max_chars=max_chars)
+        job = manager.get(job_id) if hasattr(manager, "get") else None
+    except ShellJobNotFound as exc:
+        text = f"[error] {exc}"
+        return ToolResult(
+            tool="read_shell_output",
+            status="failed",
+            output=text,
+            error=str(exc),
+            metadata={"status_source": "shell_job", "job_id": job_id},
+        )
+    header = f"Shell job {job_id}"
+    metadata = {"status_source": "shell_job", "job_id": job_id, "max_chars": max_chars}
+    if job is not None:
+        header += f" status={job.status} pid={job.pid} exit_code={job.exit_code}"
+        metadata.update({"job_status": job.status, "pid": job.pid, "exit_code": job.exit_code})
+    body = output or "(no output)"
+    return ToolResult(
+        tool="read_shell_output",
+        status="success",
+        output=f"{header}\n\n{body}",
+        metadata=metadata,
+    )
+
+
+def stop_shell_job(job_id: str, runtime_state=None) -> ToolResult:
+    manager = _shell_job_manager(runtime_state)
+    if manager is None:
+        return ToolResult(
+            tool="stop_shell_job",
+            status="failed",
+            output="[error] No shell job manager available",
+            error="No shell job manager available",
+            metadata={"status_source": "runtime", "job_id": job_id},
+        )
+    try:
+        job = manager.stop(job_id)
+    except ShellJobNotFound as exc:
+        text = f"[error] {exc}"
+        return ToolResult(
+            tool="stop_shell_job",
+            status="failed",
+            output=text,
+            error=str(exc),
+            metadata={"status_source": "shell_job", "job_id": job_id},
+        )
+    return ToolResult(
+        tool="stop_shell_job",
+        status="success",
+        output=f"Shell job {job.job_id} is {job.status} (pid={job.pid}, exit_code={job.exit_code})",
+        metadata={
+            "status_source": "shell_job",
+            "job_id": job.job_id,
+            "job_status": job.status,
+            "pid": job.pid,
+            "exit_code": job.exit_code,
+        },
+    )
+
+
+def _shell_job_manager(runtime_state):
+    return getattr(runtime_state, "shell_job_manager", None) if runtime_state is not None else None
+
+
+def _clamp_shell_output_chars(value: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 12_000
+    return max(1, min(100_000, parsed))
 
 
 def _smart_truncate_output(stdout: str, stderr: str, limit: int = 12_000) -> str:
@@ -1074,6 +1233,7 @@ class ToolExecutionLane(str, Enum):
     SUBAGENT_READ = "subagent_read"
     SHELL_READ = "shell_read"
     SHELL_VERIFY = "shell_verify"
+    SHELL_LONG_RUNNING = "shell_long_running"
     WORKSPACE_WRITE = "workspace_write"
     CONTROL_SERIAL = "control_serial"
     SHELL_SERIAL = "shell_serial"
@@ -1161,6 +1321,8 @@ def _default_lane_for_tool(name: str, permission: str) -> ToolExecutionLane:
         return ToolExecutionLane.CONTROL_SERIAL
     if name == "run_bash":
         return ToolExecutionLane.SHELL_SERIAL
+    if name in {"list_shell_jobs", "read_shell_output", "stop_shell_job"}:
+        return ToolExecutionLane.CONTROL_SERIAL
     if name in {"browser_test", "stop_dev_server"}:
         return ToolExecutionLane.SHELL_SERIAL
     if permission == TOOL_PERMISSION_NETWORK_READ:
@@ -1422,8 +1584,8 @@ CORE_TOOL_SCHEMAS = [
                     else "On POSIX this runs a shell suitable for standard Bash-style commands. "
                 )
                 + "Use for installing deps, running builds, starting servers, running tests, etc. "
-                "For long-running commands (compilation, training), increase the timeout parameter. "
-                "For background services (VMs, servers), use an OS-appropriate background command and a separate command to check readiness. "
+                "For long-running verification commands (compilation, training), increase the timeout parameter. "
+                "For dev servers, watch mode, and runserver commands, this returns a background shell job id; use read_shell_output, list_shell_jobs, and stop_shell_job to manage it. "
                 "Prefer bounded inspection commands such as rg, head/tail, sed -n, Select-Object -First/-Last, or line counts instead of dumping whole files or logs. "
                 "Stderr is preserved separately in output for easier debugging."
             ),
@@ -1437,6 +1599,47 @@ CORE_TOOL_SCHEMAS = [
                         "description": "Timeout in seconds (default 300). Increase for long builds/training.",
                         "default": 300,
                     },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_shell_jobs",
+            "description": "List background shell jobs started by long-running run_bash commands in the current session.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_shell_output",
+            "description": "Read recent stdout/stderr output from a background shell job.",
+            "parameters": {
+                "type": "object",
+                "required": ["job_id"],
+                "properties": {
+                    "job_id": {"type": "string", "description": "Background shell job id returned by run_bash."},
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum recent output characters to return (default 12000, capped at 100000).",
+                        "default": 12000,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_shell_job",
+            "description": "Stop a background shell job and its child process tree.",
+            "parameters": {
+                "type": "object",
+                "required": ["job_id"],
+                "properties": {
+                    "job_id": {"type": "string", "description": "Background shell job id returned by run_bash."},
                 },
             },
         },
@@ -1791,6 +1994,9 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "list_files": list_files,
         "ask_user": ask_user,
         "run_bash": run_bash,
+        "list_shell_jobs": list_shell_jobs,
+        "read_shell_output": read_shell_output,
+        "stop_shell_job": stop_shell_job,
         "consult_subagent": consult_subagent,
         "web_search": web_search,
         "web_fetch": web_fetch,
@@ -1809,6 +2015,9 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "apply_patch": TOOL_PERMISSION_EDIT,
         "update_plan_state": TOOL_PERMISSION_CONTROL,
         "run_bash": TOOL_PERMISSION_SHELL,
+        "list_shell_jobs": TOOL_PERMISSION_READ,
+        "read_shell_output": TOOL_PERMISSION_READ,
+        "stop_shell_job": TOOL_PERMISSION_CONTROL,
         "browser_test": TOOL_PERMISSION_SHELL,
         "stop_dev_server": TOOL_PERMISSION_SHELL,
     }
@@ -1824,6 +2033,9 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "apply_patch": ToolExecutionLane.WORKSPACE_WRITE,
         "update_plan_state": ToolExecutionLane.CONTROL_SERIAL,
         "run_bash": ToolExecutionLane.SHELL_SERIAL,
+        "list_shell_jobs": ToolExecutionLane.CONTROL_SERIAL,
+        "read_shell_output": ToolExecutionLane.CONTROL_SERIAL,
+        "stop_shell_job": ToolExecutionLane.CONTROL_SERIAL,
         "browser_test": ToolExecutionLane.SHELL_SERIAL,
         "stop_dev_server": ToolExecutionLane.SHELL_SERIAL,
     }

@@ -112,10 +112,16 @@ class ToolExecutorTests(unittest.TestCase):
             "git status --short": tools.ToolExecutionLane.SHELL_READ,
             "pytest tests": tools.ToolExecutionLane.SHELL_VERIFY,
             "ruff check .": tools.ToolExecutionLane.SHELL_VERIFY,
+            "npm run dev": tools.ToolExecutionLane.SHELL_LONG_RUNNING,
+            "pnpm dev": tools.ToolExecutionLane.SHELL_LONG_RUNNING,
+            "python manage.py runserver": tools.ToolExecutionLane.SHELL_LONG_RUNNING,
+            "uvicorn app:app": tools.ToolExecutionLane.SHELL_LONG_RUNNING,
+            "cd web && npm run dev": tools.ToolExecutionLane.SHELL_LONG_RUNNING,
             "npm run test": tools.ToolExecutionLane.SHELL_SERIAL,
             "make test": tools.ToolExecutionLane.SHELL_SERIAL,
             "python script.py": tools.ToolExecutionLane.SHELL_SERIAL,
             "cd src; pwd": tools.ToolExecutionLane.SHELL_SERIAL,
+            "export FOO=bar && npm run dev": tools.ToolExecutionLane.SHELL_SERIAL,
             "conda activate base": tools.ToolExecutionLane.SHELL_SERIAL,
         }
 
@@ -334,6 +340,54 @@ class ToolExecutorTests(unittest.TestCase):
         tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
         self.assertIn("slow:300", tool_messages[0]["content"])
         self.assertIn("fast:30", tool_messages[1]["content"])
+
+    def test_long_running_shell_is_serial_barrier_and_returns_job_id(self):
+        registry = tools.BUILTIN_TOOL_REGISTRY.copy()
+        tool_calls = [
+            _tool_call("tc_before", "read_file", {"path": "note.txt"}),
+            _tool_call("tc_long", "run_bash", {"command": "npm run dev"}),
+            _tool_call("tc_logs", "read_shell_output", {"job_id": "shell-job-test"}),
+        ]
+
+        class FakeJobs:
+            def __init__(self):
+                self.started = []
+                self.closed = False
+
+            def start(self, command, *, early_exit_seconds=0.5):
+                self.started.append((command, early_exit_seconds))
+                return SimpleNamespace(
+                    job_id="shell-job-test",
+                    command=command,
+                    pid=123,
+                    status="running",
+                    exit_code=None,
+                    output_tail="",
+                )
+
+            def read_output(self, job_id, max_chars=12000):
+                return "server ready"
+
+            def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("before", encoding="utf-8")
+            conversation, _context = _conversation_with_registry(root, registry, tool_calls)
+            fake_jobs = FakeJobs()
+            conversation.runtime_state.shell_job_manager = fake_jobs
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                conversation.run_until_idle()
+
+        tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
+        self.assertEqual(fake_jobs.started, [("npm run dev", 0.5)])
+        self.assertIn("before", tool_messages[0]["content"])
+        self.assertIn("shell-job-test", tool_messages[1]["content"])
+        self.assertIn("server ready", tool_messages[2]["content"])
 
 
 if __name__ == "__main__":

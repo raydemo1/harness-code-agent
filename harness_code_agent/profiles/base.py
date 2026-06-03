@@ -139,7 +139,8 @@ class BaseProfile(ABC):
             "4. Apply all code and test changes yourself.\n"
             "5. Run concrete verification commands.\n"
             "6. If verification fails, diagnose and continue. If it passes, update planning state when in light/full and perform final verification before stopping. "
-            "Final light/full updates must include result_status, validation, and remaining_issues.\n\n"
+            "Final light/full updates must include result_status, validation, and remaining_issues.\n"
+            "Use read_shell_output, list_shell_jobs, and stop_shell_job to inspect and clean up any background shell jobs returned by long-running run_bash commands.\n\n"
             "Use the task text and profile acceptance criteria as the source of truth."
         )
         return AgentConfig(system_prompt=prompt)

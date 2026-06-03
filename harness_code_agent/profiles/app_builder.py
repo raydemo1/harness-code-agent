@@ -39,10 +39,11 @@ Technical guidelines:
 - Build real source files with complete behavior, not mock screenshots, placeholder data, or TODO-only scaffolding.
 - Make the UI polished and appropriate for the requested product.
 - Close the browser verification loop for UI work: run the app, use browser_test, inspect console errors, perform representative clicks/typing, and capture screenshots when useful.
+- Long-running dev servers started with run_bash return shell job ids; use read_shell_output, list_shell_jobs, and stop_shell_job to inspect readiness and clean them up.
 - Check responsive behavior at mobile and desktop widths and cover basic accessibility expectations such as semantic controls, labels, focusability, and readable contrast.
 - If browser verification fails because tooling is unavailable, run the strongest build/static checks available and report the limitation.
 
-You have these tools: read_file, write_file, list_files, run_bash, update_plan_state, read_skill_file, consult_subagent, ask_user, web_search, web_fetch, browser_test.
+You have these tools: read_file, write_file, list_files, run_bash, list_shell_jobs, read_shell_output, stop_shell_job, update_plan_state, read_skill_file, consult_subagent, ask_user, web_search, web_fetch, browser_test.
 Work inside the current directory. All files you create will persist.
 """
 

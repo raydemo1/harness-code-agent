@@ -1142,8 +1142,131 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("read_file"), tools.TOOL_DISPATCH["read_file"])
         self.assertIs(tools.BUILTIN_TOOL_REGISTRY.get("stop_dev_server"), tools.TOOL_DISPATCH["stop_dev_server"])
         self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.permission_for("web_search"), "network_read")
+        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.permission_for("list_shell_jobs"), "read")
+        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.permission_for("read_shell_output"), "read")
+        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.permission_for("stop_shell_job"), "control")
+        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.lane_for("list_shell_jobs"), tools.ToolExecutionLane.CONTROL_SERIAL)
+        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.lane_for("read_shell_output"), tools.ToolExecutionLane.CONTROL_SERIAL)
+        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.lane_for("stop_shell_job"), tools.ToolExecutionLane.CONTROL_SERIAL)
         self.assertTrue(all(spec.permission for spec in tools.BUILTIN_TOOL_REGISTRY.specs()))
         self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
+
+    def test_run_bash_long_running_uses_shell_job_manager(self):
+        from harness_code_agent.runtime import tools
+
+        class FakeJobs:
+            def start(self, command, *, early_exit_seconds=0.5):
+                self.request = (command, early_exit_seconds)
+                return SimpleNamespace(
+                    job_id="shell-job-abc123",
+                    command=command,
+                    pid=456,
+                    status="running",
+                    exit_code=None,
+                    output_tail="",
+                )
+
+        fake_jobs = FakeJobs()
+        runtime_state = SimpleNamespace(shell_session=None, shell_job_manager=fake_jobs)
+
+        result = tools.run_bash(
+            "npm run dev",
+            timeout=300,
+            runtime_state=runtime_state,
+            execution_lane=tools.ToolExecutionLane.SHELL_LONG_RUNNING,
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(fake_jobs.request, ("npm run dev", 0.5))
+        self.assertIn("shell-job-abc123", result.output)
+        self.assertEqual(result.metadata["job_id"], "shell-job-abc123")
+
+    def test_run_bash_direct_call_detects_long_running_command(self):
+        from harness_code_agent.runtime import tools
+
+        class FakeJobs:
+            def start(self, command, *, early_exit_seconds=0.5):
+                self.request = (command, early_exit_seconds)
+                return SimpleNamespace(
+                    job_id="shell-job-direct",
+                    command=command,
+                    pid=789,
+                    status="running",
+                    exit_code=None,
+                    output_tail="",
+                )
+
+        fake_jobs = FakeJobs()
+        runtime_state = SimpleNamespace(shell_session=None, shell_job_manager=fake_jobs)
+
+        result = tools.run_bash("npm run dev", runtime_state=runtime_state)
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(fake_jobs.request, ("npm run dev", 0.5))
+        self.assertIn("shell-job-direct", result.output)
+
+    def test_shell_job_tools_handle_list_read_stop(self):
+        from harness_code_agent.runtime import tools
+
+        class FakeJob:
+            def __init__(self, job_id="shell-job-1", status="running"):
+                self.job_id = job_id
+                self.command = "npm run dev"
+                self.pid = 111
+                self.status = status
+                self.exit_code = None
+                self.started_at = 10.0
+                self.ended_at = None
+
+            def uptime_seconds(self):
+                return 2.0
+
+        class FakeJobs:
+            def list_jobs(self):
+                return [FakeJob()]
+
+            def read_output(self, job_id, max_chars=12000):
+                self.read_request = (job_id, max_chars)
+                return "ready"
+
+            def stop(self, job_id):
+                self.stop_request = job_id
+                return FakeJob(job_id, status="stopped")
+
+        fake_jobs = FakeJobs()
+        runtime_state = SimpleNamespace(shell_job_manager=fake_jobs)
+
+        listed = tools.list_shell_jobs(runtime_state=runtime_state)
+        read = tools.read_shell_output("shell-job-1", max_chars=50, runtime_state=runtime_state)
+        stopped = tools.stop_shell_job("shell-job-1", runtime_state=runtime_state)
+
+        self.assertEqual(listed.status, "success")
+        self.assertIn("shell-job-1", listed.output)
+        self.assertEqual(read.status, "success")
+        self.assertEqual(fake_jobs.read_request, ("shell-job-1", 50))
+        self.assertIn("ready", read.output)
+        self.assertEqual(stopped.status, "success")
+        self.assertEqual(fake_jobs.stop_request, "shell-job-1")
+        self.assertIn("stopped", stopped.output)
+
+    def test_agent_conversation_close_closes_shell_job_manager(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+
+        class FakeJobs:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        fake_jobs = FakeJobs()
+        with patch("harness_code_agent.agent.loop.get_client", return_value=SimpleNamespace(chat=SimpleNamespace(completions=None))):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False))
+        conversation.runtime_state.shell_job_manager = fake_jobs
+
+        conversation.close()
+
+        self.assertTrue(fake_jobs.closed)
 
     def test_tool_registry_requires_explicit_permission_classification(self):
         from harness_code_agent.runtime import tools

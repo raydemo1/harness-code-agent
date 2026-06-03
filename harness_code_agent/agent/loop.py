@@ -25,6 +25,7 @@ from ..runtime import tools
 from ..runtime.arg_preview import safe_args_preview
 from ..runtime.tool_context import ToolContext
 from ..runtime.tool_result import ToolResult
+from ..workspace.shell_jobs import ShellJobManager
 from ..workspace.shell_session import PersistentShellSession
 from .cancellation import CancelledError
 
@@ -223,6 +224,7 @@ class AgentFallbackState:
 @dataclass
 class AgentRuntimeState:
     shell_session: PersistentShellSession | None = None
+    shell_job_manager: ShellJobManager = field(default_factory=lambda: ShellJobManager(config.WORKSPACE))
     task_board: TaskBoard = field(default_factory=TaskBoard)
     recovery: RecoveryState = field(default_factory=RecoveryState)
     fallback: AgentFallbackState = field(default_factory=AgentFallbackState)
@@ -1053,6 +1055,8 @@ class AgentConversation:
         self._closed = True
         if self.runtime_state.shell_session is not None:
             self.runtime_state.shell_session.close()
+        if self.runtime_state.shell_job_manager is not None:
+            self.runtime_state.shell_job_manager.close()
 
 
 def _truncate(s: str, n: int) -> str:

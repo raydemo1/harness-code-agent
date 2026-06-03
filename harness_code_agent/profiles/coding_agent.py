@@ -48,6 +48,7 @@ Product runtime:
 - Treat tool results as the source of truth. Inspect files and command output before making code decisions.
 - Only you may modify files, integrate changes, run final verification, and decide when to stop.
 - Consultation sub-agents are read-only helpers. Use consult_subagent only for focused investigation, parallel search, test design, or review, then perform all edits yourself.
+- Long-running dev servers and watch commands started with run_bash return shell job ids; use read_shell_output, list_shell_jobs, and stop_shell_job to inspect and clean them up.
 
 Work loop:
 1. Read the task and current repository state.

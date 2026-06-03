@@ -129,6 +129,8 @@ class ProfileInterfaceTests(unittest.TestCase):
                 "web_search",
                 "web_fetch",
                 "consult_subagent",
+                "list_shell_jobs",
+                "read_shell_output",
                 "run_bash",
             },
         )
@@ -142,10 +144,12 @@ class ProfileInterfaceTests(unittest.TestCase):
         write_block = middleware.before_tool("write_file", {"path": "x.py", "content": "bad"}, [])
         shell_block = middleware.before_tool("run_bash", {"command": "git add ."}, [])
         verify_allowed = middleware.before_tool("run_bash", {"command": "pytest tests"}, [])
+        stop_job_block = middleware.before_tool("stop_shell_job", {"job_id": "shell-job-1"}, [])
         read_allowed = middleware.before_tool("read_file", {"path": "x.py"}, [])
 
         self.assertIsInstance(write_block, ToolResult)
         self.assertIsInstance(shell_block, ToolResult)
+        self.assertIsInstance(stop_job_block, ToolResult)
         self.assertIn("read-only", write_block.output)
         self.assertIn("safe verification", shell_block.output)
         self.assertIsNone(verify_allowed)
@@ -193,6 +197,25 @@ class ProfileInterfaceTests(unittest.TestCase):
 
                 self.assertIn("verification", prompt + " " + middleware_prompts)
                 self.assertNotIn("final review", prompt + " " + middleware_prompts)
+
+    def test_runtime_profiles_expose_shell_job_tools(self):
+        for profile_name in ["coding-agent", "app-builder", "swe-bench", "terminal"]:
+            with self.subTest(profile=profile_name):
+                main_agent = get_profile(profile_name).main_agent()
+                prompt = main_agent.system_prompt.lower()
+                tool_names = {
+                    schema["function"]["name"]
+                    for schema in tools.tool_schemas_for_profile(
+                        allowed_permissions=main_agent.allowed_tool_permissions,
+                        include_names=main_agent.allowed_tool_names,
+                        exclude_names=main_agent.blocked_tool_names,
+                    )
+                }
+
+                self.assertIn("list_shell_jobs", tool_names)
+                self.assertIn("read_shell_output", tool_names)
+                self.assertIn("stop_shell_job", tool_names)
+                self.assertIn("read_shell_output", prompt)
 
 
 if __name__ == "__main__":

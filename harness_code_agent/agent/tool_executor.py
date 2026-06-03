@@ -11,6 +11,7 @@ from typing import Any
 from .. import config
 from ..runtime import tools
 from ..runtime.permissions import PermissionPolicy
+from ..runtime.shell_classification import is_long_running_shell_command
 from ..runtime.tool_result import ToolResult
 from ..workspace.shell_session import PersistentShellSession
 
@@ -385,6 +386,8 @@ def classify_shell_lane(command: str) -> tools.ToolExecutionLane:
     lowered = " ".join(str(command or "").strip().lower().split())
     if not lowered:
         return tools.ToolExecutionLane.SHELL_SERIAL
+    if is_long_running_shell_command(lowered):
+        return tools.ToolExecutionLane.SHELL_LONG_RUNNING
     if _contains_stateful_shell_operation(lowered):
         return tools.ToolExecutionLane.SHELL_SERIAL
     if _is_shell_verify_command(lowered):

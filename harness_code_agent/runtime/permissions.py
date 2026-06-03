@@ -30,6 +30,9 @@ DEFAULT_TOOL_PERMISSIONS = {
     "apply_patch": TOOL_PERMISSION_EDIT,
     "update_plan_state": TOOL_PERMISSION_CONTROL,
     "run_bash": TOOL_PERMISSION_SHELL,
+    "list_shell_jobs": TOOL_PERMISSION_READ,
+    "read_shell_output": TOOL_PERMISSION_READ,
+    "stop_shell_job": TOOL_PERMISSION_CONTROL,
 }
 
 

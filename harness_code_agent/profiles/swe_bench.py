@@ -38,6 +38,7 @@ Rules:
 - Run concrete verification commands before stopping.
 - Prefer the smallest diff that fixes the issue and preserves existing public behavior.
 - Keep regression tests close to the failing behavior when the repository has a suitable test layer.
+- Long-running run_bash commands return shell job ids; use read_shell_output, list_shell_jobs, and stop_shell_job to inspect and stop them.
 
 Workflow:
 1. Read the issue or task carefully.

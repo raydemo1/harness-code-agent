@@ -53,7 +53,7 @@ Final answer format:
                 TOOL_PERMISSION_NETWORK_READ,
                 TOOL_PERMISSION_CONTROL,
             },
-            blocked_tool_names=set(),
+            blocked_tool_names={"list_shell_jobs", "read_shell_output", "stop_shell_job"},
             middlewares=[],
             time_budget=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
         )

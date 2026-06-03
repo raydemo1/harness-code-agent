@@ -22,6 +22,7 @@ class ReviewOnlyMiddleware(AgentMiddleware):
         "ask_user",
         "browser_test",
         "stop_dev_server",
+        "stop_shell_job",
     }
 
     def before_tool(
@@ -92,6 +93,7 @@ Keep the review independent: review mode is not a repair mode, not a planning mo
                 "ask_user",
                 "browser_test",
                 "stop_dev_server",
+                "stop_shell_job",
             },
             middlewares=[ReviewOnlyMiddleware()],
         )
