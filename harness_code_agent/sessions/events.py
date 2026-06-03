@@ -374,6 +374,29 @@ class ContextCompactionCommittedEvent:
 
 
 @dataclass(frozen=True)
+class ContextAnxietyObservedEvent:
+    token_count: int
+    threshold: int
+    score: int
+    reasons: list[str]
+    source: str = "assistant_recent_messages"
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "context_anxiety_observed",
+            {
+                "token_count": self.token_count,
+                "threshold": self.threshold,
+                "score": self.score,
+                "reasons": list(self.reasons),
+                "source": self.source,
+            },
+            self.agent,
+        )
+
+
+@dataclass(frozen=True)
 class ThoughtStartedEvent:
     agent: str | None = "main_agent"
 

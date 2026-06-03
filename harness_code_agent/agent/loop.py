@@ -231,6 +231,7 @@ class AgentRuntimeState:
     auto_compaction_turn_start_index: int = -1
     auto_compaction_suspended: bool = False
     context_refill_streak: int = 0
+    context_anxiety_turn_start_index: int = -1
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +362,7 @@ class AgentConversation:
         self.runtime_state.fallback = AgentFallbackState()
         self.runtime_state.auto_compaction_turn_start_index = -1
         self.runtime_state.auto_compaction_suspended = False
+        self.runtime_state.context_anxiety_turn_start_index = -1
         for mw in self.agent.middlewares:
             mw.begin_turn(
                 task,
@@ -403,6 +405,20 @@ class AgentConversation:
                 messages_before=messages_before,
                 messages_after=len(self.messages),
                 tokens_saved=max(0, token_count_before - tokens_after),
+            ).to_event()
+        )
+
+    def _emit_context_anxiety_observed(self, *, token_count: int, threshold: int, signal) -> None:
+        if self._event_bus is None:
+            return
+        from ..sessions.events import ContextAnxietyObservedEvent
+        self._event_bus.emit_event(
+            ContextAnxietyObservedEvent(
+                token_count=token_count,
+                threshold=threshold,
+                score=getattr(signal, "score", 0),
+                reasons=list(getattr(signal, "reasons", [])),
+                source=getattr(signal, "source", "assistant_recent_messages"),
             ).to_event()
         )
 
@@ -847,8 +863,15 @@ class AgentConversation:
             thresholds = get_thresholds()
             action = compaction_action(token_count, thresholds)
             anxiety = context.detect_anxiety(self.messages)
-            if anxiety:
-                self.trace.context_event("context_anxiety", f"tokens={token_count}")
+            if anxiety and self.runtime_state.context_anxiety_turn_start_index != self.runtime_state.current_turn_start_index:
+                self.runtime_state.context_anxiety_turn_start_index = self.runtime_state.current_turn_start_index
+                score = getattr(anxiety, "score", 0)
+                self.trace.context_event("context_anxiety", f"tokens={token_count} score={score}")
+                self._emit_context_anxiety_observed(
+                    token_count=token_count,
+                    threshold=thresholds.compact,
+                    signal=anxiety,
+                )
             if action == "auto_compact":
                 self._maybe_auto_compact(agent, token_count=token_count, thresholds=thresholds)
 

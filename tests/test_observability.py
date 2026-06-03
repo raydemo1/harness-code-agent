@@ -52,6 +52,7 @@ class ObservabilityAggregationTests(unittest.TestCase):
             _event(15, "approval_decided", {"approved": False}),
             _event(16, "file_change", {"path": "app.py"}),
             _event(17, "file_change", {"path": "app.py"}),
+            _event(18, "context_anxiety_observed", {"score": 2, "reasons": ["due to context limit"]}),
         ]
 
         snapshot = build_session_observability(metadata, events)
@@ -77,6 +78,7 @@ class ObservabilityAggregationTests(unittest.TestCase):
         self.assertEqual(snapshot.audit.latest_fallback, "token_budget_exceeded")
         self.assertEqual(snapshot.audit.compactions_committed, 1)
         self.assertEqual(snapshot.audit.tokens_saved, 40000)
+        self.assertEqual(snapshot.audit.context_anxiety_observed, 1)
         self.assertEqual(snapshot.audit.approvals_requested, 1)
         self.assertEqual(snapshot.audit.approvals_approved, 1)
         self.assertEqual(snapshot.audit.approvals_denied, 1)

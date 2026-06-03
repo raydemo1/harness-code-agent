@@ -489,6 +489,34 @@ class CompactMessagesTests(unittest.TestCase):
         self.assertNotIn("OLD_FULL_TOOL_OUTPUT", text)
 
 
+class ContextAnxietyTests(unittest.TestCase):
+    def test_detect_anxiety_returns_structured_soft_signal(self):
+        from harness_code_agent.agent.context import detect_anxiety
+
+        signal = detect_anxiety([
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "Due to the context limit, let me wrap up here."},
+        ])
+
+        self.assertTrue(signal.detected)
+        self.assertTrue(signal)
+        self.assertGreaterEqual(signal.score, 2)
+        self.assertEqual(signal.source, "assistant_recent_messages")
+        self.assertTrue(any("context limit" in reason.lower() for reason in signal.reasons))
+
+    def test_detect_anxiety_absent_signal_is_falsey(self):
+        from harness_code_agent.agent.context import detect_anxiety
+
+        signal = detect_anxiety([
+            {"role": "assistant", "content": "I will continue with the next verification step."},
+        ])
+
+        self.assertFalse(signal)
+        self.assertFalse(signal.detected)
+        self.assertEqual(signal.score, 0)
+        self.assertEqual(signal.reasons, [])
+
+
 # ---------------------------------------------------------------------------
 # Manual checkpoint restore regression — no implicit git context injection
 # ---------------------------------------------------------------------------
@@ -732,6 +760,87 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         rebuild.assert_called_once()
         self.assertEqual(conv.messages, rebuilt_messages + [{"role": "assistant", "content": "done"}])
 
+    def test_context_anxiety_below_threshold_only_records_soft_signal(self):
+        from harness_code_agent.agent.compaction import get_thresholds
+        from harness_code_agent.agent.context import ContextAnxietySignal
+        from harness_code_agent.agent.loop import Agent
+
+        thresholds = get_thresholds()
+        agent = Agent("test_agent", "sys", use_tools=False)
+        conv = agent.start_conversation("task")
+        observed: list[dict] = []
+
+        class Bus:
+            def emit_event(self, event):
+                observed.append(event.to_event().to_dict())
+
+        conv._event_bus = Bus()
+        signal = ContextAnxietySignal(
+            detected=True,
+            score=2,
+            reasons=["due to context limit", "let me wrap up"],
+        )
+
+        with (
+            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=thresholds.compact - 1),
+            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=signal),
+            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs") as clean,
+            patch("harness_code_agent.agent.loop.context.summarize_older_conversation") as summarize,
+            patch("harness_code_agent.agent.loop.context.rebuild_working_context") as rebuild,
+            patch.object(
+                conv,
+                "_request_assistant_message",
+                return_value=({"role": "assistant", "content": "done"}, "stop"),
+            ),
+        ):
+            conv.run_until_idle()
+
+        clean.assert_not_called()
+        summarize.assert_not_called()
+        rebuild.assert_not_called()
+        anxiety_events = [event for event in observed if event["type"] == "context_anxiety_observed"]
+        self.assertEqual(len(anxiety_events), 1)
+        self.assertEqual(anxiety_events[0]["payload"]["score"], 2)
+        self.assertEqual(anxiety_events[0]["payload"]["reasons"], ["due to context limit", "let me wrap up"])
+
+    def test_context_anxiety_soft_signal_emits_once_per_turn(self):
+        from harness_code_agent.agent.compaction import get_thresholds
+        from harness_code_agent.agent.context import ContextAnxietySignal
+        from harness_code_agent.agent.loop import Agent
+
+        thresholds = get_thresholds()
+        agent = Agent("test_agent", "sys", use_tools=False)
+        conv = agent.start_conversation("task")
+        observed: list[dict] = []
+
+        class Bus:
+            def emit_event(self, event):
+                observed.append(event.to_event().to_dict())
+
+        conv._event_bus = Bus()
+        signal = ContextAnxietySignal(
+            detected=True,
+            score=2,
+            reasons=["due to context limit", "let me wrap up"],
+        )
+
+        with (
+            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=thresholds.compact - 1),
+            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=signal),
+            patch.object(
+                conv,
+                "_request_assistant_message",
+                side_effect=[
+                    ({"role": "assistant", "content": "continue"}, None),
+                    ({"role": "assistant", "content": "done"}, "stop"),
+                ],
+            ),
+        ):
+            conv.run_until_idle()
+
+        anxiety_events = [event for event in observed if event["type"] == "context_anxiety_observed"]
+        self.assertEqual(len(anxiety_events), 1)
+
 
 # ---------------------------------------------------------------------------
 # Compacted storage — persistence in .harness/sessions/<id>/compacted/
@@ -800,6 +909,20 @@ class CompactionEventTests(unittest.TestCase):
         self.assertEqual(structured.type, "context_compaction_committed")
         self.assertIn("tokens_saved", structured.payload)
 
+    def test_context_anxiety_observed_event(self):
+        from harness_code_agent.sessions.events import ContextAnxietyObservedEvent
+        event = ContextAnxietyObservedEvent(
+            token_count=120000,
+            threshold=180000,
+            score=2,
+            reasons=["due to context limit", "let me wrap up"],
+        )
+        structured = event.to_event()
+        self.assertEqual(structured.type, "context_anxiety_observed")
+        self.assertEqual(structured.payload["score"], 2)
+        self.assertEqual(structured.payload["threshold"], 180000)
+        self.assertEqual(structured.payload["reasons"], ["due to context limit", "let me wrap up"])
+
 # ---------------------------------------------------------------------------
 # TUI state — compaction events update status bar
 # ---------------------------------------------------------------------------
@@ -851,6 +974,19 @@ class TuiStateCompactionTests(unittest.TestCase):
         self.assertIsNotNone(block)
         self.assertIn("rebuilding working context", block.title.lower())
         self.assertIn("rebuilding working context", state.snapshot.status.lower())
+
+    def test_context_anxiety_observed_shows_soft_notice(self):
+        state = self._make_state()
+        event = MagicMock()
+        event.to_dict.return_value = {
+            "type": "context_anxiety_observed",
+            "payload": {"token_count": 120000, "threshold": 180000, "score": 2, "reasons": ["due to context limit"]},
+        }
+        block = state.apply_event(event)
+        self.assertIsNotNone(block)
+        self.assertEqual(state.snapshot.status, "context anxiety observed")
+        self.assertEqual(block.status, "observed")
+        self.assertIn("due to context limit", block.body)
 
 
 # ---------------------------------------------------------------------------

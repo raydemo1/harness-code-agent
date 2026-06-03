@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import hashlib
 import logging
+from dataclasses import dataclass, field
 
 from .. import config
 
@@ -73,13 +74,24 @@ def count_tokens(messages: list[dict]) -> int:
 # Context anxiety detection
 # ---------------------------------------------------------------------------
 
+@dataclass
+class ContextAnxietySignal:
+    detected: bool = False
+    score: int = 0
+    reasons: list[str] = field(default_factory=list)
+    source: str = "assistant_recent_messages"
+
+    def __bool__(self) -> bool:
+        return self.detected
+
+
 # Patterns that indicate the model is trying to wrap up prematurely
 _ANXIETY_PATTERNS = [
     r"(?i)let me wrap up",
     r"(?i)i('ll| will) finalize",
     r"(?i)that should be (enough|sufficient)",
     r"(?i)i('ll| will) stop here",
-    r"(?i)due to (context |token )?limit",
+    r"(?i)due to (the )?(context |token )?limit",
     r"(?i)running (low on|out of) (context|space|tokens)",
     r"(?i)to (save|conserve) (context|space|tokens)",
     r"(?i)i('ve| have) covered the (main|key|essential)",
@@ -87,7 +99,7 @@ _ANXIETY_PATTERNS = [
 ]
 
 
-def detect_anxiety(messages: list[dict]) -> bool:
+def detect_anxiety(messages: list[dict]) -> ContextAnxietySignal:
     """
     Check recent assistant messages for signs of context anxiety —
     the model trying to wrap up work prematurely because it thinks
@@ -102,11 +114,19 @@ def detect_anxiety(messages: list[dict]) -> bool:
             break
 
     combined = " ".join(recent_texts)
-    matches = sum(1 for p in _ANXIETY_PATTERNS if re.search(p, combined))
-    if matches >= 2:
-        log.warning(f"Context anxiety detected ({matches} signals found)")
-        return True
-    return False
+    reasons: list[str] = []
+    for pattern in _ANXIETY_PATTERNS:
+        match = re.search(pattern, combined)
+        if match:
+            reasons.append(match.group(0))
+    if len(reasons) >= 2:
+        log.warning(f"Context anxiety detected ({len(reasons)} signals found)")
+        return ContextAnxietySignal(
+            detected=True,
+            score=len(reasons),
+            reasons=reasons,
+        )
+    return ContextAnxietySignal()
 
 
 # ---------------------------------------------------------------------------

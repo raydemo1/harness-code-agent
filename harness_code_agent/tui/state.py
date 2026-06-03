@@ -218,6 +218,16 @@ class TuiState:
             tokens_saved = payload.get("tokens_saved", 0)
             body = f"tokens saved: {tokens_saved}" if tokens_saved else _payload_summary(payload)
             return TranscriptBlock("status", "context compacted", body, "success", turn=self.snapshot.turn, detail=True)
+        if event_type == "context_anxiety_observed":
+            self.snapshot.status = "context anxiety observed"
+            return TranscriptBlock(
+                "status",
+                "context anxiety observed",
+                _payload_summary(payload),
+                "observed",
+                turn=self.snapshot.turn,
+                detail=True,
+            )
         if event_type == "turn_summary":
             turn = _payload_turn(payload, self.snapshot.turn)
             self.snapshot.status = "idle"
