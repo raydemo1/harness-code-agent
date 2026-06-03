@@ -38,10 +38,38 @@ def changed_files(events: list[dict[str, Any]]) -> list[str]:
         if path is None:
             continue
         text = str(path)
+        if is_ignored_changed_file(text):
+            continue
         if text and text not in seen:
             seen.add(text)
             paths.append(text)
     return paths
+
+
+def is_ignored_changed_file(path: str) -> bool:
+    text = str(path or "").replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    lowered = text.lower()
+    if not lowered:
+        return False
+    ignored_prefixes = (
+        ".pytest_cache/",
+        ".ruff_cache/",
+        ".mypy_cache/",
+        "htmlcov/",
+        "node_modules/.cache/",
+        "dist/",
+        "build/",
+        "__pycache__/",
+    )
+    if lowered in {".coverage"}:
+        return True
+    if lowered.endswith(".pyc"):
+        return True
+    if "/__pycache__/" in lowered:
+        return True
+    return any(lowered.startswith(prefix) for prefix in ignored_prefixes)
 
 
 def event_type(event: dict[str, Any]) -> str:

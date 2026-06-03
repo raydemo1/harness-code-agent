@@ -25,6 +25,7 @@ from ..runtime.questions import ConsoleQuestionProvider, QuestionProvider
 from ..runtime.tool_context import ToolContext
 from ..sessions.events import AssistantMessageEvent, FinalReportEvent, SessionFinishedEvent, TurnSummaryEvent, UserInputEvent
 from ..sessions.report import build_final_report
+from ..sessions._event_helpers import is_ignored_changed_file
 from ..sessions.summary import load_session_summary
 from ..sessions.store import Session, SessionStore
 from ..sessions.turn_summary import generate_turn_summary, should_summarize_turn
@@ -977,7 +978,7 @@ def git_dirty_paths(workspace: Path) -> set[str]:
         path = line[3:].strip()
         if " -> " in path:
             path = path.rsplit(" -> ", 1)[1]
-        if path:
+        if path and not is_ignored_changed_file(path):
             paths.add(path)
     return paths
 

@@ -1923,6 +1923,20 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(event.payload["tool_counts"], {"write_file": 1})
         self.assertEqual(event.payload["changed_files"], ["app.py"])
 
+    def test_changed_files_helpers_filter_verify_cache_paths(self):
+        from harness_code_agent.sessions._event_helpers import changed_files
+
+        events = [
+            {"type": "file_change", "payload": {"path": "app.py"}},
+            {"type": "file_change", "payload": {"path": ".pytest_cache/v/cache/nodeids"}},
+            {"type": "file_change", "payload": {"path": ".ruff_cache/0.13.0/123"}},
+            {"type": "file_change", "payload": {"path": ".mypy_cache/3.11/app.meta.json"}},
+            {"type": "file_change", "payload": {"path": "__pycache__/app.cpython-311.pyc"}},
+            {"type": "file_change", "payload": {"path": "build/temp.txt"}},
+        ]
+
+        self.assertEqual(changed_files(events), ["app.py"])
+
     def test_session_report_and_summary_share_event_helpers(self):
         from harness_code_agent.sessions import _event_helpers
         from harness_code_agent.sessions import report, summary

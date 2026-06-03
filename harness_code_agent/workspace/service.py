@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,12 @@ class WorkspacePatchResult:
 
 
 class WorkspaceService:
-    """Workspace path resolution and file snapshot service."""
+    """Workspace path resolution and file snapshot service.
+
+    The internal lock protects snapshots and changed_files consistency. In v1,
+    global read/write isolation is provided by the tool executor's group barrier,
+    not by this service acting as a workspace transaction layer.
+    """
 
     DEFAULT_PROTECTED_NAMES = {".env", ".env.local", ".env.production"}
 
@@ -35,6 +41,7 @@ class WorkspaceService:
         self.snapshots_dir = Path(snapshots_dir).resolve() if snapshots_dir else self.root / ".harness" / "snapshots"
         self.protected_names = protected_names or self.DEFAULT_PROTECTED_NAMES
         self.changed_files: list[Path] = []
+        self._lock = threading.RLock()
 
     def resolve(self, path: str | Path) -> Path:
         raw = Path(path)
@@ -50,15 +57,16 @@ class WorkspaceService:
         return self.resolve(path).read_text(encoding="utf-8", errors="replace")
 
     def write_text(self, path: str | Path, content: str) -> WorkspaceWriteResult:
-        resolved = self.resolve(path)
-        self._ensure_writable(resolved)
-        snapshot_path = self.snapshot(path) if resolved.exists() else None
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
-        rel = resolved.relative_to(self.root)
-        if rel not in self.changed_files:
-            self.changed_files.append(rel)
-        return WorkspaceWriteResult(path=resolved, snapshot_path=snapshot_path)
+        with self._lock:
+            resolved = self.resolve(path)
+            self._ensure_writable(resolved)
+            snapshot_path = self.snapshot(path) if resolved.exists() else None
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(content, encoding="utf-8")
+            rel = resolved.relative_to(self.root)
+            if rel not in self.changed_files:
+                self.changed_files.append(rel)
+            return WorkspaceWriteResult(path=resolved, snapshot_path=snapshot_path)
 
     def apply_text_patch(
         self,
@@ -67,57 +75,60 @@ class WorkspaceService:
         search: str,
         replace: str,
     ) -> WorkspacePatchResult:
-        if not search:
-            raise ValueError("Patch search text must not be empty")
-        resolved = self.resolve(path)
-        self._ensure_writable(resolved)
-        if not resolved.exists() or not resolved.is_file():
-            raise FileNotFoundError(f"File not found: {path}")
-        original = resolved.read_text(encoding="utf-8", errors="replace")
-        count = original.count(search)
-        if count != 1:
-            raise ValueError(f"Patch search text must match exactly once; found {count}")
-        snapshot_path = self.snapshot(path)
-        resolved.write_text(original.replace(search, replace, 1), encoding="utf-8")
-        rel = resolved.relative_to(self.root)
-        if rel not in self.changed_files:
-            self.changed_files.append(rel)
-        return WorkspacePatchResult(path=resolved, snapshot_path=snapshot_path, replacements=1)
+        with self._lock:
+            if not search:
+                raise ValueError("Patch search text must not be empty")
+            resolved = self.resolve(path)
+            self._ensure_writable(resolved)
+            if not resolved.exists() or not resolved.is_file():
+                raise FileNotFoundError(f"File not found: {path}")
+            original = resolved.read_text(encoding="utf-8", errors="replace")
+            count = original.count(search)
+            if count != 1:
+                raise ValueError(f"Patch search text must match exactly once; found {count}")
+            snapshot_path = self.snapshot(path)
+            resolved.write_text(original.replace(search, replace, 1), encoding="utf-8")
+            rel = resolved.relative_to(self.root)
+            if rel not in self.changed_files:
+                self.changed_files.append(rel)
+            return WorkspacePatchResult(path=resolved, snapshot_path=snapshot_path, replacements=1)
 
     def rollback_latest_snapshot(self, path: str | Path) -> WorkspaceWriteResult:
-        resolved = self.resolve(path)
-        self._ensure_writable(resolved)
-        rel = resolved.relative_to(self.root)
-        snapshot_dir = self.snapshots_dir / rel.parent
-        pattern = f"{resolved.name}.*.bak"
-        snapshots = sorted(
-            snapshot_dir.glob(pattern),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )
-        if not snapshots:
-            raise FileNotFoundError(f"No snapshot found for: {rel}")
-        rollback_snapshot = self.snapshot(path) if resolved.exists() else None
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(snapshots[0], resolved)
-        if rel not in self.changed_files:
-            self.changed_files.append(rel)
-        return WorkspaceWriteResult(path=resolved, snapshot_path=rollback_snapshot)
+        with self._lock:
+            resolved = self.resolve(path)
+            self._ensure_writable(resolved)
+            rel = resolved.relative_to(self.root)
+            snapshot_dir = self.snapshots_dir / rel.parent
+            pattern = f"{resolved.name}.*.bak"
+            snapshots = sorted(
+                snapshot_dir.glob(pattern),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            if not snapshots:
+                raise FileNotFoundError(f"No snapshot found for: {rel}")
+            rollback_snapshot = self.snapshot(path) if resolved.exists() else None
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(snapshots[0], resolved)
+            if rel not in self.changed_files:
+                self.changed_files.append(rel)
+            return WorkspaceWriteResult(path=resolved, snapshot_path=rollback_snapshot)
 
     def snapshot(self, path: str | Path) -> Path | None:
-        resolved = self.resolve(path)
-        if not resolved.exists() or not resolved.is_file():
-            return None
-        rel = resolved.relative_to(self.root)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        snapshot_path = self.snapshots_dir / rel.parent / f"{resolved.name}.{stamp}.bak"
-        suffix = 1
-        while snapshot_path.exists():
-            snapshot_path = self.snapshots_dir / rel.parent / f"{resolved.name}.{stamp}.{suffix}.bak"
-            suffix += 1
-        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(resolved, snapshot_path)
-        return snapshot_path
+        with self._lock:
+            resolved = self.resolve(path)
+            if not resolved.exists() or not resolved.is_file():
+                return None
+            rel = resolved.relative_to(self.root)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            snapshot_path = self.snapshots_dir / rel.parent / f"{resolved.name}.{stamp}.bak"
+            suffix = 1
+            while snapshot_path.exists():
+                snapshot_path = self.snapshots_dir / rel.parent / f"{resolved.name}.{stamp}.{suffix}.bak"
+                suffix += 1
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(resolved, snapshot_path)
+            return snapshot_path
 
     _SAFE_ENV_SUFFIXES = {'.example', '.template', '.sample', '.default', '.dist'}
 

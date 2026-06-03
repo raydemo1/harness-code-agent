@@ -1040,6 +1040,19 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_git_dirty_paths_filters_verify_cache_paths(self):
+        Path(self.temp_dir, "app.py").write_text("print('hi')\n", encoding="utf-8")
+        Path(self.temp_dir, ".pytest_cache", "v", "cache").mkdir(parents=True)
+        Path(self.temp_dir, ".pytest_cache", "v", "cache", "nodeids").write_text("[]\n", encoding="utf-8")
+        Path(self.temp_dir, "__pycache__").mkdir()
+        Path(self.temp_dir, "__pycache__", "app.cpython-311.pyc").write_bytes(b"cache")
+
+        dirty = git_dirty_paths(Path(self.temp_dir))
+
+        self.assertIn("app.py", dirty)
+        self.assertFalse(any(".pytest_cache" in path for path in dirty))
+        self.assertFalse(any("__pycache__" in path for path in dirty))
+
     def test_hca_first_task_starts_tui_with_first_task(self):
         from harness_code_agent import cli
 

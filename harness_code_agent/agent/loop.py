@@ -19,6 +19,7 @@ from .observations import (
     ObservationStore,
 )
 from .providers import ProviderAdapter, current_adapter, get_client
+from .tool_executor import ToolExecutor
 from .utils import _prompt_cache_key, _short_hash, _usage_to_dict
 from ..runtime import tools
 from ..runtime.arg_preview import safe_args_preview
@@ -987,152 +988,10 @@ class AgentConversation:
                 break
 
             # --- Execute tool calls ---
-            stop_after_tool_loop = False
-            for tool_call_index, tc in enumerate(tool_calls):
-                self._check_cancelled(cancellation_token)
-                self.compaction_gate.begin_tool_call()
-                fn_name = tc["function"]["name"]
-                fn_arguments = tc["function"].get("arguments") or "{}"
-                try:
-                    fn_args = json.loads(fn_arguments)
-                except json.JSONDecodeError:
-                    log.warning(f"[{agent.name}] Bad JSON in tool call {fn_name}: {fn_arguments[:200]}")
-                    self.trace.error("bad_json", f"{fn_name}: {fn_arguments[:200]}")
-                    self._append_message({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": f"[error] Invalid JSON arguments: {fn_arguments[:200]}",
-                    })
-                    self.compaction_gate.end_tool_call()
-                    continue
-
-                if not self._record_tool_call_budget(fn_name, fn_args):
-                    self._emit_agent_fallback()
-                    self.last_text = self._fallback_text()
-                    self._append_blocked_tool_results(
-                        tool_calls[tool_call_index:],
-                        self.runtime_state.fallback.stop_reason,
-                    )
-                    self.compaction_gate.end_tool_call()
-                    stop_after_tool_loop = True
-                    break
-
-                intercepted_result = None
-                if agent.allowed_tool_names is not None and fn_name not in agent.allowed_tool_names:
-                    output = f"[blocked] Tool '{fn_name}' is not available to this agent profile."
-                    intercepted_result = tools.finalize_intercepted_tool_result(
-                        ToolResult(
-                            tool=fn_name,
-                            status="failed",
-                            output=output,
-                            error=output.removeprefix("[blocked] "),
-                            metadata={"status_source": "permission"},
-                        ),
-                        arguments=fn_args,
-                        tool_context=agent.tool_context,
-                        agent_name=agent.name,
-                    )
-                    self.trace.middleware_inject("ToolSchemaGuard", "before_tool", output)
-                else:
-                    for mw in agent.middlewares:
-                        blocked = mw.before_tool(
-                            fn_name,
-                            fn_args,
-                            self.messages,
-                            runtime_state=self.runtime_state,
-                            agent_name=agent.name,
-                        )
-                        if blocked:
-                            blocked_text = blocked.to_text() if isinstance(blocked, ToolResult) else str(blocked)
-                            intercepted_result = (
-                                blocked
-                                if isinstance(blocked, ToolResult)
-                                else _tool_result_from_before_tool_block(fn_name, blocked_text)
-                            )
-                            intercepted_result = tools.finalize_intercepted_tool_result(
-                                intercepted_result,
-                                arguments=fn_args,
-                                tool_context=agent.tool_context,
-                                agent_name=agent.name,
-                            )
-                            self.trace.middleware_inject(type(mw).__name__, "before_tool", blocked_text)
-                            break
-                if intercepted_result is not None:
-                    result = intercepted_result.to_text()
-                    self.trace.tool_call(fn_name, fn_args, result)
-                    self._append_message({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result,
-                    })
-                    self.compaction_gate.end_tool_call()
-                    continue
-
-                if fn_name == "run_bash" and self.runtime_state.shell_session is None:
-                    self.runtime_state.shell_session = PersistentShellSession(config.WORKSPACE)
-
-                log.info(f"[{agent.name}] tool: {fn_name}({_truncate(str(fn_args), 120)})")
-                tool_result = tools.execute_tool_result(
-                    fn_name,
-                    fn_args,
-                    runtime_state=self.runtime_state,
-                    agent_name=agent.name,
-                    tool_context=agent.tool_context,
-                )
-                result = tool_result.to_text()
-                log.debug(f"[{agent.name}] tool result: {_truncate(result, 200)}")
-                self.trace.tool_call(fn_name, fn_args, result)
-                observation = self.observation_store.create(
-                    tool=fn_name,
-                    args=fn_args,
-                    result=tool_result,
-                    fact_tracker=self.fact_tracker,
-                )
-
-                self._append_message({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": self.observation_store.observed_message(observation, tool_result),
-                })
-                observation.message_index = len(self.messages) - 1
-                invalidation = self.fact_tracker.apply_mutation(
-                    tool=fn_name,
-                    args=fn_args,
-                    result=tool_result,
-                    observations=self.observation_store.observations,
-                    exclude_ids={observation.id},
-                )
-                if invalidation:
-                    replaced = self.observation_store.replace_long_stale_messages(self.messages)
-                    notice = invalidation
-                    if replaced:
-                        notice += "\nCompressed stale long observations: " + ", ".join(replaced)
-                    self._append_message({"role": "user", "content": notice})
-                self.compaction_gate.end_tool_call()
-
-                self._check_cancelled(cancellation_token)
-
-                # --- Middleware: post-tool hooks ---
-                for mw in agent.middlewares:
-                    inject = mw.post_tool(
-                        fn_name,
-                        fn_args,
-                        result,
-                        self.messages,
-                        runtime_state=self.runtime_state,
-                        agent_name=agent.name,
-                    )
-                    if inject:
-                        self._append_message({"role": "user", "content": inject})
-                        self.trace.middleware_inject(type(mw).__name__, "post_tool", inject)
-                        break
-
-                if self.runtime_state.fallback.stop_requested:
-                    self._emit_agent_fallback()
-                    self.last_text = self._fallback_text()
-                    self.trace.finish("agent_fallback", iteration)
-                    stop_after_tool_loop = True
-                    break
+            stop_after_tool_loop = ToolExecutor(
+                self,
+                cancellation_token=cancellation_token,
+            ).execute(tool_calls)
 
             if stop_after_tool_loop:
                 break

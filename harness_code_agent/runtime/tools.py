@@ -12,6 +12,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -633,9 +634,21 @@ def run_bash(
     timeout: int = 300,
     runtime_state=None,
     agent_name: str | None = None,
+    execution_lane: ToolExecutionLane | str | None = None,
 ) -> ToolResult:
     """Run a shell command inside the agent's persistent shell session."""
-    if runtime_state is None or runtime_state.shell_session is None:
+    lane = _coerce_tool_lane(execution_lane) if execution_lane is not None else ToolExecutionLane.SHELL_SERIAL
+    use_temporary_shell = lane in {ToolExecutionLane.SHELL_READ, ToolExecutionLane.SHELL_VERIFY}
+    shell_session = None
+    owns_shell = False
+    if use_temporary_shell:
+        from ..workspace.shell_session import PersistentShellSession
+
+        shell_session = PersistentShellSession(config.WORKSPACE)
+        owns_shell = True
+    elif runtime_state is not None:
+        shell_session = runtime_state.shell_session
+    if shell_session is None:
         return ToolResult(
             tool="run_bash",
             status="failed",
@@ -644,7 +657,7 @@ def run_bash(
             metadata={"status_source": "runtime"},
         )
     try:
-        shell_result = runtime_state.shell_session.run(command, timeout=timeout)
+        shell_result = shell_session.run(command, timeout=timeout)
         if shell_result.timed_out:
             output = (
                 f"[error] Command timed out after {timeout}s. "
@@ -678,6 +691,9 @@ def run_bash(
             error=str(e),
             metadata={"status_source": "exception"},
         )
+    finally:
+        if owns_shell and shell_session is not None:
+            shell_session.close()
 
 
 def _smart_truncate_output(stdout: str, stderr: str, limit: int = 12_000) -> str:
@@ -1049,6 +1065,19 @@ class ToolSpec:
     schema: dict
     handler: Callable
     permission: str
+    lane: "ToolExecutionLane"
+
+
+class ToolExecutionLane(str, Enum):
+    WORKSPACE_READ = "workspace_read"
+    NETWORK_READ = "network_read"
+    SUBAGENT_READ = "subagent_read"
+    SHELL_READ = "shell_read"
+    SHELL_VERIFY = "shell_verify"
+    WORKSPACE_WRITE = "workspace_write"
+    CONTROL_SERIAL = "control_serial"
+    SHELL_SERIAL = "shell_serial"
+    BLOCKED = "blocked"
 
 
 class ToolRegistry:
@@ -1058,8 +1087,16 @@ class ToolRegistry:
         self._schemas: dict[str, dict] = {}
         self._handlers: dict[str, Callable] = {}
         self._permissions: dict[str, str] = {}
+        self._lanes: dict[str, ToolExecutionLane] = {}
 
-    def register(self, schema: dict, handler: Callable, *, permission: str | None = None) -> None:
+    def register(
+        self,
+        schema: dict,
+        handler: Callable,
+        *,
+        permission: str | None = None,
+        lane: ToolExecutionLane | str | None = None,
+    ) -> None:
         name = schema.get("function", {}).get("name")
         if not name:
             raise ValueError("Tool schema missing function.name")
@@ -1070,6 +1107,7 @@ class ToolRegistry:
         self._schemas[name] = schema
         self._handlers[name] = handler
         self._permissions[name] = permission
+        self._lanes[name] = _coerce_tool_lane(lane) if lane is not None else _default_lane_for_tool(name, permission)
 
     def get(self, name: str) -> Callable | None:
         return self._handlers.get(name)
@@ -1077,9 +1115,12 @@ class ToolRegistry:
     def permission_for(self, name: str) -> str | None:
         return self._permissions.get(name)
 
+    def lane_for(self, name: str) -> ToolExecutionLane | None:
+        return self._lanes.get(name)
+
     def specs(self) -> list[ToolSpec]:
         return [
-            ToolSpec(name, self._schemas[name], self._handlers[name], self._permissions[name])
+            ToolSpec(name, self._schemas[name], self._handlers[name], self._permissions[name], self._lanes[name])
             for name in sorted(self._schemas)
         ]
 
@@ -1094,7 +1135,43 @@ class ToolRegistry:
         clone._schemas = dict(self._schemas)
         clone._handlers = dict(self._handlers)
         clone._permissions = dict(self._permissions)
+        clone._lanes = dict(self._lanes)
         return clone
+
+
+def _coerce_tool_lane(lane: ToolExecutionLane | str) -> ToolExecutionLane:
+    if isinstance(lane, ToolExecutionLane):
+        return lane
+    try:
+        return ToolExecutionLane(str(lane))
+    except ValueError as exc:
+        raise ValueError(f"Unknown tool execution lane: {lane}") from exc
+
+
+def _default_lane_for_tool(name: str, permission: str) -> ToolExecutionLane:
+    if name in {"read_file", "list_files", "read_skill_file"}:
+        return ToolExecutionLane.WORKSPACE_READ
+    if name in {"web_search", "web_fetch"}:
+        return ToolExecutionLane.NETWORK_READ
+    if name == "consult_subagent":
+        return ToolExecutionLane.SUBAGENT_READ
+    if name in {"write_file", "apply_patch"}:
+        return ToolExecutionLane.WORKSPACE_WRITE
+    if name in {"ask_user", "update_plan_state"}:
+        return ToolExecutionLane.CONTROL_SERIAL
+    if name == "run_bash":
+        return ToolExecutionLane.SHELL_SERIAL
+    if name in {"browser_test", "stop_dev_server"}:
+        return ToolExecutionLane.SHELL_SERIAL
+    if permission == TOOL_PERMISSION_NETWORK_READ:
+        return ToolExecutionLane.NETWORK_READ
+    if permission == TOOL_PERMISSION_READ:
+        return ToolExecutionLane.WORKSPACE_READ
+    if permission == TOOL_PERMISSION_EDIT:
+        return ToolExecutionLane.WORKSPACE_WRITE
+    if permission == TOOL_PERMISSION_SHELL:
+        return ToolExecutionLane.SHELL_SERIAL
+    return ToolExecutionLane.CONTROL_SERIAL
 
 
 def tool_schemas_for_profile(
@@ -1735,10 +1812,25 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "browser_test": TOOL_PERMISSION_SHELL,
         "stop_dev_server": TOOL_PERMISSION_SHELL,
     }
+    lanes = {
+        "read_file": ToolExecutionLane.WORKSPACE_READ,
+        "read_skill_file": ToolExecutionLane.WORKSPACE_READ,
+        "list_files": ToolExecutionLane.WORKSPACE_READ,
+        "ask_user": ToolExecutionLane.CONTROL_SERIAL,
+        "consult_subagent": ToolExecutionLane.SUBAGENT_READ,
+        "web_search": ToolExecutionLane.NETWORK_READ,
+        "web_fetch": ToolExecutionLane.NETWORK_READ,
+        "write_file": ToolExecutionLane.WORKSPACE_WRITE,
+        "apply_patch": ToolExecutionLane.WORKSPACE_WRITE,
+        "update_plan_state": ToolExecutionLane.CONTROL_SERIAL,
+        "run_bash": ToolExecutionLane.SHELL_SERIAL,
+        "browser_test": ToolExecutionLane.SHELL_SERIAL,
+        "stop_dev_server": ToolExecutionLane.SHELL_SERIAL,
+    }
     for schema in CORE_TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS:
         name = schema["function"]["name"]
         if name in handlers:
-            registry.register(schema, handlers[name], permission=permissions.get(name))
+            registry.register(schema, handlers[name], permission=permissions.get(name), lane=lanes.get(name))
     return registry
 
 
@@ -1769,12 +1861,14 @@ def execute_tool_result(
     runtime_state=None,
     agent_name: str | None = None,
     tool_context: ToolContext | None = None,
+    emit_events: bool = True,
+    execution_lane: ToolExecutionLane | str | None = None,
 ) -> ToolResult:
     """Execute a tool by name with pre-validation and auto-correction."""
     arguments = dict(arguments or {})
     registry = _registry_for_context(tool_context)
 
-    if tool_context is not None:
+    if emit_events and tool_context is not None:
         tool_context.event_bus.emit_event(
             ToolCallEvent(
                 tool=name,
@@ -1795,6 +1889,7 @@ def execute_tool_result(
             ),
             tool_context=tool_context,
             agent_name=agent_name,
+            emit_events=emit_events,
         )
 
     # Pre-validate and auto-correct arguments
@@ -1812,6 +1907,7 @@ def execute_tool_result(
             ),
             tool_context=tool_context,
             agent_name=agent_name,
+            emit_events=emit_events,
         )
     if fix_warning and "interactive command" in fix_warning:
         return _finalize_tool_result_object(
@@ -1824,6 +1920,7 @@ def execute_tool_result(
             ),
             tool_context=tool_context,
             agent_name=agent_name,
+            emit_events=emit_events,
         )
 
     try:
@@ -1833,6 +1930,7 @@ def execute_tool_result(
             runtime_state=runtime_state,
             agent_name=agent_name,
             tool_context=tool_context,
+            execution_lane=execution_lane,
         )
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
@@ -1850,6 +1948,30 @@ def execute_tool_result(
     if fix_warning:
         tool_result = tool_result.with_output_prefix(fix_warning)
 
+    return _finalize_tool_result_object(
+        tool_result,
+        tool_context=tool_context,
+        agent_name=agent_name,
+        emit_events=emit_events,
+    )
+
+
+def finalize_executed_tool_result(
+    tool_result: ToolResult,
+    *,
+    arguments: dict | None = None,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+) -> ToolResult:
+    """Record a tool call and its already-computed result on the main thread."""
+    if tool_context is not None:
+        tool_context.event_bus.emit_event(
+            ToolCallEvent(
+                tool=tool_result.tool,
+                args=_redact_tool_args(arguments or {}),
+                agent=agent_name,
+            ).to_event()
+        )
     return _finalize_tool_result_object(
         tool_result,
         tool_context=tool_context,
@@ -1893,6 +2015,7 @@ def _invoke_registered_tool(
     runtime_state,
     agent_name: str | None,
     tool_context: ToolContext | None,
+    execution_lane: ToolExecutionLane | str | None = None,
 ):
     kwargs = dict(arguments)
     parameters = inspect.signature(fn).parameters
@@ -1904,8 +2027,13 @@ def _invoke_registered_tool(
         "runtime_state": runtime_state,
         "agent_name": agent_name,
         "tool_context": tool_context,
+        "execution_lane": execution_lane,
     }
     for key, value in extras.items():
+        if key == "execution_lane":
+            if key not in kwargs and key in parameters:
+                kwargs[key] = value
+            continue
         if key not in kwargs and (key in parameters or accepts_kwargs):
             kwargs[key] = value
     return fn(**kwargs)
@@ -1929,8 +2057,9 @@ def _finalize_tool_result_object(
     *,
     tool_context: ToolContext | None,
     agent_name: str | None,
+    emit_events: bool = True,
 ) -> ToolResult:
-    if tool_context is not None:
+    if emit_events and tool_context is not None:
         _emit_structured_tool_result(tool_result, tool_context=tool_context, agent_name=agent_name)
         _emit_file_change_events(tool_result, tool_context=tool_context, agent_name=agent_name)
     return tool_result
