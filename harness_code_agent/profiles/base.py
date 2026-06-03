@@ -138,7 +138,7 @@ class BaseProfile(ABC):
             "3. Consult sub-agents only when their read-only findings would reduce context load or risk.\n"
             "4. Apply all code and test changes yourself.\n"
             "5. Run concrete verification commands.\n"
-            "6. If verification fails, diagnose and continue. If it passes, update planning state when in light/full and do a final review before stopping. "
+            "6. If verification fails, diagnose and continue. If it passes, update planning state when in light/full and perform final verification before stopping. "
             "Final light/full updates must include result_status, validation, and remaining_issues.\n\n"
             "Use the task text and profile acceptance criteria as the source of truth."
         )
@@ -163,7 +163,7 @@ class BaseProfile(ABC):
         return [
             "The main agent made any required code or test changes itself.",
             "The main agent ran concrete verification commands.",
-            "The main agent reviewed verification output before stopping.",
+            "The main agent checked verification output before stopping.",
         ]
 
     def resolve_task_timeout(self, user_prompt: str) -> float | None:

@@ -93,5 +93,5 @@ Default engineering posture:
             "The main agent inspected the relevant repository state before editing.",
             "The main agent made any required code or test changes itself.",
             "The main agent ran concrete verification commands.",
-            "The main agent reviewed verification output before stopping.",
+            "The main agent checked verification output before stopping.",
         ]

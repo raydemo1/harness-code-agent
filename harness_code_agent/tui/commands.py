@@ -80,6 +80,7 @@ def default_command_registry() -> SlashCommandRegistry:
         CommandSpec("/terminal", "Profiles", "/terminal", "Switch to terminal task profile.", _profile("terminal", "/terminal")),
         CommandSpec("/swe", "Profiles", "/swe", "Switch to swe-bench profile.", _profile("swe-bench", "/swe")),
         CommandSpec("/app", "Profiles", "/app", "Switch to app-builder profile.", _profile("app-builder", "/app")),
+        CommandSpec("/review", "Profiles", "/review", "Switch to read-only review profile.", _profile("review", "/review")),
         CommandSpec("/sessions", "Sessions", "/sessions", "List local Harness sessions.", _sessions),
         CommandSpec("/session", "Sessions", "/session <session-id>", "Show a human-readable session summary.", _session),
         CommandSpec("/resume", "Sessions", "/resume <session-id>", "Inject previous session context into this conversation.", _resume),

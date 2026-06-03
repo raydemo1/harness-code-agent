@@ -37,11 +37,14 @@ class TuiTests(unittest.TestCase):
 
         help_text = registry.format_help()
         result = registry.execute("/code", session)
+        review_result = registry.execute("/review", session)
 
         self.assertIn("Profiles:", help_text)
+        self.assertIn("/review", help_text)
         self.assertIn("/checkpoint", help_text)
         self.assertEqual(result.text, "switched coding-agent")
-        self.assertEqual(calls, ["coding-agent"])
+        self.assertEqual(review_result.text, "switched review")
+        self.assertEqual(calls, ["coding-agent", "review"])
 
     def test_command_registry_reports_validation_errors(self):
         registry = default_command_registry()

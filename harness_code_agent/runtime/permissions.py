@@ -129,6 +129,7 @@ _READ_ONLY_COMMAND_PREFIXES = (
     "cat ", "type ", "ls", "dir", "pwd", "grep ", "rg ", "head ", "tail ",
     "git status", "git diff", "git log", "git show", "git branch",
     "python -m unittest", "python -m pytest", "pytest", "test ", "diff ",
+    "ruff check", "mypy", "npm test", "go test", "cargo test",
     "wc ", "which ", "where ",
 )
 

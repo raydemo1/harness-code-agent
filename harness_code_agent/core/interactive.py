@@ -43,6 +43,7 @@ PROFILE_SLASH_ALIASES = {
     "/terminal": "terminal",
     "/swe": "swe-bench",
     "/plan": "plan",
+    "/review": "review",
 }
 log = logging.getLogger("harness")
 

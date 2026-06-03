@@ -4,6 +4,7 @@ from .base import BaseProfile, AgentConfig, ProfileConfig
 from .app_builder import AppBuilderProfile
 from .coding_agent import CodingAgentProfile
 from .plan import PlanProfile
+from .review import ReviewProfile
 from .terminal import TerminalProfile
 from .swe_bench import SWEBenchProfile
 
@@ -13,6 +14,7 @@ PROFILES: dict[str, type[BaseProfile]] = {
     "terminal": TerminalProfile,
     "swe-bench": SWEBenchProfile,
     "plan": PlanProfile,
+    "review": ReviewProfile,
 }
 
 

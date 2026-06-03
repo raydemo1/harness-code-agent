@@ -25,6 +25,7 @@ from harness_code_agent.runtime.middlewares import (
     RecoveryStrategyMiddleware,
     TaskTrackingEnforcementMiddleware,
 )
+from harness_code_agent.runtime.tool_result import ToolResult
 
 
 class ProfileInterfaceTests(unittest.TestCase):
@@ -99,6 +100,57 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertNotIn("run_bash", tool_names)
         self.assertFalse(any(name.startswith("browser") for name in tool_names))
 
+    def test_review_profile_is_registered_and_read_only(self):
+        from harness_code_agent.profiles.review import ReviewOnlyMiddleware
+
+        profile_names = [profile["name"] for profile in list_profiles()]
+        main_agent = get_profile("review").main_agent()
+        prompt = main_agent.system_prompt.lower()
+        tool_names = {
+            schema["function"]["name"]
+            for schema in tools.tool_schemas_for_profile(
+                allowed_permissions=main_agent.allowed_tool_permissions,
+                include_names=main_agent.allowed_tool_names,
+                exclude_names=main_agent.blocked_tool_names,
+            )
+        }
+
+        self.assertIn("review", profile_names)
+        self.assertIn("findings first", prompt)
+        self.assertIn("read-only", prompt)
+        self.assertIn("must not modify files", prompt)
+        self.assertIn("do not implement", prompt)
+        self.assertEqual(
+            tool_names,
+            {
+                "read_file",
+                "list_files",
+                "read_skill_file",
+                "web_search",
+                "web_fetch",
+                "consult_subagent",
+                "run_bash",
+            },
+        )
+        self.assertTrue(any(isinstance(mw, ReviewOnlyMiddleware) for mw in main_agent.middlewares))
+
+    def test_review_only_middleware_blocks_writes_and_risky_shell(self):
+        from harness_code_agent.profiles.review import ReviewOnlyMiddleware
+
+        middleware = ReviewOnlyMiddleware()
+
+        write_block = middleware.before_tool("write_file", {"path": "x.py", "content": "bad"}, [])
+        shell_block = middleware.before_tool("run_bash", {"command": "git add ."}, [])
+        verify_allowed = middleware.before_tool("run_bash", {"command": "pytest tests"}, [])
+        read_allowed = middleware.before_tool("read_file", {"path": "x.py"}, [])
+
+        self.assertIsInstance(write_block, ToolResult)
+        self.assertIsInstance(shell_block, ToolResult)
+        self.assertIn("read-only", write_block.output)
+        self.assertIn("safe verification", shell_block.output)
+        self.assertIsNone(verify_allowed)
+        self.assertIsNone(read_allowed)
+
     def test_specialized_profile_prompts_capture_expected_workflows(self):
         app_prompt = get_profile("app-builder").main_agent().system_prompt.lower()
         swe_prompt = get_profile("swe-bench").main_agent().system_prompt.lower()
@@ -111,7 +163,7 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertIn("reproduce or characterize the failure", swe_prompt)
         self.assertIn("smallest diff", swe_prompt)
         self.assertIn("regression tests", swe_prompt)
-        self.assertIn("review git diff", swe_prompt)
+        self.assertIn("inspect git diff", swe_prompt)
 
     def test_app_builder_and_swe_bench_use_core_runtime_guardrails(self):
         for profile_name in ["app-builder", "swe-bench"]:
@@ -129,8 +181,19 @@ class ProfileInterfaceTests(unittest.TestCase):
 
                 self.assertIn(PLANNING_MODE_POLICY, prompt)
 
+    def test_runtime_profiles_require_verification_not_forced_final_review(self):
+        for profile_name in ["coding-agent", "app-builder", "swe-bench", "terminal"]:
+            with self.subTest(profile=profile_name):
+                main_agent = get_profile(profile_name).main_agent()
+                prompt = main_agent.system_prompt.lower()
+                middleware_prompts = " ".join(
+                    getattr(mw, "_verification_prompt", "")
+                    for mw in main_agent.middlewares
+                ).lower()
+
+                self.assertIn("verification", prompt + " " + middleware_prompts)
+                self.assertNotIn("final review", prompt + " " + middleware_prompts)
+
 
 if __name__ == "__main__":
     unittest.main()
-
-

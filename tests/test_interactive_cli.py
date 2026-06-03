@@ -30,6 +30,7 @@ _install_fake_openai_module()
 from harness_code_agent import config
 from harness_code_agent.core.interactive import (
     InteractiveSession,
+    PROFILE_SLASH_ALIASES,
     git_dirty_paths,
 )
 from harness_code_agent.core.mentions import (
@@ -611,7 +612,7 @@ class InteractiveCliTests(unittest.TestCase):
                 session.close()
 
     def test_short_slash_commands_switch_profiles(self):
-        conversations = [FakeConversation() for _ in range(6)]
+        conversations = [FakeConversation() for _ in range(7)]
         with patch(
             "harness_code_agent.agent.loop.Agent.start_conversation",
             side_effect=conversations,
@@ -624,6 +625,7 @@ class InteractiveCliTests(unittest.TestCase):
                     ("/terminal", "terminal"),
                     ("/swe", "swe-bench"),
                     ("/app", "app-builder"),
+                    ("/review", "review"),
                 ]
                 for command, expected in cases:
                     with self.subTest(command=command):
@@ -631,6 +633,9 @@ class InteractiveCliTests(unittest.TestCase):
                         self.assertEqual(session.profile.name(), expected)
             finally:
                 session.close()
+
+    def test_review_slash_alias_is_registered(self):
+        self.assertEqual(PROFILE_SLASH_ALIASES["/review"], "review")
 
     def test_profile_switch_uses_handoff_context_without_copying_old_messages(self):
         coding_conversation = FakeConversation()

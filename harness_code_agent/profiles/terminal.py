@@ -101,7 +101,7 @@ AVAILABLE TOOLS:
                 RecoveryStrategyMiddleware(),
                 PreExitVerificationMiddleware(
                     verification_prompt=(
-                        "Switch to final review mode. Verify what ACTUALLY exists on disk. "
+                        "Switch to final verification. Verify what ACTUALLY exists on disk. "
                         "Run concrete checks for every requirement. If any check fails, fix it before stopping."
                     ),
                     include_task_requirements=True,

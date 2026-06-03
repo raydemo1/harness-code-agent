@@ -6,6 +6,7 @@ call an LLM, but its messages are never inserted into the bound profile slot.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,12 @@ def route_profile_for_task(
     Invalid model output, low confidence, unknown profiles, and provider
     failures all fall back to the product default.
     """
+    if _is_explicit_review_intent(user_prompt):
+        return RouteDecision(
+            profile_name="review",
+            confidence=0.99,
+            reason="User explicitly requested a code review or review-style assessment.",
+        )
     try:
         profiles = list_profiles()
         valid_profiles = {item["name"] for item in profiles}
@@ -109,6 +116,24 @@ def _parse_router_json(raw: str) -> dict[str, Any]:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     return json.loads(text)
+
+
+def _is_explicit_review_intent(user_prompt: str) -> bool:
+    text = " ".join(str(user_prompt or "").strip().split())
+    if not text:
+        return False
+    lowered = text.lower()
+    chinese_review_terms = ("审查", "评审")
+    if any(term in text for term in chinese_review_terms):
+        return True
+
+    review_patterns = [
+        r"\bcode[-\s]+review\b",
+        r"\breview\s+(?:this|these|the|my|our)?\s*(?:code|changes|change|diff|pr|pull\s+request|patch|commit|branch|implementation)\b",
+        r"\b(?:please\s+)?review\s+(?:this|these|the|my|our)\s+(?:changes?|code|diff|pr|pull\s+request|patch|commit|branch|implementation)\b",
+        r"\bdo\s+(?:a|an)\s+review\b",
+    ]
+    return any(re.search(pattern, lowered) for pattern in review_patterns)
 
 
 def _workspace_summary(workspace: Path) -> str:

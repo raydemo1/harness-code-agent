@@ -518,6 +518,41 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", completions.calls[0])
         self.assertEqual(completions.calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
 
+    def test_profile_router_short_circuits_explicit_review_intent(self):
+        from harness_code_agent.profiles import router
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("harness_code_agent.profiles.router._call_router_llm") as call_router:
+                decision = router.route_profile_for_task("please code review these changes", workspace=Path(tmpdir))
+
+        self.assertEqual(decision.profile_name, "review")
+        self.assertGreaterEqual(decision.confidence, 0.99)
+        self.assertFalse(decision.fallback_used)
+        call_router.assert_not_called()
+
+    def test_profile_router_does_not_treat_review_filenames_as_review_intent(self):
+        from harness_code_agent.profiles import router
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content='{"profile_name":"coding-agent","confidence":0.9,"reason":"filename only"}'))]
+                )
+
+        completions = FakeCompletions()
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("harness_code_agent.profiles.router.get_client", return_value=fake_client):
+                decision = router.route_profile_for_task("open docs/review.md and summarize it", workspace=Path(tmpdir))
+
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertEqual(len(completions.calls), 1)
+
     def test_profile_router_falls_back_when_profile_catalog_fails(self):
         from harness_code_agent.profiles import router
 
@@ -537,6 +572,19 @@ class ProductRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(parsed["reason"], "keep `literal` ticks")
+
+    def test_read_only_command_whitelist_includes_common_verification_commands(self):
+        from harness_code_agent.runtime.permissions import is_read_only_command
+
+        for command in [
+            "ruff check .",
+            "mypy harness_code_agent",
+            "npm test",
+            "go test ./...",
+            "cargo test",
+        ]:
+            with self.subTest(command=command):
+                self.assertTrue(is_read_only_command(command))
 
     def test_turn_summary_event_serializes_payload(self):
         from harness_code_agent.sessions.events import TurnSummaryEvent

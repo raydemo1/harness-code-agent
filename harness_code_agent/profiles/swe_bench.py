@@ -48,7 +48,7 @@ Workflow:
 6. Modify the necessary source or test files yourself.
 7. Run the relevant focused tests with run_bash, then broader regression checks when risk warrants it.
 8. If tests fail, use the output as evidence and fix the root cause.
-9. Before stopping, review git diff for unintended changes and verify the acceptance criteria. In light/full, final update_plan_state must include result_status, validation, and remaining_issues.
+9. Before stopping, inspect git diff for unintended changes and verify the acceptance criteria. In light/full, final update_plan_state must include result_status, validation, and remaining_issues.
 """,
             middlewares=[
                 LoopDetectionMiddleware(),
@@ -57,7 +57,7 @@ Workflow:
                 RecoveryStrategyMiddleware(),
                 PreExitVerificationMiddleware(
                     verification_prompt=(
-                        "Review the actual diff and run the most relevant tests for the issue. "
+                        "Inspect the actual diff and run the most relevant tests for the issue. "
                         "If tests fail, fix the root cause before stopping."
                     ),
                     include_task_requirements=True,

@@ -31,7 +31,7 @@ Step-by-step workflow:
 5. WRITE CODE: Use write_file to create every source file needed. \
    Write real, complete, working code — no stubs, no placeholders, no TODO comments.
 6. Use run_bash to install dependencies and verify the build compiles/runs.
-7. Run final checks and review actual output before stopping. In light/full, final update_plan_state must include result_status, validation, and remaining_issues.
+7. Run final verification checks and inspect actual output before stopping. In light/full, final update_plan_state must include result_status, validation, and remaining_issues.
 
 Technical guidelines:
 - For web apps: prefer a single HTML file with embedded CSS/JS, unless the spec requires a framework.
