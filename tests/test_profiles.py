@@ -51,6 +51,21 @@ class ProfileInterfaceTests(unittest.TestCase):
             self.assertIn("allowed_scopes", policy)
             self.assertIn("review", policy["allowed_scopes"])
 
+    def test_all_profiles_expose_tool_search(self):
+        for profile_meta in list_profiles():
+            with self.subTest(profile=profile_meta["name"]):
+                main_agent = get_profile(profile_meta["name"]).main_agent()
+                tool_names = {
+                    schema["function"]["name"]
+                    for schema in tools.tool_schemas_for_profile(
+                        allowed_permissions=main_agent.allowed_tool_permissions,
+                        include_names=main_agent.allowed_tool_names,
+                        exclude_names=main_agent.blocked_tool_names,
+                    )
+                }
+
+                self.assertIn("tool_search", tool_names)
+
     def test_terminal_main_agent_prompt_keeps_single_owner_model(self):
         profile = get_profile("terminal")
         prompt = profile.main_agent().system_prompt.lower()
@@ -90,6 +105,7 @@ class ProfileInterfaceTests(unittest.TestCase):
                 "read_file",
                 "list_files",
                 "read_skill_file",
+                "tool_search",
                 "web_search",
                 "web_fetch",
                 "ask_user",
@@ -127,6 +143,7 @@ class ProfileInterfaceTests(unittest.TestCase):
                 "read_file",
                 "list_files",
                 "read_skill_file",
+                "tool_search",
                 "web_search",
                 "web_fetch",
                 "consult_subagent",

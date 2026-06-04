@@ -161,6 +161,8 @@ class InteractiveSession:
         if self.tool_context is None:
             raise RuntimeError("Cannot build agent before the session is bound.")
         cfg = profile.main_agent()
+        self.tool_context.allowed_tool_permissions = set(cfg.allowed_tool_permissions)
+        self.tool_context.blocked_tool_names = set(cfg.blocked_tool_names)
         harness_rules = _load_harness_rules(self.cwd)
         catalog = self.skill_registry.build_catalog_prompt()
         acceptance_criteria = (
@@ -207,12 +209,36 @@ class InteractiveSession:
             self._load_mcp_tools()
 
     def _tool_schemas_for_agent_config(self, cfg) -> list[dict]:
-        return tools.tool_schemas_for_profile(
+        core_schemas = tools.tool_schemas_for_profile(
             allowed_permissions=cfg.allowed_tool_permissions,
             include_names=cfg.allowed_tool_names,
             exclude_names=cfg.blocked_tool_names,
             registry=self.tool_registry,
         )
+        revealed = set()
+        if self.tool_context is not None:
+            self.tool_context.allowed_tool_permissions = set(cfg.allowed_tool_permissions)
+            self.tool_context.blocked_tool_names = set(cfg.blocked_tool_names)
+            revealed = set(self.tool_context.revealed_tool_names)
+        if not revealed:
+            return core_schemas
+        revealed_schemas = tools.tool_schemas_for_profile(
+            allowed_permissions=cfg.allowed_tool_permissions,
+            include_names=revealed,
+            exclude_names=cfg.blocked_tool_names,
+            registry=self.tool_registry,
+            disclosure={"deferred"},
+        )
+        known = {
+            schema.get("function", {}).get("name")
+            for schema in core_schemas
+            if isinstance(schema, dict)
+        }
+        return core_schemas + [
+            schema
+            for schema in revealed_schemas
+            if schema.get("function", {}).get("name") not in known
+        ]
 
     def _refresh_agent_tool_schemas(self) -> None:
         if not self.profile_slots:
@@ -363,6 +389,7 @@ class InteractiveSession:
             user_prompt,
             workspace_root=self.cwd,
             session_store=self.session_store,
+            skill_catalog=self.skill_registry.catalog,
         )
         prompt_with_mentions = format_turn_with_mentions(user_prompt, resolved)
         task = self.format_task(prompt_with_mentions)

@@ -335,6 +335,7 @@ class ToolExecutor:
             tool_context=self.agent.tool_context,
             agent_name=self.agent.name,
         )
+        self._reveal_tool_schemas_from_result(tool_result)
         result = tool_result.to_text()
         log.debug("[%s] tool result: %s", self.agent.name, result[:200])
         self.conversation.trace.tool_call(prepared.name, prepared.args, result)
@@ -377,6 +378,56 @@ class ToolExecutor:
                 self.conversation._append_message({"role": "user", "content": inject})
                 self.conversation.trace.middleware_inject(type(mw).__name__, "post_tool", inject)
                 break
+
+    def _reveal_tool_schemas_from_result(self, tool_result: ToolResult) -> None:
+        if tool_result.tool != "tool_search":
+            return
+        raw_names = tool_result.metadata.get("revealed_tool_names")
+        if not isinstance(raw_names, list) or self.agent.tool_context is None:
+            return
+        context = self.agent.tool_context
+        registry = context.tool_registry
+        if registry is None:
+            return
+        revealed = context.revealed_tool_names
+        new_names = {
+            str(name)
+            for name in raw_names
+            if isinstance(name, str)
+            and name not in revealed
+            and registry.get(name) is not None
+            and registry.disclosure_for(name) == "deferred"
+        }
+        if not new_names:
+            return
+
+        allowed_permissions = context.allowed_tool_permissions
+        revealed_schemas = tools.tool_schemas_for_profile(
+            allowed_permissions=allowed_permissions,
+            include_names=new_names,
+            exclude_names=context.blocked_tool_names,
+            registry=registry,
+            disclosure={"deferred"},
+        )
+        if not revealed_schemas:
+            return
+
+        current_schemas = list(self.agent.tool_schemas or [])
+        current_names = {
+            schema.get("function", {}).get("name")
+            for schema in current_schemas
+            if isinstance(schema, dict)
+        }
+        additions = [
+            schema
+            for schema in revealed_schemas
+            if schema.get("function", {}).get("name") not in current_names
+        ]
+        if not additions:
+            revealed.update(new_names)
+            return
+        revealed.update(new_names)
+        self.agent.update_tool_schemas(current_schemas + additions)
 
 
 def _build_groups(calls: list[PreparedToolCall]) -> list[ExecutionGroup]:

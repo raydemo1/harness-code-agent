@@ -207,6 +207,129 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertIn("slow", result_outputs[0])
         self.assertIn("fast", result_outputs[1])
 
+    def test_tool_search_reveals_deferred_schema_for_next_iteration(self):
+        registry = tools.BUILTIN_TOOL_REGISTRY.copy()
+        registry.register(
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__docs__search",
+                    "description": "Search product documentation",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Documentation query"}
+                        },
+                    },
+                },
+            },
+            lambda **_: ToolResult(tool="mcp__docs__search", status="success", output="searched"),
+            permission="read",
+            disclosure="deferred",
+        )
+        tool_calls = [
+            _tool_call("tc_search", "tool_search", {"query": "product documentation"}),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="danger-full-access"),
+                event_bus=EventBus(),
+                tool_registry=registry,
+                allowed_tool_permissions={"read", "network_read", "edit", "control", "shell"},
+                blocked_tool_names={"browser_test", "stop_dev_server"},
+                revealed_tool_names=set(),
+            )
+            initial_schemas = tools.tool_schemas_for_profile(
+                allowed_permissions=context.allowed_tool_permissions,
+                exclude_names=context.blocked_tool_names,
+                registry=registry,
+            )
+            fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions(tool_calls)))
+            with patch("harness_code_agent.agent.loop.get_client", return_value=fake_client):
+                agent = Agent(
+                    "main_agent",
+                    "system",
+                    use_tools=True,
+                    tool_schemas=initial_schemas,
+                    tool_context=context,
+                )
+                conversation = AgentConversation(agent)
+                agent._conversations.add(conversation)
+                conversation._cached_prompt_cache_key = "old-cache-key"
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                conversation.run_until_idle()
+
+        names = {schema["function"]["name"] for schema in agent.tool_schemas}
+        self.assertIn("tool_search", names)
+        self.assertIn("mcp__docs__search", names)
+        self.assertIn("mcp__docs__search", agent.allowed_tool_names)
+        self.assertEqual(context.revealed_tool_names, {"mcp__docs__search"})
+        self.assertIsNone(conversation._cached_prompt_cache_key)
+
+    def test_repeated_tool_search_reveal_preserves_prompt_cache_when_unchanged(self):
+        from harness_code_agent.agent.tool_executor import ToolExecutor
+
+        registry = tools.BUILTIN_TOOL_REGISTRY.copy()
+        registry.register(
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__docs__search",
+                    "description": "Search product documentation",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            lambda **_: "ok",
+            permission="read",
+            disclosure="deferred",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="danger-full-access"),
+                event_bus=EventBus(),
+                tool_registry=registry,
+                allowed_tool_permissions={"read"},
+                blocked_tool_names=set(),
+                revealed_tool_names={"mcp__docs__search"},
+            )
+            agent = Agent(
+                "main_agent",
+                "system",
+                use_tools=True,
+                tool_schemas=tools.tool_schemas_for_profile(
+                    allowed_permissions={"read"},
+                    registry=registry,
+                ) + tools.tool_schemas_for_profile(
+                    allowed_permissions={"read"},
+                    registry=registry,
+                    disclosure={"deferred"},
+                    include_names={"mcp__docs__search"},
+                ),
+                tool_context=context,
+            )
+            conversation = AgentConversation(agent)
+            conversation._cached_prompt_cache_key = "old-cache-key"
+            executor = ToolExecutor(conversation)
+            result = ToolResult(
+                tool="tool_search",
+                status="success",
+                output="already revealed",
+                metadata={"revealed_tool_names": ["mcp__docs__search"]},
+            )
+
+            executor._reveal_tool_schemas_from_result(result)
+
+        self.assertEqual(conversation._cached_prompt_cache_key, "old-cache-key")
+
     def test_write_barrier_prevents_later_read_from_running_before_write(self):
         registry = tools.BUILTIN_TOOL_REGISTRY.copy()
         tool_calls = [

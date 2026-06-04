@@ -250,6 +250,7 @@ class McpClientManager:
                 binding.schema(),
                 self._handler_for(binding),
                 permission=binding.permission,
+                disclosure="deferred",
             )
 
     def call_tool(self, exposed_name: str, arguments: dict[str, Any]) -> ToolResult:
@@ -312,7 +313,7 @@ class McpClientManager:
         for binding in self.tool_bindings:
             lines.append(
                 f"{binding.exposed_name} -> {binding.server_name}/{binding.tool_name} "
-                f"permission={binding.permission}"
+                f"permission={binding.permission} disclosure=deferred"
             )
         return "\n".join(lines)
 

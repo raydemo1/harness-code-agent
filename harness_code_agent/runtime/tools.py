@@ -32,6 +32,7 @@ from .questions import ConsoleQuestionProvider, QuestionRequest, normalize_quest
 from .shell_classification import is_long_running_shell_command
 from .tool_context import ToolContext
 from .tool_result import ToolResult, unstructured_tool_result_from_text
+from .tool_search import SearchDocument, expand_search_text, search_bm25
 from ..workspace.shell_jobs import ShellJobNotFound
 
 # Playwright is optional — only needed for browser UI testing
@@ -1271,6 +1272,7 @@ class ToolSpec:
     handler: Callable
     permission: str
     lane: "ToolExecutionLane"
+    disclosure: str = "core"
 
 
 class ToolExecutionLane(str, Enum):
@@ -1286,6 +1288,9 @@ class ToolExecutionLane(str, Enum):
     BLOCKED = "blocked"
 
 
+VALID_TOOL_DISCLOSURES = {"core", "deferred"}
+
+
 class ToolRegistry:
     """Thin registry boundary for built-in and future profile-provided tools."""
 
@@ -1294,6 +1299,7 @@ class ToolRegistry:
         self._handlers: dict[str, Callable] = {}
         self._permissions: dict[str, str] = {}
         self._lanes: dict[str, ToolExecutionLane] = {}
+        self._disclosures: dict[str, str] = {}
 
     def register(
         self,
@@ -1302,6 +1308,7 @@ class ToolRegistry:
         *,
         permission: str | None = None,
         lane: ToolExecutionLane | str | None = None,
+        disclosure: str = "core",
     ) -> None:
         name = schema.get("function", {}).get("name")
         if not name:
@@ -1310,10 +1317,13 @@ class ToolRegistry:
             raise ValueError(f"Tool {name} missing permission classification")
         if permission not in VALID_TOOL_PERMISSIONS:
             raise ValueError(f"Tool {name} has unknown permission classification: {permission}")
+        if disclosure not in VALID_TOOL_DISCLOSURES:
+            raise ValueError(f"Tool {name} has unknown disclosure classification: {disclosure}")
         self._schemas[name] = schema
         self._handlers[name] = handler
         self._permissions[name] = permission
         self._lanes[name] = _coerce_tool_lane(lane) if lane is not None else _default_lane_for_tool(name, permission)
+        self._disclosures[name] = disclosure
 
     def get(self, name: str) -> Callable | None:
         return self._handlers.get(name)
@@ -1324,9 +1334,19 @@ class ToolRegistry:
     def lane_for(self, name: str) -> ToolExecutionLane | None:
         return self._lanes.get(name)
 
+    def disclosure_for(self, name: str) -> str | None:
+        return self._disclosures.get(name)
+
     def specs(self) -> list[ToolSpec]:
         return [
-            ToolSpec(name, self._schemas[name], self._handlers[name], self._permissions[name], self._lanes[name])
+            ToolSpec(
+                name,
+                self._schemas[name],
+                self._handlers[name],
+                self._permissions[name],
+                self._lanes[name],
+                self._disclosures.get(name, "core"),
+            )
             for name in sorted(self._schemas)
         ]
 
@@ -1342,6 +1362,7 @@ class ToolRegistry:
         clone._handlers = dict(self._handlers)
         clone._permissions = dict(self._permissions)
         clone._lanes = dict(self._lanes)
+        clone._disclosures = dict(self._disclosures)
         return clone
 
 
@@ -1388,20 +1409,28 @@ def tool_schemas_for_profile(
     include_names: set[str] | None = None,
     exclude_names: set[str] | None = None,
     registry: ToolRegistry | None = None,
+    disclosure: set[str] | None = None,
 ) -> list[dict]:
     registry = registry or BUILTIN_TOOL_REGISTRY
     allowed_permissions = set(allowed_permissions) if allowed_permissions is not None else None
     include_names = set(include_names or set())
     exclude_names = set(exclude_names or set())
+    disclosures = {"core"} if disclosure is None else set(disclosure)
     if allowed_permissions is not None:
         unknown_permissions = allowed_permissions - VALID_TOOL_PERMISSIONS
         if unknown_permissions:
             names = ", ".join(sorted(unknown_permissions))
             raise ValueError(f"Unknown tool permission classification for profile: {names}")
+    unknown_disclosures = disclosures - VALID_TOOL_DISCLOSURES
+    if unknown_disclosures:
+        names = ", ".join(sorted(unknown_disclosures))
+        raise ValueError(f"Unknown tool disclosure classification for profile: {names}")
 
     schemas: list[dict] = []
     for spec in registry.specs():
         if spec.name in exclude_names:
+            continue
+        if spec.disclosure not in disclosures:
             continue
         if spec.name in include_names or (
             allowed_permissions is not None and spec.permission in allowed_permissions
@@ -1451,6 +1480,30 @@ CORE_TOOL_SCHEMAS = [
                 "required": ["path"],
                 "properties": {
                     "path": {"type": "string", "description": "Relative path to skill file (e.g. 'skills/frontend-design/SKILL.md')"}
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_search",
+            "description": "Search hidden deferred tools available to the current profile. Matching tools are revealed for future tool calls in this conversation.",
+            "parameters": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language description of the tool capability needed.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 8,
+                        "description": "Maximum number of matching hidden tools to reveal.",
+                    },
                 },
             },
         },
@@ -1914,6 +1967,147 @@ def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# Tool search / progressive disclosure
+# ---------------------------------------------------------------------------
+
+def tool_search(query: str, max_results: int = 8, tool_context: ToolContext | None = None) -> ToolResult:
+    """Search currently hidden deferred tools and reveal matching schemas."""
+    query = str(query or "").strip()
+    try:
+        max_results = max(1, min(int(max_results or 8), 20))
+    except (TypeError, ValueError):
+        max_results = 8
+
+    if tool_context is None or tool_context.tool_registry is None:
+        return ToolResult(
+            tool="tool_search",
+            status="failed",
+            output="[error] tool_search requires a tool registry in the current tool context.",
+            error="tool_search requires tool context",
+            metadata={"status_source": "validation"},
+        )
+
+    registry = tool_context.tool_registry
+    allowed_permissions = (
+        set(tool_context.allowed_tool_permissions)
+        if tool_context.allowed_tool_permissions is not None
+        else set(VALID_TOOL_PERMISSIONS)
+    )
+    blocked_names = set(tool_context.blocked_tool_names or set())
+    already_revealed = set(tool_context.revealed_tool_names or set())
+
+    documents: list[SearchDocument] = []
+    for spec in registry.specs():
+        if spec.disclosure != "deferred":
+            continue
+        if spec.name in blocked_names or spec.name in already_revealed:
+            continue
+        if spec.permission not in allowed_permissions:
+            continue
+        documents.append(_tool_search_document(spec))
+
+    if not query:
+        return ToolResult(
+            tool="tool_search",
+            status="failed",
+            output="[error] tool_search requires a non-empty query.",
+            error="tool_search requires query",
+            metadata={"status_source": "validation"},
+        )
+    if not documents:
+        return ToolResult(
+            tool="tool_search",
+            status="success",
+            output="No hidden deferred tools are available for the current profile.",
+            metadata={"revealed_tool_names": [], "status_source": "native"},
+        )
+
+    hits = search_bm25(documents, query, limit=max_results)
+    revealed = [hit.key for hit in hits]
+    if not hits:
+        return ToolResult(
+            tool="tool_search",
+            status="success",
+            output=f"No deferred tools matched query: {query}",
+            metadata={"query": query, "revealed_tool_names": [], "status_source": "native"},
+        )
+
+    lines = [f"Tool search results for: {query}"]
+    for index, hit in enumerate(hits, start=1):
+        description = str(hit.metadata.get("description") or "").strip()
+        if len(description) > 180:
+            description = description[:177] + "..."
+        reason = str(hit.metadata.get("match_text") or "").strip()
+        if len(reason) > 160:
+            reason = reason[:157] + "..."
+        lines.append(
+            f"{index}. {hit.key} score={hit.score:.3f} revealed=yes"
+            + (f"\n   {description}" if description else "")
+            + (f"\n   matched: {reason}" if reason else "")
+        )
+
+    return ToolResult(
+        tool="tool_search",
+        status="success",
+        output="\n".join(lines),
+        metadata={
+            "query": query,
+            "revealed_tool_names": revealed,
+            "status_source": "native",
+        },
+    )
+
+
+def _tool_search_document(spec: ToolSpec) -> SearchDocument:
+    function = spec.schema.get("function", {}) if isinstance(spec.schema, dict) else {}
+    description = str(function.get("description") or "")
+    parameters = function.get("parameters") if isinstance(function.get("parameters"), dict) else {}
+    parameter_text = _schema_parameter_text(parameters)
+    server_tool_text = ""
+    if spec.name.startswith("mcp__"):
+        server_tool_text = spec.name.removeprefix("mcp__").replace("__", " ")
+    text = "\n".join(
+        part
+        for part in [
+            expand_search_text(spec.name),
+            expand_search_text(server_tool_text),
+            description,
+            parameter_text,
+            spec.permission,
+        ]
+        if part
+    )
+    match_text = " ".join(
+        part for part in [expand_search_text(spec.name), description, parameter_text] if part
+    )
+    return SearchDocument(
+        key=spec.name,
+        text=text,
+        metadata={
+            "description": description,
+            "permission": spec.permission,
+            "match_text": match_text,
+        },
+    )
+
+
+def _schema_parameter_text(schema: dict) -> str:
+    parts: list[str] = []
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name, raw in properties.items():
+            parts.append(expand_search_text(str(name)))
+            if isinstance(raw, dict):
+                description = raw.get("description")
+                if description:
+                    parts.append(str(description))
+                nested = raw.get("items") if isinstance(raw.get("items"), dict) else raw
+                if isinstance(nested, dict) and nested is not raw:
+                    parts.append(_schema_parameter_text(nested))
+    return " ".join(part for part in parts if part)
+
+
+# ---------------------------------------------------------------------------
 # Web search (lightweight, no external deps)
 # ---------------------------------------------------------------------------
 
@@ -2034,6 +2228,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
     handlers = {
         "read_file": read_file,
         "read_skill_file": read_skill_file,
+        "tool_search": tool_search,
         "write_file": write_file,
         "apply_patch": apply_patch,
         "update_plan_state": update_plan_state,
@@ -2052,6 +2247,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
     permissions = {
         "read_file": TOOL_PERMISSION_READ,
         "read_skill_file": TOOL_PERMISSION_READ,
+        "tool_search": TOOL_PERMISSION_READ,
         "list_files": TOOL_PERMISSION_READ,
         "ask_user": TOOL_PERMISSION_READ,
         "consult_subagent": TOOL_PERMISSION_READ,
@@ -2070,6 +2266,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
     lanes = {
         "read_file": ToolExecutionLane.WORKSPACE_READ,
         "read_skill_file": ToolExecutionLane.WORKSPACE_READ,
+        "tool_search": ToolExecutionLane.CONTROL_SERIAL,
         "list_files": ToolExecutionLane.WORKSPACE_READ,
         "ask_user": ToolExecutionLane.CONTROL_SERIAL,
         "consult_subagent": ToolExecutionLane.SUBAGENT_READ,

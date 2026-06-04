@@ -237,6 +237,86 @@ class McpRuntimeTests(unittest.TestCase):
         self.assertIn("mcp__docs__search", names)
         self.assertNotIn("mcp__danger__delete", names)
 
+    def test_deferred_tools_are_hidden_initially_and_searchable_by_tool_search(self):
+        from harness_code_agent.runtime import tools
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        registry = tools.BUILTIN_TOOL_REGISTRY.copy()
+        registry.register(
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__docs__search",
+                    "description": "Search product documentation by query",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Documentation search query",
+                            }
+                        },
+                    },
+                },
+            },
+            lambda **_: "ok",
+            permission="read",
+            disclosure="deferred",
+        )
+        registry.register(
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__danger__delete",
+                    "description": "Delete remote data",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            lambda **_: "ok",
+            permission="dangerous",
+            disclosure="deferred",
+        )
+
+        initial_names = {
+            schema["function"]["name"]
+            for schema in tools.tool_schemas_for_profile(
+                allowed_permissions={"read", "network_read", "control"},
+                registry=registry,
+            )
+        }
+        deferred_names = {
+            schema["function"]["name"]
+            for schema in tools.tool_schemas_for_profile(
+                allowed_permissions={"read", "network_read", "control"},
+                registry=registry,
+                disclosure={"deferred"},
+            )
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(),
+                tool_registry=registry,
+                allowed_tool_permissions={"read", "network_read", "control"},
+                blocked_tool_names=set(),
+                revealed_tool_names=set(),
+            )
+            result = tools.execute_tool_result("tool_search", {"query": "documentation query"}, tool_context=context)
+
+        self.assertIn("tool_search", initial_names)
+        self.assertNotIn("mcp__docs__search", initial_names)
+        self.assertEqual(deferred_names, {"mcp__docs__search"})
+        self.assertEqual(result.status, "success")
+        self.assertIn("mcp__docs__search", result.output)
+        self.assertEqual(result.metadata["revealed_tool_names"], ["mcp__docs__search"])
+        self.assertNotIn("mcp__danger__delete", result.output)
+
     def test_profile_schema_filtering_returns_tools_in_name_order(self):
         from harness_code_agent.runtime import tools
 

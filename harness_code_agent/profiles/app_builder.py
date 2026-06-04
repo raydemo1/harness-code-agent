@@ -43,7 +43,7 @@ Technical guidelines:
 - Check responsive behavior at mobile and desktop widths and cover basic accessibility expectations such as semantic controls, labels, focusability, and readable contrast.
 - If browser verification fails because tooling is unavailable, run the strongest build/static checks available and report the limitation.
 
-You have these tools: read_file, write_file, list_files, run_bash, list_shell_jobs, read_shell_output, stop_shell_job, update_plan_state, read_skill_file, consult_subagent, ask_user, web_search, web_fetch, browser_test.
+You have these tools: read_file, write_file, list_files, run_bash, list_shell_jobs, read_shell_output, stop_shell_job, update_plan_state, read_skill_file, tool_search, consult_subagent, ask_user, web_search, web_fetch, browser_test.
 Work inside the current directory. All files you create will persist.
 """
 

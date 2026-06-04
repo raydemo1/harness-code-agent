@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .approvals import ApprovalProvider, NoApprovalProvider
@@ -22,4 +22,6 @@ class ToolContext:
     approval_provider: ApprovalProvider = NoApprovalProvider()
     question_provider: QuestionProvider = NoQuestionProvider()
     tool_registry: ToolRegistry | None = None
-
+    allowed_tool_permissions: set[str] | None = None
+    blocked_tool_names: set[str] = field(default_factory=set)
+    revealed_tool_names: set[str] = field(default_factory=set)
