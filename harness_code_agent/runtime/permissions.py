@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .shell_classification import classify_safe_shell_command
+
 
 TOOL_PERMISSION_READ = "read"
 TOOL_PERMISSION_NETWORK_READ = "network_read"
@@ -113,7 +115,7 @@ class PermissionPolicy:
             r"\bremove-item\b(?=.*-recurse\b)(?=.*(?:\bc:\\(?:\s|$)|\$home\b|~|(?:^|\s)\.(?:\s|$)|(?:^|\s)\*))",
             r"\bdel\b(?=.*(?:/[^\s]*s|-recurse\b))(?=.*(?:\bc:\\\*|\$home\b|~|(?:^|\s)\*))",
             r"\bmkfs(?:\.[\w-]+)?\b",
-            r"\bformat(?:\.com)?\b",
+            r"(?:^|[;&|]\s*)format(?:\.com)?(?:\s|$)",
             r"\bdiskpart\b",
             r"\bdd\b.*\bof=/dev/",
         ]
@@ -128,16 +130,6 @@ class PermissionPolicy:
         return "shell_risky"
 
 
-_READ_ONLY_COMMAND_PREFIXES = (
-    "cat ", "type ", "ls", "dir", "pwd", "grep ", "rg ", "head ", "tail ",
-    "git status", "git diff", "git log", "git show", "git branch",
-    "python -m unittest", "python -m pytest", "pytest", "test ", "diff ",
-    "ruff check", "mypy", "npm test", "go test", "cargo test",
-    "wc ", "which ", "where ",
-)
-
-
 def is_read_only_command(command: str) -> bool:
     """Check whether a shell command is safe to run in read-only contexts."""
-    lowered = command.strip().lower()
-    return any(lowered.startswith(prefix) for prefix in _READ_ONLY_COMMAND_PREFIXES)
+    return classify_safe_shell_command(command) in {"read", "verify"}

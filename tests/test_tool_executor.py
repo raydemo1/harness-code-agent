@@ -114,8 +114,11 @@ class ToolExecutorTests(unittest.TestCase):
 
         cases = {
             "rg \"needle\" .": tools.ToolExecutionLane.SHELL_READ,
+            "rg foo . | head -n 5": tools.ToolExecutionLane.SHELL_READ,
+            "Get-Content a.txt | Select-String foo": tools.ToolExecutionLane.SHELL_READ,
             "git status --short": tools.ToolExecutionLane.SHELL_READ,
             "pytest tests": tools.ToolExecutionLane.SHELL_VERIFY,
+            "pytest tests | Select-Object -First 10": tools.ToolExecutionLane.SHELL_VERIFY,
             "ruff check .": tools.ToolExecutionLane.SHELL_VERIFY,
             "npm run dev": tools.ToolExecutionLane.SHELL_LONG_RUNNING,
             "pnpm dev": tools.ToolExecutionLane.SHELL_LONG_RUNNING,
@@ -128,6 +131,10 @@ class ToolExecutorTests(unittest.TestCase):
             "cd src; pwd": tools.ToolExecutionLane.SHELL_SERIAL,
             "export FOO=bar && npm run dev": tools.ToolExecutionLane.SHELL_SERIAL,
             "conda activate base": tools.ToolExecutionLane.SHELL_SERIAL,
+            "cat > file.txt": tools.ToolExecutionLane.SHELL_SERIAL,
+            "rg needle . > out.txt": tools.ToolExecutionLane.SHELL_SERIAL,
+            "pytest tests > result.txt": tools.ToolExecutionLane.SHELL_SERIAL,
+            "rg foo . | tee out.txt": tools.ToolExecutionLane.SHELL_SERIAL,
         }
 
         for command, expected in cases.items():
@@ -384,6 +391,81 @@ class ToolExecutorTests(unittest.TestCase):
         tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
         self.assertIn("slow:300", tool_messages[0]["content"])
         self.assertIn("fast:30", tool_messages[1]["content"])
+
+    def test_parallel_group_observes_cancellation_while_waiting_for_tools(self):
+        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+
+        registry = tools.ToolRegistry()
+        token = CancellationToken()
+
+        def slow_tool(cancellation_token=None):
+            deadline = time.time() + 0.4
+            while time.time() < deadline:
+                if cancellation_token is not None and cancellation_token.is_cancelled:
+                    return ToolResult(tool="slow_read", status="failed", output="slow cancelled")
+                time.sleep(0.01)
+            return ToolResult(tool="slow_read", status="success", output="slow done")
+
+        def cancel_tool():
+            token.cancel()
+            return ToolResult(tool="cancel_read", status="success", output="cancelled")
+
+        registry.register(_schema("slow_read"), slow_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+        registry.register(_schema("cancel_read"), cancel_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+        tool_calls = [
+            _tool_call("tc_slow", "slow_read"),
+            _tool_call("tc_cancel", "cancel_read"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation, _context = _conversation_with_registry(Path(tmp), registry, tool_calls)
+            start = time.perf_counter()
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                with self.assertRaises(CancelledError):
+                    conversation.run_until_idle(cancellation_token=token)
+            elapsed = time.perf_counter() - start
+
+        self.assertLess(elapsed, 0.25)
+
+    def test_parallel_group_passes_cancellation_token_to_tool_handlers(self):
+        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+
+        registry = tools.ToolRegistry()
+        token = CancellationToken()
+        seen = []
+
+        def slow_tool(cancellation_token=None):
+            seen.append(cancellation_token)
+            while not cancellation_token.is_cancelled:
+                time.sleep(0.01)
+            seen.append("slow_observed_cancel")
+            return ToolResult(tool="slow_read", status="failed", output="slow cancelled")
+
+        def cancel_tool(cancellation_token=None):
+            token.cancel()
+            return ToolResult(tool="cancel_read", status="success", output="cancelled")
+
+        registry.register(_schema("slow_read"), slow_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+        registry.register(_schema("cancel_read"), cancel_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+        tool_calls = [
+            _tool_call("tc_slow", "slow_read"),
+            _tool_call("tc_cancel", "cancel_read"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation, _context = _conversation_with_registry(Path(tmp), registry, tool_calls)
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                with self.assertRaises(CancelledError):
+                    conversation.run_until_idle(cancellation_token=token)
+
+        self.assertIs(seen[0], token)
+        self.assertIn("slow_observed_cancel", seen)
 
     def test_long_running_shell_is_serial_barrier_and_returns_job_id(self):
         registry = tools.BUILTIN_TOOL_REGISTRY.copy()

@@ -128,6 +128,12 @@ def _is_explicit_review_intent(user_prompt: str) -> bool:
     chinese_review_terms = ("审查", "评审")
     if any(term in text for term in chinese_review_terms):
         return True
+    chinese_code_terms = ("代码", "变更", "提交", "实现", "diff", "pr")
+    if "review" in lowered and any(term in lowered for term in chinese_code_terms):
+        return True
+    chinese_inspection_terms = ("看一下代码", "看看代码", "检查代码", "代码有没有问题")
+    if any(term in lowered for term in chinese_inspection_terms):
+        return True
 
     review_patterns = [
         r"\bcode[-\s]+review\b",

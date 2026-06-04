@@ -96,6 +96,10 @@ _ANXIETY_PATTERNS = [
     r"(?i)to (save|conserve) (context|space|tokens)",
     r"(?i)i('ve| have) covered the (main|key|essential)",
     r"(?i)in the interest of (time|space|brevity)",
+    r"上下文.*(快满|快没|不够|用完|空间)",
+    r"(快没|没有|没).*上下文",
+    r"先收尾",
+    r"只覆盖关键",
 ]
 
 

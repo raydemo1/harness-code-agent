@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
@@ -224,29 +224,41 @@ class ToolExecutor:
             return executed
 
         futures: dict[Future, PreparedToolCall] = {}
+        pending: set[Future] = set()
         try:
             for prepared in ready:
-                futures[self._executor.submit(self._execute_one, prepared)] = prepared
-            for future, prepared in futures.items():
-                try:
-                    executed.append(future.result())
-                except Exception as exc:
-                    executed.append(
-                        ExecutedToolCall(
-                            prepared,
-                            ToolResult(
-                                tool=prepared.name,
-                                status="failed",
-                                output=f"[error] {type(exc).__name__}: {exc}",
-                                error=f"{type(exc).__name__}: {exc}",
-                                metadata={"status_source": "exception"},
-                            ),
-                            error=exc,
+                future = self._executor.submit(self._execute_one, prepared)
+                futures[future] = prepared
+                pending.add(future)
+            while pending:
+                self.conversation._check_cancelled(self.cancellation_token)
+                done, pending = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+                for future in done:
+                    prepared = futures[future]
+                    try:
+                        executed.append(future.result())
+                    except Exception as exc:
+                        executed.append(
+                            ExecutedToolCall(
+                                prepared,
+                                ToolResult(
+                                    tool=prepared.name,
+                                    status="failed",
+                                    output=f"[error] {type(exc).__name__}: {exc}",
+                                    error=f"{type(exc).__name__}: {exc}",
+                                    metadata={"status_source": "exception"},
+                                ),
+                                error=exc,
+                            )
                         )
-                    )
+            self.conversation._check_cancelled(self.cancellation_token)
         except Exception:
-            for future in futures:
+            for future in pending:
                 future.cancel()
+            if pending:
+                wait(pending, timeout=0.25)
             raise
         return executed
 
@@ -293,6 +305,7 @@ class ToolExecutor:
             tool_context=self.agent.tool_context,
             emit_events=False,
             execution_lane=prepared.lane,
+            cancellation_token=self.cancellation_token,
         )
         return ExecutedToolCall(prepared, tool_result)
 
@@ -388,49 +401,12 @@ def classify_shell_lane(command: str) -> tools.ToolExecutionLane:
         return tools.ToolExecutionLane.SHELL_SERIAL
     if shell_classification.is_long_running_shell_command(lowered):
         return tools.ToolExecutionLane.SHELL_LONG_RUNNING
-    if shell_classification.contains_stateful_shell_operation(lowered):
-        return tools.ToolExecutionLane.SHELL_SERIAL
-    if _is_shell_verify_command(lowered):
+    safe_kind = shell_classification.classify_safe_shell_command(lowered)
+    if safe_kind == "verify":
         return tools.ToolExecutionLane.SHELL_VERIFY
-    if _is_shell_read_command(lowered):
+    if safe_kind == "read":
         return tools.ToolExecutionLane.SHELL_READ
     return tools.ToolExecutionLane.SHELL_SERIAL
-
-
-def _is_shell_verify_command(command: str) -> bool:
-    prefixes = (
-        "pytest",
-        "python -m pytest",
-        "python -m unittest",
-        "ruff check",
-        "mypy",
-        "tsc --noemit",
-        "tsc --noemit ",
-        "go test",
-        "cargo test",
-    )
-    return any(command == prefix or command.startswith(prefix + " ") for prefix in prefixes)
-
-
-def _is_shell_read_command(command: str) -> bool:
-    prefixes = (
-        "rg ",
-        "grep ",
-        "git status",
-        "git diff",
-        "git log",
-        "git show",
-        "ls",
-        "dir",
-        "cat ",
-        "type ",
-        "head ",
-        "tail ",
-        "pwd",
-        "where ",
-        "which ",
-    )
-    return any(command == prefix.strip() or command.startswith(prefix) for prefix in prefixes)
 
 
 def _semaphore_for(lane: tools.ToolExecutionLane):

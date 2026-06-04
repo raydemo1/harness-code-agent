@@ -358,15 +358,17 @@ class TuiApp(App):
 
     # ── Async submit ────────────────────────────────────────────────────────
 
-    def _submit_async(self, text: str) -> None:
+    def _submit_async(self, text: str) -> bool:
         """Dispatch submit to background worker. Non-blocking."""
         if self._submitting:
-            return
+            return False
         self._submitting = True
+        self._input_enabled(False)
         self._streaming_current_response = False
         self._stream_header_printed = False
         self._cancellation_token = CancellationToken()
         self._submit_worker(text)
+        return True
 
     @work(thread=True, exclusive=True, exit_on_error=False)
     def _submit_worker(self, text: str) -> None:

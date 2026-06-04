@@ -25,7 +25,9 @@ from .permissions import (
     TOOL_PERMISSION_READ,
     TOOL_PERMISSION_SHELL,
     VALID_TOOL_PERMISSIONS,
+    is_read_only_command,
 )
+from .middlewares import AgentMiddleware
 from .questions import ConsoleQuestionProvider, QuestionRequest, normalize_question_options
 from .shell_classification import is_long_running_shell_command
 from .tool_context import ToolContext
@@ -947,9 +949,51 @@ def _tool_schema_by_name(name: str) -> dict | None:
 
 
 def consultation_tool_schemas() -> list[dict]:
-    """Return the read-only tool surface for consultation sub-agents."""
-    names = ("read_file", "list_files", "web_search", "web_fetch")
+    """Return the read-only and verification tool surface for consultation sub-agents."""
+    names = ("read_file", "list_files", "run_bash", "web_search", "web_fetch")
     return [schema for name in names if (schema := _tool_schema_by_name(name)) is not None]
+
+
+class ConsultationReadOnlyMiddleware(AgentMiddleware):
+    """Allow consultation helpers to inspect and verify without modifying state."""
+
+    _WRITE_OR_CONTROL_TOOLS = {
+        "write_file",
+        "apply_patch",
+        "update_plan_state",
+        "ask_user",
+        "browser_test",
+        "stop_dev_server",
+        "stop_shell_job",
+    }
+
+    def before_tool(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        messages: list[dict],
+        runtime_state=None,
+        agent_name: str | None = None,
+    ) -> ToolResult | None:
+        if tool_name in self._WRITE_OR_CONTROL_TOOLS:
+            return ToolResult(
+                tool=tool_name,
+                status="failed",
+                output="[blocked] Consultation sub-agents are read-only and must not modify files or control workflow state.",
+                error="consultation sub-agent is read-only",
+                metadata={"status_source": "consultation_policy"},
+            )
+        if tool_name == "run_bash":
+            command = str(tool_args.get("command", ""))
+            if not is_read_only_command(command):
+                return ToolResult(
+                    tool=tool_name,
+                    status="failed",
+                    output="[blocked] Consultation sub-agents may only run read-only or verification shell commands.",
+                    error="only read-only or verification shell commands are allowed",
+                    metadata={"status_source": "consultation_policy"},
+                )
+        return None
 
 
 def _as_consultation_report(scope: str, raw_result: str) -> str:
@@ -1004,7 +1048,8 @@ def consult_subagent(task: str, scope: str = "codebase_investigation") -> ToolRe
         name=f"consult_{scope}",
         system_prompt=(
             "You are a read-only consultation helper. You are not a separate implementation owner.\n"
-            "You may inspect files, search, and fetch references. "
+            "You may inspect files, run read-only or verification shell commands, search, and fetch references. "
+            "Use shell commands for evidence such as git diff, git status, pytest, ruff check, or similar checks. "
             "You must not modify files, start services, install packages, change git state, "
             "or decide whether the overall task is complete.\n"
             "Return only JSON with this shape:\n"
@@ -1020,6 +1065,7 @@ def consult_subagent(task: str, scope: str = "codebase_investigation") -> ToolRe
         ),
         use_tools=True,
         tool_schemas=consultation_tool_schemas(),
+        middlewares=[ConsultationReadOnlyMiddleware()],
     )
 
     result = sub.run(task)
@@ -2057,6 +2103,7 @@ def execute_tool(
     runtime_state=None,
     agent_name: str | None = None,
     tool_context: ToolContext | None = None,
+    cancellation_token=None,
 ) -> str:
     return execute_tool_result(
         name,
@@ -2064,6 +2111,7 @@ def execute_tool(
         runtime_state=runtime_state,
         agent_name=agent_name,
         tool_context=tool_context,
+        cancellation_token=cancellation_token,
     ).to_text()
 
 
@@ -2075,6 +2123,7 @@ def execute_tool_result(
     tool_context: ToolContext | None = None,
     emit_events: bool = True,
     execution_lane: ToolExecutionLane | str | None = None,
+    cancellation_token=None,
 ) -> ToolResult:
     """Execute a tool by name with pre-validation and auto-correction."""
     arguments = dict(arguments or {})
@@ -2143,6 +2192,7 @@ def execute_tool_result(
             agent_name=agent_name,
             tool_context=tool_context,
             execution_lane=execution_lane,
+            cancellation_token=cancellation_token,
         )
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
@@ -2228,6 +2278,7 @@ def _invoke_registered_tool(
     agent_name: str | None,
     tool_context: ToolContext | None,
     execution_lane: ToolExecutionLane | str | None = None,
+    cancellation_token=None,
 ):
     kwargs = dict(arguments)
     parameters = inspect.signature(fn).parameters
@@ -2241,6 +2292,8 @@ def _invoke_registered_tool(
         "tool_context": tool_context,
         "execution_lane": execution_lane,
     }
+    if cancellation_token is not None:
+        extras["cancellation_token"] = cancellation_token
     for key, value in extras.items():
         if key == "execution_lane":
             if key not in kwargs and key in parameters:

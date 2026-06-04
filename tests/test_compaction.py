@@ -332,6 +332,17 @@ class ContextAnxietyTests(unittest.TestCase):
         self.assertEqual(signal.score, 0)
         self.assertEqual(signal.reasons, [])
 
+    def test_detect_anxiety_recognizes_chinese_context_limit_language(self):
+        from harness_code_agent.agent.context import detect_anxiety
+
+        signal = detect_anxiety([
+            {"role": "assistant", "content": "我快没上下文空间了，先收尾一下。上下文快满了，我只覆盖关键部分。"},
+        ])
+
+        self.assertTrue(signal.detected)
+        self.assertGreaterEqual(signal.score, 2)
+        self.assertTrue(any("上下文" in reason for reason in signal.reasons))
+
 
 # ---------------------------------------------------------------------------
 # Manual checkpoint restore regression — no implicit git context injection

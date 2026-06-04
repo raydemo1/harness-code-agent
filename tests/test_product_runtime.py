@@ -536,6 +536,23 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertFalse(decision.fallback_used)
         call_router.assert_not_called()
 
+    def test_profile_router_short_circuits_common_chinese_review_intent(self):
+        from harness_code_agent.profiles import router
+
+        prompts = [
+            "帮我 review 这段代码",
+            "看一下代码有没有问题",
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for prompt in prompts:
+                with self.subTest(prompt=prompt):
+                    with patch("harness_code_agent.profiles.router._call_router_llm") as call_router:
+                        decision = router.route_profile_for_task(prompt, workspace=Path(tmpdir))
+                    self.assertEqual(decision.profile_name, "review")
+                    self.assertFalse(decision.fallback_used)
+                    call_router.assert_not_called()
+
     def test_profile_router_does_not_treat_review_filenames_as_review_intent(self):
         from harness_code_agent.profiles import router
 
@@ -607,13 +624,55 @@ class ProductRuntimeTests(unittest.TestCase):
 
         for command in [
             "ruff check .",
+            "ruff check --diff --no-fix --output-format=text",
             "mypy harness_code_agent",
             "npm test",
             "go test ./...",
             "cargo test",
+            "git log --format=%s -1",
         ]:
             with self.subTest(command=command):
                 self.assertTrue(is_read_only_command(command))
+
+    def test_read_only_command_allows_safe_pipelines_but_blocks_shell_writes(self):
+        from harness_code_agent.runtime.permissions import is_read_only_command
+
+        allowed = [
+            "rg foo . | head -n 5",
+            "Get-Content a.txt | Select-String foo",
+        ]
+        blocked = [
+            "cat > file.txt",
+            "rg needle . > out.txt",
+            "pytest tests > result.txt",
+            "rg foo . | tee out.txt",
+            "git diff --output=out.patch",
+            "git show HEAD --output out.txt",
+            "sort -o out.txt input.txt",
+        ]
+
+        for command in allowed:
+            with self.subTest(command=command):
+                self.assertTrue(is_read_only_command(command))
+        for command in blocked:
+            with self.subTest(command=command):
+                self.assertFalse(is_read_only_command(command))
+
+    def test_permission_policy_does_not_block_format_substrings_in_safe_commands(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+
+        policy = PermissionPolicy(mode="workspace-write")
+
+        safe_commands = [
+            "ruff check --diff --no-fix --output-format=text",
+            "git log --format=%s -1",
+            "git show --format=fuller HEAD",
+        ]
+
+        for command in safe_commands:
+            with self.subTest(command=command):
+                decision = policy.decide_tool_call("run_bash", {"command": command})
+                self.assertNotEqual(decision.risk, "shell_blocked")
 
     def test_turn_summary_event_serializes_payload(self):
         from harness_code_agent.sessions.events import TurnSummaryEvent

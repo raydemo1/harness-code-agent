@@ -42,10 +42,11 @@ class SubagentConsultationTests(unittest.TestCase):
         ]
         self.assertIn("read_file", tool_names)
         self.assertIn("list_files", tool_names)
-        self.assertNotIn("run_bash", tool_names)
+        self.assertIn("run_bash", tool_names)
         self.assertIn("web_search", tool_names)
         self.assertNotIn("write_file", tool_names)
         self.assertNotIn("update_plan_state", tool_names)
+        self.assertTrue(CapturingAgent.init_kwargs["middlewares"])
         self.assertEqual(result.status, "success")
         self.assertLessEqual(len(result.output), 8200)
         parsed = json.loads(result.output)
@@ -56,11 +57,30 @@ class SubagentConsultationTests(unittest.TestCase):
     def test_consultation_tool_schema_helper_is_stably_ordered(self):
         self.assertEqual(
             [schema["function"]["name"] for schema in tools.consultation_tool_schemas()],
-            ["read_file", "list_files", "web_search", "web_fetch"],
+            ["read_file", "list_files", "run_bash", "web_search", "web_fetch"],
         )
+
+    def test_consultation_middleware_allows_read_and_verify_shell_only(self):
+        middleware = tools.ConsultationReadOnlyMiddleware()
+
+        diff_allowed = middleware.before_tool("run_bash", {"command": "git diff --stat"}, [])
+        verify_allowed = middleware.before_tool("run_bash", {"command": "pytest tests"}, [])
+        pipeline_allowed = middleware.before_tool("run_bash", {"command": "rg foo . | head -n 5"}, [])
+        write_block = middleware.before_tool("write_file", {"path": "x.py", "content": "bad"}, [])
+        shell_block = middleware.before_tool("run_bash", {"command": "git add ."}, [])
+        redirect_block = middleware.before_tool("run_bash", {"command": "rg foo . > out.txt"}, [])
+
+        self.assertIsNone(diff_allowed)
+        self.assertIsNone(verify_allowed)
+        self.assertIsNone(pipeline_allowed)
+        self.assertIsNotNone(write_block)
+        self.assertIsNotNone(shell_block)
+        self.assertIsNotNone(redirect_block)
+        self.assertIn("read-only", write_block.output)
+        self.assertIn("read-only or verification", shell_block.output)
+        self.assertIn("read-only or verification", redirect_block.output)
 
 
 if __name__ == "__main__":
     unittest.main()
-
 

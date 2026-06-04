@@ -457,9 +457,6 @@ class InputArea(Vertical):
         if not text:
             return
 
-        text_area.text = ""
-        self.query_one("#cmd-palette", CommandPalette).update_candidates([])
-
         # Delegate to app for actual submission
         app = self.app
         if app is None:
@@ -476,7 +473,9 @@ class InputArea(Vertical):
             return
 
         # Submit to agent
-        app._submit_async(text)
+        if app._submit_async(text):
+            text_area.text = ""
+            self.query_one("#cmd-palette", CommandPalette).update_candidates([])
 
     @on(TextArea.Changed, "#input-text")
     def _on_text_changed(self, event: TextArea.Changed) -> None:

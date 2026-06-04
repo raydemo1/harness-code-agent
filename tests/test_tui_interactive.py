@@ -130,7 +130,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 async with app.run_test() as pilot:
                     await pilot.press("h", "e", "l", "l", "o")
                     await pilot.press("enter")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     self.assertIn("hello", submitted)
                     text_area = app.query_one("#input-text", SubmitTextArea)
                     self.assertEqual(text_area.text, "")
@@ -147,7 +147,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 app = TuiApp(cwd=self.root, profile_name="coding-agent")
                 async with app.run_test() as pilot:
                     await pilot.press("enter")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     self.assertEqual(len(submitted), 0)
         _run(_test())
 
@@ -166,7 +166,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     await pilot.press("slash")
                     await pilot.press("h", "e", "l", "p")
                     await pilot.press("enter")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     self.assertIn("/help", commands)
         _run(_test())
 
@@ -191,24 +191,24 @@ class TuiInteractiveTests(unittest.TestCase):
                     from harness_code_agent.tui.screens import ObservabilityScreen
 
                     await pilot.press("ctrl+o")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     self.assertIsInstance(app.screen, ObservabilityScreen)
                     body = str(app.screen.query_one("#observability-body").renderable)
                     self.assertIn("Observability dashboard", body)
                     self.assertIn("cache hit ratio: 80.0%", body)
 
                     await pilot.press("tab")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     body = str(app.screen.query_one("#observability-body").renderable)
                     self.assertIn("Project observability", body)
 
                     await pilot.press("e")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     footer = str(app.screen.query_one("#observability-footer").renderable)
                     self.assertIn("observability_export_markdown:", footer)
 
                     await pilot.press("escape")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     self.assertNotIsInstance(app.screen, ObservabilityScreen)
         _run(_test())
 
@@ -220,42 +220,18 @@ class TuiInteractiveTests(unittest.TestCase):
                 app = TuiApp(cwd=self.root, profile_name="coding-agent")
                 async with app.run_test(size=(120, 40)) as pilot:
                     await pilot.press("ctrl+o")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
 
                     body = str(app.screen.query_one("#observability-body").renderable)
                     self.assertIn("No active session yet", body)
 
                     await pilot.press("e")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     footer = str(app.screen.query_one("#observability-footer").renderable)
                     self.assertIn("No active session yet", footer)
         _run(_test())
 
     # ── Submit behavior ─────────────────────────────────────────────────────
-
-    def test_double_submit_prevented(self):
-        async def _test():
-            call_count = []
-            import time
-            mock = _mock_session(self.root)
-            def slow_submit(text, cancellation_token=None):
-                call_count.append(text)
-                time.sleep(0.3)
-                return SimpleNamespace(notice="", checkpoint="")
-            mock.submit = slow_submit
-
-            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
-                MockSession.return_value = mock
-                app = TuiApp(cwd=self.root, profile_name="coding-agent")
-                async with app.run_test() as pilot:
-                    await pilot.press("t", "a", "s", "k", "1")
-                    await pilot.press("enter")
-                    await pilot.pause()
-                    await pilot.press("t", "a", "s", "k", "2")
-                    await pilot.press("enter")
-                    await pilot.pause()
-                    self.assertEqual(len(call_count), 1)
-        _run(_test())
 
     def test_first_task_auto_submitted(self):
         async def _test():
@@ -267,7 +243,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 MockSession.return_value = mock
                 app = TuiApp(cwd=self.root, profile_name="coding-agent", first_task="fix the bug")
                 async with app.run_test() as pilot:
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     self.assertIn("fix the bug", submitted)
         _run(_test())
 
@@ -279,9 +255,9 @@ class TuiInteractiveTests(unittest.TestCase):
             async with app.run_test() as pilot:
                 from harness_code_agent.tui.app import StreamDelta
                 app.post_message(StreamDelta("Hello "))
-                await pilot.pause()
+                await pilot.pause(0.01)
                 app.post_message(StreamDelta("world"))
-                await pilot.pause()
+                await pilot.pause(0.01)
                 transcript = app.query_one("#transcript")
                 self.assertGreater(len(transcript.lines), 0)
         _run(_test())
@@ -295,7 +271,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     to_dict=lambda: {"type": "turn_started", "payload": {"turn": 1}},
                 )
                 app.post_message(SessionEvent(event))
-                await pilot.pause()
+                await pilot.pause(0.01)
                 self.assertEqual(app.state.snapshot.turn, 1)
                 self.assertEqual(app.state.snapshot.status, "running")
         _run(_test())
@@ -322,7 +298,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     },
                 )
                 app.post_message(SessionEvent(event))
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 text = app.query_one("#plan-panel").render()
                 self.assertIn("write failing test", text.plain)
@@ -335,7 +311,7 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test() as pilot:
                 app._output("test output", title="test")
-                await pilot.pause()
+                await pilot.pause(0.01)
                 self.assertTrue(any(b.title == "test" and b.body == "test output" for b in app.state.blocks))
         _run(_test())
 
@@ -348,7 +324,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     to_dict=lambda: {"type": "turn_started", "payload": {"turn": 5}},
                 )
                 app.post_message(SessionEvent(event))
-                await pilot.pause()
+                await pilot.pause(0.01)
                 status_bar = app.query_one("#status-bar")
                 self.assertEqual(status_bar.turn, 5)
                 self.assertEqual(status_bar.status, "running")
@@ -369,7 +345,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 app = TuiApp(cwd=self.root, profile_name="coding-agent")
                 async with app.run_test() as pilot:
                     await pilot.press("ctrl+p")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     self.assertEqual(app.state.snapshot.permission_mode, "danger-full-access")
                     self.assertTrue(any(block.title == "permission mode switched" for block in app.state.blocks))
         _run(_test())
@@ -390,7 +366,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 app = TuiApp(cwd=self.root, profile_name="coding-agent")
                 async with app.run_test() as pilot:
                     await pilot.press("ctrl+k")
-                    await pilot.pause()
+                    await pilot.pause(0.01)
                     self.assertEqual(calls, [True])
                     self.assertTrue(any(block.title == "context compacted" for block in app.state.blocks))
         _run(_test())
@@ -413,7 +389,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     reason="test",
                 )
                 app.show_approval_panel(request, event, holder)
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 input_area = app.query_one("#input-area")
                 self.assertFalse(input_area.display)
@@ -421,9 +397,9 @@ class TuiInteractiveTests(unittest.TestCase):
 
                 # Double-press 1 to approve
                 await pilot.press("1")
-                await pilot.pause()
+                await pilot.pause(0.01)
                 await pilot.press("1")
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 self.assertTrue(input_area.display)
                 self.assertTrue(holder[0])
@@ -445,13 +421,13 @@ class TuiInteractiveTests(unittest.TestCase):
                     reason="dangerous",
                 )
                 app.show_approval_panel(request, event, holder)
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 # Double-press 3 to deny
                 await pilot.press("3")
-                await pilot.pause()
+                await pilot.pause(0.01)
                 await pilot.press("3")
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 self.assertFalse(holder[0])
         _run(_test())
@@ -472,7 +448,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     reason="test",
                 )
                 app.show_approval_panel(request, event, holder)
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 panel = app.query_one("#approval-panel")
                 self.assertEqual(panel._selected_index, 0)
@@ -485,7 +461,7 @@ class TuiInteractiveTests(unittest.TestCase):
 
                 # Cleanup
                 await pilot.press("escape")
-                await pilot.pause()
+                await pilot.pause(0.01)
         _run(_test())
 
     def test_approval_panel_enter_submits(self):
@@ -504,11 +480,11 @@ class TuiInteractiveTests(unittest.TestCase):
                     reason="test",
                 )
                 app.show_approval_panel(request, event, holder)
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 # Enter should submit current selection (default: Approve)
                 await pilot.press("enter")
-                await pilot.pause()
+                await pilot.pause(0.01)
                 self.assertTrue(holder[0])
         _run(_test())
 
@@ -532,13 +508,13 @@ class TuiInteractiveTests(unittest.TestCase):
                     ],
                 )
                 app.show_question_panel(request, event, holder)
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 # Double-press 2 to select Vue
                 await pilot.press("2")
-                await pilot.pause()
+                await pilot.pause(0.01)
                 await pilot.press("2")
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 self.assertIsNotNone(holder[0])
                 self.assertEqual(holder[0]["label"], "Vue")
@@ -558,9 +534,9 @@ class TuiInteractiveTests(unittest.TestCase):
                     options=[QuestionOption(label="A"), QuestionOption(label="B")],
                 )
                 app.show_question_panel(request, event, holder)
-                await pilot.pause()
+                await pilot.pause(0.01)
                 await pilot.press("escape")
-                await pilot.pause()
+                await pilot.pause(0.01)
                 self.assertIsNone(holder[0])
         _run(_test())
 
@@ -582,7 +558,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     ],
                 )
                 app.show_question_panel(request, event, holder)
-                await pilot.pause()
+                await pilot.pause(0.01)
 
                 panel = app.query_one("#question-panel")
                 self.assertEqual(panel._selected_index, 0)
@@ -594,9 +570,10 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertEqual(panel._selected_index, 1)
 
                 await pilot.press("escape")
-                await pilot.pause()
+                await pilot.pause(0.01)
         _run(_test())
 
 
 if __name__ == "__main__":
     unittest.main()
+

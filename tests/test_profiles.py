@@ -145,15 +145,23 @@ class ProfileInterfaceTests(unittest.TestCase):
         write_block = middleware.before_tool("write_file", {"path": "x.py", "content": "bad"}, [])
         shell_block = middleware.before_tool("run_bash", {"command": "git add ."}, [])
         verify_allowed = middleware.before_tool("run_bash", {"command": "pytest tests"}, [])
+        pipeline_allowed = middleware.before_tool("run_bash", {"command": "rg foo . | head -n 5"}, [])
+        redirect_block = middleware.before_tool("run_bash", {"command": "rg foo . > out.txt"}, [])
+        tee_block = middleware.before_tool("run_bash", {"command": "rg foo . | tee out.txt"}, [])
         stop_job_block = middleware.before_tool("stop_shell_job", {"job_id": "shell-job-1"}, [])
         read_allowed = middleware.before_tool("read_file", {"path": "x.py"}, [])
 
         self.assertIsInstance(write_block, ToolResult)
         self.assertIsInstance(shell_block, ToolResult)
+        self.assertIsInstance(redirect_block, ToolResult)
+        self.assertIsInstance(tee_block, ToolResult)
         self.assertIsInstance(stop_job_block, ToolResult)
         self.assertIn("read-only", write_block.output)
         self.assertIn("safe verification", shell_block.output)
+        self.assertIn("safe verification", redirect_block.output)
+        self.assertIn("safe verification", tee_block.output)
         self.assertIsNone(verify_allowed)
+        self.assertIsNone(pipeline_allowed)
         self.assertIsNone(read_allowed)
 
     def test_specialized_profile_prompts_capture_expected_workflows(self):
