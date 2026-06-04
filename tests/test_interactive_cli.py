@@ -104,7 +104,7 @@ class InteractiveCliTests(unittest.TestCase):
         ).stdout.strip()
 
     def _session(self):
-        patcher = patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation())
+        patcher = patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation())
         patcher.start()
         session = InteractiveSession(cwd=self.temp_dir)
         close = session.close
@@ -128,7 +128,7 @@ class InteractiveCliTests(unittest.TestCase):
             session.close()
 
     def test_interactive_session_starts_pending_without_session_record(self):
-        with patch("harness_code_agent.agent.loop.Agent.start_conversation") as start:
+        with patch("harness_code_agent.agent.conversation.Agent.start_conversation") as start:
             session = InteractiveSession(cwd=self.temp_dir)
         try:
             self.assertFalse(session.is_bound)
@@ -151,7 +151,7 @@ class InteractiveCliTests(unittest.TestCase):
 
         with (
             patch("harness_code_agent.core.interactive.route_profile_for_task", return_value=decision),
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
         ):
             session = InteractiveSession(cwd=self.temp_dir)
             try:
@@ -169,7 +169,7 @@ class InteractiveCliTests(unittest.TestCase):
                 session.close()
 
     def test_pending_profile_slash_command_defers_session_creation_until_task(self):
-        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()):
+        with patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()):
             session = InteractiveSession(cwd=self.temp_dir)
             try:
                 self.assertTrue(session.handle_slash_command("/plan"))
@@ -200,7 +200,7 @@ class InteractiveCliTests(unittest.TestCase):
         store.event_bus(previous).emit("user_input", agent="main_agent", payload={"text": "previous task"})
         conversation = FakeConversation()
 
-        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=conversation):
+        with patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=conversation):
             session = InteractiveSession(
                 cwd=self.temp_dir,
                 profile_name="coding-agent",
@@ -233,7 +233,7 @@ class InteractiveCliTests(unittest.TestCase):
         plan_conversation.response_text = "plan output"
 
         with patch(
-            "harness_code_agent.agent.loop.Agent.start_conversation",
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
             side_effect=[coding_conversation, plan_conversation],
         ):
             session = InteractiveSession(
@@ -285,7 +285,7 @@ class InteractiveCliTests(unittest.TestCase):
 
         events = []
         with (
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=ToolingConversation()),
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=ToolingConversation()),
             patch("harness_code_agent.core.interactive.generate_turn_summary", side_effect=fake_summary),
         ):
             session = InteractiveSession(cwd=self.temp_dir, event_listener=events.append)
@@ -299,7 +299,7 @@ class InteractiveCliTests(unittest.TestCase):
                 session.close()
 
         with (
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=ToolingConversation()),
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=ToolingConversation()),
             patch("harness_code_agent.core.interactive.generate_turn_summary", side_effect=fake_summary),
         ):
             session = InteractiveSession(cwd=self.temp_dir)
@@ -320,7 +320,7 @@ class InteractiveCliTests(unittest.TestCase):
                     cancellation_token.cancel()
                 raise CancelledError("Turn cancelled by user")
 
-        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=CancellingConversation()):
+        with patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=CancellingConversation()):
             session = InteractiveSession(cwd=self.temp_dir)
             try:
                 with self.assertRaises(CancelledError):
@@ -361,7 +361,7 @@ class InteractiveCliTests(unittest.TestCase):
 
         with (
             patch("harness_code_agent.core.interactive.get_profile", return_value=FakePermissionProfile()),
-            patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
+            patch("harness_code_agent.agent.conversation.Agent", RecordingInteractiveAgent),
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-permissions")
             try:
@@ -423,7 +423,7 @@ class InteractiveCliTests(unittest.TestCase):
         with (
             patch("harness_code_agent.core.interactive.get_profile", return_value=FakeToolProfile()),
             patch("harness_code_agent.core.interactive.McpClientManager", FakeMcpManager),
-            patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
+            patch("harness_code_agent.agent.conversation.Agent", RecordingInteractiveAgent),
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
             try:
@@ -470,7 +470,7 @@ class InteractiveCliTests(unittest.TestCase):
 
         with (
             patch("harness_code_agent.core.interactive.McpClientManager", FakeMcpManager),
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
         ):
             session = InteractiveSession(cwd=self.temp_dir)
             try:
@@ -505,7 +505,7 @@ class InteractiveCliTests(unittest.TestCase):
 
         with (
             patch("harness_code_agent.core.interactive.get_profile", return_value=FakeToolProfile()),
-            patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
+            patch("harness_code_agent.agent.conversation.Agent", RecordingInteractiveAgent),
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
             try:
@@ -529,7 +529,7 @@ class InteractiveCliTests(unittest.TestCase):
 
         with (
             patch("harness_code_agent.core.interactive.get_profile", return_value=FakeToolProfile()),
-            patch("harness_code_agent.agent.loop.Agent", RecordingInteractiveAgent),
+            patch("harness_code_agent.agent.conversation.Agent", RecordingInteractiveAgent),
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-tools")
             try:
@@ -541,7 +541,7 @@ class InteractiveCliTests(unittest.TestCase):
 
     def test_plan_profile_captures_markdown_and_offers_handoff_choice(self):
         FakeConversation.response_text = "# Title\n\n## Summary\n\nPlan body"
-        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()):
+        with patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
             try:
                 result = session.submit("plan the parser fix")
@@ -565,7 +565,7 @@ class InteractiveCliTests(unittest.TestCase):
         coding_conversation.response_text = "implemented"
 
         with patch(
-            "harness_code_agent.agent.loop.Agent.start_conversation",
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
             side_effect=[plan_conversation, coding_conversation],
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
@@ -594,7 +594,7 @@ class InteractiveCliTests(unittest.TestCase):
         plan_conversation = FakeConversation()
         plan_conversation.response_text = "# Title\n\n## Summary\n\nPlan v1"
 
-        with patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=plan_conversation):
+        with patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=plan_conversation):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
             try:
                 session.submit("plan the parser fix")
@@ -614,7 +614,7 @@ class InteractiveCliTests(unittest.TestCase):
     def test_short_slash_commands_switch_profiles(self):
         conversations = [FakeConversation() for _ in range(7)]
         with patch(
-            "harness_code_agent.agent.loop.Agent.start_conversation",
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
             side_effect=conversations,
         ):
             session = InteractiveSession(cwd=self.temp_dir)
@@ -642,7 +642,7 @@ class InteractiveCliTests(unittest.TestCase):
         plan_conversation = FakeConversation()
         coding_conversation.response_text = "analysis output"
         with patch(
-            "harness_code_agent.agent.loop.Agent.start_conversation",
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
             side_effect=[coding_conversation, plan_conversation],
         ):
             session = InteractiveSession(cwd=self.temp_dir)
@@ -681,7 +681,7 @@ class InteractiveCliTests(unittest.TestCase):
         FakeConversation.response_text = "# Title\n\n## Summary\n\nPlan body"
         conversations = [FakeConversation(), FakeConversation()]
         with patch(
-            "harness_code_agent.agent.loop.Agent.start_conversation",
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
             side_effect=conversations,
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
@@ -922,8 +922,8 @@ class InteractiveCliTests(unittest.TestCase):
         errors = []
 
         with (
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=conversation),
-            patch("harness_code_agent.core.interactive.tools.stop_dev_server") as stop_dev_server,
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=conversation),
+            patch("harness_code_agent.core.interactive.stop_dev_server") as stop_dev_server,
         ):
             session = InteractiveSession(
                 cwd=self.temp_dir,
@@ -1153,7 +1153,7 @@ class InteractiveCliTests(unittest.TestCase):
         from harness_code_agent import cli
 
         with (
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
             patch("harness_code_agent.cli.TuiApp") as tui_app,
             patch.object(sys, "argv", ["hca", "-p", "fix", "tests"]),
         ):
@@ -1168,7 +1168,7 @@ class InteractiveCliTests(unittest.TestCase):
         from harness_code_agent import cli
 
         with (
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
             patch("harness_code_agent.cli.TuiApp") as tui_app,
             patch.object(sys, "argv", ["hca", "--print", "fix", "tests"]),
         ):
@@ -1255,8 +1255,8 @@ class InteractiveCliTests(unittest.TestCase):
 
         with (
             patch.object(config, "SANDBOX_MODE", "docker"),
-            patch("harness_code_agent.core.interactive.docker_cli_path", return_value="/usr/bin/docker"),
-            patch("harness_code_agent.core.interactive.docker_info_check", return_value=(True, "Docker 27.0.3")),
+            patch("harness_code_agent.core.formatters.docker_cli_path", return_value="/usr/bin/docker"),
+            patch("harness_code_agent.core.formatters.docker_info_check", return_value=(True, "Docker 27.0.3")),
         ):
             text, failures = format_doctor(Path(self.temp_dir))
 
@@ -1270,8 +1270,8 @@ class InteractiveCliTests(unittest.TestCase):
 
         with (
             patch.object(config, "SANDBOX_MODE", "docker"),
-            patch("harness_code_agent.core.interactive.docker_cli_path", return_value="/usr/bin/docker"),
-            patch("harness_code_agent.core.interactive.docker_info_check", return_value=(False, "Docker daemon unreachable (exit code 1)")),
+            patch("harness_code_agent.core.formatters.docker_cli_path", return_value="/usr/bin/docker"),
+            patch("harness_code_agent.core.formatters.docker_info_check", return_value=(False, "Docker daemon unreachable (exit code 1)")),
         ):
             text, failures = format_doctor(Path(self.temp_dir))
 
@@ -1307,7 +1307,7 @@ class InteractiveCliTests(unittest.TestCase):
         from harness_code_agent import cli
 
         with (
-            patch("harness_code_agent.agent.loop.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
             patch("harness_code_agent.cli.TuiApp") as tui_app,
             patch.object(sys, "argv", ["hca"]),
             patch.object(sys.stdin, "read", return_value="fix from pipe"),

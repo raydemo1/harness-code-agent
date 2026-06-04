@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from .. import config
 
 if TYPE_CHECKING:
-    from .loop import Agent
+    from .conversation import Agent
 
 
 def _get(value, key: str, default=None):

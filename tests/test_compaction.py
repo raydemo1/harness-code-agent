@@ -461,11 +461,11 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         ]
 
         with (
-            patch("harness_code_agent.agent.loop.context.count_tokens", side_effect=[thresholds.compact, thresholds.compact - 1]),
-            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(cleaned_messages, True)) as clean,
-            patch("harness_code_agent.agent.loop.context.summarize_older_conversation") as summarize,
-            patch("harness_code_agent.agent.loop.context.create_checkpoint", return_value="checkpoint") as checkpoint,
+            patch("harness_code_agent.agent.conversation.context.count_tokens", side_effect=[thresholds.compact, thresholds.compact - 1]),
+            patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
+            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(cleaned_messages, True)) as clean,
+            patch("harness_code_agent.agent.conversation.context.summarize_older_conversation") as summarize,
+            patch("harness_code_agent.agent.conversation.context.create_checkpoint", return_value="checkpoint") as checkpoint,
             patch.object(conv, "_replace_messages", wraps=conv._replace_messages) as replace_messages,
             patch.object(
                 conv,
@@ -499,17 +499,17 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_code_agent.agent.loop.context.count_tokens",
+                "harness_code_agent.agent.conversation.context.count_tokens",
                 side_effect=[
                     thresholds.compact,
                     thresholds.compact,
                     thresholds.summary_target - 1,
                 ],
             ),
-            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(cleaned_messages, False)) as clean,
-            patch("harness_code_agent.agent.loop.context.summarize_older_conversation", return_value=summarized_messages) as summarize,
-            patch("harness_code_agent.agent.loop.context.create_checkpoint", return_value="checkpoint") as checkpoint,
+            patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
+            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(cleaned_messages, False)) as clean,
+            patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=summarized_messages) as summarize,
+            patch("harness_code_agent.agent.conversation.context.create_checkpoint", return_value="checkpoint") as checkpoint,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -532,7 +532,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_code_agent.agent.loop.context.count_tokens",
+                "harness_code_agent.agent.conversation.context.count_tokens",
                 side_effect=[
                     thresholds.compact,
                     thresholds.compact,
@@ -540,10 +540,10 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
                     thresholds.summary_target,
                 ],
             ),
-            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(conv.messages, False)) as clean,
-            patch("harness_code_agent.agent.loop.context.summarize_older_conversation", return_value=conv.messages) as summarize,
-            patch("harness_code_agent.agent.loop.context.rebuild_working_context") as rebuild,
+            patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
+            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(conv.messages, False)) as clean,
+            patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=conv.messages) as summarize,
+            patch("harness_code_agent.agent.conversation.context.rebuild_working_context") as rebuild,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -575,7 +575,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_code_agent.agent.loop.context.count_tokens",
+                "harness_code_agent.agent.conversation.context.count_tokens",
                 side_effect=[
                     thresholds.compact,
                     thresholds.compact,
@@ -583,10 +583,10 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
                     thresholds.summary_target,
                 ],
             ),
-            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs", return_value=(conv.messages, False)),
-            patch("harness_code_agent.agent.loop.context.summarize_older_conversation", return_value=conv.messages),
-            patch("harness_code_agent.agent.loop.context.rebuild_working_context", return_value=rebuilt_messages) as rebuild,
+            patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
+            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(conv.messages, False)),
+            patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=conv.messages),
+            patch("harness_code_agent.agent.conversation.context.rebuild_working_context", return_value=rebuilt_messages) as rebuild,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -620,11 +620,11 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         )
 
         with (
-            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=thresholds.compact - 1),
-            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=signal),
-            patch("harness_code_agent.agent.loop.context.clean_older_tool_outputs") as clean,
-            patch("harness_code_agent.agent.loop.context.summarize_older_conversation") as summarize,
-            patch("harness_code_agent.agent.loop.context.rebuild_working_context") as rebuild,
+            patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=thresholds.compact - 1),
+            patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=signal),
+            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs") as clean,
+            patch("harness_code_agent.agent.conversation.context.summarize_older_conversation") as summarize,
+            patch("harness_code_agent.agent.conversation.context.rebuild_working_context") as rebuild,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -663,8 +663,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         )
 
         with (
-            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=thresholds.compact - 1),
-            patch("harness_code_agent.agent.loop.context.detect_anxiety", return_value=signal),
+            patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=thresholds.compact - 1),
+            patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=signal),
             patch.object(
                 conv,
                 "_request_assistant_message",

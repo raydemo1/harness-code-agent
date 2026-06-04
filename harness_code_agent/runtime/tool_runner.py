@@ -1,0 +1,420 @@
+"""Tool execution and event finalization."""
+from __future__ import annotations
+
+import inspect
+import os
+from typing import Callable
+
+from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent, classify_tool_failure
+from .tool_context import ToolContext
+from .tool_registry import ToolExecutionLane, ToolRegistry, _coerce_tool_lane
+from .tool_result import ToolResult, unstructured_tool_result_from_text
+
+
+def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
+    """
+    Pre-validate tool arguments and auto-correct common mistakes.
+    Returns (fixed_arguments, warning_message_or_None).
+
+    This is a lightweight heuristic layer — no LLM calls.
+    Catches the most common tool-call errors from weaker models:
+      - Empty/missing required arguments
+      - Absolute paths that should be relative
+      - Obvious typos in common patterns
+    """
+    warning = None
+
+    if name == "write_file":
+        path = arguments.get("path", "")
+        content = arguments.get("content")
+
+        # Empty path
+        if not path or not path.strip():
+            return arguments, "[auto-fix] Empty file path. You must specify a path."
+
+        # Absolute path → make relative to workspace
+        if path.startswith("/"):
+            import re
+            # Strip common workspace prefixes
+            for prefix in ["/app/", "/home/user/", "/workspace/"]:
+                if path.startswith(prefix):
+                    arguments["path"] = path[len(prefix):]
+                    warning = f"[auto-fix] Converted absolute path '{path}' to relative '{arguments['path']}'"
+                    break
+
+        # Missing content
+        if content is None:
+            arguments["content"] = ""
+            warning = "[auto-fix] Missing 'content' argument — writing empty file."
+
+    elif name == "read_file":
+        path = arguments.get("path", "")
+
+        # Absolute path → relative
+        if path.startswith("/"):
+            for prefix in ["/app/", "/home/user/", "/workspace/"]:
+                if path.startswith(prefix):
+                    arguments["path"] = path[len(prefix):]
+                    warning = f"[auto-fix] Converted absolute path '{path}' to relative '{arguments['path']}'"
+                    break
+
+    elif name == "run_bash":
+        command = arguments.get("command", "")
+
+        # Empty command
+        if not command or not command.strip():
+            return arguments, "[auto-fix] Empty command. You must specify a command to run."
+
+        # Detect interactive commands that will hang
+        import re
+        interactive_cmds = ["vim", "nano", "vi", "less", "more", "top", "htop"]
+        first_word = command.strip().split()[0] if command.strip() else ""
+        if first_word in interactive_cmds:
+            return arguments, (
+                f"[auto-fix] '{first_word}' is an interactive command that will hang. "
+                f"Use non-interactive alternatives: "
+                f"for editing use write_file, for viewing use {'type/more' if os.name == 'nt' else 'cat/head/tail'}."
+            )
+
+    elif name == "list_files":
+        directory = arguments.get("directory", ".")
+        if directory.startswith("/"):
+            for prefix in ["/app/", "/home/user/", "/workspace/"]:
+                if directory.startswith(prefix):
+                    arguments["directory"] = directory[len(prefix):] or "."
+                    warning = f"[auto-fix] Converted absolute path '{directory}' to relative '{arguments['directory']}'"
+                    break
+
+    return arguments, warning
+
+
+TOOL_EVENT_OUTPUT_LIMIT = 2_000
+
+
+def execute_tool(
+    name: str,
+    arguments: dict,
+    runtime_state=None,
+    agent_name: str | None = None,
+    tool_context: ToolContext | None = None,
+    cancellation_token=None,
+) -> str:
+    return execute_tool_result(
+        name,
+        arguments,
+        runtime_state=runtime_state,
+        agent_name=agent_name,
+        tool_context=tool_context,
+        cancellation_token=cancellation_token,
+    ).to_text()
+
+
+def execute_tool_result(
+    name: str,
+    arguments: dict,
+    runtime_state=None,
+    agent_name: str | None = None,
+    tool_context: ToolContext | None = None,
+    emit_events: bool = True,
+    execution_lane: ToolExecutionLane | str | None = None,
+    cancellation_token=None,
+) -> ToolResult:
+    """Execute a tool by name with pre-validation and auto-correction."""
+    arguments = dict(arguments or {})
+    registry = _registry_for_context(tool_context)
+
+    if emit_events and tool_context is not None:
+        tool_context.event_bus.emit_event(
+            ToolCallEvent(
+                tool=name,
+                args=_redact_tool_args(arguments),
+                agent=agent_name,
+            ).to_event()
+        )
+
+    fn = registry.get(name)
+    if fn is None:
+        return _finalize_tool_result_object(
+            ToolResult(
+                tool=name,
+                status="failed",
+                output=f"[error] Unknown tool: {name}",
+                error=f"Unknown tool: {name}",
+                metadata={"status_source": "registry"},
+            ),
+            tool_context=tool_context,
+            agent_name=agent_name,
+            emit_events=emit_events,
+        )
+
+    # Pre-validate and auto-correct arguments
+    arguments, fix_warning = _validate_and_fix(name, arguments)
+
+    # If validation returned a blocking error (no fix possible), return it.
+    if fix_warning and fix_warning.startswith("[auto-fix] Empty"):
+        return _finalize_tool_result_object(
+            ToolResult(
+                tool=name,
+                status="failed",
+                output=fix_warning,
+                error=fix_warning,
+                metadata={"status_source": "validation"},
+            ),
+            tool_context=tool_context,
+            agent_name=agent_name,
+            emit_events=emit_events,
+        )
+    if fix_warning and "interactive command" in fix_warning:
+        return _finalize_tool_result_object(
+            ToolResult(
+                tool=name,
+                status="failed",
+                output=fix_warning,
+                error=fix_warning,
+                metadata={"status_source": "validation"},
+            ),
+            tool_context=tool_context,
+            agent_name=agent_name,
+            emit_events=emit_events,
+        )
+
+    try:
+        result = _invoke_registered_tool(
+            fn,
+            arguments,
+            runtime_state=runtime_state,
+            agent_name=agent_name,
+            tool_context=tool_context,
+            execution_lane=execution_lane,
+            cancellation_token=cancellation_token,
+        )
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+        tool_result = ToolResult(
+            tool=name,
+            status="failed",
+            output=f"[error] {error}",
+            error=error,
+            metadata={"status_source": "exception"},
+        )
+    else:
+        tool_result = _coerce_tool_result(name, result)
+
+    # Prepend the auto-fix warning so the model knows what was corrected
+    if fix_warning:
+        tool_result = tool_result.with_output_prefix(fix_warning)
+
+    return _finalize_tool_result_object(
+        tool_result,
+        tool_context=tool_context,
+        agent_name=agent_name,
+        emit_events=emit_events,
+    )
+
+
+def finalize_executed_tool_result(
+    tool_result: ToolResult,
+    *,
+    arguments: dict | None = None,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+) -> ToolResult:
+    """Record a tool call and its already-computed result on the main thread."""
+    if tool_context is not None:
+        tool_context.event_bus.emit_event(
+            ToolCallEvent(
+                tool=tool_result.tool,
+                args=_redact_tool_args(arguments or {}),
+                agent=agent_name,
+            ).to_event()
+        )
+    return _finalize_tool_result_object(
+        tool_result,
+        tool_context=tool_context,
+        agent_name=agent_name,
+    )
+
+
+def finalize_intercepted_tool_result(
+    tool_result: ToolResult,
+    *,
+    arguments: dict | None = None,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+) -> ToolResult:
+    """Record a tool call that was intercepted before native execution."""
+    if tool_context is not None:
+        tool_context.event_bus.emit_event(
+            ToolCallEvent(
+                tool=tool_result.tool,
+                args=_redact_tool_args(arguments or {}),
+                agent=agent_name,
+            ).to_event()
+        )
+    return _finalize_tool_result_object(
+        tool_result,
+        tool_context=tool_context,
+        agent_name=agent_name,
+    )
+
+
+def _registry_for_context(tool_context: ToolContext | None) -> ToolRegistry:
+    if tool_context is not None and tool_context.tool_registry is not None:
+        return tool_context.tool_registry
+    from .builtins.registry import BUILTIN_TOOL_REGISTRY
+
+    return BUILTIN_TOOL_REGISTRY
+
+
+def _invoke_registered_tool(
+    fn: Callable,
+    arguments: dict,
+    *,
+    runtime_state,
+    agent_name: str | None,
+    tool_context: ToolContext | None,
+    execution_lane: ToolExecutionLane | str | None = None,
+    cancellation_token=None,
+):
+    kwargs = dict(arguments)
+    parameters = inspect.signature(fn).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    extras = {
+        "runtime_state": runtime_state,
+        "agent_name": agent_name,
+        "tool_context": tool_context,
+        "execution_lane": execution_lane,
+    }
+    if cancellation_token is not None:
+        extras["cancellation_token"] = cancellation_token
+    for key, value in extras.items():
+        if key == "execution_lane":
+            if key not in kwargs and key in parameters:
+                kwargs[key] = value
+            continue
+        if key not in kwargs and (key in parameters or accepts_kwargs):
+            kwargs[key] = value
+    return fn(**kwargs)
+
+
+def _finalize_tool_result(
+    tool_result: ToolResult,
+    *,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+) -> str:
+    return _finalize_tool_result_object(
+        tool_result,
+        tool_context=tool_context,
+        agent_name=agent_name,
+    ).to_text()
+
+
+def _finalize_tool_result_object(
+    tool_result: ToolResult,
+    *,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+    emit_events: bool = True,
+) -> ToolResult:
+    if emit_events and tool_context is not None:
+        _emit_structured_tool_result(tool_result, tool_context=tool_context, agent_name=agent_name)
+        _emit_file_change_events(tool_result, tool_context=tool_context, agent_name=agent_name)
+    return tool_result
+
+
+def _coerce_tool_result(name: str, result) -> ToolResult:
+    if isinstance(result, ToolResult):
+        return result
+    return unstructured_tool_result_from_text(tool=name, text=str(result))
+
+
+def _event_safe_tool_output(tool_result: ToolResult) -> tuple[str, dict]:
+    metadata = dict(tool_result.metadata)
+    output = tool_result.output or ""
+    metadata["output_length"] = len(output)
+    if tool_result.tool == "read_file" and output:
+        metadata["output_redacted"] = True
+        return f"[redacted read_file output: {len(output)} chars]", metadata
+    if len(output) > TOOL_EVENT_OUTPUT_LIMIT:
+        metadata["output_truncated"] = True
+        metadata["output_preview_chars"] = TOOL_EVENT_OUTPUT_LIMIT
+        return (
+            output[:TOOL_EVENT_OUTPUT_LIMIT]
+            + f"\n\n[TRUNCATED in session event: {len(output) - TOOL_EVENT_OUTPUT_LIMIT} chars omitted]",
+            metadata,
+        )
+    return output, metadata
+
+
+def _emit_structured_tool_result(
+    tool_result: ToolResult,
+    *,
+    tool_context: ToolContext,
+    agent_name: str | None,
+) -> None:
+    event_output, event_metadata = _event_safe_tool_output(tool_result)
+    tool_context.event_bus.emit_event(
+        ToolResultEvent(
+            tool=tool_result.tool,
+            status=tool_result.status,
+            output=event_output,
+            error=tool_result.error,
+            return_code=tool_result.return_code,
+            metadata=event_metadata,
+            agent=agent_name,
+        ).to_event()
+    )
+    if tool_result.status == "failed":
+        source = tool_result.metadata.get("status_source")
+        message = tool_result.error or event_output
+        tool_context.event_bus.emit_event(
+            FailureEvent(
+                category=classify_tool_failure(tool_result),
+                message=message,
+                tool=tool_result.tool,
+                source=str(source) if source else None,
+                agent=agent_name,
+            ).to_event()
+        )
+
+
+def _emit_file_change_events(
+    tool_result: ToolResult,
+    *,
+    tool_context: ToolContext,
+    agent_name: str | None,
+) -> None:
+    file_changes = tool_result.metadata.get("file_changes")
+    if not isinstance(file_changes, list):
+        return
+    for change in file_changes:
+        if not isinstance(change, dict):
+            continue
+        path = change.get("path")
+        if not path:
+            continue
+        payload = {
+            "path": str(path),
+            "snapshot_path": change.get("snapshot_path"),
+        }
+        if change.get("operation"):
+            payload["operation"] = change["operation"]
+        tool_context.event_bus.emit_event(
+            FileChangeEvent(
+                path=str(path),
+                operation=change.get("operation"),
+                snapshot_path=change.get("snapshot_path"),
+                agent=agent_name,
+            ).to_event()
+        )
+
+
+def _redact_tool_args(arguments: dict) -> dict:
+    redacted = dict(arguments or {})
+    if "content" in redacted:
+        redacted["content"] = f"[{len(str(redacted['content']))} chars]"
+    return redacted

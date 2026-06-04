@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .base import AgentConfig, BaseProfile
-from ..runtime.middlewares import AgentMiddleware
+from ..runtime.middleware import AgentMiddleware
 from ..runtime.permissions import (
     TOOL_PERMISSION_NETWORK_READ,
     TOOL_PERMISSION_READ,

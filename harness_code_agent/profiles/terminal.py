@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from .base import BaseProfile, AgentConfig
 from ..planning_policy import PLANNING_MODE_POLICY
-from ..runtime.middlewares import (
+from ..runtime.middleware import (
     LoopDetectionMiddleware,
     PreExitVerificationMiddleware,
     TimeBudgetMiddleware,

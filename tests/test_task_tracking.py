@@ -180,7 +180,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         state_path.parent.mkdir(parents=True)
         state_path.write_text('{"mode": "old"}\n', encoding="utf-8")
 
-        with patch("harness_code_agent.runtime.tools.os.replace", side_effect=OSError("locked")):
+        with patch("harness_code_agent.runtime.builtins.planning.os.replace", side_effect=OSError("locked")):
             result = execute_tool(
                 "update_plan_state",
                 self._base_args(),

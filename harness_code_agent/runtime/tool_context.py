@@ -10,7 +10,7 @@ from .permissions import PermissionPolicy
 from ..workspace.service import WorkspaceService
 
 if TYPE_CHECKING:
-    from .tools import ToolRegistry
+    from .tool_registry import ToolRegistry
 
 
 @dataclass

@@ -1,0 +1,105 @@
+"""Agent runtime state containers."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from .. import config
+from ..workspace.shell_jobs import ShellJobManager
+from ..workspace.shell_session import PersistentShellSession
+
+
+@dataclass
+class TaskBoard:
+    goal: str = ""
+    steps: list[str] = field(default_factory=list)
+    current_step: str = ""
+    completed_steps: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    next_action: str = ""
+    planning_mode: str = "unset"
+    update_count: int = 0
+    action_count: int = 0
+    changed_files: list[str] = field(default_factory=list)
+    requires_approval: bool = False
+    requires_update: bool = False
+    needs_final_update: bool = False
+    replan_required: bool = False
+    replan_reason: str = ""
+    plan_revision: int = 0
+    result_status: str = ""
+    validation: str = ""
+    remaining_issues: list[str] = field(default_factory=list)
+    actions_since_progress: int = 0
+
+
+@dataclass
+class RecoveryState:
+    mode: str = "NORMAL"
+    failure_signature: str = ""
+    repeat_count: int = 0
+    last_successful_action: str = ""
+    last_verification_result: str = ""
+
+
+@dataclass
+class AgentFallbackState:
+    total_tokens: int = 0
+    llm_call_count: int = 0
+    tool_call_count: int = 0
+    budget_warnings: set[str] = field(default_factory=set)
+    stop_requested: bool = False
+    stop_reason: str = ""
+    stop_limit_type: str = ""
+    stop_used: int | None = None
+    stop_limit: int | None = None
+    stop_last_tool: str = ""
+    stop_fingerprint_hash: str = ""
+    recent_action_summary: list[str] = field(default_factory=list)
+    fallback_event_emitted: bool = False
+
+    def request_stop(
+        self,
+        *,
+        reason: str,
+        limit_type: str = "",
+        used: int | None = None,
+        limit: int | None = None,
+        last_tool: str = "",
+        fingerprint_hash: str = "",
+        recent_action_summary: list[str] | None = None,
+    ) -> None:
+        if self.stop_requested:
+            return
+        self.stop_requested = True
+        self.stop_reason = reason
+        self.stop_limit_type = limit_type
+        self.stop_used = used
+        self.stop_limit = limit
+        self.stop_last_tool = last_tool
+        self.stop_fingerprint_hash = fingerprint_hash
+        if recent_action_summary is not None:
+            self.recent_action_summary = list(recent_action_summary)[-5:]
+
+    def record_action(self, summary: str) -> None:
+        summary = summary.strip()
+        if not summary:
+            return
+        self.recent_action_summary.append(summary[:240])
+        if len(self.recent_action_summary) > 5:
+            self.recent_action_summary = self.recent_action_summary[-5:]
+
+
+@dataclass
+class AgentRuntimeState:
+    shell_session: PersistentShellSession | None = None
+    shell_job_manager: ShellJobManager = field(default_factory=lambda: ShellJobManager(config.WORKSPACE))
+    task_board: TaskBoard = field(default_factory=TaskBoard)
+    recovery: RecoveryState = field(default_factory=RecoveryState)
+    fallback: AgentFallbackState = field(default_factory=AgentFallbackState)
+    action_tool_count: int = 0
+    current_turn_start_index: int = 0
+    session_id: str = "default"
+    auto_compaction_turn_start_index: int = -1
+    auto_compaction_suspended: bool = False
+    context_refill_streak: int = 0
+    context_anxiety_turn_start_index: int = -1

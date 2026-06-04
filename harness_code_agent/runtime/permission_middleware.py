@@ -17,7 +17,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .approvals import ApprovalRequest
-from .middlewares import AgentMiddleware
+from .middleware import AgentMiddleware
 
 if TYPE_CHECKING:
     from .tool_context import ToolContext

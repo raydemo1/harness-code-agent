@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from ..planning_policy import PLANNING_MODE_POLICY
 from .base import BaseProfile, AgentConfig
-from ..runtime.middlewares import (
+from ..runtime.middleware import (
     ErrorGuidanceMiddleware,
     LoopDetectionMiddleware,
     PreExitVerificationMiddleware,

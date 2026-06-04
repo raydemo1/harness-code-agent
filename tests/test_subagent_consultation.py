@@ -33,7 +33,7 @@ class CapturingAgent:
 
 class SubagentConsultationTests(unittest.TestCase):
     def test_consult_subagent_uses_read_only_tool_schemas(self):
-        with patch("harness_code_agent.agent.loop.Agent", CapturingAgent):
+        with patch("harness_code_agent.agent.conversation.Agent", CapturingAgent):
             result = tools.consult_subagent("inspect auth flow", scope="codebase_investigation")
 
         tool_names = [

@@ -76,8 +76,8 @@ class ProductRuntimeTests(unittest.TestCase):
         )
 
         with (
-            patch("harness_code_agent.agent.loop.config.BASE_URL", "https://api.deepseek.com"),
-            patch("harness_code_agent.agent.loop.config.MODEL", "deepseek-v4-flash"),
+            patch("harness_code_agent.agent.conversation.config.BASE_URL", "https://api.deepseek.com"),
+            patch("harness_code_agent.agent.conversation.config.MODEL", "deepseek-v4-flash"),
         ):
             assistant_msg = _assistant_message_from_response(msg)
 
@@ -94,8 +94,8 @@ class ProductRuntimeTests(unittest.TestCase):
         )
 
         with (
-            patch("harness_code_agent.agent.loop.config.BASE_URL", "https://api.deepseek.com"),
-            patch("harness_code_agent.agent.loop.config.MODEL", "deepseek-v4-flash"),
+            patch("harness_code_agent.agent.conversation.config.BASE_URL", "https://api.deepseek.com"),
+            patch("harness_code_agent.agent.conversation.config.MODEL", "deepseek-v4-flash"),
         ):
             assistant_msg = _assistant_message_from_response(msg)
 
@@ -107,8 +107,8 @@ class ProductRuntimeTests(unittest.TestCase):
         msg = SimpleNamespace(content="ok", reasoning_content="hidden", tool_calls=None)
 
         with (
-            patch("harness_code_agent.agent.loop.config.BASE_URL", "https://api.openai.com/v1"),
-            patch("harness_code_agent.agent.loop.config.MODEL", "gpt-4o"),
+            patch("harness_code_agent.agent.conversation.config.BASE_URL", "https://api.openai.com/v1"),
+            patch("harness_code_agent.agent.conversation.config.MODEL", "gpt-4o"),
         ):
             assistant_msg = _assistant_message_from_response(msg)
 
@@ -281,7 +281,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 self.chat = SimpleNamespace(completions=FakeCompletions())
 
         fake_client = FakeClient()
-        with patch("harness_code_agent.agent.loop.get_client", return_value=fake_client):
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client):
             conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=lambda _: None))
             completion = conversation._request_assistant_message(
                 conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10)
@@ -311,7 +311,7 @@ class ProductRuntimeTests(unittest.TestCase):
             def __init__(self):
                 self.chat = SimpleNamespace(completions=FakeCompletions())
 
-        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
             conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=lambda _: None))
 
         with patch.object(conversation.trace, "error") as trace_error:
@@ -351,7 +351,7 @@ class ProductRuntimeTests(unittest.TestCase):
 
         deltas = []
         fake_client = FakeClient()
-        with patch("harness_code_agent.agent.loop.get_client", return_value=fake_client):
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client):
             conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=deltas.append))
             completion = conversation._request_assistant_message(
                 conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10)
@@ -401,13 +401,13 @@ class ProductRuntimeTests(unittest.TestCase):
 
         schema = [{"type": "function", "function": {"name": "read_file"}}]
         provider = CountingProvider()
-        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
             conversation = AgentConversation(Agent("test", "system", use_tools=True, tool_schemas=schema))
         conversation.provider = provider
 
         with (
-            patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
-            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
         ):
             result = conversation.run_until_idle()
 
@@ -453,15 +453,15 @@ class ProductRuntimeTests(unittest.TestCase):
                 return self.delegate.assistant_message_from_response(msg)
 
         provider = CapturingProvider()
-        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
             conversation = AgentConversation(Agent("test", "system", use_tools=False))
         conversation.provider = provider
 
         with (
-            patch("harness_code_agent.agent.loop.config.BASE_URL", "https://api.deepseek.com"),
-            patch("harness_code_agent.agent.loop.config.MODEL_INTENSITY", "hard"),
-            patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
-            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            patch("harness_code_agent.agent.conversation.config.BASE_URL", "https://api.deepseek.com"),
+            patch("harness_code_agent.agent.conversation.config.MODEL_INTENSITY", "hard"),
+            patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
         ):
             conversation.run_until_idle()
 
@@ -486,7 +486,7 @@ class ProductRuntimeTests(unittest.TestCase):
         fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
         with (
-            patch("harness_code_agent.agent.loop.get_client", return_value=fake_client),
+            patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client),
             patch.object(loop.config, "BASE_URL", "https://api.deepseek.com"),
         ):
             result = loop.llm_call_simple([{"role": "user", "content": "summarize"}])
@@ -860,15 +860,15 @@ class ProductRuntimeTests(unittest.TestCase):
             def assistant_message_from_response(self, msg):
                 return self.delegate.assistant_message_from_response(msg)
 
-        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
             openai_conv = AgentConversation(Agent("test", "system", use_tools=False))
             compatible_conv = AgentConversation(Agent("test", "system", use_tools=False))
         openai_conv.provider = CapturingProvider("openai")
         compatible_conv.provider = CapturingProvider("openai-compatible")
 
         with (
-            patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
-            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
         ):
             openai_conv.run_until_idle()
             compatible_conv.run_until_idle()
@@ -968,7 +968,7 @@ class ProductRuntimeTests(unittest.TestCase):
         from harness_code_agent.agent.loop import Agent, AgentConversation
         from harness_code_agent.runtime.tool_result import ToolResult
 
-        with patch("harness_code_agent.agent.loop.get_client"):
+        with patch("harness_code_agent.agent.conversation.get_client"):
             conversation = AgentConversation(Agent("test", "system", use_tools=False))
 
         result = ToolResult(tool="read_file", status="success", output="SECRET_RAW_CONTENT")
@@ -1026,13 +1026,13 @@ class ProductRuntimeTests(unittest.TestCase):
                 self.chat = SimpleNamespace(completions=FakeCompletions())
 
         events = []
-        with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
             conversation = AgentConversation(Agent("test", "system", use_tools=False))
         conversation._event_bus = EventBus(listener=events.append)
 
         with (
-            patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
-            patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
         ):
             conversation.run_until_idle()
 
@@ -1098,14 +1098,14 @@ class ProductRuntimeTests(unittest.TestCase):
             (root / "note.txt").write_text("SECRET_FULL_CONTENT_UNSAFE" * 700, encoding="utf-8")
             fake_client = FakeClient()
             with (
-                patch("harness_code_agent.agent.loop.get_client", return_value=fake_client),
-                patch("harness_code_agent.agent.loop.config.WORKSPACE", str(root)),
+                patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client),
+                patch("harness_code_agent.agent.conversation.config.WORKSPACE", str(root)),
             ):
                 conversation = AgentConversation(Agent("test", "system", use_tools=True))
 
             with (
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 3),
-                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 3),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
                 patch("harness_code_agent.runtime.tools.config.WORKSPACE", str(root)),
             ):
                 conversation.run_until_idle()
@@ -1178,14 +1178,14 @@ class ProductRuntimeTests(unittest.TestCase):
             (root / "note.txt").write_text("SHORT_STALE_CONTENT", encoding="utf-8")
             fake_client = FakeClient()
             with (
-                patch("harness_code_agent.agent.loop.get_client", return_value=fake_client),
-                patch("harness_code_agent.agent.loop.config.WORKSPACE", str(root)),
+                patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client),
+                patch("harness_code_agent.agent.conversation.config.WORKSPACE", str(root)),
             ):
                 conversation = AgentConversation(Agent("test", "system", use_tools=True))
 
             with (
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 3),
-                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 3),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
                 patch("harness_code_agent.runtime.tools.config.WORKSPACE", str(root)),
             ):
                 conversation.run_until_idle()
@@ -1202,8 +1202,8 @@ class ProductRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stderr = StringIO()
             with (
-                patch("harness_code_agent.agent.loop.config.WORKSPACE", tmp),
-                patch("harness_code_agent.agent.loop.config.TRACE_STDERR", False),
+                patch("harness_code_agent.agent.conversation.config.WORKSPACE", tmp),
+                patch("harness_code_agent.agent.conversation.config.TRACE_STDERR", False),
             ):
                 with redirect_stderr(stderr):
                     writer = TraceWriter("main_agent")
@@ -1348,7 +1348,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 self.closed = True
 
         fake_jobs = FakeJobs()
-        with patch("harness_code_agent.agent.loop.get_client", return_value=SimpleNamespace(chat=SimpleNamespace(completions=None))):
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=SimpleNamespace(chat=SimpleNamespace(completions=None))):
             conversation = AgentConversation(Agent("test", "system", use_tools=False))
         conversation.runtime_state.shell_job_manager = fake_jobs
 
@@ -2482,7 +2482,7 @@ class ProductRuntimeTests(unittest.TestCase):
             )
             shell_schemas = tools.tool_schemas_for_profile(allowed_permissions={"shell"})
 
-            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
                 conversation = AgentConversation(
                     Agent(
                         "main_agent",
@@ -2493,7 +2493,7 @@ class ProductRuntimeTests(unittest.TestCase):
                         tool_context=context,
                     )
                 )
-            with patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2):
+            with patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2):
                 conversation.run_until_idle()
 
             event_types = [event.type for event in context.event_bus.events]
@@ -2558,7 +2558,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 event_bus=EventBus(),
             )
             read_only_schemas = tools.tool_schemas_for_profile(allowed_permissions={"read"})
-            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
                 conversation = AgentConversation(
                     Agent(
                         "consult_test",
@@ -2568,7 +2568,7 @@ class ProductRuntimeTests(unittest.TestCase):
                         tool_context=context,
                     )
                 )
-            with patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2):
+            with patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2):
                 conversation.run_until_idle()
 
             self.assertFalse((root / "should_not_exist.txt").exists())
@@ -2617,7 +2617,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 event_bus=EventBus(),
             )
             write_schemas = tools.tool_schemas_for_profile(allowed_permissions={"edit"})
-            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
                 conversation = AgentConversation(
                     Agent(
                         "main_agent",
@@ -2628,10 +2628,10 @@ class ProductRuntimeTests(unittest.TestCase):
                     )
                 )
             with (
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 10),
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 100),
-                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_TOTAL_TOKENS", 10),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_TOOL_CALLS", 100),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
             ):
                 text = conversation.run_until_idle()
 
@@ -2692,7 +2692,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 event_bus=EventBus(),
             )
             write_schemas = tools.tool_schemas_for_profile(allowed_permissions={"edit"})
-            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
                 conversation = AgentConversation(
                     Agent(
                         "main_agent",
@@ -2703,10 +2703,10 @@ class ProductRuntimeTests(unittest.TestCase):
                     )
                 )
             with (
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 100),
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 1),
-                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_TOTAL_TOKENS", 100),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_TOOL_CALLS", 1),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
             ):
                 text = conversation.run_until_idle()
 
@@ -2761,7 +2761,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 event_bus=EventBus(),
             )
             read_schemas = tools.tool_schemas_for_profile(allowed_permissions={"read"})
-            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
                 conversation = AgentConversation(
                     Agent(
                         "main_agent",
@@ -2772,10 +2772,10 @@ class ProductRuntimeTests(unittest.TestCase):
                     )
                 )
             with (
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 1),
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 100),
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 100),
-                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 1),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_TOTAL_TOKENS", 100),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_TOOL_CALLS", 100),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
             ):
                 text = conversation.run_until_idle()
 
@@ -2832,7 +2832,7 @@ class ProductRuntimeTests(unittest.TestCase):
                 event_bus=EventBus(),
             )
             read_schemas = tools.tool_schemas_for_profile(allowed_permissions={"read"})
-            with patch("harness_code_agent.agent.loop.get_client", return_value=FakeClient()):
+            with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
                 conversation = AgentConversation(
                     Agent(
                         "main_agent",
@@ -2843,11 +2843,11 @@ class ProductRuntimeTests(unittest.TestCase):
                     )
                 )
             with (
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 200),
-                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 100),
-                patch("harness_code_agent.agent.loop.config.AGENT_BUDGET_WARN_FRACTION", 0.25),
-                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_TOTAL_TOKENS", 200),
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_TOOL_CALLS", 100),
+                patch("harness_code_agent.agent.conversation.config.AGENT_BUDGET_WARN_FRACTION", 0.25),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
             ):
                 conversation.run_until_idle()
 
@@ -3038,7 +3038,7 @@ class ProductRuntimeTests(unittest.TestCase):
             workspace.write_text("warn.py", "x = 1\n")
 
             with patch(
-                "harness_code_agent.runtime.middlewares._check_ruff_diff",
+                "harness_code_agent.runtime.middleware.verification._check_ruff_diff",
                 return_value=[("warn.py", "W292", "no newline at end of file")],
             ):
                 first = mw.pre_exit(messages=[])

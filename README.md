@@ -30,8 +30,8 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 ├── harness_code_agent/     # 核心 Python 包
 │   ├── cli.py              # `hca` 命令行入口
 │   ├── core/               # Harness 控制器、CLI 命令处理、日志配置
-│   ├── agent/              # Agent loop、运行状态、上下文压缩/恢复
-│   ├── runtime/            # 工具、权限、审批、middleware 和 tool context
+│   ├── agent/              # Agent conversation、运行状态、trace、上下文压缩/恢复
+│   ├── runtime/            # 工具 registry/runner、内置工具、权限、审批和 middleware
 │   ├── workspace/          # 工作区路径保护、快照和持久 shell
 │   ├── sessions/           # 会话元数据与事件日志
 │   ├── skills/             # skill registry
@@ -413,14 +413,16 @@ python benchmarks/run_terminal_bench.py --task fix-git --env daytona
 
 新增工具时，通常需要：
 
-1. 在 `harness_code_agent/runtime/tools.py` 中实现工具函数。
-2. 在 tool schema 中声明参数。
-3. 在 `_build_builtin_tool_registry()` 中注册 handler，并显式声明权限分类。
+1. 在 `harness_code_agent/runtime/builtins/` 下按领域实现工具函数，例如文件工具放 `filesystem.py`，shell 工具放 `shell.py`。
+2. 在 `harness_code_agent/runtime/builtins/schemas.py` 中声明 tool schema。
+3. 在 `harness_code_agent/runtime/builtins/registry.py` 的 `_build_builtin_tool_registry()` 中注册 handler，并显式声明权限分类。
    例如查询天气这类外部只读工具应使用 `TOOL_PERMISSION_NETWORK_READ`。
 4. 如果现有分类不够表达风险，再扩展 `harness_code_agent/runtime/permissions.py` 的权限分类。
 5. 添加单元测试覆盖正常路径和失败路径。
 
-新增 middleware 时，建议先明确它要拦截的是 tool call、tool result 还是 agent loop 退出条件，并在 `harness_code_agent/runtime/middlewares.py` 中保持行为可测试、可组合。
+`harness_code_agent/runtime/tools.py` 只保留旧 public API 的兼容 re-export，新生产代码不要继续往这里堆实现。
+
+新增 middleware 时，建议先明确它要拦截的是 tool call、tool result 还是 agent loop 退出条件，并在 `harness_code_agent/runtime/middleware/` 下按职责拆分实现，再从 `harness_code_agent/runtime/middleware/__init__.py` 导出。`harness_code_agent/runtime/middlewares.py` 只保留旧 public API 的兼容 re-export。
 
 ## 注意事项
 

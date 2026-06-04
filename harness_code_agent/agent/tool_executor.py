@@ -8,9 +8,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import config
-from ..runtime import tools
 from ..runtime.permissions import PermissionPolicy
 from ..runtime import shell_classification
+from ..runtime.tool_registry import ToolExecutionLane, tool_schemas_for_profile
+from ..runtime.tool_runner import (
+    _registry_for_context,
+    execute_tool_result,
+    finalize_executed_tool_result,
+    finalize_intercepted_tool_result,
+)
 from ..runtime.tool_result import ToolResult
 from ..workspace.shell_session import PersistentShellSession
 
@@ -23,11 +29,11 @@ VERIFY_SHELL_LIMIT = 2
 NETWORK_LIMIT = 2
 
 PARALLEL_LANES = {
-    tools.ToolExecutionLane.WORKSPACE_READ,
-    tools.ToolExecutionLane.NETWORK_READ,
-    tools.ToolExecutionLane.SUBAGENT_READ,
-    tools.ToolExecutionLane.SHELL_READ,
-    tools.ToolExecutionLane.SHELL_VERIFY,
+    ToolExecutionLane.WORKSPACE_READ,
+    ToolExecutionLane.NETWORK_READ,
+    ToolExecutionLane.SUBAGENT_READ,
+    ToolExecutionLane.SHELL_READ,
+    ToolExecutionLane.SHELL_VERIFY,
 }
 
 
@@ -37,7 +43,7 @@ class PreparedToolCall:
     tool_call_id: str
     name: str
     args: dict
-    lane: tools.ToolExecutionLane
+    lane: ToolExecutionLane
     raw: Any
     blocked_result: ToolResult | None = None
     emit_events: bool = True
@@ -118,7 +124,7 @@ class ToolExecutor:
                         tool_call_id=tc["id"],
                         name=fn_name,
                         args={},
-                        lane=tools.ToolExecutionLane.BLOCKED,
+                        lane=ToolExecutionLane.BLOCKED,
                         raw=tc,
                         blocked_result=ToolResult(
                             tool=fn_name,
@@ -142,7 +148,7 @@ class ToolExecutor:
                     error=output.removeprefix("[blocked] "),
                     metadata={"status_source": "permission"},
                 )
-                lane = tools.ToolExecutionLane.BLOCKED
+                lane = ToolExecutionLane.BLOCKED
                 self.conversation.trace.middleware_inject("ToolSchemaGuard", "before_tool", output)
             prepared.append(
                 PreparedToolCall(
@@ -157,16 +163,16 @@ class ToolExecutor:
             )
         return prepared, False
 
-    def _classify_call(self, name: str, args: dict) -> tuple[tools.ToolExecutionLane, ToolResult | None]:
-        registry = tools._registry_for_context(self.agent.tool_context)
-        lane = registry.lane_for(name) or tools.ToolExecutionLane.CONTROL_SERIAL
+    def _classify_call(self, name: str, args: dict) -> tuple[ToolExecutionLane, ToolResult | None]:
+        registry = _registry_for_context(self.agent.tool_context)
+        lane = registry.lane_for(name) or ToolExecutionLane.CONTROL_SERIAL
         if name != "run_bash":
             return lane, None
         command = str(args.get("command", ""))
         shell_risk = self._shell_policy.classify_shell_command(command)
         if shell_risk == "shell_blocked":
             output = "[blocked] blacklisted shell command is never allowed"
-            return tools.ToolExecutionLane.BLOCKED, ToolResult(
+            return ToolExecutionLane.BLOCKED, ToolResult(
                 tool=name,
                 status="failed",
                 output=output,
@@ -294,10 +300,10 @@ class ToolExecutor:
             return self._execute_one_unlimited(prepared)
 
     def _execute_one_unlimited(self, prepared: PreparedToolCall) -> ExecutedToolCall:
-        if prepared.name == "run_bash" and prepared.lane == tools.ToolExecutionLane.SHELL_SERIAL:
+        if prepared.name == "run_bash" and prepared.lane == ToolExecutionLane.SHELL_SERIAL:
             if self.runtime_state.shell_session is None:
                 self.runtime_state.shell_session = PersistentShellSession(config.WORKSPACE)
-        tool_result = tools.execute_tool_result(
+        tool_result = execute_tool_result(
             prepared.name,
             prepared.args,
             runtime_state=self.runtime_state,
@@ -314,7 +320,7 @@ class ToolExecutor:
         tool_result = item.result
         if item.intercepted:
             if prepared.emit_events:
-                tool_result = tools.finalize_intercepted_tool_result(
+                tool_result = finalize_intercepted_tool_result(
                     tool_result,
                     arguments=prepared.args,
                     tool_context=self.agent.tool_context,
@@ -329,7 +335,7 @@ class ToolExecutor:
             })
             return
 
-        tool_result = tools.finalize_executed_tool_result(
+        tool_result = finalize_executed_tool_result(
             tool_result,
             arguments=prepared.args,
             tool_context=self.agent.tool_context,
@@ -402,7 +408,7 @@ class ToolExecutor:
             return
 
         allowed_permissions = context.allowed_tool_permissions
-        revealed_schemas = tools.tool_schemas_for_profile(
+        revealed_schemas = tool_schemas_for_profile(
             allowed_permissions=allowed_permissions,
             include_names=new_names,
             exclude_names=context.blocked_tool_names,
@@ -446,25 +452,25 @@ def _build_groups(calls: list[PreparedToolCall]) -> list[ExecutionGroup]:
     return groups
 
 
-def classify_shell_lane(command: str) -> tools.ToolExecutionLane:
+def classify_shell_lane(command: str) -> ToolExecutionLane:
     lowered = " ".join(str(command or "").strip().lower().split())
     if not lowered:
-        return tools.ToolExecutionLane.SHELL_SERIAL
+        return ToolExecutionLane.SHELL_SERIAL
     if shell_classification.is_long_running_shell_command(lowered):
-        return tools.ToolExecutionLane.SHELL_LONG_RUNNING
+        return ToolExecutionLane.SHELL_LONG_RUNNING
     safe_kind = shell_classification.classify_safe_shell_command(lowered)
     if safe_kind == "verify":
-        return tools.ToolExecutionLane.SHELL_VERIFY
+        return ToolExecutionLane.SHELL_VERIFY
     if safe_kind == "read":
-        return tools.ToolExecutionLane.SHELL_READ
-    return tools.ToolExecutionLane.SHELL_SERIAL
+        return ToolExecutionLane.SHELL_READ
+    return ToolExecutionLane.SHELL_SERIAL
 
 
-def _semaphore_for(lane: tools.ToolExecutionLane):
-    if lane == tools.ToolExecutionLane.SUBAGENT_READ:
+def _semaphore_for(lane: ToolExecutionLane):
+    if lane == ToolExecutionLane.SUBAGENT_READ:
         return ToolExecutor._subagent_semaphore
-    if lane == tools.ToolExecutionLane.SHELL_VERIFY:
+    if lane == ToolExecutionLane.SHELL_VERIFY:
         return ToolExecutor._verify_shell_semaphore
-    if lane == tools.ToolExecutionLane.NETWORK_READ:
+    if lane == ToolExecutionLane.NETWORK_READ:
         return ToolExecutor._network_semaphore
     return None
