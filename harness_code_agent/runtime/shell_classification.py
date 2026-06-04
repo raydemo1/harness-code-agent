@@ -9,7 +9,7 @@ def is_long_running_shell_command(command: str) -> bool:
         return False
     if _is_cd_prefixed_long_running_command(lowered):
         return True
-    if _contains_stateful_shell_operation(lowered):
+    if contains_stateful_shell_operation(lowered):
         return False
     return _is_direct_long_running_command(lowered)
 
@@ -19,7 +19,7 @@ def _is_cd_prefixed_long_running_command(command: str) -> bool:
     return bool(match and _is_direct_long_running_command(match.group("inner").strip()))
 
 
-def _contains_stateful_shell_operation(command: str) -> bool:
+def contains_stateful_shell_operation(command: str) -> bool:
     patterns = (
         r"(?:^|[;&|]\s*)cd(?:\s|$)",
         r"\bset-location\b",
@@ -31,6 +31,10 @@ def _contains_stateful_shell_operation(command: str) -> bool:
         r"\bconda\s+activate\b",
     )
     return any(re.search(pattern, command) for pattern in patterns)
+
+
+def _contains_stateful_shell_operation(command: str) -> bool:
+    return contains_stateful_shell_operation(command)
 
 
 def _is_direct_long_running_command(command: str) -> bool:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -11,7 +10,7 @@ from typing import Any
 from .. import config
 from ..runtime import tools
 from ..runtime.permissions import PermissionPolicy
-from ..runtime.shell_classification import is_long_running_shell_command
+from ..runtime import shell_classification
 from ..runtime.tool_result import ToolResult
 from ..workspace.shell_session import PersistentShellSession
 
@@ -60,7 +59,6 @@ class ExecutionGroup:
 
 
 class ToolExecutor:
-    _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     _subagent_semaphore = threading.Semaphore(SUBAGENT_LIMIT)
     _verify_shell_semaphore = threading.Semaphore(VERIFY_SHELL_LIMIT)
     _network_semaphore = threading.Semaphore(NETWORK_LIMIT)
@@ -73,6 +71,7 @@ class ToolExecutor:
         self._shell_policy = PermissionPolicy()
         self._tool_calls: list = []
         self._block_remaining_after_index: int | None = None
+        self._executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
     def execute(self, tool_calls: list) -> bool:
         self._tool_calls = list(tool_calls or [])
@@ -101,6 +100,7 @@ class ToolExecutor:
             return False
         finally:
             self.conversation.compaction_gate.end_tool_call()
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _prepare_calls(self, tool_calls: list) -> tuple[list[PreparedToolCall], bool]:
         prepared: list[PreparedToolCall] = []
@@ -386,29 +386,15 @@ def classify_shell_lane(command: str) -> tools.ToolExecutionLane:
     lowered = " ".join(str(command or "").strip().lower().split())
     if not lowered:
         return tools.ToolExecutionLane.SHELL_SERIAL
-    if is_long_running_shell_command(lowered):
+    if shell_classification.is_long_running_shell_command(lowered):
         return tools.ToolExecutionLane.SHELL_LONG_RUNNING
-    if _contains_stateful_shell_operation(lowered):
+    if shell_classification.contains_stateful_shell_operation(lowered):
         return tools.ToolExecutionLane.SHELL_SERIAL
     if _is_shell_verify_command(lowered):
         return tools.ToolExecutionLane.SHELL_VERIFY
     if _is_shell_read_command(lowered):
         return tools.ToolExecutionLane.SHELL_READ
     return tools.ToolExecutionLane.SHELL_SERIAL
-
-
-def _contains_stateful_shell_operation(command: str) -> bool:
-    patterns = [
-        r"(?:^|[;&|]\s*)cd(?:\s|$)",
-        r"\bset-location\b",
-        r"(?:^|[;&|]\s*)export\s+",
-        r"(?:^|[;&|]\s*)source\s+",
-        r"(?:^|[;&|]\s*)set\s+",
-        r"(?:^|[;&|]\s*)alias\s+",
-        r"\bactivate\b",
-        r"\bconda\s+activate\b",
-    ]
-    return any(re.search(pattern, command) for pattern in patterns)
 
 
 def _is_shell_verify_command(command: str) -> bool:

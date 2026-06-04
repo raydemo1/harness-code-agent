@@ -134,6 +134,12 @@ class ProductRuntimeTests(unittest.TestCase):
             "openai-compatible",
         )
 
+    def test_config_and_provider_adapter_share_provider_resolution(self):
+        from harness_code_agent import config
+        from harness_code_agent.agent import providers
+
+        self.assertIs(config._resolve_provider_name, providers.resolve_provider_name)
+
     def test_cached_provider_client_refreshes_when_config_changes(self):
         from harness_code_agent.agent import providers
 
@@ -549,6 +555,29 @@ class ProductRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("harness_code_agent.profiles.router.get_client", return_value=fake_client):
                 decision = router.route_profile_for_task("open docs/review.md and summarize it", workspace=Path(tmpdir))
+
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertEqual(len(completions.calls), 1)
+
+    def test_profile_router_does_not_short_circuit_review_plus_implementation(self):
+        from harness_code_agent.profiles import router
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content='{"profile_name":"coding-agent","confidence":0.91,"reason":"implementation requested"}'))]
+                )
+
+        completions = FakeCompletions()
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("harness_code_agent.profiles.router.get_client", return_value=fake_client):
+                decision = router.route_profile_for_task("帮我评审一下这个方案然后实现", workspace=Path(tmpdir))
 
         self.assertEqual(decision.profile_name, "coding-agent")
         self.assertEqual(len(completions.calls), 1)
@@ -2094,6 +2123,28 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(result.snapshot_path.read_text(encoding="utf-8"), "old")
             with self.assertRaises(ValueError):
                 workspace.resolve("../outside.txt")
+
+    def test_workspace_service_read_text_uses_same_lock_as_writes(self):
+        import threading
+        import time
+
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("old", encoding="utf-8")
+            workspace = WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots")
+            results = []
+
+            with workspace._lock:
+                reader = threading.Thread(target=lambda: results.append(workspace.read_text("app.py")))
+                reader.start()
+                time.sleep(0.05)
+                self.assertEqual(results, [])
+
+            reader.join(timeout=1)
+
+        self.assertEqual(results, ["old"])
 
     def test_workspace_service_applies_unique_text_patch_and_rejects_ambiguous_patch(self):
         from harness_code_agent.workspace.service import WorkspaceService

@@ -8,6 +8,7 @@ from typing import Callable, Iterable
 from openai import OpenAI
 
 from .. import config
+from ..provider_resolution import resolve_provider_name
 from .utils import _get, _usage_to_dict
 
 
@@ -55,23 +56,6 @@ def current_adapter() -> "ProviderAdapter":
             model=config.MODEL,
         )
     )
-
-
-def resolve_provider_name(*, provider: str | None, base_url: str | None, model: str | None) -> str:
-    requested = (provider or "auto").strip().lower()
-    if requested in {"openai-compatible", "compatible"}:
-        return "openai-compatible"
-    if requested in {"openai", "deepseek"}:
-        return requested
-    if requested != "auto":
-        raise ValueError(f"Unsupported HARNESS_PROVIDER: {provider}")
-
-    base_signature = (base_url or "").lower()
-    if "api.openai.com" in base_signature:
-        return "openai"
-    if "deepseek" in base_signature:
-        return "deepseek"
-    return "openai-compatible"
 
 
 @dataclass(frozen=True)

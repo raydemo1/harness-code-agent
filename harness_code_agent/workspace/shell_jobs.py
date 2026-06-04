@@ -56,6 +56,7 @@ class ShellJob:
     container_name: str | None = None
     error: str | None = None
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    _reader_threads: list[threading.Thread] = field(default_factory=list, repr=False)
 
     @property
     def output_tail(self) -> str:
@@ -266,7 +267,10 @@ class ShellJobManager:
     def _start_reader(self, job: ShellJob, pipe, stream_name: str) -> None:
         if pipe is None:
             return
-        threading.Thread(target=self._reader_loop, args=(job, pipe, stream_name), daemon=True).start()
+        thread = threading.Thread(target=self._reader_loop, args=(job, pipe, stream_name), daemon=True)
+        with job._lock:
+            job._reader_threads.append(thread)
+        thread.start()
 
     def _reader_loop(self, job: ShellJob, pipe, stream_name: str) -> None:
         try:
@@ -288,6 +292,8 @@ class ShellJobManager:
         if process is None:
             return
         exit_code = process.wait()
+        for thread in list(job._reader_threads):
+            thread.join()
         if job.status == "running":
             job.mark("exited", exit_code=exit_code)
 

@@ -130,6 +130,32 @@ class ShellJobManagerTests(unittest.TestCase):
         self.assertIn("child-kill", calls)
         self.assertIn("parent-kill", calls)
 
+    def test_monitor_waits_for_reader_threads_before_marking_exited(self):
+        import threading
+
+        from harness_code_agent.workspace.shell_jobs import ShellJob, ShellJobManager
+
+        class FakeProcess:
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ShellJobManager(Path(tmp))
+            job = ShellJob(job_id="shell-job-test", command="exit", pid=123, process=FakeProcess())
+
+            def late_reader():
+                time.sleep(0.05)
+                job.output.append("late output\n")
+
+            reader = threading.Thread(target=late_reader)
+            job._reader_threads = [reader]
+            reader.start()
+
+            manager._monitor(job)
+
+        self.assertEqual(job.status, "exited")
+        self.assertIn("late output", job.output_tail)
+
     def _wait_for_output(self, manager, job_id, needle):
         deadline = time.time() + 5
         while time.time() < deadline:

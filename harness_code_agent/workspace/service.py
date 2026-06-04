@@ -23,9 +23,9 @@ class WorkspacePatchResult:
 class WorkspaceService:
     """Workspace path resolution and file snapshot service.
 
-    The internal lock protects snapshots and changed_files consistency. In v1,
-    global read/write isolation is provided by the tool executor's group barrier,
-    not by this service acting as a workspace transaction layer.
+    The internal lock serializes reads, writes, snapshots, and changed_files
+    bookkeeping for this service instance. Global cross-agent isolation is still
+    provided by the tool executor's group barrier.
     """
 
     DEFAULT_PROTECTED_NAMES = {".env", ".env.local", ".env.production"}
@@ -54,7 +54,8 @@ class WorkspaceService:
         return candidate
 
     def read_text(self, path: str | Path) -> str:
-        return self.resolve(path).read_text(encoding="utf-8", errors="replace")
+        with self._lock:
+            return self.resolve(path).read_text(encoding="utf-8", errors="replace")
 
     def write_text(self, path: str | Path, content: str) -> WorkspaceWriteResult:
         with self._lock:

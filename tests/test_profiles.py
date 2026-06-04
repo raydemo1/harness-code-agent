@@ -120,6 +120,7 @@ class ProfileInterfaceTests(unittest.TestCase):
         self.assertIn("read-only", prompt)
         self.assertIn("must not modify files", prompt)
         self.assertIn("do not implement", prompt)
+        self.assertIn("cannot manage or stop shell jobs", prompt)
         self.assertEqual(
             tool_names,
             {

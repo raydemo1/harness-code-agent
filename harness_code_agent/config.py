@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .provider_resolution import resolve_provider_name as _resolve_provider_name
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -60,23 +62,6 @@ def _normalize_model_intensity(value: str | None) -> str:
         allowed = ", ".join(MODEL_INTENSITIES)
         raise ValueError(f"Unsupported HARNESS_MODEL_INTENSITY: {value!r}; expected one of: {allowed}")
     return intensity
-
-
-def _resolve_provider_name(*, provider: str | None, base_url: str | None, model: str | None) -> str:
-    requested = (provider or "auto").strip().lower()
-    if requested in {"openai-compatible", "compatible"}:
-        return "openai-compatible"
-    if requested in {"openai", "deepseek"}:
-        return requested
-    if requested != "auto":
-        raise ValueError(f"Unsupported HARNESS_PROVIDER: {provider}")
-
-    base_signature = (base_url or "").lower()
-    if "api.openai.com" in base_signature:
-        return "openai"
-    if "deepseek" in base_signature:
-        return "deepseek"
-    return "openai-compatible"
 
 
 def _model_override_for_intensity(intensity: str) -> str | None:

@@ -104,6 +104,11 @@ def _conversation_with_registry(root: Path, registry: tools.ToolRegistry, tool_c
 
 
 class ToolExecutorTests(unittest.TestCase):
+    def test_executor_pool_is_instance_scoped(self):
+        from harness_code_agent.agent.tool_executor import ToolExecutor
+
+        self.assertNotIn("_executor", ToolExecutor.__dict__)
+
     def test_shell_lane_classification_is_conservative(self):
         from harness_code_agent.agent.tool_executor import classify_shell_lane
 
@@ -128,6 +133,12 @@ class ToolExecutorTests(unittest.TestCase):
         for command, expected in cases.items():
             with self.subTest(command=command):
                 self.assertEqual(classify_shell_lane(command), expected)
+
+    def test_shell_lane_uses_shared_stateful_classifier(self):
+        from harness_code_agent.agent.tool_executor import classify_shell_lane
+
+        with patch("harness_code_agent.runtime.shell_classification.contains_stateful_shell_operation", return_value=True):
+            self.assertEqual(classify_shell_lane("rg needle ."), tools.ToolExecutionLane.SHELL_SERIAL)
 
     def test_parallel_read_tools_finish_faster_but_results_keep_original_order(self):
         registry = tools.ToolRegistry()
@@ -281,6 +292,39 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertIn("ok a", tool_messages[0]["content"])
         self.assertIn("stopping at b", tool_messages[1]["content"])
         self.assertIn("Agent fallback triggered (test_fallback)", tool_messages[2]["content"])
+
+    def test_tool_call_budget_blocks_remaining_parallel_group_calls(self):
+        registry = tools.ToolRegistry()
+        executed_labels = []
+
+        def read_tool(label):
+            executed_labels.append(label)
+            return ToolResult(tool="parallel_read", status="success", output=f"ok {label}")
+
+        registry.register(_schema("parallel_read"), read_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+        tool_calls = [
+            _tool_call("tc_a", "parallel_read", {"label": "a"}),
+            _tool_call("tc_b", "parallel_read", {"label": "b"}),
+            _tool_call("tc_c", "parallel_read", {"label": "c"}),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation, _context = _conversation_with_registry(Path(tmp), registry, tool_calls)
+            with (
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOTAL_TOKENS", 100),
+                patch("harness_code_agent.agent.loop.config.MAX_AGENT_TOOL_CALLS", 1),
+                patch("harness_code_agent.agent.loop.context.count_tokens", return_value=1),
+            ):
+                text = conversation.run_until_idle()
+
+        tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
+        self.assertEqual(executed_labels, ["a"])
+        self.assertIn("Agent fallback triggered", text)
+        self.assertEqual([msg["tool_call_id"] for msg in tool_messages], ["tc_a", "tc_b", "tc_c"])
+        self.assertIn("ok a", tool_messages[0]["content"])
+        self.assertIn("tool_call_budget_exceeded", tool_messages[1]["content"])
+        self.assertIn("tool_call_budget_exceeded", tool_messages[2]["content"])
 
     def test_approval_is_requested_only_when_later_serial_tool_is_reached(self):
         from harness_code_agent.runtime.approvals import ApprovalResult

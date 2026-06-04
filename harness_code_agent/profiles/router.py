@@ -123,6 +123,8 @@ def _is_explicit_review_intent(user_prompt: str) -> bool:
     if not text:
         return False
     lowered = text.lower()
+    if _includes_follow_up_implementation_intent(text, lowered):
+        return False
     chinese_review_terms = ("审查", "评审")
     if any(term in text for term in chinese_review_terms):
         return True
@@ -134,6 +136,28 @@ def _is_explicit_review_intent(user_prompt: str) -> bool:
         r"\bdo\s+(?:a|an)\s+review\b",
     ]
     return any(re.search(pattern, lowered) for pattern in review_patterns)
+
+
+def _includes_follow_up_implementation_intent(text: str, lowered: str) -> bool:
+    chinese_action_terms = (
+        "然后",
+        "并实现",
+        "实现",
+        "修复",
+        "修改",
+        "改动",
+        "调整",
+        "执行",
+        "开始做",
+        "落地",
+    )
+    if any(term in text for term in chinese_action_terms):
+        return True
+    action_patterns = (
+        r"\b(?:and|then)\s+(?:fix|implement|apply|change|update|modify|refactor)\b",
+        r"\b(?:fix|implement|apply|change|update|modify|refactor)\s+(?:it|this|these|the|code|changes|issue|bug|fix)\b",
+    )
+    return any(re.search(pattern, lowered) for pattern in action_patterns)
 
 
 def _workspace_summary(workspace: Path) -> str:
