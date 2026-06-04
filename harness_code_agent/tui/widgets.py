@@ -393,7 +393,7 @@ class InputArea(Vertical):
             if selected:
                 text_area = self.query_one("#input-text", SubmitTextArea)
                 if selected.startswith("/") or selected.startswith("@"):
-                    text_area.text = selected + " "
+                    text_area.text = _complete_input_text(text_area.text, selected)
                 palette.update_candidates([])
                 event.prevent_default()
                 return
@@ -424,7 +424,7 @@ class InputArea(Vertical):
             selected = palette.get_selected()
             if selected:
                 if selected.startswith("/") or selected.startswith("@"):
-                    text_area.text = selected + " "
+                    text_area.text = _complete_input_text(text_area.text, selected)
                 palette.update_candidates([])
                 return
         # Otherwise submit
@@ -439,7 +439,7 @@ class InputArea(Vertical):
         if selected:
             text_area = self.query_one("#input-text", SubmitTextArea)
             if selected.startswith("/") or selected.startswith("@"):
-                text_area.text = selected + " "
+                text_area.text = _complete_input_text(text_area.text, selected)
             palette.update_candidates([])
             event.stop()
 
@@ -500,9 +500,15 @@ class InputArea(Vertical):
         mention = current_mention_query(text)
         if mention is not None and self._session:
             prefix, _start = mention
+            skill_registry = getattr(self._session, "skill_registry", None)
             candidates = [
-                (f"@{c.insert_text}", c.description)
-                for c in mention_candidates(self._session.cwd, prefix, self._session.session_store)
+                (c.display, c.description)
+                for c in mention_candidates(
+                    self._session.cwd,
+                    prefix,
+                    self._session.session_store,
+                    skill_catalog=getattr(skill_registry, "catalog", None),
+                )
             ]
             palette.update_candidates(candidates)
             return
@@ -518,3 +524,11 @@ class InputArea(Vertical):
 
     def focus_input(self) -> None:
         self.query_one("#input-text", TextArea).focus()
+
+
+def _complete_input_text(current_text: str, selected: str) -> str:
+    if selected.startswith("@"):
+        from .completion import replace_mention_fragment
+
+        return replace_mention_fragment(current_text, selected.removeprefix("@"))
+    return selected + " "

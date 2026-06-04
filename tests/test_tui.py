@@ -17,7 +17,7 @@ from harness_code_agent.tui.approval import (
 )
 from harness_code_agent.tui.question import TuiQuestionProvider
 from harness_code_agent.tui.commands import default_command_registry
-from harness_code_agent.tui.completion import current_mention_query, mention_candidates
+from harness_code_agent.tui.completion import current_mention_query, mention_candidates, replace_mention_fragment
 from harness_code_agent.tui.state import PlanStep, SessionStatusSnapshot, TranscriptBlock, TuiState
 from harness_code_agent.tui.widgets import block_to_rich, ContextBar, PlanPanel, StatusBar
 
@@ -139,9 +139,13 @@ class TuiTests(unittest.TestCase):
         )
 
         self.assertEqual(mentions[0].target, "space name.md")
-        self.assertEqual(resolved[0].content, "hello space\n")
+        self.assertEqual(resolved[0].kind, "file")
+        self.assertIn("space name.md", resolved[0].content)
+        self.assertIn("Use read_file to inspect this file if needed.", resolved[0].content)
+        self.assertNotIn("hello space", resolved[0].content)
 
     def test_mention_candidates_fuzzy_files_sessions_and_exclusions(self):
+        Path(self.temp_dir, "README.md").write_text("read me\n", encoding="utf-8")
         Path(self.temp_dir, "space name.md").write_text("hello\n", encoding="utf-8")
         Path(self.temp_dir, "node_modules").mkdir()
         Path(self.temp_dir, "node_modules", "ignored.js").write_text("x\n", encoding="utf-8")
@@ -154,16 +158,41 @@ class TuiTests(unittest.TestCase):
         )
 
         file_candidates = mention_candidates(self.root, "space", store)
+        readme_candidates = mention_candidates(self.root, "rea", store)
         session_candidates = mention_candidates(self.root, "session:" + session.id[:8], store)
+        skill_candidates = mention_candidates(
+            self.root,
+            "skill:dia",
+            store,
+            skill_catalog=[
+                {
+                    "name": "diagnose",
+                    "description": "Debug hard failures.",
+                    "path": "skills/diagnose/SKILL.md",
+                }
+            ],
+        )
 
-        self.assertIn('"space name.md"', [item.insert_text for item in file_candidates])
+        self.assertIn('file:"space name.md"', [item.insert_text for item in file_candidates])
+        self.assertIn("file:README.md", [item.insert_text for item in readme_candidates])
         self.assertNotIn("node_modules/ignored.js", [item.insert_text for item in file_candidates])
         self.assertIn("session:" + session.id, [item.insert_text for item in session_candidates])
+        self.assertIn("skill:diagnose", [item.insert_text for item in skill_candidates])
 
     def test_current_mention_query_handles_plain_and_quoted_mentions(self):
         self.assertEqual(current_mention_query("fix @READ"), ("READ", -5))
-        self.assertEqual(current_mention_query('fix @"space'), ("space", -7))
+        self.assertEqual(current_mention_query("fix @file:READ"), ("file:READ", -10))
         self.assertIsNone(current_mention_query("email@domain"))
+
+    def test_replace_mention_fragment_preserves_surrounding_text(self):
+        self.assertEqual(
+            replace_mention_fragment("please inspect @rea before editing", "file:README.md"),
+            "please inspect @file:README.md before editing",
+        )
+        self.assertEqual(
+            replace_mention_fragment("use @skill:dia", "skill:diagnose"),
+            "use @skill:diagnose ",
+        )
 
     def test_event_bus_listener_updates_tui_state(self):
         events = []

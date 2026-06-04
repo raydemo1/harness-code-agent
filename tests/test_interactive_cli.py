@@ -697,7 +697,25 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_file_mention_is_injected(self):
+    def test_file_mention_injects_light_reference_not_content(self):
+        Path(self.temp_dir, "README.md").write_text("hello docs\n", encoding="utf-8")
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+
+        resolved = resolve_mentions(
+            "use @file:README.md please",
+            workspace_root=self.temp_dir,
+            session_store=store,
+        )
+        formatted = format_turn_with_mentions("use @file:README.md please", resolved)
+
+        self.assertIn("Mention context:", formatted)
+        self.assertIn("resolved as file", formatted)
+        self.assertIn("README.md", formatted)
+        self.assertIn("Use read_file to inspect this file if needed.", formatted)
+        self.assertNotIn("hello docs", formatted)
+        self.assertIn("User turn:\nuse @file:README.md please", formatted)
+
+    def test_legacy_file_mention_still_resolves_as_light_file_reference(self):
         Path(self.temp_dir, "README.md").write_text("hello docs\n", encoding="utf-8")
         store = SessionStore(Path(self.temp_dir) / ".harness")
 
@@ -708,9 +726,46 @@ class InteractiveCliTests(unittest.TestCase):
         )
         formatted = format_turn_with_mentions("use @README.md please", resolved)
 
-        self.assertIn("Mention context:", formatted)
-        self.assertIn("hello docs", formatted)
-        self.assertIn("User turn:\nuse @README.md please", formatted)
+        self.assertEqual(resolved[0].kind, "file")
+        self.assertNotIn("hello docs", formatted)
+
+    def test_directory_mention_is_light_reference(self):
+        Path(self.temp_dir, "docs").mkdir()
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+
+        resolved = resolve_mentions(
+            "inspect @file:docs",
+            workspace_root=self.temp_dir,
+            session_store=store,
+        )
+        formatted = format_turn_with_mentions("inspect @file:docs", resolved)
+
+        self.assertEqual(resolved[0].kind, "directory")
+        self.assertIn("resolved as directory", formatted)
+        self.assertIn("Use list_files to inspect this directory if needed.", formatted)
+
+    def test_skill_mention_injects_catalog_reference_not_body(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        skill_catalog = [
+            {
+                "name": "diagnose",
+                "description": "Debug hard failures.",
+                "path": "skills/diagnose/SKILL.md",
+            }
+        ]
+
+        resolved = resolve_mentions(
+            "use @skill:diagnose",
+            workspace_root=self.temp_dir,
+            session_store=store,
+            skill_catalog=skill_catalog,
+        )
+        formatted = format_turn_with_mentions("use @skill:diagnose", resolved)
+
+        self.assertEqual(resolved[0].kind, "skill")
+        self.assertIn("Debug hard failures.", formatted)
+        self.assertIn("skills/diagnose/SKILL.md", formatted)
+        self.assertIn("Use read_skill_file to load this skill if relevant.", formatted)
 
     def test_missing_file_mention_fails_fast(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
