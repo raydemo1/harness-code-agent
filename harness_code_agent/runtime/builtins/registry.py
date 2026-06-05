@@ -14,6 +14,7 @@ from .browser import browser_test, stop_dev_server
 from .discovery import tool_search
 from .filesystem import apply_patch, list_files, read_file, read_skill_file, write_file
 from .interaction import ask_user
+from .memory_tools import memory_search, read_memory_file, remember_memory
 from .planning import update_plan_state
 from .schemas import BROWSER_TOOL_SCHEMAS, CORE_TOOL_SCHEMAS
 from .shell import list_shell_jobs, read_shell_output, run_bash, stop_shell_job
@@ -31,6 +32,9 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "update_plan_state": update_plan_state,
         "list_files": list_files,
         "ask_user": ask_user,
+        "memory_search": memory_search,
+        "remember_memory": remember_memory,
+        "read_memory_file": read_memory_file,
         "run_bash": run_bash,
         "list_shell_jobs": list_shell_jobs,
         "read_shell_output": read_shell_output,
@@ -47,6 +51,9 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "tool_search": TOOL_PERMISSION_READ,
         "list_files": TOOL_PERMISSION_READ,
         "ask_user": TOOL_PERMISSION_READ,
+        "memory_search": TOOL_PERMISSION_READ,
+        "remember_memory": TOOL_PERMISSION_EDIT,
+        "read_memory_file": TOOL_PERMISSION_READ,
         "consult_subagent": TOOL_PERMISSION_READ,
         "web_search": TOOL_PERMISSION_NETWORK_READ,
         "web_fetch": TOOL_PERMISSION_NETWORK_READ,
@@ -66,6 +73,9 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "tool_search": ToolExecutionLane.CONTROL_SERIAL,
         "list_files": ToolExecutionLane.WORKSPACE_READ,
         "ask_user": ToolExecutionLane.CONTROL_SERIAL,
+        "memory_search": ToolExecutionLane.WORKSPACE_READ,
+        "remember_memory": ToolExecutionLane.WORKSPACE_WRITE,
+        "read_memory_file": ToolExecutionLane.WORKSPACE_READ,
         "consult_subagent": ToolExecutionLane.SUBAGENT_READ,
         "web_search": ToolExecutionLane.NETWORK_READ,
         "web_fetch": ToolExecutionLane.NETWORK_READ,

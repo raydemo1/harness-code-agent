@@ -237,6 +237,107 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "memory_search",
+            "description": (
+                "Search long-term project memory for relevant past decisions, "
+                "debugging notes, commands, preferences, and learnings. Returns summaries; "
+                "use read_memory_file for full details."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language search query.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_memory",
+            "description": (
+                "Queue a long-term memory candidate. This tool never writes MEMORY.md, "
+                "manifest.json, dream-log.md, records.jsonl, or Markdown memory files directly; "
+                "Dream merges candidates later."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["summary"],
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Concise durable memory to preserve.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short title for the memory candidate.",
+                        "default": "",
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": (
+                            "Optional Dream routing hint: project.md, decisions.md, commands.md, "
+                            "debugging.md, preferences.md, or learnings.md."
+                        ),
+                        "default": "",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional tags for later recall.",
+                        "default": [],
+                    },
+                    "source_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Workspace paths related to this memory.",
+                        "default": [],
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "Confidence that the memory is durable and useful.",
+                        "default": 0.7,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_memory_file",
+            "description": "Read a generated long-term memory file for details after MEMORY.md navigation or recall points to it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Readable memory file.",
+                        "enum": [
+                            "MEMORY.md",
+                            "project.md",
+                            "decisions.md",
+                            "commands.md",
+                            "debugging.md",
+                            "preferences.md",
+                            "learnings.md",
+                            "dream-log.md",
+                        ],
+                        "default": "MEMORY.md",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_bash",
             "description": (
                 "Execute a shell command in the workspace directory. "

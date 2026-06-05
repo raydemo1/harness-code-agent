@@ -34,7 +34,7 @@ from ..sessions.turn_summary import generate_turn_summary, should_summarize_turn
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
 from ..workspace.shell_session import docker_cli_path, docker_info_check, docker_shell_hint, sandbox_mode, windows_shell_hint, windows_shell_path
-from .mentions import MentionResolutionError, format_turn_with_mentions, resolve_mentions
+from .mentions import MentionResolutionError, ResolvedMention, render_mention_context, resolve_mentions
 
 
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
@@ -371,6 +371,8 @@ class InteractiveSession:
         self.profile = slot.profile
         self.agent = slot.agent
         self.conversation = slot.conversation
+        if created:
+            self._inject_memory_navigation()
         if create_handoff and (created or plan_markdown):
             handoff = self._build_profile_handoff_context(
                 previous_profile=previous_profile or "",
@@ -393,7 +395,11 @@ class InteractiveSession:
             session_store=self.session_store,
             skill_catalog=self.skill_registry.catalog,
         )
-        prompt_with_mentions = format_turn_with_mentions(user_prompt, resolved)
+        memory_block = self._memory_recall_block(
+            user_prompt,
+            mention_paths=_memory_mention_paths(resolved),
+        )
+        prompt_with_mentions = _format_turn_with_mentions_and_memory(user_prompt, resolved, memory_block)
         task = self.format_task(prompt_with_mentions)
         self.turn_count += 1
         self.event_bus.emit_event(
@@ -749,6 +755,63 @@ class InteractiveSession:
         else:
             self.conversation.messages.append(message)
 
+    def _memory_store(self):
+        from ..memory.store import MemoryStore, default_memory_root
+
+        return MemoryStore(default_memory_root(self.cwd), workspace=self.cwd)
+
+    def _maybe_run_memory_dream(self) -> None:
+        if _memory_disabled():
+            return
+        from ..memory.dream import run_dream, should_dream
+
+        store = self._memory_store()
+        try:
+            if should_dream(store):
+                run_dream(store)
+        except Exception as exc:
+            log.debug("Memory Dream skipped after error: %s", exc)
+
+    def _inject_memory_navigation(self) -> None:
+        if _memory_disabled() or self.conversation is None:
+            return
+        self._maybe_run_memory_dream()
+        store = self._memory_store()
+        if not store.exists() or not store.has_active_records():
+            return
+        content = store.read_memory_file("MEMORY.md").strip()
+        if not content:
+            return
+        self._append_conversation_message(
+            {
+                "role": "user",
+                "content": (
+                    "Long-term memory navigation (dynamic user-context, not stable prompt prefix):\n"
+                    f"{content}"
+                ),
+            }
+        )
+
+    def _memory_recall_block(self, user_prompt: str, *, mention_paths: list[str]) -> str:
+        if _memory_disabled():
+            return ""
+        self._maybe_run_memory_dream()
+        store = self._memory_store()
+        if not store.exists() or not store.has_active_records():
+            return ""
+        try:
+            from ..memory.recall import MemoryRecall
+
+            recall = MemoryRecall(store)
+            hits = recall.search(
+                user_prompt,
+                mentions=mention_paths,
+            )
+            return recall.format_block(hits)
+        except Exception as exc:
+            log.debug("Memory recall skipped after error: %s", exc)
+            return ""
+
     def _handle_checkpoint_command(self, args: list[str]) -> str:
         if not args:
             return self.create_checkpoint(manual=True)
@@ -838,6 +901,7 @@ class InteractiveSession:
             if self._closed:
                 return
             self._closed = True
+        self._maybe_run_memory_dream()
         stop_dev_server()
         for slot in list(self.profile_slots.values()):
             slot.conversation.close()
@@ -877,6 +941,38 @@ class InteractiveSession:
 def _require_arg(args: list[str], usage: str) -> None:
     if len(args) != 1:
         raise ValueError(usage)
+
+
+def _memory_mention_paths(resolved: list[ResolvedMention]) -> list[str]:
+    paths: list[str] = []
+    for item in resolved:
+        if item.kind not in {"file", "directory"}:
+            continue
+        value = item.metadata.get("path") or item.resolved or item.target
+        if value:
+            paths.append(str(value))
+    return paths
+
+
+def _format_turn_with_mentions_and_memory(
+    user_text: str,
+    resolved: list[ResolvedMention],
+    memory_block: str,
+) -> str:
+    parts = []
+    mention_context = render_mention_context(resolved)
+    if mention_context:
+        parts.append(mention_context)
+    if memory_block:
+        parts.append(memory_block)
+    if not parts:
+        return user_text
+    parts.append(f"User turn:\n{user_text}")
+    return "\n\n".join(parts)
+
+
+def _memory_disabled() -> bool:
+    return os.environ.get("HARNESS_MEMORY_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_plan_execution_confirmation(text: str) -> bool:
