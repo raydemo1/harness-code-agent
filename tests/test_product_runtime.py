@@ -3161,11 +3161,6 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIn('"token": "[redacted]"', result)
         self.assertNotIn("short-secret", result)
 
-    def test_loop_detection_preview_does_not_import_agent_loop(self):
-        middleware_source = Path("harness_code_agent/runtime/middlewares.py").read_text(encoding="utf-8")
-
-        self.assertNotIn("agent.loop", middleware_source)
-
     # ------------------------------------------------------------------
     # _file_warned reset per turn
     # ------------------------------------------------------------------

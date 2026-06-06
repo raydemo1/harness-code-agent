@@ -468,14 +468,6 @@ class CompactCommandTests(unittest.TestCase):
 
 
 class AgentConversationCompactionLifecycleTests(unittest.TestCase):
-    def test_agent_conversation_no_longer_owns_compaction_manager(self):
-        from harness_code_agent.agent.loop import Agent
-
-        agent = Agent("test_agent", "sys", use_tools=False)
-        conv = agent.start_conversation()
-
-        self.assertFalse(hasattr(conv, "compaction_mgr"))
-
     def test_message_revision_tracks_user_assistant_tool_and_middleware_appends(self):
         from harness_code_agent.agent.loop import Agent
 

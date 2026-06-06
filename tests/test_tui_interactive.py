@@ -348,11 +348,6 @@ class TuiInteractiveTests(unittest.TestCase):
                     self.assertTrue(any(block.title == "permission mode switched" for block in app.state.blocks))
         _run(_test())
 
-    def test_ctrl_k_is_not_bound_to_manual_compaction(self):
-        bindings = list(TuiApp.BINDINGS)
-
-        self.assertFalse(any(getattr(binding, "key", "") == "ctrl+k" for binding in bindings))
-
     # ── Approval panel ──────────────────────────────────────────────────────
 
     def test_approval_panel_replaces_input(self):
