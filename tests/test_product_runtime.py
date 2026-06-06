@@ -1356,6 +1356,33 @@ class ProductRuntimeTests(unittest.TestCase):
 
         self.assertTrue(fake_jobs.closed)
 
+    def test_agent_conversation_runs_lifecycle_middleware_hooks(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.runtime.middleware import AgentMiddleware
+
+        class LifecycleMiddleware(AgentMiddleware):
+            def __init__(self):
+                self.closed = False
+
+            def on_conversation_start(self, messages, runtime_state=None, agent_name=None):
+                return [{"role": "system", "content": f"startup context for {agent_name}"}]
+
+            def on_conversation_close(self, messages, runtime_state=None, agent_name=None):
+                self.closed = True
+
+        middleware = LifecycleMiddleware()
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=SimpleNamespace(chat=SimpleNamespace(completions=None))):
+            conversation = AgentConversation(
+                Agent("test", "system", use_tools=False, middlewares=[middleware])
+            )
+
+        self.assertEqual(conversation.messages[-1]["role"], "system")
+        self.assertEqual(conversation.messages[-1]["content"], "startup context for test")
+
+        conversation.close()
+
+        self.assertTrue(middleware.closed)
+
     def test_tool_registry_requires_explicit_permission_classification(self):
         from harness_code_agent.runtime import tools
 

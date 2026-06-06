@@ -140,8 +140,43 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
-    def test_memory_dream_check_is_throttled_per_session(self):
-        session = InteractiveSession(cwd=self.temp_dir)
+    def test_user_prompt_augmentation_middleware_runs_before_submit(self):
+        class AugmentMiddleware:
+            def augment_user_prompt(
+                self,
+                user_prompt,
+                messages,
+                runtime_state=None,
+                agent_name=None,
+                mention_paths=None,
+            ):
+                return f"Injected context for: {user_prompt}"
+
+        class FakeAugmentProfile:
+            def name(self):
+                return "fake-augment"
+
+            def main_agent(self):
+                return AgentConfig(system_prompt="fake", middlewares=[AugmentMiddleware()])
+
+        with (
+            patch("harness_code_agent.core.interactive.get_profile", return_value=FakeAugmentProfile()),
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-augment")
+            try:
+                session.submit("inspect parser")
+
+                submitted = FakeConversation.instances[-1].submissions[-1]
+                self.assertIn("Injected context for: inspect parser", submitted)
+                self.assertLess(submitted.index("Injected context"), submitted.index("User turn:"))
+            finally:
+                session.close()
+
+    def test_memory_middleware_dream_check_is_throttled(self):
+        from harness_code_agent.runtime.middleware.memory import MemoryMiddleware
+
+        middleware = MemoryMiddleware(workspace=self.temp_dir)
         try:
             store = object()
             with (
@@ -152,15 +187,15 @@ class InteractiveCliTests(unittest.TestCase):
                         "HARNESS_MEMORY_DREAM_CHECK_INTERVAL_SECONDS": "60",
                     },
                 ),
-                patch.object(session, "_memory_store", return_value=store),
+                patch.object(middleware, "_store", return_value=store),
                 patch("harness_code_agent.memory.dream.should_dream", return_value=False) as should_dream,
             ):
-                session._maybe_run_memory_dream()
-                session._maybe_run_memory_dream()
+                middleware.maybe_run_dream()
+                middleware.maybe_run_dream()
 
             self.assertEqual(should_dream.call_count, 1)
         finally:
-            session.close()
+            pass
 
     def test_first_task_routes_before_creating_session_metadata(self):
         decision = SimpleNamespace(
@@ -398,6 +433,33 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertNotIn("ask_user", tool_names)
                 self.assertNotIn("write_file", tool_names)
                 self.assertNotIn("run_bash", tool_names)
+            finally:
+                session.close()
+
+    def test_profile_can_disable_memory_middleware(self):
+        from harness_code_agent.runtime.middleware import MemoryMiddleware
+
+        class FakeNoMemoryProfile:
+            def name(self):
+                return "fake-no-memory"
+
+            def main_agent(self):
+                return AgentConfig(system_prompt="fake", memory_enabled=False)
+
+        with (
+            patch("harness_code_agent.core.interactive.get_profile", return_value=FakeNoMemoryProfile()),
+            patch("harness_code_agent.agent.conversation.Agent", RecordingInteractiveAgent),
+        ):
+            session = InteractiveSession(cwd=self.temp_dir, profile_name="fake-no-memory")
+            try:
+                session.ensure_profile_bound_for_first_task("inspect")
+
+                self.assertFalse(
+                    any(
+                        isinstance(middleware, MemoryMiddleware)
+                        for middleware in RecordingInteractiveAgent.init_kwargs["middlewares"]
+                    )
+                )
             finally:
                 session.close()
 

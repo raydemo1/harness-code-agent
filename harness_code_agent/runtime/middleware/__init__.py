@@ -4,6 +4,7 @@ from __future__ import annotations
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 from .error_guidance import ErrorGuidanceMiddleware
 from .loop_detection import LoopDetectionMiddleware
+from .memory import MemoryMiddleware
 from .recovery import RecoveryStrategyMiddleware
 from .task_tracking import TaskTrackingEnforcementMiddleware, TaskTrackingMiddleware
 from .time_budget import TimeBudgetMiddleware
@@ -24,6 +25,7 @@ __all__ = [
     "MAIN_AGENT_NAMES",
     "ErrorGuidanceMiddleware",
     "LoopDetectionMiddleware",
+    "MemoryMiddleware",
     "RecoveryStrategyMiddleware",
     "TaskTrackingEnforcementMiddleware",
     "TaskTrackingMiddleware",

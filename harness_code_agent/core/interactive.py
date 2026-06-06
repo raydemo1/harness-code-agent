@@ -18,7 +18,7 @@ from ..profiles.router import RouteDecision, route_profile_for_task
 from ..runtime.builtins.browser import stop_dev_server
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
 from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider
-from ..runtime.middleware import StaticVerifierMiddleware, TimeBudgetMiddleware
+from ..runtime.middleware import MemoryMiddleware, StaticVerifierMiddleware, TimeBudgetMiddleware
 from ..runtime.mcp import McpClientManager, McpConfigError, load_mcp_config
 from ..runtime.permission_middleware import PermissionMiddleware
 from ..runtime.permissions import PermissionPolicy
@@ -142,7 +142,6 @@ class InteractiveSession:
         self._started_at: float | None = None
         self._closed = False
         self._close_lock = threading.Lock()
-        self._next_memory_dream_check_at = 0.0
 
     @property
     def is_bound(self) -> bool:
@@ -180,6 +179,8 @@ class InteractiveSession:
             acceptance_criteria=acceptance_criteria,
         )
         middlewares = list(cfg.middlewares)
+        if getattr(cfg, "memory_enabled", True):
+            middlewares.append(MemoryMiddleware(workspace=self.cwd))
         middlewares.append(
             PermissionMiddleware(
                 tool_context=self.tool_context,
@@ -372,8 +373,6 @@ class InteractiveSession:
         self.profile = slot.profile
         self.agent = slot.agent
         self.conversation = slot.conversation
-        if created:
-            self._inject_memory_navigation()
         if create_handoff and (created or plan_markdown):
             handoff = self._build_profile_handoff_context(
                 previous_profile=previous_profile or "",
@@ -396,11 +395,11 @@ class InteractiveSession:
             session_store=self.session_store,
             skill_catalog=self.skill_registry.catalog,
         )
-        memory_block = self._memory_recall_block(
+        context_block = self._augment_user_prompt(
             user_prompt,
             mention_paths=_memory_mention_paths(resolved),
         )
-        prompt_with_mentions = _format_turn_with_mentions_and_memory(user_prompt, resolved, memory_block)
+        prompt_with_mentions = _format_turn_with_mentions_and_memory(user_prompt, resolved, context_block)
         task = self.format_task(prompt_with_mentions)
         self.turn_count += 1
         self.event_bus.emit_event(
@@ -756,66 +755,27 @@ class InteractiveSession:
         else:
             self.conversation.messages.append(message)
 
-    def _memory_store(self):
-        from ..memory.store import MemoryStore, default_memory_root
-
-        return MemoryStore(default_memory_root(self.cwd), workspace=self.cwd)
-
-    def _maybe_run_memory_dream(self, *, force: bool = False) -> None:
-        if _memory_disabled():
-            return
-        now = time.monotonic()
-        if not force and now < self._next_memory_dream_check_at:
-            return
-        self._next_memory_dream_check_at = now + _memory_dream_check_interval_seconds()
-        from ..memory.dream import run_dream, should_dream
-
-        store = self._memory_store()
-        try:
-            if should_dream(store):
-                run_dream(store)
-        except Exception as exc:
-            log.debug("Memory Dream skipped after error: %s", exc)
-
-    def _inject_memory_navigation(self) -> None:
-        if _memory_disabled() or self.conversation is None:
-            return
-        self._maybe_run_memory_dream()
-        store = self._memory_store()
-        if not store.exists() or not store.has_active_records():
-            return
-        content = store.read_memory_file("MEMORY.md").strip()
-        if not content:
-            return
-        self._append_conversation_message(
-            {
-                "role": "system",
-                "content": (
-                    "Long-term memory navigation (dynamic user-context, not stable prompt prefix):\n"
-                    f"{content}"
-                ),
-            }
-        )
-
-    def _memory_recall_block(self, user_prompt: str, *, mention_paths: list[str]) -> str:
-        if _memory_disabled():
+    def _augment_user_prompt(self, user_prompt: str, *, mention_paths: list[str]) -> str:
+        if self.agent is None or self.conversation is None:
             return ""
-        self._maybe_run_memory_dream()
-        store = self._memory_store()
-        if not store.exists():
-            return ""
-        try:
-            from ..memory.recall import MemoryRecall
-
-            recall = MemoryRecall(store)
-            hits = recall.search(
+        blocks: list[str] = []
+        messages = getattr(self.conversation, "messages", [])
+        runtime_state = getattr(self.conversation, "runtime_state", None)
+        agent_name = getattr(self.agent, "name", None)
+        for mw in getattr(self.agent, "middlewares", []):
+            augment = getattr(mw, "augment_user_prompt", None)
+            if augment is None:
+                continue
+            block = augment(
                 user_prompt,
-                mentions=mention_paths,
+                messages,
+                runtime_state=runtime_state,
+                agent_name=agent_name,
+                mention_paths=mention_paths,
             )
-            return recall.format_block(hits)
-        except Exception as exc:
-            log.debug("Memory recall skipped after error: %s", exc)
-            return ""
+            if block and block.strip():
+                blocks.append(block.strip())
+        return "\n\n".join(blocks)
 
     def _handle_checkpoint_command(self, args: list[str]) -> str:
         if not args:
@@ -906,7 +866,6 @@ class InteractiveSession:
             if self._closed:
                 return
             self._closed = True
-        self._maybe_run_memory_dream(force=True)
         stop_dev_server()
         for slot in list(self.profile_slots.values()):
             slot.conversation.close()
@@ -974,20 +933,6 @@ def _format_turn_with_mentions_and_memory(
         return user_text
     parts.append(f"User turn:\n{user_text}")
     return "\n\n".join(parts)
-
-
-def _memory_disabled() -> bool:
-    return os.environ.get("HARNESS_MEMORY_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _memory_dream_check_interval_seconds() -> float:
-    value = os.environ.get("HARNESS_MEMORY_DREAM_CHECK_INTERVAL_SECONDS", "").strip()
-    if not value:
-        return 60.0
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        return 60.0
 
 
 def _is_plan_execution_confirmation(text: str) -> bool:

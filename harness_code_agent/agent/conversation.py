@@ -150,6 +150,7 @@ class AgentConversation:
         self.fact_tracker = FactTracker()
         self.observation_store = ObservationStore(self._observation_dir())
         self._cached_prompt_cache_key: str | None = None
+        self._run_conversation_start_middlewares()
         if initial_task is not None:
             self.add_user_turn(initial_task)
 
@@ -190,6 +191,24 @@ class AgentConversation:
     def _append_message(self, message: dict) -> None:
         self.messages.append(message)
         self.compaction_gate.bump_revision()
+
+    def _run_conversation_start_middlewares(self) -> None:
+        for mw in self.agent.middlewares:
+            on_start = getattr(mw, "on_conversation_start", None)
+            if on_start is None:
+                continue
+            injected = on_start(
+                self.messages,
+                runtime_state=self.runtime_state,
+                agent_name=self.agent.name,
+            ) or []
+            for message in injected:
+                self._append_message(message)
+                self.trace.middleware_inject(
+                    type(mw).__name__,
+                    "on_conversation_start",
+                    str(message.get("content") or ""),
+                )
 
     def _replace_messages(self, messages: list[dict]) -> None:
         self.messages = list(messages)
@@ -866,6 +885,15 @@ class AgentConversation:
         if self._closed:
             return
         self._closed = True
+        for mw in self.agent.middlewares:
+            on_close = getattr(mw, "on_conversation_close", None)
+            if on_close is None:
+                continue
+            on_close(
+                self.messages,
+                runtime_state=self.runtime_state,
+                agent_name=self.agent.name,
+            )
         if self.runtime_state.shell_session is not None:
             self.runtime_state.shell_session.close()
         if self.runtime_state.shell_job_manager is not None:

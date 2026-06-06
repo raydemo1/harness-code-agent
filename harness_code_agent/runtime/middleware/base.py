@@ -10,6 +10,27 @@ MAIN_AGENT_NAMES = {"main_agent"}
 class AgentMiddleware(ABC):
     """Base class for agent middlewares."""
 
+    def on_conversation_start(self, messages: list[dict], runtime_state=None,
+                              agent_name: str | None = None) -> list[dict]:
+        """Called after a live conversation is initialized. Return messages to append."""
+        return []
+
+    def on_conversation_close(self, messages: list[dict], runtime_state=None,
+                              agent_name: str | None = None) -> None:
+        """Called when a live conversation is closing."""
+        return None
+
+    def augment_user_prompt(
+        self,
+        user_prompt: str,
+        messages: list[dict],
+        runtime_state=None,
+        agent_name: str | None = None,
+        mention_paths: list[str] | None = None,
+    ) -> str | None:
+        """Called after user prompt mentions are resolved and before the turn is formatted."""
+        return None
+
     def before_tool(
         self,
         tool_name: str,
