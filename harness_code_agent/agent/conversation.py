@@ -5,6 +5,7 @@ import logging
 import json
 import time
 import weakref
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
@@ -25,6 +26,7 @@ from ..runtime.tool_runner import finalize_intercepted_tool_result
 
 
 log = logging.getLogger("harness")
+DYNAMIC_CONTEXT_MARKER = "[HARNESS_DYNAMIC_CONTEXT:"
 
 
 def llm_call_simple(messages: list[dict]) -> str:
@@ -215,6 +217,87 @@ class AgentConversation:
         self.observation_store.detach_message_indexes(self.messages)
         self.compaction_gate.bump_revision()
 
+    def _strip_dynamic_context_messages(self) -> bool:
+        kept: list[dict] = []
+        removed_before_turn = 0
+        changed = False
+        turn_start = self.runtime_state.current_turn_start_index
+        for idx, message in enumerate(self.messages):
+            content = str(message.get("content") or "")
+            if content.startswith(DYNAMIC_CONTEXT_MARKER):
+                changed = True
+                if idx < turn_start:
+                    removed_before_turn += 1
+                continue
+            kept.append(message)
+        if not changed:
+            return False
+        self.messages = kept
+        self.runtime_state.current_turn_start_index = max(1, turn_start - removed_before_turn)
+        self.observation_store.detach_message_indexes(self.messages)
+        self.compaction_gate.bump_revision()
+        return True
+
+    def _inject_dynamic_context_after_system(self, injected: list[dict], *, source: str) -> None:
+        if not injected:
+            return
+        insert_at = 1 if self.messages and self.messages[0].get("role") == "system" else 0
+        for offset, message in enumerate(injected):
+            self.messages.insert(insert_at + offset, message)
+            self.trace.middleware_inject(
+                type(source).__name__ if not isinstance(source, str) else source,
+                "on_context_compacted",
+                str(message.get("content") or ""),
+            )
+        if self.runtime_state.current_turn_start_index >= insert_at:
+            self.runtime_state.current_turn_start_index += len(injected)
+        self.observation_store.detach_message_indexes(self.messages)
+        self.compaction_gate.bump_revision()
+
+    def _refresh_dynamic_context_after_compaction(self, *, phase: str) -> None:
+        self._strip_dynamic_context_messages()
+        for mw in self.agent.middlewares:
+            on_compacted = getattr(mw, "on_context_compacted", None)
+            if on_compacted is None:
+                continue
+            injected = on_compacted(
+                self.messages,
+                runtime_state=self.runtime_state,
+                agent_name=self.agent.name,
+                phase=phase,
+            ) or []
+            self._inject_dynamic_context_after_system(injected, source=type(mw).__name__)
+
+    def _session_compacted_dir(self) -> Path | None:
+        session_id = getattr(self.runtime_state, "session_id", None)
+        if not session_id or session_id == "default":
+            return None
+        safe_session_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
+        if self.agent.tool_context is not None:
+            root = self.agent.tool_context.workspace.root
+        else:
+            root = Path(config.WORKSPACE)
+        return root / ".harness" / "sessions" / safe_session_id / "compacted"
+
+    def _persist_compacted_summary(self, summary: str, *, phase: str) -> None:
+        text = (summary or "").strip()
+        if not text:
+            return
+        compacted_dir = self._session_compacted_dir()
+        if compacted_dir is None:
+            return
+        try:
+            history_dir = compacted_dir / "history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+            safe_phase = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in phase) or "compact"
+            body = f"# Compacted Context\n\nphase: {phase}\ncreated_at: {datetime.now(timezone.utc).isoformat()}\n\n{text}\n"
+            history_path = history_dir / f"{stamp}-{safe_phase}.md"
+            history_path.write_text(body, encoding="utf-8")
+            (compacted_dir / "latest.md").write_text(body, encoding="utf-8")
+        except OSError as exc:
+            log.debug("Failed to persist compacted summary: %s", exc)
+
     def _emit_compaction_started(self, *, token_count: int, threshold: int, phase: str) -> None:
         if self._event_bus is None:
             return
@@ -228,11 +311,18 @@ class AgentConversation:
             ).to_event()
         )
 
-    def _emit_compaction_committed(self, *, messages_before: int, token_count_before: int, summary_chars: int = 0) -> None:
+    def _emit_compaction_committed(self, *, messages_before: int, token_count_before: int,
+                                   summary_chars: int = 0, summary_text: str = "",
+                                   phase: str = "compact") -> None:
+        if summary_text:
+            self._persist_compacted_summary(summary_text, phase=phase)
         if self._event_bus is None:
             return
         from ..sessions.events import ContextCompactionCommittedEvent
-        tokens_after = context.count_tokens(self.messages)
+        tokens_after = context.count_request_tokens(
+            self.messages,
+            tool_schemas=_tool_schemas_for_agent(self.agent),
+        )
         self._event_bus.emit_event(
             ContextCompactionCommittedEvent(
                 summary_chars=summary_chars,
@@ -271,6 +361,7 @@ class AgentConversation:
         state.auto_compaction_turn_start_index = state.current_turn_start_index
         messages_before = len(self.messages)
         token_count_before = token_count
+        self._strip_dynamic_context_messages()
 
         self._emit_compaction_started(
             token_count=token_count,
@@ -287,15 +378,28 @@ class AgentConversation:
             self._emit_compaction_committed(
                 messages_before=messages_before,
                 token_count_before=token_count_before,
+                phase="cleaning_older_outputs",
             )
 
-        tokens_after_clean = context.count_tokens(self.messages)
+        tokens_after_clean = context.count_request_tokens(
+            self.messages,
+            tool_schemas=_tool_schemas_for_agent(agent),
+        )
+        token_count_for_summary = tokens_after_clean
         if tokens_after_clean < thresholds.compact:
-            state.context_refill_streak = 0
-            return
+            self._refresh_dynamic_context_after_compaction(phase="cleaning_older_outputs")
+            tokens_after_refresh = context.count_request_tokens(
+                self.messages,
+                tool_schemas=_tool_schemas_for_agent(agent),
+            )
+            if tokens_after_refresh < thresholds.compact:
+                state.context_refill_streak = 0
+                return
+            token_count_for_summary = tokens_after_refresh
+            self._strip_dynamic_context_messages()
 
         self._emit_compaction_started(
-            token_count=tokens_after_clean,
+            token_count=token_count_for_summary,
             threshold=thresholds.compact,
             phase="summarizing_history",
         )
@@ -305,17 +409,25 @@ class AgentConversation:
             current_turn_start_index=state.current_turn_start_index,
         )
         summary_chars = 0
+        summary_text = ""
         if summarized != self.messages:
-            summary_chars = len(summarized[1].get("content", "")) if len(summarized) > 1 else 0
+            summary_text = _first_compacted_summary(summarized)
+            summary_chars = len(summary_text)
             self._replace_messages(summarized)
             self.compaction_gate.mark_compacted()
             self._emit_compaction_committed(
                 messages_before=messages_before,
                 token_count_before=token_count_before,
                 summary_chars=summary_chars,
+                summary_text=summary_text,
+                phase="summarizing_history",
             )
+            self._refresh_dynamic_context_after_compaction(phase="summarizing_history")
 
-        tokens_after_summary = context.count_tokens(self.messages)
+        tokens_after_summary = context.count_request_tokens(
+            self.messages,
+            tool_schemas=_tool_schemas_for_agent(agent),
+        )
         if tokens_after_summary < thresholds.compact:
             state.context_refill_streak = 0
             return
@@ -337,6 +449,7 @@ class AgentConversation:
             threshold=thresholds.compact,
             phase="rebuilding_working_context",
         )
+        messages_before = len(self.messages)
         rebuilt = context.rebuild_working_context(
             self.messages,
             self._working_context_state(),
@@ -344,7 +457,7 @@ class AgentConversation:
             max_turns=5,
         )
         self._replace_messages(rebuilt)
-        if context.count_tokens(self.messages) >= thresholds.compact:
+        if context.count_request_tokens(self.messages, tool_schemas=_tool_schemas_for_agent(agent)) >= thresholds.compact:
             rebuilt = context.rebuild_working_context(
                 self.messages,
                 self._working_context_state(),
@@ -356,6 +469,15 @@ class AgentConversation:
         self.compaction_gate.mark_compacted()
         self.runtime_state.context_refill_streak = 0
         self.runtime_state.auto_compaction_suspended = True
+        summary_text = _first_compacted_summary(self.messages)
+        self._emit_compaction_committed(
+            messages_before=messages_before,
+            token_count_before=token_count,
+            summary_chars=len(summary_text),
+            summary_text=summary_text,
+            phase="rebuilding_working_context",
+        )
+        self._refresh_dynamic_context_after_compaction(phase="rebuilding_working_context")
 
     def _working_context_state(self) -> dict:
         board = self.runtime_state.task_board
@@ -696,7 +818,8 @@ class AgentConversation:
                     self.trace.middleware_inject(type(mw).__name__, "per_iteration", inject)
 
             # --- Context lifecycle check ---
-            token_count = context.count_tokens(self.messages)
+            tool_schemas = _tool_schemas_for_agent(agent)
+            token_count = context.count_request_tokens(self.messages, tool_schemas=tool_schemas)
             log.info(f"[{agent.name}] iteration={iteration}  tokens≈{token_count}")
             self.trace.iteration(iteration, token_count)
 
@@ -724,10 +847,6 @@ class AgentConversation:
                 "max_tokens": 32768,
             }
             if agent.use_tools:
-                if agent.tool_schemas is not None:
-                    tool_schemas = agent.tool_schemas
-                else:
-                    tool_schemas = TOOL_SCHEMAS + agent.extra_tool_schemas
                 chat_args["tools"] = tool_schemas
                 chat_args["tool_choice"] = "auto"
             else:
@@ -911,6 +1030,27 @@ def _safe_tool_summary(tool_name: str, tool_args: dict) -> str:
 def _safe_args_preview(tool_args: dict) -> str:
     """Backward-compatible wrapper (200-char limit)."""
     return safe_args_preview(tool_args, max_chars=200)
+
+
+def _tool_schemas_for_agent(agent: Agent) -> list[dict] | None:
+    if not agent.use_tools:
+        return None
+    if agent.tool_schemas is not None:
+        return agent.tool_schemas
+    return TOOL_SCHEMAS + agent.extra_tool_schemas
+
+
+def _first_compacted_summary(messages: list[dict]) -> str:
+    for message in messages:
+        content = str(message.get("content") or "")
+        if not (
+            content.startswith("[COMPACTED CONTEXT")
+            or content.startswith("[REBUILD_WORKING_CONTEXT]")
+        ):
+            continue
+        _header, _sep, body = content.partition("\n")
+        return (body or content).strip()
+    return ""
 
 
 def _tool_names_from_schemas(tool_schemas: list[dict] | None) -> set[str]:

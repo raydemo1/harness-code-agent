@@ -287,7 +287,7 @@ class ContextBar(Static):
         text.append(f" auto-compact @{self.compact_percent}%", style="dim")
         text.append(f" │ ", style="dim")
         text.append(f"▶ {self.permission_mode}", style=perm_color)
-        text.append(" │ Ctrl+K compact │ Ctrl+P perms", style="dim")
+        text.append(" │ Ctrl+P perms", style="dim")
         return text
 
     def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
@@ -303,8 +303,7 @@ class ContextBar(Static):
             self.compact_percent = 90
 
     def on_click(self) -> None:
-        if hasattr(self.app, "action_compact_context"):
-            self.app.action_compact_context()
+        return None
 
 
 # ── CommandPalette ──────────────────────────────────────────────────────────

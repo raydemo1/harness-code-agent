@@ -20,6 +20,12 @@ class AgentMiddleware(ABC):
         """Called when a live conversation is closing."""
         return None
 
+    def on_context_compacted(self, messages: list[dict], runtime_state=None,
+                             agent_name: str | None = None,
+                             phase: str | None = None) -> list[dict]:
+        """Called after conversation context is compacted. Return messages to inject."""
+        return []
+
     def augment_user_prompt(
         self,
         user_prompt: str,

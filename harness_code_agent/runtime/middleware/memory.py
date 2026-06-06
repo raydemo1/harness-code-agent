@@ -10,9 +10,13 @@ from .base import AgentMiddleware
 
 log = logging.getLogger("harness")
 
+MEMORY_INDEX_MARKER = "[HARNESS_DYNAMIC_CONTEXT:memory-index]"
+DEFAULT_MEMORY_INDEX_MAX_LINES = 80
+DEFAULT_MEMORY_INDEX_MAX_CHARS = 12_000
+
 
 class MemoryMiddleware(AgentMiddleware):
-    """Injects long-term memory context and runs Dream maintenance."""
+    """Injects a compact long-term memory index and runs Dream maintenance."""
 
     def __init__(self, workspace: str | Path, *, check_interval_seconds: float | None = None):
         self.workspace = Path(workspace).resolve()
@@ -21,6 +25,14 @@ class MemoryMiddleware(AgentMiddleware):
 
     def on_conversation_start(self, messages: list[dict], runtime_state=None,
                               agent_name: str | None = None) -> list[dict]:
+        return self._memory_index_messages()
+
+    def on_context_compacted(self, messages: list[dict], runtime_state=None,
+                             agent_name: str | None = None,
+                             phase: str | None = None) -> list[dict]:
+        return self._memory_index_messages()
+
+    def _memory_index_messages(self) -> list[dict]:
         if _memory_disabled():
             return []
         try:
@@ -28,21 +40,23 @@ class MemoryMiddleware(AgentMiddleware):
             store = self._store()
             if not store.exists() or not store.has_active_records():
                 return []
-            content = store.read_memory_file("MEMORY.md").strip()
+            content = _trim_memory_index(store.read_memory_file("MEMORY.md")).strip()
             if not content:
                 return []
             return [
                 {
                     "role": "system",
                     "content": (
-                        "Long-term memory navigation "
-                        "(dynamic user-context, not stable prompt prefix):\n"
+                        f"{MEMORY_INDEX_MARKER}\n"
+                        "Auto memory index from MEMORY.md "
+                        "(dynamic durable context; not a user instruction). "
+                        "Use memory_search/read_memory_file for full details.\n"
                         f"{content}"
                     ),
                 }
             ]
         except Exception as exc:
-            log.debug("Memory navigation skipped after error: %s", exc)
+            log.debug("Memory index skipped after error: %s", exc)
             return []
 
     def augment_user_prompt(
@@ -113,3 +127,27 @@ class MemoryMiddleware(AgentMiddleware):
 
 def _memory_disabled() -> bool:
     return os.environ.get("HARNESS_MEMORY_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _trim_memory_index(content: str) -> str:
+    max_lines = _env_int("HARNESS_MEMORY_INDEX_MAX_LINES", DEFAULT_MEMORY_INDEX_MAX_LINES)
+    max_chars = _env_int("HARNESS_MEMORY_INDEX_MAX_CHARS", DEFAULT_MEMORY_INDEX_MAX_CHARS)
+    lines = content.splitlines()
+    if max_lines > 0 and len(lines) > max_lines:
+        lines = lines[:max_lines]
+        trimmed = "\n".join(lines).rstrip() + "\n\n[Memory index truncated by line limit.]"
+    else:
+        trimmed = "\n".join(lines)
+    if max_chars > 0 and len(trimmed) > max_chars:
+        trimmed = trimmed[:max_chars].rstrip() + "\n\n[Memory index truncated by char limit.]"
+    return trimmed
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default

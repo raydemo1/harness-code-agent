@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import logging
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -40,6 +41,8 @@ from .mentions import MentionResolutionError, ResolvedMention, render_mention_co
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 PRODUCT_DEFAULT_PROFILE = "coding-agent"
 CHECKPOINT_EXCLUDES = [".harness", "global_plan", config.PROGRESS_FILE]
+TURN_INLINE_CHAR_LIMIT = 40_000
+TURN_EXCERPT_CHARS = 2_000
 PROFILE_SLASH_ALIASES = {
     "/code": "coding-agent",
     "/app": "app-builder",
@@ -395,11 +398,21 @@ class InteractiveSession:
             session_store=self.session_store,
             skill_catalog=self.skill_registry.catalog,
         )
-        context_block = self._augment_user_prompt(
+        prompt_for_model = self._externalize_large_turn_text(
+            "prompt",
             user_prompt,
+            intro="The full user prompt was too large to inline.",
+        )
+        resolved_for_model = self._externalize_large_mentions(resolved)
+        context_block = self._augment_user_prompt(
+            prompt_for_model,
             mention_paths=_memory_mention_paths(resolved),
         )
-        prompt_with_mentions = _format_turn_with_mentions_and_memory(user_prompt, resolved, context_block)
+        prompt_with_mentions = _format_turn_with_mentions_and_memory(
+            prompt_for_model,
+            resolved_for_model,
+            context_block,
+        )
         task = self.format_task(prompt_with_mentions)
         self.turn_count += 1
         self.event_bus.emit_event(
@@ -719,34 +732,64 @@ class InteractiveSession:
         })
         return f"Resumed context injected for session: {session_id}"
 
-    def manual_compact_context(self) -> str:
-        if not self.is_bound or self.conversation is None:
-            return "No active session yet. Submit a task first."
-        from ..agent import context
-        from ..agent.compaction import get_thresholds
-        from ..agent.conversation import llm_call_simple
-
-        conv = self.conversation
-        token_count = context.count_tokens(conv.messages)
-        msg_count_before = len(conv.messages)
-        compacted = context.compact_messages(
-            conv.messages,
-            llm_call_simple,
-            role=conv.agent.name,
-            force=True,
-            target_tokens=get_thresholds().summary_target,
+    def _externalize_large_turn_text(self, label: str, text: str, *, intro: str) -> str:
+        limit = _env_int("HARNESS_TURN_INLINE_CHAR_LIMIT", TURN_INLINE_CHAR_LIMIT)
+        if limit <= 0 or len(text) <= limit:
+            return text
+        path = self._write_turn_input_file(label, text)
+        digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+        head, tail = _head_tail(text, TURN_EXCERPT_CHARS)
+        return (
+            "[EXTERNALIZED TURN CONTENT]\n"
+            f"{intro}\n"
+            f"path: {path}\n"
+            f"chars: {len(text)}\n"
+            f"sha256: {digest}\n"
+            "Use read_file to inspect the full text if needed. Do not assume the omitted middle.\n\n"
+            "Head excerpt:\n"
+            "```text\n"
+            f"{head}\n"
+            "```\n\n"
+            "Tail excerpt:\n"
+            "```text\n"
+            f"{tail}\n"
+            "```"
         )
-        replace = getattr(conv, "_replace_messages", None)
-        if replace is not None:
-            replace(compacted)
-        else:
-            conv.messages = compacted
-            conv.compaction_gate.bump_revision()
-        msg_count_after = len(conv.messages)
-        conv.runtime_state.current_turn_start_index = max(1, len(conv.messages) - 1)
-        conv.compaction_gate.mark_compacted()
-        tokens_saved = max(0, token_count - context.count_tokens(conv.messages))
-        return f"Compacted: {msg_count_before} -> {msg_count_after} messages, ~{tokens_saved} tokens saved."
+
+    def _externalize_large_mentions(self, resolved: list[ResolvedMention]) -> list[ResolvedMention]:
+        limit = _env_int("HARNESS_TURN_INLINE_CHAR_LIMIT", TURN_INLINE_CHAR_LIMIT)
+        if limit <= 0:
+            return resolved
+        updated: list[ResolvedMention] = []
+        for idx, item in enumerate(resolved, start=1):
+            content = item.content or ""
+            if len(content) <= limit:
+                updated.append(item)
+                continue
+            label = f"mention-{idx}"
+            replacement = self._externalize_large_turn_text(
+                label,
+                content,
+                intro=f"The resolved content for mention {item.raw} was too large to inline.",
+            )
+            metadata = dict(item.metadata)
+            metadata["externalized_content"] = True
+            updated.append(replace(item, content=replacement, metadata=metadata))
+        return updated
+
+    def _write_turn_input_file(self, label: str, text: str) -> Path:
+        if self.session is None:
+            raise RuntimeError("Cannot externalize turn input before the session is bound.")
+        safe_label = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in label) or "input"
+        inputs_dir = self.session.root / "inputs"
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        path = inputs_dir / f"turn-{self.turn_count + 1:04d}-{safe_label}.txt"
+        suffix = 1
+        while path.exists():
+            path = inputs_dir / f"turn-{self.turn_count + 1:04d}-{safe_label}-{suffix}.txt"
+            suffix += 1
+        path.write_text(text, encoding="utf-8")
+        return path
 
     def _append_conversation_message(self, message: dict) -> None:
         append = getattr(self.conversation, "_append_message", None)
@@ -905,6 +948,24 @@ class InteractiveSession:
 def _require_arg(args: list[str], usage: str) -> None:
     if len(args) != 1:
         raise ValueError(usage)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _head_tail(text: str, chars: int) -> tuple[str, str]:
+    if chars <= 0:
+        return "", ""
+    if len(text) <= chars * 2:
+        return text, ""
+    return text[:chars], text[-chars:]
 
 
 def _memory_mention_paths(resolved: list[ResolvedMention]) -> list[str]:

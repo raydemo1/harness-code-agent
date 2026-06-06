@@ -87,7 +87,6 @@ class TuiApp(App):
         Binding("ctrl+t", "toggle_thought", "Toggle thought", show=False, priority=True),
         Binding("ctrl+d", "toggle_details", "Details", show=False, priority=True),
         Binding("ctrl+o", "observe", "Observe", show=False, priority=True),
-        Binding("ctrl+k", "compact_context", "Compact", show=False, priority=True),
         Binding("ctrl+p", "toggle_permission", "Permissions", show=False, priority=True),
         # Panel keys: check_action guards these to only fire when a panel is active.
         # priority=True ensures they are checked before widget-level handlers so
@@ -521,19 +520,6 @@ class TuiApp(App):
         if hasattr(self, "session"):
             self.push_screen(ObservabilityScreen(self.session))
 
-    def action_compact_context(self) -> None:
-        """Manually compact conversation context (dispatched to worker thread)."""
-        self._run_compact_context()
-
-    @work(thread=True, exclusive=True)
-    def _run_compact_context(self) -> None:
-        """Worker thread: compact context and post result to UI thread."""
-        try:
-            result = self.session.manual_compact_context()
-            self.post_message(OutputEvent(result, title="context compacted"))
-        except Exception as exc:
-            self.post_message(OutputEvent(f"Error: {exc}", title="context compact error"))
-
     def action_toggle_permission(self) -> None:
         """Toggle runtime permission mode (dispatched to worker thread)."""
         self._run_toggle_permission()
@@ -660,7 +646,11 @@ class TuiApp(App):
         from ..agent import context
         from ..agent.compaction import get_thresholds
         thresholds = get_thresholds()
-        self.state.snapshot.context_tokens = context.count_tokens(self.session.conversation.messages)
+        tool_schemas = getattr(getattr(self.session, "agent", None), "tool_schemas", None)
+        self.state.snapshot.context_tokens = context.count_request_tokens(
+            self.session.conversation.messages,
+            tool_schemas=tool_schemas,
+        )
         self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
         self.state.snapshot.context_compact_threshold = thresholds.compact
         self.state.snapshot.context_summary_target_threshold = thresholds.summary_target

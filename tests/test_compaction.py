@@ -217,6 +217,26 @@ class CompactMessagesTests(unittest.TestCase):
         self.assertLessEqual(count_tokens(result), 1200)
         self.assertEqual(result[-1]["content"], "current task")
 
+    def test_request_token_count_includes_tool_schema_overhead(self):
+        from harness_code_agent.agent.context import count_request_tokens, count_tokens
+
+        messages = [{"role": "system", "content": "sys"}]
+        tool_schemas = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "large_tool",
+                    "description": "schema overhead " * 200,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        self.assertGreater(
+            count_request_tokens(messages, tool_schemas=tool_schemas),
+            count_tokens(messages),
+        )
+
     def test_clean_older_tool_outputs_keeps_current_turn(self):
         from harness_code_agent.agent.context import clean_older_tool_outputs
 
@@ -418,6 +438,25 @@ class CompactCommandTests(unittest.TestCase):
 
             self.assertIn("Latest summary text", show.text)
 
+    def test_compact_show_prefers_persisted_latest_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from harness_code_agent.tui.commands import default_command_registry
+
+            compacted_dir = Path(tmpdir) / "compacted"
+            compacted_dir.mkdir()
+            (compacted_dir / "latest.md").write_text("Persisted summary text\n", encoding="utf-8")
+            session = self._make_session(tmpdir)
+            session.session = MagicMock(compacted_dir=compacted_dir)
+            session.conversation.messages.insert(1, {
+                "role": "user",
+                "content": "[COMPACTED CONTEXT]\nMessage summary text",
+            })
+
+            show = default_command_registry().execute("/compact show", session)
+
+            self.assertIn("Persisted summary text", show.text)
+            self.assertNotIn("Message summary text", show.text)
+
     def test_compact_rejects_manual_status_and_history_commands(self):
         from harness_code_agent.tui.commands import default_command_registry
         registry = default_command_registry()
@@ -448,6 +487,34 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
         self.assertGreater(conv.compaction_gate.revision, initial)
 
+    def test_context_compacted_hook_replaces_dynamic_context_block(self):
+        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.runtime.middleware import AgentMiddleware
+
+        class RefreshMiddleware(AgentMiddleware):
+            def on_conversation_start(self, messages, runtime_state=None, agent_name=None):
+                return [{"role": "system", "content": "[HARNESS_DYNAMIC_CONTEXT:test]\nold"}]
+
+            def on_context_compacted(self, messages, runtime_state=None, agent_name=None, phase=None):
+                return [{"role": "system", "content": f"[HARNESS_DYNAMIC_CONTEXT:test]\nnew:{phase}"}]
+
+        conv = Agent(
+            "test_agent",
+            "sys",
+            use_tools=False,
+            middlewares=[RefreshMiddleware()],
+        ).start_conversation("task")
+
+        conv._refresh_dynamic_context_after_compaction(phase="summarizing_history")
+
+        dynamic = [
+            message for message in conv.messages
+            if str(message.get("content") or "").startswith("[HARNESS_DYNAMIC_CONTEXT:test]")
+        ]
+        self.assertEqual(len(dynamic), 1)
+        self.assertIn("new:summarizing_history", dynamic[0]["content"])
+        self.assertEqual(conv.messages[1], dynamic[0])
+
     def test_auto_compaction_cleans_outputs_before_summary(self):
         from harness_code_agent.agent.compaction import get_thresholds
         from harness_code_agent.agent.loop import Agent
@@ -461,7 +528,10 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         ]
 
         with (
-            patch("harness_code_agent.agent.conversation.context.count_tokens", side_effect=[thresholds.compact, thresholds.compact - 1]),
+            patch(
+                "harness_code_agent.agent.conversation.context.count_tokens",
+                side_effect=[thresholds.compact, thresholds.compact - 1, thresholds.compact - 1],
+            ),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
             patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(cleaned_messages, True)) as clean,
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation") as summarize,
@@ -521,6 +591,63 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         clean.assert_called_once()
         summarize.assert_called_once()
         checkpoint.assert_not_called()
+
+    def test_auto_compaction_persists_latest_summary(self):
+        from harness_code_agent.agent.compaction import get_thresholds
+        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.store import SessionStore
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(root / ".harness")
+            session = store.create(
+                profile="coding-agent",
+                cwd=root,
+                model="test-model",
+                permission_mode="workspace-write",
+            )
+            tool_context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=session.snapshots_dir),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=store.event_bus(session),
+                session_id=session.id,
+            )
+            thresholds = get_thresholds()
+            agent = Agent("test_agent", "sys", use_tools=False, tool_context=tool_context)
+            conv = agent.start_conversation("task")
+            summarized_messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "[COMPACTED CONTEXT]\nPersist me"},
+                {"role": "user", "content": "task"},
+            ]
+
+            with (
+                patch(
+                    "harness_code_agent.agent.conversation.context.count_tokens",
+                    side_effect=[
+                        thresholds.compact,
+                        thresholds.compact,
+                        thresholds.summary_target - 1,
+                        thresholds.summary_target - 1,
+                    ],
+                ),
+                patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
+                patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(conv.messages, False)),
+                patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=summarized_messages),
+                patch.object(
+                    conv,
+                    "_request_assistant_message",
+                    return_value=({"role": "assistant", "content": "done"}, "stop"),
+                ),
+            ):
+                conv.run_until_idle()
+
+            latest = session.compacted_dir / "latest.md"
+            self.assertTrue(latest.exists())
+            self.assertIn("Persist me", latest.read_text(encoding="utf-8"))
 
     def test_auto_compaction_suspends_for_turn_when_summary_still_over_threshold(self):
         from harness_code_agent.agent.compaction import get_thresholds

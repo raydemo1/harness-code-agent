@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 
@@ -68,6 +69,18 @@ def count_tokens(messages: list[dict]) -> int:
             else:
                 total += len(args) // 4
     return total
+
+
+def count_request_tokens(messages: list[dict], *, tool_schemas: list[dict] | None = None) -> int:
+    """Estimate the full request size, including tool schema overhead."""
+    total = count_tokens(messages)
+    if not tool_schemas:
+        return total
+    schema_text = json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    enc = _get_encoder()
+    if enc:
+        return total + len(enc.encode(schema_text))
+    return total + len(schema_text) // 4
 
 
 # ---------------------------------------------------------------------------

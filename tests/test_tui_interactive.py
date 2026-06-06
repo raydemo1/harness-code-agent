@@ -36,7 +36,6 @@ def _mock_session(root: Path):
         conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
         close=lambda: None,
         handle_slash_command=lambda line: True,
-        manual_compact_context=lambda: "compacted",
         submit=lambda text, cancellation_token=None: SimpleNamespace(notice="", checkpoint=""),
         interrupt_current_shell=lambda: None,
         toggle_permission_mode=lambda: "permission mode switched: workspace-write -> danger-full-access",
@@ -58,7 +57,6 @@ def _mock_pending_session(root: Path):
         conversation=None,
         close=lambda: None,
         handle_slash_command=lambda line: True,
-        manual_compact_context=lambda: "No active session yet. Submit a task first.",
         submit=lambda text, cancellation_token=None: SimpleNamespace(notice="", checkpoint=""),
         interrupt_current_shell=lambda: None,
         toggle_permission_mode=lambda: "permission mode switched: workspace-write -> danger-full-access",
@@ -350,26 +348,10 @@ class TuiInteractiveTests(unittest.TestCase):
                     self.assertTrue(any(block.title == "permission mode switched" for block in app.state.blocks))
         _run(_test())
 
-    def test_ctrl_k_compacts_context_and_reports_result(self):
-        async def _test():
-            mock = _mock_session(self.root)
-            calls = []
+    def test_ctrl_k_is_not_bound_to_manual_compaction(self):
+        bindings = list(TuiApp.BINDINGS)
 
-            def compact():
-                calls.append(True)
-                return "compacted old context"
-
-            mock.manual_compact_context = compact
-
-            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
-                MockSession.return_value = mock
-                app = TuiApp(cwd=self.root, profile_name="coding-agent")
-                async with app.run_test() as pilot:
-                    await pilot.press("ctrl+k")
-                    await pilot.pause(0.01)
-                    self.assertEqual(calls, [True])
-                    self.assertTrue(any(block.title == "context compacted" for block in app.state.blocks))
-        _run(_test())
+        self.assertFalse(any(getattr(binding, "key", "") == "ctrl+k" for binding in bindings))
 
     # ── Approval panel ──────────────────────────────────────────────────────
 

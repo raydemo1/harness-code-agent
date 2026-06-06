@@ -881,7 +881,6 @@ class TuiAppTests(unittest.TestCase):
                 conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
                 close=lambda: None,
                 handle_slash_command=lambda line: True,
-                manual_compact_context=lambda: "compacted",
                 submit=lambda text, cancellation_token=None: SimpleNamespace(notice="", checkpoint=""),
                 interrupt_current_shell=lambda: None,
             )
@@ -950,7 +949,6 @@ class TuiAppTests(unittest.TestCase):
                 conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
                 close=lambda: None,
                 handle_slash_command=lambda line: True,
-                manual_compact_context=lambda: "compacted",
                 submit=lambda text, cancellation_token=None: SimpleNamespace(notice="", checkpoint=""),
                 interrupt_current_shell=lambda: None,
             )

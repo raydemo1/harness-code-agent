@@ -187,6 +187,56 @@ class MemoryQueryTests(unittest.TestCase):
         self.assertNotIn("repo_name", signature.parameters)
 
 
+class MemoryMiddlewareTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_memory_index_injection_is_marked_and_truncated(self):
+        from harness_code_agent.memory.store import MemoryRecord, MemoryStore
+        from harness_code_agent.runtime.middleware.memory import MEMORY_INDEX_MARKER, MemoryMiddleware
+
+        store = MemoryStore(self.temp_dir / "memory", workspace=self.temp_dir)
+        store.ensure_initialized()
+        store.atomic_write_records([
+            MemoryRecord(
+                id="mem_1",
+                file="commands.md",
+                anchor="test",
+                title="Test command",
+                summary="Run targeted unittest commands.",
+                status="active",
+            )
+        ])
+        store.atomic_write("MEMORY.md", "\n".join(f"line {idx}" for idx in range(10)))
+        middleware = MemoryMiddleware(workspace=self.temp_dir)
+
+        with (
+            patch.object(middleware, "_store", return_value=store),
+            patch("harness_code_agent.memory.dream.should_dream", return_value=False),
+            patch.dict(
+                "os.environ",
+                {
+                    "HARNESS_MEMORY_DISABLED": "",
+                    "HARNESS_MEMORY_INDEX_MAX_LINES": "3",
+                    "HARNESS_MEMORY_INDEX_MAX_CHARS": "1000",
+                },
+            ),
+        ):
+            messages = middleware.on_conversation_start([])
+
+        self.assertEqual(len(messages), 1)
+        content = messages[0]["content"]
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertTrue(content.startswith(MEMORY_INDEX_MARKER))
+        self.assertIn("line 0", content)
+        self.assertIn("line 2", content)
+        self.assertNotIn("line 3", content)
+        self.assertIn("truncated", content.lower())
+
+
 class MemoryToolTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())

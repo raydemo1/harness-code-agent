@@ -173,6 +173,35 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_large_user_prompt_is_externalized_before_agent_submit(self):
+        head = "Task: analyze this pasted payload\n" + ("H" * 2200)
+        middle = "MIDDLE-OMITTED-" * 400
+        tail = "T" * 2200
+        large_prompt = head + middle + tail
+
+        with (
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
+            patch.dict("os.environ", {"HARNESS_TURN_INLINE_CHAR_LIMIT": "100"}),
+        ):
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="coding-agent",
+                profile_explicit=True,
+            )
+            try:
+                session.submit(large_prompt)
+
+                submitted = FakeConversation.instances[-1].submissions[-1]
+                input_files = list((session.session.root / "inputs").glob("turn-0001-prompt*.txt"))
+                self.assertEqual(len(input_files), 1)
+                self.assertEqual(input_files[0].read_text(encoding="utf-8"), large_prompt)
+                self.assertIn("[EXTERNALIZED TURN CONTENT]", submitted)
+                self.assertIn(str(input_files[0]), submitted)
+                self.assertIn("Use read_file to inspect the full text", submitted)
+                self.assertNotIn("MIDDLE-OMITTED-" * 20, submitted)
+            finally:
+                session.close()
+
     def test_memory_middleware_dream_check_is_throttled(self):
         from harness_code_agent.runtime.middleware.memory import MemoryMiddleware
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -242,10 +243,27 @@ def _compact(session: Any, args: list[str], registry: SlashCommandRegistry) -> C
     if args != ["show"]:
         raise ValueError("Usage: /compact show")
     _require_bound(session)
-    summary = _latest_compacted_summary(getattr(session.conversation, "messages", []))
+    summary = _latest_compacted_summary_from_disk(session)
+    if summary is None:
+        summary = _latest_compacted_summary(getattr(session.conversation, "messages", []))
     if summary is None:
         return CommandResult("No compacted summary available yet.")
     return CommandResult(f"Latest compacted summary:\n\n{summary}")
+
+
+def _latest_compacted_summary_from_disk(session: Any) -> str | None:
+    session_obj = getattr(session, "session", None)
+    compacted_dir = getattr(session_obj, "compacted_dir", None)
+    if not isinstance(compacted_dir, (str, Path)):
+        return None
+    path = Path(compacted_dir) / "latest.md"
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    return text or None
 
 
 def _latest_compacted_summary(messages: list[dict]) -> str | None:
