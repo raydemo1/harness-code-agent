@@ -142,6 +142,7 @@ class InteractiveSession:
         self._started_at: float | None = None
         self._closed = False
         self._close_lock = threading.Lock()
+        self._next_memory_dream_check_at = 0.0
 
     @property
     def is_bound(self) -> bool:
@@ -760,9 +761,13 @@ class InteractiveSession:
 
         return MemoryStore(default_memory_root(self.cwd), workspace=self.cwd)
 
-    def _maybe_run_memory_dream(self) -> None:
+    def _maybe_run_memory_dream(self, *, force: bool = False) -> None:
         if _memory_disabled():
             return
+        now = time.monotonic()
+        if not force and now < self._next_memory_dream_check_at:
+            return
+        self._next_memory_dream_check_at = now + _memory_dream_check_interval_seconds()
         from ..memory.dream import run_dream, should_dream
 
         store = self._memory_store()
@@ -784,7 +789,7 @@ class InteractiveSession:
             return
         self._append_conversation_message(
             {
-                "role": "user",
+                "role": "system",
                 "content": (
                     "Long-term memory navigation (dynamic user-context, not stable prompt prefix):\n"
                     f"{content}"
@@ -797,7 +802,7 @@ class InteractiveSession:
             return ""
         self._maybe_run_memory_dream()
         store = self._memory_store()
-        if not store.exists() or not store.has_active_records():
+        if not store.exists():
             return ""
         try:
             from ..memory.recall import MemoryRecall
@@ -901,7 +906,7 @@ class InteractiveSession:
             if self._closed:
                 return
             self._closed = True
-        self._maybe_run_memory_dream()
+        self._maybe_run_memory_dream(force=True)
         stop_dev_server()
         for slot in list(self.profile_slots.values()):
             slot.conversation.close()
@@ -973,6 +978,16 @@ def _format_turn_with_mentions_and_memory(
 
 def _memory_disabled() -> bool:
     return os.environ.get("HARNESS_MEMORY_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _memory_dream_check_interval_seconds() -> float:
+    value = os.environ.get("HARNESS_MEMORY_DREAM_CHECK_INTERVAL_SECONDS", "").strip()
+    if not value:
+        return 60.0
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return 60.0
 
 
 def _is_plan_execution_confirmation(text: str) -> bool:

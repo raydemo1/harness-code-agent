@@ -23,6 +23,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 MEMORY_CONTENT_FILES = (
     "project.md",
     "decisions.md",
@@ -188,7 +198,11 @@ class MemoryStore:
             with self._path("inbox.jsonl").open("a", encoding="utf-8", newline="\n") as fh:
                 fh.write(json.dumps(candidate, ensure_ascii=False) + "\n")
             manifest = self.read_manifest()
-            manifest["inbox_count"] = len(self.read_inbox())
+            try:
+                inbox_count = int(manifest.get("inbox_count", 0))
+            except (TypeError, ValueError):
+                inbox_count = 0
+            manifest["inbox_count"] = max(0, inbox_count) + 1
             manifest["updated_at"] = _utc_now()
             self.atomic_write("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from ..runtime.tool_search import SearchDocument, search_bm25
 from .query import MemoryQueryComposer
-from .store import MemoryRecord, MemoryStore
+from .store import MemoryRecord, MemoryStore, _env_float, _env_int
 
 
 DEFAULT_TOP_K = 6
@@ -45,8 +44,12 @@ class MemoryRecall:
         self._maybe_rebuild_cache()
         if not self._cached_documents:
             return []
-        limit = top_k if top_k is not None else int(os.environ.get("HARNESS_MEMORY_TOP_K", DEFAULT_TOP_K))
-        threshold = min_score if min_score is not None else float(os.environ.get("HARNESS_MEMORY_MIN_SCORE", DEFAULT_MIN_SCORE))
+        limit = top_k if top_k is not None else _env_int("HARNESS_MEMORY_TOP_K", DEFAULT_TOP_K)
+        threshold = (
+            min_score
+            if min_score is not None
+            else _env_float("HARNESS_MEMORY_MIN_SCORE", DEFAULT_MIN_SCORE)
+        )
         raw_hits = search_bm25(self._cached_documents, query.text, limit=limit)
         if not raw_hits or raw_hits[0].score < threshold:
             return []
@@ -66,6 +69,11 @@ class MemoryRecall:
         if not hits:
             return ""
         lines = ["Relevant long-term memory:"]
+        lines.extend(self.format_hit_lines(hits))
+        return "\n".join(lines)
+
+    def format_hit_lines(self, hits: list[MemoryHit]) -> list[str]:
+        lines: list[str] = []
         for hit in hits:
             record = hit.record
             tags = ", ".join(record.tags[:6]) or "-"
@@ -76,7 +84,7 @@ class MemoryRecall:
             lines.append(f"  Summary: {record.summary}")
             lines.append(f"  Tags: {tags}")
             lines.append(f"  Source paths: {paths}")
-        return "\n".join(lines)
+        return lines
 
     def _maybe_rebuild_cache(self) -> None:
         records_path = self.store.root / "records.jsonl"

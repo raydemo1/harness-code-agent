@@ -140,6 +140,28 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_memory_dream_check_is_throttled_per_session(self):
+        session = InteractiveSession(cwd=self.temp_dir)
+        try:
+            store = object()
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "HARNESS_MEMORY_DISABLED": "",
+                        "HARNESS_MEMORY_DREAM_CHECK_INTERVAL_SECONDS": "60",
+                    },
+                ),
+                patch.object(session, "_memory_store", return_value=store),
+                patch("harness_code_agent.memory.dream.should_dream", return_value=False) as should_dream,
+            ):
+                session._maybe_run_memory_dream()
+                session._maybe_run_memory_dream()
+
+            self.assertEqual(should_dream.call_count, 1)
+        finally:
+            session.close()
+
     def test_first_task_routes_before_creating_session_metadata(self):
         decision = SimpleNamespace(
             profile_name="plan",

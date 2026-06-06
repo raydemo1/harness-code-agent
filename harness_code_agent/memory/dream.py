@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import calendar
 import json
-import os
 import re
 import time
 
 from .navigator import rebuild_navigation_from_records
-from .store import MEMORY_CONTENT_FILES, MemoryRecord, MemoryStore
+from .store import MEMORY_CONTENT_FILES, MemoryRecord, MemoryStore, _env_int, _utc_now
 
 
 DEFAULT_INBOX_THRESHOLD = 12
@@ -15,14 +15,19 @@ DEFAULT_INBOX_THRESHOLD = 12
 def should_dream(store: MemoryStore) -> bool:
     if not store.exists():
         return False
-    inbox = store.read_inbox()
-    threshold = _env_int("HARNESS_MEMORY_INBOX_THRESHOLD", DEFAULT_INBOX_THRESHOLD)
-    if len(inbox) >= threshold:
-        return True
     manifest = store.read_manifest()
+    try:
+        inbox_count = int(manifest["inbox_count"]) if "inbox_count" in manifest else len(store.read_inbox())
+    except (TypeError, ValueError):
+        inbox_count = len(store.read_inbox())
+    threshold = _env_int("HARNESS_MEMORY_INBOX_THRESHOLD", DEFAULT_INBOX_THRESHOLD)
+    if inbox_count >= threshold:
+        return True
+    if inbox_count <= 0:
+        return False
     last = str(manifest.get("last_dream_at") or "")
     interval_seconds = _env_int("HARNESS_MEMORY_DREAM_INTERVAL_HOURS", 24) * 60 * 60
-    if inbox and _seconds_since(last) >= interval_seconds:
+    if _seconds_since(last) >= interval_seconds:
         return True
     return False
 
@@ -121,8 +126,6 @@ def _find_conflict(
 ) -> MemoryRecord | None:
     candidate_paths = set(_string_list(candidate.get("source_paths")))
     for record in active_records:
-        if record.status != "active":
-            continue
         if record.file == target_file and record.anchor == anchor:
             return record
         if candidate_paths and record.file == target_file and candidate_paths & set(record.source_paths):
@@ -192,7 +195,7 @@ def _append_dream_log(previous: str, summary: str, records: list[MemoryRecord], 
         lines.append("Superseded:")
         for record_id in sorted(superseded_ids):
             lines.append(f"- {record_id}")
-    return "\n".join(line for line in lines if line is not None).lstrip() + "\n"
+    return "\n".join(lines).lstrip() + "\n"
 
 
 def _new_record_id(existing: list[MemoryRecord], new_records: list[MemoryRecord]) -> str:
@@ -231,18 +234,4 @@ def _seconds_since(timestamp: str) -> float:
         parsed = time.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
         return float("inf")
-    return time.time() - time.mktime(parsed)
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if value is None or not value.strip():
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def _utc_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return time.time() - calendar.timegm(parsed)

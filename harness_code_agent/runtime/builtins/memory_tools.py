@@ -28,14 +28,15 @@ def memory_search(query: str, tool_context: ToolContext | None = None) -> ToolRe
             metadata={"status_source": "validation"},
         )
     store = MemoryStore(default_memory_root(workspace), workspace=workspace)
-    if not store.exists() or not store.has_active_records():
+    if not store.exists():
         return ToolResult(
             tool="memory_search",
             status="success",
             output="No relevant memory found.",
             metadata={"status_source": "native", "memory_root": str(store.root), "result_count": 0},
         )
-    hits = MemoryRecall(store).search(query)
+    recall = MemoryRecall(store)
+    hits = recall.search(query)
     if not hits:
         return ToolResult(
             tool="memory_search",
@@ -44,14 +45,7 @@ def memory_search(query: str, tool_context: ToolContext | None = None) -> ToolRe
             metadata={"status_source": "native", "memory_root": str(store.root), "result_count": 0},
         )
     lines = [f"Found {len(hits)} memory entries:"]
-    for hit in hits:
-        record = hit.record
-        lines.append(f"- [{record.id}] {record.title} ({record.file}#{record.anchor}, score={hit.score:.2f})")
-        lines.append(f"  Summary: {record.summary}")
-        if record.tags:
-            lines.append(f"  Tags: {', '.join(record.tags[:6])}")
-        if record.source_paths:
-            lines.append(f"  Source paths: {', '.join(record.source_paths[:4])}")
+    lines.extend(recall.format_hit_lines(hits))
     lines.append("")
     lines.append("Use read_memory_file to read full details from the memory files.")
     return ToolResult(
