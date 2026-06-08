@@ -16,6 +16,10 @@ from .. import config
 
 log = logging.getLogger("harness")
 
+DEFAULT_RECENT_TAIL_TOKENS = 16_384
+DEFAULT_MIN_RECENT_MESSAGES = 2
+MIN_COMPACT_REGION_TOKENS = 400
+
 # ---------------------------------------------------------------------------
 # Token counting
 # ---------------------------------------------------------------------------
@@ -157,6 +161,7 @@ def compact_messages(
     *,
     force: bool = False,
     target_tokens: int | None = None,
+    recent_tail_budget_tokens: int | None = None,
 ) -> list[dict]:
     """
     Summarize the older portion of messages, keep the system prompt
@@ -175,11 +180,14 @@ def compact_messages(
         messages,
         force=force,
         target_tokens=target_tokens,
+        recent_tail_budget_tokens=recent_tail_budget_tokens,
     ) - len(system)
     old = non_system[:split_idx]
     recent = non_system[split_idx:]
 
     if not old:
+        return messages
+    if not force and not _compaction_economics(old):
         return messages
 
     old_text = _messages_to_text(old)
@@ -251,6 +259,8 @@ def summarize_older_conversation(
     current = messages[split:]
     if not older:
         return messages
+    if not _compaction_economics(older):
+        return messages
 
     old_text = _messages_to_text(older)
     summary = llm_call([
@@ -311,29 +321,19 @@ def choose_compaction_split_index(
     *,
     force: bool = False,
     target_tokens: int | None = None,
+    recent_tail_budget_tokens: int | None = None,
 ) -> int:
     """Return an absolute split index for replacing the old prefix."""
     if not messages:
         return 0
 
-    retention = 0.30
     system = [messages[0]] if messages[0].get("role") == "system" else []
     non_system = messages[len(system):]
-    keep_count = max(4, int(len(non_system) * retention))
-
-    # In normal mode (not forced), skip the current user turn — find the
-    # last user message and keep everything from there onward.
-    if not force:
-        last_user_idx = None
-        for i in range(len(non_system) - 1, -1, -1):
-            if non_system[i].get("role") == "user":
-                last_user_idx = i
-                break
-        if last_user_idx is not None:
-            keep_count = max(keep_count, len(non_system) - last_user_idx)
-
-    split_idx = len(non_system) - keep_count
-    split_idx = _safe_split_index(non_system, split_idx)
+    tail_budget = _recent_tail_budget_tokens(
+        recent_tail_budget_tokens=recent_tail_budget_tokens,
+        target_tokens=target_tokens,
+    )
+    split_idx = _token_bounded_tail_start(non_system, tail_budget)
     if target_tokens is not None:
         placeholder_summary = {
             "role": "user",
@@ -347,6 +347,52 @@ def choose_compaction_split_index(
             target_tokens,
         )
     return len(system) + split_idx
+
+
+def _recent_tail_budget_tokens(
+    *,
+    recent_tail_budget_tokens: int | None,
+    target_tokens: int | None,
+) -> int:
+    if recent_tail_budget_tokens is not None:
+        try:
+            return max(1, int(recent_tail_budget_tokens))
+        except (TypeError, ValueError):
+            return DEFAULT_RECENT_TAIL_TOKENS
+    budget = DEFAULT_RECENT_TAIL_TOKENS
+    if target_tokens is not None:
+        try:
+            budget = min(budget, max(1, int(target_tokens * 0.5)))
+        except (TypeError, ValueError):
+            pass
+    else:
+        budget = min(budget, max(1, int(config.CONTEXT_WINDOW_TOKENS * 0.5)))
+    return budget
+
+
+def _token_bounded_tail_start(
+    messages: list[dict],
+    budget_tokens: int,
+    *,
+    min_recent_messages: int = DEFAULT_MIN_RECENT_MESSAGES,
+) -> int:
+    if not messages:
+        return 0
+    start = len(messages)
+    token_count = 0
+    min_recent_messages = max(0, min_recent_messages)
+    for idx in range(len(messages) - 1, -1, -1):
+        msg_tokens = count_tokens([messages[idx]])
+        kept = len(messages) - idx
+        if kept > min_recent_messages and token_count + msg_tokens > budget_tokens:
+            break
+        token_count += msg_tokens
+        start = idx
+    return _safe_split_index(messages, start)
+
+
+def _compaction_economics(messages: list[dict]) -> bool:
+    return count_tokens(messages) >= MIN_COMPACT_REGION_TOKENS
 
 
 def _safe_split_index(messages: list[dict], target_idx: int) -> int:

@@ -133,28 +133,38 @@ class CompactMessagesTests(unittest.TestCase):
 
     def test_summary_uses_user_role(self):
         from harness_code_agent.agent.context import compact_messages
+        large_old_detail = "important old detail " * 500
         messages = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "task1"},
-            {"role": "assistant", "content": "done1"},
+            {"role": "user", "content": "task1 " + large_old_detail},
+            {"role": "assistant", "content": "done1 " + large_old_detail},
             {"role": "user", "content": "task2"},
             {"role": "assistant", "content": "done2"},
             {"role": "user", "content": "current task"},
         ]
-        result = compact_messages(messages, self._mock_llm())
+        result = compact_messages(
+            messages,
+            self._mock_llm(),
+            recent_tail_budget_tokens=100,
+        )
         # Find the compacted summary message
         summary_msgs = [m for m in result if m.get("role") == "user" and "COMPACTED" in (m.get("content") or "")]
         self.assertEqual(len(summary_msgs), 1)
 
     def test_preserves_system_prompt(self):
         from harness_code_agent.agent.context import compact_messages
+        large_old_detail = "important old detail " * 500
         messages = [
             {"role": "system", "content": "system instructions"},
-            {"role": "user", "content": "task"},
-            {"role": "assistant", "content": "response"},
+            {"role": "user", "content": "task " + large_old_detail},
+            {"role": "assistant", "content": "response " + large_old_detail},
             {"role": "user", "content": "current"},
         ]
-        result = compact_messages(messages, self._mock_llm())
+        result = compact_messages(
+            messages,
+            self._mock_llm(),
+            recent_tail_budget_tokens=100,
+        )
         self.assertEqual(result[0]["role"], "system")
         self.assertEqual(result[0]["content"], "system instructions")
 
@@ -217,6 +227,52 @@ class CompactMessagesTests(unittest.TestCase):
         self.assertLessEqual(count_tokens(result), 1200)
         self.assertEqual(result[-1]["content"], "current task")
 
+    def test_token_bounded_recent_tail_drops_huge_recent_message(self):
+        from harness_code_agent.agent.context import compact_messages
+
+        huge_recent = "HUGE_RECENT_OUTPUT " + ("x " * 8000)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old task " + ("old detail " * 500)},
+            {"role": "assistant", "content": "old answer " + ("old detail " * 500)},
+            {"role": "user", "content": "recent task"},
+            {"role": "assistant", "content": huge_recent},
+            {"role": "user", "content": "current task"},
+            {"role": "assistant", "content": "current ack"},
+        ]
+
+        result = compact_messages(
+            messages,
+            self._mock_llm("summary"),
+            force=True,
+            recent_tail_budget_tokens=80,
+        )
+
+        rendered = " ".join(str(message.get("content", "")) for message in result)
+        self.assertNotIn("HUGE_RECENT_OUTPUT", rendered)
+        self.assertEqual(result[-2]["content"], "current task")
+        self.assertEqual(result[-1]["content"], "current ack")
+
+    def test_compact_messages_skips_small_region_without_summary_call(self):
+        from harness_code_agent.agent.context import compact_messages
+
+        llm = self._mock_llm("should not be called")
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "tiny old task"},
+            {"role": "assistant", "content": "tiny old answer"},
+            {"role": "user", "content": "tiny old task 2"},
+            {"role": "assistant", "content": "tiny old answer 2"},
+            {"role": "user", "content": "tiny old task 3"},
+            {"role": "assistant", "content": "tiny old answer 3"},
+            {"role": "user", "content": "current task"},
+        ]
+
+        result = compact_messages(messages, llm, force=False)
+
+        self.assertEqual(result, messages)
+        llm.assert_not_called()
+
     def test_request_token_count_includes_tool_schema_overhead(self):
         from harness_code_agent.agent.context import count_request_tokens, count_tokens
 
@@ -265,10 +321,11 @@ class CompactMessagesTests(unittest.TestCase):
     def test_summarize_older_conversation_preserves_current_turn(self):
         from harness_code_agent.agent.context import summarize_older_conversation
 
+        large_old_detail = "important old detail " * 500
         messages = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "old task"},
-            {"role": "assistant", "content": "old result"},
+            {"role": "user", "content": "old task " + large_old_detail},
+            {"role": "assistant", "content": "old result " + large_old_detail},
             {"role": "user", "content": "current task"},
             {"role": "assistant", "content": "current work"},
         ]
@@ -282,6 +339,26 @@ class CompactMessagesTests(unittest.TestCase):
         self.assertEqual(summarized[0], messages[0])
         self.assertIn("older summary", summarized[1]["content"])
         self.assertEqual(summarized[-2:], messages[-2:])
+
+    def test_summarize_older_conversation_skips_small_region_without_summary_call(self):
+        from harness_code_agent.agent.context import summarize_older_conversation
+
+        llm = self._mock_llm("should not be called")
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "tiny old task"},
+            {"role": "assistant", "content": "tiny old result"},
+            {"role": "user", "content": "current task"},
+        ]
+
+        summarized = summarize_older_conversation(
+            messages,
+            llm,
+            current_turn_start_index=3,
+        )
+
+        self.assertEqual(summarized, messages)
+        llm.assert_not_called()
 
     def test_rebuild_working_context_keeps_working_state_and_drops_old_outputs(self):
         from harness_code_agent.agent.context import rebuild_working_context

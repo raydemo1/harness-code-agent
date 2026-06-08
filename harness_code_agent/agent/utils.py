@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .. import config
@@ -26,12 +27,92 @@ def _usage_to_dict(usage) -> dict | None:
     completion_tokens = _get(usage, "completion_tokens")
     total_tokens = _get(usage, "total_tokens")
     details = _get(usage, "prompt_tokens_details") or {}
-    cached_tokens = _get(details, "cached_tokens", 0) or 0
+    cache_hit_tokens = _usage_int(usage, "prompt_cache_hit_tokens")
+    if cache_hit_tokens == 0:
+        cache_hit_tokens = _int_or_zero(_get(details, "cached_tokens", 0))
+    cache_miss_tokens = _usage_int(usage, "prompt_cache_miss_tokens")
+    if cache_miss_tokens == 0 and cache_hit_tokens and prompt_tokens is not None:
+        try:
+            cache_miss_tokens = max(0, int(prompt_tokens) - cache_hit_tokens)
+        except (TypeError, ValueError):
+            cache_miss_tokens = 0
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
-        "cached_tokens": cached_tokens,
+        "cached_tokens": cache_hit_tokens,
+        "cache_hit_tokens": cache_hit_tokens,
+        "cache_miss_tokens": cache_miss_tokens,
+    }
+
+
+@dataclass(frozen=True)
+class PromptCacheShape:
+    system_hash: str
+    tools_hash: str
+    prefix_hash: str
+    log_rewrite_version: int
+    tool_schema_tokens: int
+
+    def to_dict(self) -> dict:
+        return {
+            "system_hash": self.system_hash,
+            "tools_hash": self.tools_hash,
+            "prefix_hash": self.prefix_hash,
+            "log_rewrite_version": self.log_rewrite_version,
+            "tool_schema_tokens": self.tool_schema_tokens,
+        }
+
+
+def capture_prompt_cache_shape(
+    agent: Agent,
+    tool_schemas: list[dict] | None,
+    *,
+    log_rewrite_version: int = 0,
+) -> PromptCacheShape:
+    """Snapshot the stable request prefix inputs used for cache diagnostics."""
+    tool_text = json.dumps(
+        _canonical_tool_schemas(tool_schemas or []),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    system_prompt = getattr(agent, "system_prompt", "")
+    return PromptCacheShape(
+        system_hash=_short_hash(system_prompt),
+        tools_hash=_short_hash(tool_text),
+        prefix_hash=_short_hash(
+            json.dumps(
+                {"system": system_prompt, "tools": tool_text},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ),
+        log_rewrite_version=int(log_rewrite_version),
+        tool_schema_tokens=max(0, len(tool_text) // 4),
+    )
+
+
+def compare_prompt_cache_shapes(
+    previous: PromptCacheShape | None,
+    current: PromptCacheShape,
+    usage: dict | None,
+) -> dict:
+    reasons: list[str] = []
+    if previous is not None:
+        if previous.system_hash != current.system_hash:
+            reasons.append("system")
+        if previous.tools_hash != current.tools_hash:
+            reasons.append("tools")
+        if previous.log_rewrite_version != current.log_rewrite_version:
+            reasons.append("log_rewrite")
+    return {
+        **current.to_dict(),
+        "prefix_changed": bool(reasons),
+        "prefix_change_reasons": reasons,
+        "cache_hit_tokens": int((usage or {}).get("cache_hit_tokens") or (usage or {}).get("cached_tokens") or 0),
+        "cache_miss_tokens": int((usage or {}).get("cache_miss_tokens") or 0),
     }
 
 
@@ -74,6 +155,21 @@ def _canonical_schema_value(value, *, parent_key: str = ""):
             return sorted(items)
         return items
     return value
+
+
+def _usage_int(usage, key: str) -> int:
+    value = _get(usage, key, None)
+    if value is None:
+        extra = _get(usage, "model_extra") or {}
+        value = _get(extra, key, 0)
+    return _int_or_zero(value)
+
+
+def _int_or_zero(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _short_hash(text: str) -> str:

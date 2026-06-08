@@ -88,7 +88,7 @@ class ProviderAdapter:
             raise ValueError("model or profile is required")
         kwargs = {
             "model": model,
-            "messages": messages,
+            "messages": _strip_response_only_message_fields(messages),
             "max_tokens": max_tokens,
         }
         if tools is not None:
@@ -243,3 +243,19 @@ def _reasoning_content_from(value) -> str | None:
     if reasoning_content is None:
         reasoning_content = _get(_get(value, "model_extra") or {}, "reasoning_content")
     return reasoning_content
+
+
+def _strip_response_only_message_fields(messages: list[dict]) -> list[dict]:
+    """Return provider-bound messages without response-only bookkeeping fields."""
+    cleaned: list[dict] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            cleaned.append(message)
+            continue
+        if "reasoning_content" not in message:
+            cleaned.append(message)
+            continue
+        outbound = dict(message)
+        outbound.pop("reasoning_content", None)
+        cleaned.append(outbound)
+    return cleaned

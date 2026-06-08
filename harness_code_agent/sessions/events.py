@@ -308,26 +308,34 @@ class LlmUsageEvent:
     model: str
     prompt_tokens: int | None = None
     cached_tokens: int = 0
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
     completion_tokens: int | None = None
     total_tokens: int | None = None
     prompt_cache_key_hash: str | None = None
+    cache_diagnostics: dict[str, Any] | None = None
     agent: str | None = "main_agent"
 
     def to_event(self) -> StructuredEvent:
+        cache_hit_tokens = self.cache_hit_tokens or self.cached_tokens
         ratio = 0.0
         if self.prompt_tokens is not None and self.prompt_tokens > 0:
-            ratio = self.cached_tokens / self.prompt_tokens
+            ratio = cache_hit_tokens / self.prompt_tokens
         payload: dict[str, Any] = {
             "provider": self.provider,
             "model": self.model,
             "prompt_tokens": self.prompt_tokens,
-            "cached_tokens": self.cached_tokens,
+            "cached_tokens": cache_hit_tokens,
+            "cache_hit_tokens": cache_hit_tokens,
+            "cache_miss_tokens": self.cache_miss_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
             "cache_hit_ratio": ratio,
         }
         if self.prompt_cache_key_hash:
             payload["prompt_cache_key_hash"] = self.prompt_cache_key_hash
+        if self.cache_diagnostics is not None:
+            payload["cache_diagnostics"] = dict(self.cache_diagnostics)
         return StructuredEvent("llm_usage", payload, self.agent)
 
 

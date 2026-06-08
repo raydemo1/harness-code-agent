@@ -17,7 +17,13 @@ from .providers import ProviderAdapter, current_adapter, get_client
 from .runtime_state import AgentFallbackState, AgentRuntimeState, TaskBoard
 from .tool_executor import ToolExecutor
 from .trace import TraceWriter
-from .utils import _prompt_cache_key, _usage_to_dict
+from .utils import (
+    _prompt_cache_key,
+    _short_hash,
+    _usage_to_dict,
+    capture_prompt_cache_shape,
+    compare_prompt_cache_shapes,
+)
 from ..runtime.arg_preview import safe_args_preview
 from ..runtime.builtins.registry import TOOL_SCHEMAS
 from ..runtime.tool_context import ToolContext
@@ -152,6 +158,9 @@ class AgentConversation:
         self.fact_tracker = FactTracker()
         self.observation_store = ObservationStore(self._observation_dir())
         self._cached_prompt_cache_key: str | None = None
+        self._log_rewrite_version = 0
+        self._last_prompt_cache_shape = None
+        self._pending_prompt_cache_shape = None
         self._run_conversation_start_middlewares()
         if initial_task is not None:
             self.add_user_turn(initial_task)
@@ -215,6 +224,7 @@ class AgentConversation:
     def _replace_messages(self, messages: list[dict]) -> None:
         self.messages = list(messages)
         self.observation_store.detach_message_indexes(self.messages)
+        self._log_rewrite_version += 1
         self.compaction_gate.bump_revision()
 
     def _strip_dynamic_context_messages(self) -> bool:
@@ -652,15 +662,32 @@ class AgentConversation:
         from ..sessions.events import LlmUsageEvent
 
         key_hash = _short_hash(prompt_cache_key) if prompt_cache_key else None
+        cache_hit_tokens = int(usage.get("cache_hit_tokens") or usage.get("cached_tokens") or 0)
+        cache_miss_tokens = int(usage.get("cache_miss_tokens") or 0)
+        cache_shape = self._pending_prompt_cache_shape or capture_prompt_cache_shape(
+            self.agent,
+            _tool_schemas_for_agent(self.agent),
+            log_rewrite_version=self._log_rewrite_version,
+        )
+        cache_diagnostics = compare_prompt_cache_shapes(
+            self._last_prompt_cache_shape,
+            cache_shape,
+            usage,
+        )
+        self._last_prompt_cache_shape = cache_shape
+        self._pending_prompt_cache_shape = None
         self._event_bus.emit_event(
             LlmUsageEvent(
                 provider=getattr(self.provider, "name", "unknown"),
                 model=config.MODEL,
                 prompt_tokens=usage.get("prompt_tokens"),
-                cached_tokens=int(usage.get("cached_tokens") or 0),
+                cached_tokens=cache_hit_tokens,
+                cache_hit_tokens=cache_hit_tokens,
+                cache_miss_tokens=cache_miss_tokens,
                 completion_tokens=usage.get("completion_tokens"),
                 total_tokens=usage.get("total_tokens"),
                 prompt_cache_key_hash=key_hash,
+                cache_diagnostics=cache_diagnostics,
                 agent=self.agent.name,
             ).to_event()
         )
@@ -851,6 +878,11 @@ class AgentConversation:
                 chat_args["tool_choice"] = "auto"
             else:
                 tool_schemas = None
+            self._pending_prompt_cache_shape = capture_prompt_cache_shape(
+                agent,
+                tool_schemas,
+                log_rewrite_version=self._log_rewrite_version,
+            )
             if self.provider.supports_prompt_cache_key:
                 if self._cached_prompt_cache_key is None:
                     self._cached_prompt_cache_key = _prompt_cache_key(agent, tool_schemas)

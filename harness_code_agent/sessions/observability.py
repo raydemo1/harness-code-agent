@@ -19,6 +19,7 @@ class TokenMetrics:
     llm_calls: int = 0
     prompt_tokens: int = 0
     cached_tokens: int = 0
+    cache_miss_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
@@ -32,6 +33,7 @@ class TokenMetrics:
         self.llm_calls += other.llm_calls
         self.prompt_tokens += other.prompt_tokens
         self.cached_tokens += other.cached_tokens
+        self.cache_miss_tokens += other.cache_miss_tokens
         self.completion_tokens += other.completion_tokens
         self.total_tokens += other.total_tokens
 
@@ -40,6 +42,7 @@ class TokenMetrics:
             "llm_calls": self.llm_calls,
             "prompt_tokens": self.prompt_tokens,
             "cached_tokens": self.cached_tokens,
+            "cache_miss_tokens": self.cache_miss_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
             "cache_hit_ratio": self.cache_hit_ratio,
@@ -248,6 +251,7 @@ def build_session_observability(metadata: dict[str, Any], events: list[dict[str,
             snapshot.tokens.llm_calls += 1
             snapshot.tokens.prompt_tokens += _int_value(data.get("prompt_tokens"))
             snapshot.tokens.cached_tokens += _int_value(data.get("cached_tokens"))
+            snapshot.tokens.cache_miss_tokens += _int_value(data.get("cache_miss_tokens"))
             snapshot.tokens.completion_tokens += _int_value(data.get("completion_tokens"))
             snapshot.tokens.total_tokens += _int_value(data.get("total_tokens"))
         elif event_name == "tool_call":
@@ -447,6 +451,7 @@ def _token_line(tokens: TokenMetrics) -> str:
         f"llm_calls={tokens.llm_calls}, "
         f"prompt={tokens.prompt_tokens}, "
         f"cached={tokens.cached_tokens}, "
+        f"miss={tokens.cache_miss_tokens}, "
         f"completion={tokens.completion_tokens}, "
         f"total={tokens.total_tokens}, "
         f"cache hit ratio: {_percent(tokens.cache_hit_ratio)}"

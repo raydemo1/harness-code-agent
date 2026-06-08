@@ -225,6 +225,33 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(result.assistant_message["tool_calls"][0]["function"]["name"], "read_file")
         self.assertEqual(result.assistant_message["tool_calls"][0]["function"]["arguments"], '{"path":"README.md"}')
 
+    def test_provider_chat_kwargs_strip_response_only_reasoning_content(self):
+        from harness_code_agent.agent.providers import ProviderAdapter
+
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "provider-only thinking",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            }
+        ]
+
+        kwargs = ProviderAdapter("deepseek").chat_kwargs(
+            model="deepseek-v4-pro",
+            messages=messages,
+            max_tokens=10,
+        )
+
+        self.assertNotIn("reasoning_content", kwargs["messages"][0])
+        self.assertEqual(messages[0]["reasoning_content"], "provider-only thinking")
+
     def test_provider_streaming_checks_cancellation_between_chunks(self):
         from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
         from harness_code_agent.agent.providers import ProviderAdapter
@@ -964,6 +991,23 @@ class ProductRuntimeTests(unittest.TestCase):
 
         self.assertEqual(first, second)
 
+    def test_usage_to_dict_normalizes_deepseek_cache_hit_and_miss_tokens(self):
+        from harness_code_agent.agent.utils import _usage_to_dict
+
+        usage = SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            prompt_cache_hit_tokens=70,
+            prompt_cache_miss_tokens=30,
+        )
+
+        result = _usage_to_dict(usage)
+
+        self.assertEqual(result["cached_tokens"], 70)
+        self.assertEqual(result["cache_hit_tokens"], 70)
+        self.assertEqual(result["cache_miss_tokens"], 30)
+
     def test_context_replacement_detaches_observation_indexes_and_summarizes_survivors(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
         from harness_code_agent.runtime.tool_result import ToolResult
@@ -1040,6 +1084,62 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(usage.payload["cached_tokens"], 80)
         self.assertEqual(usage.payload["prompt_tokens"], 100)
         self.assertEqual(usage.payload["cache_hit_ratio"], 0.8)
+
+    def test_agent_loop_emits_cache_diagnostics_when_tool_schema_changes(self):
+        from harness_code_agent.agent.loop import Agent, AgentConversation
+        from harness_code_agent.sessions.events import EventBus
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content=f"done {self.calls}", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(
+                        prompt_tokens=100,
+                        completion_tokens=20,
+                        total_tokens=120,
+                        prompt_cache_hit_tokens=80 if self.calls > 1 else 0,
+                        prompt_cache_miss_tokens=20 if self.calls > 1 else 100,
+                    ),
+                )
+
+        class FakeClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        read_schema = {"type": "function", "function": {"name": "read_file"}}
+        write_schema = {"type": "function", "function": {"name": "write_file"}}
+        events = []
+        agent = Agent("test", "system", use_tools=True, tool_schemas=[read_schema])
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
+            conversation = AgentConversation(agent)
+        conversation._event_bus = EventBus(listener=events.append)
+
+        with (
+            patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 1),
+            patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+        ):
+            conversation.run_until_idle()
+            agent.update_tool_schemas([write_schema])
+            conversation.run_until_idle()
+
+        usage_events = [event for event in events if event.type == "llm_usage"]
+        self.assertEqual(len(usage_events), 2)
+        first_diag = usage_events[0].payload["cache_diagnostics"]
+        second_diag = usage_events[1].payload["cache_diagnostics"]
+        self.assertFalse(first_diag["prefix_changed"])
+        self.assertTrue(second_diag["prefix_changed"])
+        self.assertEqual(second_diag["prefix_change_reasons"], ["tools"])
+        self.assertEqual(second_diag["cache_hit_tokens"], 80)
+        self.assertEqual(second_diag["cache_miss_tokens"], 20)
 
     def test_invalidated_long_observation_is_compressed_and_notice_is_appended(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation

@@ -1,0 +1,22 @@
+{
+  "args": {
+    "context_file": [],
+    "max_output_tokens": 80,
+    "no_profile_extra": false,
+    "output_root": "C:\\Users\\ray\\Desktop\\harness-code-agent\\Eval\\results",
+    "project_context_tokens": 4000,
+    "run_name": "smoke",
+    "scenarios": "stable_warmup",
+    "summary_output_tokens": 80,
+    "turns": 2
+  },
+  "base_url": "https://api.deepseek.com",
+  "compress_threshold": 180000,
+  "context_window_tokens": 200000,
+  "created_at": "2026-06-08T15:27:59",
+  "model": "deepseek-v4-pro",
+  "model_intensity": "hard",
+  "project_root": "C:\\Users\\ray\\Desktop\\harness-code-agent",
+  "provider": "deepseek",
+  "summary_target_threshold": 150000
+}

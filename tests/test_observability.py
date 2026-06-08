@@ -35,7 +35,7 @@ class ObservabilityAggregationTests(unittest.TestCase):
             "created_at": "2026-06-01T00:00:00+00:00",
         }
         events = [
-            _event(1, "llm_usage", {"prompt_tokens": 100, "cached_tokens": 80, "completion_tokens": 20, "total_tokens": 120}),
+            _event(1, "llm_usage", {"prompt_tokens": 100, "cached_tokens": 80, "cache_miss_tokens": 20, "completion_tokens": 20, "total_tokens": 120}),
             _event(2, "llm_usage", {"prompt_tokens": None, "cached_tokens": 4, "completion_tokens": None, "total_tokens": None}),
             _event(3, "tool_call", {"tool": "read_file", "args": {"path": "README.md"}}),
             _event(4, "tool_result", {"tool": "read_file", "status": "success", "output": "ok"}),
@@ -61,6 +61,7 @@ class ObservabilityAggregationTests(unittest.TestCase):
         self.assertEqual(snapshot.tokens.llm_calls, 2)
         self.assertEqual(snapshot.tokens.prompt_tokens, 100)
         self.assertEqual(snapshot.tokens.cached_tokens, 84)
+        self.assertEqual(snapshot.tokens.cache_miss_tokens, 20)
         self.assertEqual(snapshot.tokens.completion_tokens, 20)
         self.assertEqual(snapshot.tokens.total_tokens, 120)
         self.assertEqual(snapshot.tokens.cache_hit_ratio, 0.84)

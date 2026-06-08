@@ -1,0 +1,487 @@
+{
+  "all_calls": [
+    {
+      "cache_hit_ratio": 0.0,
+      "diagnostics": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 11503,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 12263,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "stable_warmup_turn_1",
+      "latency_ms": 6191,
+      "log_rewrite_version": 0,
+      "message_count": 3,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "stable_warmup",
+      "timestamp": "2026-06-08T15:28:56",
+      "turn": 1,
+      "usage": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 11503,
+        "cached_tokens": 0,
+        "completion_tokens": 120,
+        "prompt_tokens": 11503,
+        "total_tokens": 11623
+      }
+    },
+    {
+      "cache_hit_ratio": 0.9873461605130872,
+      "diagnostics": {
+        "cache_hit_tokens": 11392,
+        "cache_miss_tokens": 146,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 12302,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "stable_warmup_turn_2",
+      "latency_ms": 3836,
+      "log_rewrite_version": 0,
+      "message_count": 5,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "The context lifecycle is designed to maximize prompt-cache stability by keeping system rules and tool schemas fixed in the prefix while appending fresh tool outputs and compacti...",
+      "scenario": "stable_warmup",
+      "timestamp": "2026-06-08T15:28:59",
+      "turn": 2,
+      "usage": {
+        "cache_hit_tokens": 11392,
+        "cache_miss_tokens": 146,
+        "cached_tokens": 11392,
+        "completion_tokens": 120,
+        "prompt_tokens": 11538,
+        "total_tokens": 11658
+      }
+    },
+    {
+      "cache_hit_ratio": 0.9924190213645762,
+      "diagnostics": {
+        "cache_hit_tokens": 11520,
+        "cache_miss_tokens": 88,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 12374,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "stable_warmup_turn_3",
+      "latency_ms": 3157,
+      "log_rewrite_version": 0,
+      "message_count": 7,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "stable_warmup",
+      "timestamp": "2026-06-08T15:29:03",
+      "turn": 3,
+      "usage": {
+        "cache_hit_tokens": 11520,
+        "cache_miss_tokens": 88,
+        "cached_tokens": 11520,
+        "completion_tokens": 120,
+        "prompt_tokens": 11608,
+        "total_tokens": 11728
+      }
+    },
+    {
+      "cache_hit_ratio": 0.9894357124452461,
+      "diagnostics": {
+        "cache_hit_tokens": 11520,
+        "cache_miss_tokens": 123,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 12413,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "stable_warmup_turn_4",
+      "latency_ms": 2788,
+      "log_rewrite_version": 0,
+      "message_count": 9,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "stable_warmup",
+      "timestamp": "2026-06-08T15:29:05",
+      "turn": 4,
+      "usage": {
+        "cache_hit_tokens": 11520,
+        "cache_miss_tokens": 123,
+        "cached_tokens": 11520,
+        "completion_tokens": 120,
+        "prompt_tokens": 11643,
+        "total_tokens": 11763
+      }
+    },
+    {
+      "cache_hit_ratio": 0.9864702860078781,
+      "diagnostics": {
+        "cache_hit_tokens": 11520,
+        "cache_miss_tokens": 158,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 12452,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "stable_warmup_turn_5",
+      "latency_ms": 3594,
+      "log_rewrite_version": 0,
+      "message_count": 11,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "stable_warmup",
+      "timestamp": "2026-06-08T15:29:09",
+      "turn": 5,
+      "usage": {
+        "cache_hit_tokens": 11520,
+        "cache_miss_tokens": 158,
+        "cached_tokens": 11520,
+        "completion_tokens": 120,
+        "prompt_tokens": 11678,
+        "total_tokens": 11798
+      }
+    },
+    {
+      "cache_hit_ratio": 0.0,
+      "diagnostics": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 11487,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 12246,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "canonical_a",
+      "latency_ms": 4266,
+      "log_rewrite_version": 0,
+      "message_count": 3,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "schema_reorder",
+      "timestamp": "2026-06-08T15:29:13",
+      "turn": 1,
+      "usage": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 11487,
+        "cached_tokens": 0,
+        "completion_tokens": 120,
+        "prompt_tokens": 11487,
+        "total_tokens": 11607
+      }
+    },
+    {
+      "cache_hit_ratio": 0.9917297814921215,
+      "diagnostics": {
+        "cache_hit_tokens": 11392,
+        "cache_miss_tokens": 95,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 12246,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "canonical_a_repeat",
+      "latency_ms": 3258,
+      "log_rewrite_version": 0,
+      "message_count": 3,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "schema_reorder",
+      "timestamp": "2026-06-08T15:29:16",
+      "turn": 2,
+      "usage": {
+        "cache_hit_tokens": 11392,
+        "cache_miss_tokens": 95,
+        "cached_tokens": 11392,
+        "completion_tokens": 120,
+        "prompt_tokens": 11487,
+        "total_tokens": 11607
+      }
+    },
+    {
+      "cache_hit_ratio": 0.9917297814921215,
+      "diagnostics": {
+        "cache_hit_tokens": 11392,
+        "cache_miss_tokens": 95,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 12246,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "reordered_b",
+      "latency_ms": 3700,
+      "log_rewrite_version": 0,
+      "message_count": 3,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "schema_reorder",
+      "timestamp": "2026-06-08T15:29:20",
+      "turn": 3,
+      "usage": {
+        "cache_hit_tokens": 11392,
+        "cache_miss_tokens": 95,
+        "cached_tokens": 11392,
+        "completion_tokens": 120,
+        "prompt_tokens": 11487,
+        "total_tokens": 11607
+      }
+    },
+    {
+      "cache_hit_ratio": 0.0,
+      "diagnostics": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 17676,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 18441,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "before_rewrite",
+      "latency_ms": 5145,
+      "log_rewrite_version": 0,
+      "message_count": 6,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "compaction_rewrite",
+      "timestamp": "2026-06-08T15:29:25",
+      "turn": 1,
+      "usage": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 17676,
+        "cached_tokens": 0,
+        "completion_tokens": 120,
+        "prompt_tokens": 17676,
+        "total_tokens": 17796
+      }
+    },
+    {
+      "cache_hit_ratio": 0.0,
+      "diagnostics": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 1798,
+        "log_rewrite_version": 0,
+        "prefix_change_reasons": [],
+        "prefix_changed": false,
+        "prefix_hash": "2c754ac810799ae4",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 0,
+        "tools_hash": "4f53cda18c2baa0c"
+      },
+      "estimated_request_tokens": 2051,
+      "finish_reason": "length",
+      "kind": "summarizer",
+      "label": "rewrite_summary_call",
+      "latency_ms": 4551,
+      "log_rewrite_version": 0,
+      "message_count": 2,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "compaction_rewrite",
+      "timestamp": "2026-06-08T15:29:30",
+      "turn": 2,
+      "usage": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 1798,
+        "cached_tokens": 0,
+        "completion_tokens": 160,
+        "prompt_tokens": 1798,
+        "total_tokens": 1958
+      }
+    },
+    {
+      "cache_hit_ratio": 0.0,
+      "diagnostics": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 105,
+        "log_rewrite_version": 1,
+        "prefix_change_reasons": [
+          "log_rewrite"
+        ],
+        "prefix_changed": true,
+        "prefix_hash": "5bf73ba8a1933f1d",
+        "system_hash": "fca1d848a9a5375d",
+        "tool_schema_tokens": 179,
+        "tools_hash": "33c2a4621ad0aaa5"
+      },
+      "estimated_request_tokens": 273,
+      "finish_reason": "length",
+      "kind": "measured",
+      "label": "after_rewrite",
+      "latency_ms": 3156,
+      "log_rewrite_version": 1,
+      "message_count": 5,
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_preview": "",
+      "scenario": "compaction_rewrite",
+      "timestamp": "2026-06-08T15:29:33",
+      "turn": 3,
+      "usage": {
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 105,
+        "cached_tokens": 0,
+        "completion_tokens": 120,
+        "prompt_tokens": 105,
+        "total_tokens": 225
+      }
+    }
+  ],
+  "created_at": "2026-06-08T15:29:33",
+  "scenarios": {
+    "compaction_rewrite": {
+      "avg_hit_ratio": 0.0,
+      "cache_hit_tokens": [
+        0,
+        0
+      ],
+      "cache_miss_tokens": [
+        17676,
+        105
+      ],
+      "estimated_request_tokens": [
+        18441,
+        273
+      ],
+      "first_hit_ratio": 0.0,
+      "last_hit_ratio": 0.0,
+      "prefix_changes": [
+        {
+          "label": "after_rewrite",
+          "reasons": [
+            "log_rewrite"
+          ],
+          "turn": 3
+        }
+      ],
+      "prompt_tokens": [
+        17676,
+        105
+      ],
+      "turns": 2
+    },
+    "schema_reorder": {
+      "avg_hit_ratio": 0.6611531876614144,
+      "cache_hit_tokens": [
+        0,
+        11392,
+        11392
+      ],
+      "cache_miss_tokens": [
+        11487,
+        95,
+        95
+      ],
+      "estimated_request_tokens": [
+        12246,
+        12246,
+        12246
+      ],
+      "first_hit_ratio": 0.0,
+      "last_hit_ratio": 0.9917297814921215,
+      "prefix_changes": [],
+      "prompt_tokens": [
+        11487,
+        11487,
+        11487
+      ],
+      "turns": 3
+    },
+    "stable_warmup": {
+      "avg_hit_ratio": 0.7911342360661575,
+      "cache_hit_tokens": [
+        0,
+        11392,
+        11520,
+        11520,
+        11520
+      ],
+      "cache_miss_tokens": [
+        11503,
+        146,
+        88,
+        123,
+        158
+      ],
+      "estimated_request_tokens": [
+        12263,
+        12302,
+        12374,
+        12413,
+        12452
+      ],
+      "first_hit_ratio": 0.0,
+      "last_hit_ratio": 0.9864702860078781,
+      "prefix_changes": [],
+      "prompt_tokens": [
+        11503,
+        11538,
+        11608,
+        11643,
+        11678
+      ],
+      "turns": 5
+    }
+  }
+}
