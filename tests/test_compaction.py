@@ -293,31 +293,6 @@ class CompactMessagesTests(unittest.TestCase):
             count_tokens(messages),
         )
 
-    def test_clean_older_tool_outputs_keeps_current_turn(self):
-        from harness_code_agent.agent.context import clean_older_tool_outputs
-
-        old_output = "[OBS obs_0001 observed]\n" + ("stdout line\n" * 1000)
-        recent_output = "[OBS obs_0002 observed]\n" + ("recent line\n" * 1000)
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "old task"},
-            {"role": "tool", "tool_call_id": "old", "content": old_output},
-            {"role": "assistant", "content": "old done"},
-            {"role": "user", "content": "recent task"},
-            {"role": "tool", "tool_call_id": "recent", "content": recent_output},
-        ]
-
-        cleaned, changed = clean_older_tool_outputs(
-            messages,
-            current_turn_start_index=4,
-            max_tool_chars=800,
-        )
-
-        self.assertTrue(changed)
-        self.assertIn("[CLEANED OLDER TOOL OUTPUT]", cleaned[2]["content"])
-        self.assertLess(len(cleaned[2]["content"]), len(old_output))
-        self.assertEqual(cleaned[-1]["content"], recent_output)
-
     def test_summarize_older_conversation_preserves_current_turn(self):
         from harness_code_agent.agent.context import summarize_older_conversation
 
@@ -584,52 +559,13 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         self.assertIn("new:summarizing_history", dynamic[0]["content"])
         self.assertEqual(conv.messages[1], dynamic[0])
 
-    def test_auto_compaction_cleans_outputs_before_summary(self):
+    def test_auto_compaction_summarizes_and_returns_below_threshold_after_summary(self):
         from harness_code_agent.agent.compaction import get_thresholds
         from harness_code_agent.agent.loop import Agent
 
         thresholds = get_thresholds()
         agent = Agent("test_agent", "sys", use_tools=False)
         conv = agent.start_conversation("task")
-        cleaned_messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "task"},
-        ]
-
-        with (
-            patch(
-                "harness_code_agent.agent.conversation.context.count_tokens",
-                side_effect=[thresholds.compact, thresholds.compact - 1, thresholds.compact - 1],
-            ),
-            patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(cleaned_messages, True)) as clean,
-            patch("harness_code_agent.agent.conversation.context.summarize_older_conversation") as summarize,
-            patch("harness_code_agent.agent.conversation.context.create_checkpoint", return_value="checkpoint") as checkpoint,
-            patch.object(conv, "_replace_messages", wraps=conv._replace_messages) as replace_messages,
-            patch.object(
-                conv,
-                "_request_assistant_message",
-                return_value=({"role": "assistant", "content": "done"}, "stop"),
-            ),
-        ):
-            conv.run_until_idle()
-
-        clean.assert_called_once()
-        replace_messages.assert_called_once_with(cleaned_messages)
-        summarize.assert_not_called()
-        checkpoint.assert_not_called()
-
-    def test_auto_compaction_summarizes_when_cleaning_is_not_enough(self):
-        from harness_code_agent.agent.compaction import get_thresholds
-        from harness_code_agent.agent.loop import Agent
-
-        thresholds = get_thresholds()
-        agent = Agent("test_agent", "sys", use_tools=False)
-        conv = agent.start_conversation("task")
-        cleaned_messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "task"},
-        ]
         summarized_messages = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "[COMPACTED CONTEXT]\nsummary"},
@@ -641,14 +577,11 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
                 "harness_code_agent.agent.conversation.context.count_tokens",
                 side_effect=[
                     thresholds.compact,
-                    thresholds.compact,
                     thresholds.summary_target - 1,
                 ],
             ),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(cleaned_messages, False)) as clean,
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=summarized_messages) as summarize,
-            patch("harness_code_agent.agent.conversation.context.create_checkpoint", return_value="checkpoint") as checkpoint,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -657,9 +590,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         ):
             conv.run_until_idle()
 
-        clean.assert_called_once()
         summarize.assert_called_once()
-        checkpoint.assert_not_called()
 
     def test_auto_compaction_persists_latest_summary(self):
         from harness_code_agent.agent.compaction import get_thresholds
@@ -696,15 +627,9 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             with (
                 patch(
                     "harness_code_agent.agent.conversation.context.count_tokens",
-                    side_effect=[
-                        thresholds.compact,
-                        thresholds.compact,
-                        thresholds.summary_target - 1,
-                        thresholds.summary_target - 1,
-                    ],
+                    side_effect=[thresholds.compact] + [thresholds.summary_target - 1] * 10,
                 ),
                 patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
-                patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(conv.messages, False)),
                 patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=summarized_messages),
                 patch.object(
                     conv,
@@ -733,11 +658,9 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
                     thresholds.compact,
                     thresholds.compact,
                     thresholds.compact,
-                    thresholds.summary_target,
                 ],
             ),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(conv.messages, False)) as clean,
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=conv.messages) as summarize,
             patch("harness_code_agent.agent.conversation.context.rebuild_working_context") as rebuild,
             patch.object(
@@ -751,7 +674,6 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         ):
             conv.run_until_idle()
 
-        self.assertEqual(clean.call_count, 1)
         self.assertEqual(summarize.call_count, 1)
         rebuild.assert_not_called()
         self.assertTrue(conv.runtime_state.auto_compaction_suspended)
@@ -773,14 +695,12 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             patch(
                 "harness_code_agent.agent.conversation.context.count_tokens",
                 side_effect=[
-                    thresholds.compact,
-                    thresholds.compact,
-                    thresholds.compact,
-                    thresholds.summary_target,
+                    thresholds.compact,       # main loop → trigger
+                    thresholds.compact,       # after summarize → still over → rebuild
+                    thresholds.compact - 1,   # inside rebuild → below → done
                 ],
             ),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
-            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs", return_value=(conv.messages, False)),
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=conv.messages),
             patch("harness_code_agent.agent.conversation.context.rebuild_working_context", return_value=rebuilt_messages) as rebuild,
             patch.object(
@@ -818,7 +738,6 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         with (
             patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=thresholds.compact - 1),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=signal),
-            patch("harness_code_agent.agent.conversation.context.clean_older_tool_outputs") as clean,
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation") as summarize,
             patch("harness_code_agent.agent.conversation.context.rebuild_working_context") as rebuild,
             patch.object(
@@ -829,7 +748,6 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         ):
             conv.run_until_idle()
 
-        clean.assert_not_called()
         summarize.assert_not_called()
         rebuild.assert_not_called()
         anxiety_events = [event for event in observed if event["type"] == "context_anxiety_observed"]

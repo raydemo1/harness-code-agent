@@ -210,38 +210,6 @@ def compact_messages(
     return system + [summary_msg] + recent
 
 
-def clean_older_tool_outputs(
-    messages: list[dict],
-    *,
-    current_turn_start_index: int,
-    max_tool_chars: int = 2_000,
-) -> tuple[list[dict], bool]:
-    """Replace long tool/read_file outputs before the current turn with metadata.
-
-    This is the first and cheapest auto-compaction step. It preserves the
-    current turn exactly so the active task is not disturbed.
-    """
-    if not messages:
-        return messages, False
-
-    protected_start = max(1, min(current_turn_start_index, len(messages)))
-    cleaned: list[dict] = []
-    changed = False
-    for idx, msg in enumerate(messages):
-        if idx >= protected_start or msg.get("role") != "tool":
-            cleaned.append(msg)
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str) or len(content) <= max_tool_chars:
-            cleaned.append(msg)
-            continue
-        new_msg = dict(msg)
-        new_msg["content"] = _cleaned_tool_output(content)
-        cleaned.append(new_msg)
-        changed = True
-    return cleaned, changed
-
-
 def summarize_older_conversation(
     messages: list[dict],
     llm_call,
@@ -532,52 +500,41 @@ def _messages_to_text(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _cleaned_tool_output(content: str) -> str:
-    metadata = _observation_metadata(content)
-    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:16]
-    header = "[CLEANED OLDER TOOL OUTPUT]"
-    if "tool: read_file" in content:
-        header = "[CLEANED OLDER READ_FILE OUTPUT]"
-    return (
-        f"{header}\n"
-        f"original_chars: {len(content)}\n"
-        f"output_sha256: {digest}\n"
-        f"{metadata}\n"
-        "detail: older full output was discarded; rerun the tool or inspect raw observation artifacts if exact output is needed."
-    )
-
-
-def _observation_metadata(content: str) -> str:
-    lines = []
-    allowed_prefixes = (
-        "[OBS ",
-        "tool:",
-        "args:",
-        "output_chars:",
-        "output_sha256:",
-        "resource_keys:",
-        "observed_workspace_generation:",
-        "summary:",
-    )
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("observation:"):
-            break
-        if stripped.startswith(allowed_prefixes):
-            lines.append(line)
-        if len(lines) >= 12:
-            break
-    return "\n".join(lines) if lines else "metadata: none"
-
-
 def _sanitize_message_for_rebuild(message: dict) -> dict:
     msg = dict(message)
     content = msg.get("content")
     if msg.get("role") == "tool" and isinstance(content, str):
-        msg["content"] = _cleaned_tool_output(content)
+        msg["content"] = _strip_tool_output_detail(content)
     elif isinstance(content, str) and len(content) > 2_000:
         msg["content"] = _fold_long_text(content, 2_000, label="REBUILD_CONTEXT_MESSAGE_SUMMARY")
     return msg
+
+
+def _strip_tool_output_detail(content: str) -> str:
+    """Strip the detail body from a tool output message.
+
+    For OBS-formatted messages, keeps the metadata header lines only.
+    For plain-text tool outputs, replaces with a compact placeholder."""
+    # OBS format: keep header up to the observation:/preview boundary
+    lines = content.split("\n")
+    header_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("observation:") or stripped.startswith("--- preview ---"):
+            break
+        header_lines.append(line)
+    if len(header_lines) < len(lines):
+        return (
+            "\n".join(header_lines)
+            + "\ndetail: older full output discarded during context rebuild."
+        )
+    # Plain text — drop the body entirely
+    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return (
+        f"[tool output discarded during context rebuild]\n"
+        f"original_chars: {len(content)}\n"
+        f"sha256: {digest}"
+    )
 
 
 def _last_turn_messages(messages: list[dict], *, max_turns: int) -> list[dict]:

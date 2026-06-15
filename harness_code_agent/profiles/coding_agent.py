@@ -49,6 +49,7 @@ Product runtime:
 - Only you may modify files, integrate changes, run final verification, and decide when to stop.
 - Consultation sub-agents are read-only helpers. Use consult_subagent only for focused investigation, parallel search, test design, or review, then perform all edits yourself.
 - Long-running dev servers and watch commands started with run_bash return shell job ids; use read_shell_output, list_shell_jobs, and stop_shell_job to inspect and clean them up.
+- Large tool outputs (>4k chars) are stored as observation files in .harness/observations/ and only a head+tail preview appears inline.  Use read_file on the raw_output path shown in the OBS header to inspect the full result.
 
 Work loop:
 1. Read the task and current repository state.

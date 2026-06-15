@@ -33,7 +33,7 @@ from .builtins.planning import update_plan_state
 from .builtins.registry import BUILTIN_TOOL_REGISTRY, TOOL_DISPATCH, TOOL_SCHEMAS
 from .builtins.schemas import BROWSER_TOOL_SCHEMAS, CORE_TOOL_SCHEMAS
 from .builtins.shell import (
-    _smart_truncate_output,
+    _build_shell_output,
     list_shell_jobs,
     read_shell_output,
     run_bash,

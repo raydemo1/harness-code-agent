@@ -373,43 +373,9 @@ class AgentConversation:
         token_count_before = token_count
         self._strip_dynamic_context_messages()
 
+        # Layer 1 — summarize older conversation via lightweight LLM call
         self._emit_compaction_started(
             token_count=token_count,
-            threshold=thresholds.compact,
-            phase="cleaning_older_outputs",
-        )
-        cleaned, changed = context.clean_older_tool_outputs(
-            self.messages,
-            current_turn_start_index=state.current_turn_start_index,
-        )
-        if changed:
-            self._replace_messages(cleaned)
-            self.compaction_gate.mark_compacted()
-            self._emit_compaction_committed(
-                messages_before=messages_before,
-                token_count_before=token_count_before,
-                phase="cleaning_older_outputs",
-            )
-
-        tokens_after_clean = context.count_request_tokens(
-            self.messages,
-            tool_schemas=_tool_schemas_for_agent(agent),
-        )
-        token_count_for_summary = tokens_after_clean
-        if tokens_after_clean < thresholds.compact:
-            self._refresh_dynamic_context_after_compaction(phase="cleaning_older_outputs")
-            tokens_after_refresh = context.count_request_tokens(
-                self.messages,
-                tool_schemas=_tool_schemas_for_agent(agent),
-            )
-            if tokens_after_refresh < thresholds.compact:
-                state.context_refill_streak = 0
-                return
-            token_count_for_summary = tokens_after_refresh
-            self._strip_dynamic_context_messages()
-
-        self._emit_compaction_started(
-            token_count=token_count_for_summary,
             threshold=thresholds.compact,
             phase="summarizing_history",
         )
@@ -442,6 +408,7 @@ class AgentConversation:
             state.context_refill_streak = 0
             return
 
+        # Layer 2 — rebuild working context from structured state
         state.context_refill_streak += 1
         state.auto_compaction_suspended = True
         self._emit_compaction_started(

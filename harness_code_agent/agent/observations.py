@@ -15,6 +15,27 @@ FRESH_DETAIL_LIMIT = 12_000
 STALE_REPLACEMENT_MIN_CHARS = 4_000
 _OBS_ID_PREFIX = "[OBS "
 
+# Preview budget for compact tool-output refs: head + tail chars shown inline
+# when the full output is stored to file.
+PREVIEW_TOTAL_CHARS = 1000
+
+
+def _output_preview(output: str) -> str:
+    """Head + tail preview so the agent can see both context and final results
+    without reading the full output file."""
+    if len(output) <= PREVIEW_TOTAL_CHARS:
+        return output
+    head_chars = PREVIEW_TOTAL_CHARS // 2  # 500
+    tail_chars = PREVIEW_TOTAL_CHARS - head_chars  # 500
+    head = output[:head_chars]
+    tail = output[-tail_chars:]
+    omitted = len(output) - head_chars - tail_chars
+    return (
+        f"{head}\n\n"
+        f"...[{omitted} chars omitted — use read_file for full output]...\n\n"
+        f"{tail}"
+    )
+
 
 @dataclass
 class ToolObservation:
@@ -165,10 +186,29 @@ class ObservationStore:
 
     def observed_message(self, observation: ToolObservation, result: ToolResult) -> str:
         output = result.to_text()
-        detail = output
-        if len(detail) > FRESH_DETAIL_LIMIT:
-            omitted = len(detail) - FRESH_DETAIL_LIMIT
-            detail = detail[:FRESH_DETAIL_LIMIT] + f"\n\n[TRUNCATED observation detail: {omitted} chars omitted]"
+        from .. import config as _cfg
+        inline_limit = getattr(_cfg, "TOOL_OUTPUT_INLINE_LIMIT", 4000)
+
+        if len(output) <= inline_limit:
+            # Small output — full inline (existing path, unchanged)
+            detail = output
+            if len(detail) > FRESH_DETAIL_LIMIT:
+                omitted = len(detail) - FRESH_DETAIL_LIMIT
+                detail = detail[:FRESH_DETAIL_LIMIT] + (
+                    f"\n\n[TRUNCATED observation detail: {omitted} chars omitted]"
+                )
+            return (
+                f"[OBS {observation.id} observed]\n"
+                f"tool: {observation.tool}\n"
+                f"args: {observation.args_summary}\n"
+                f"output_chars: {observation.output_chars}\n"
+                f"output_sha256: {observation.output_hash}\n"
+                f"resource_keys: {', '.join(observation.resource_keys) or 'none'}\n"
+                "observation: This is the tool result as observed when the tool ran.\n\n"
+                + detail
+            )
+
+        # Large output — compact file ref + head+tail preview
         return (
             f"[OBS {observation.id} observed]\n"
             f"tool: {observation.tool}\n"
@@ -176,8 +216,13 @@ class ObservationStore:
             f"output_chars: {observation.output_chars}\n"
             f"output_sha256: {observation.output_hash}\n"
             f"resource_keys: {', '.join(observation.resource_keys) or 'none'}\n"
-            "observation: This is the tool result as observed when the tool ran.\n\n"
-            + detail
+            f"raw_output: {observation.raw_output_path}\n"
+            f"summary: {observation.summary}\n"
+            "observation: Full output stored in file.  Use read_file on the "
+            "raw_output path if you need the complete result.\n\n"
+            "--- preview ---\n"
+            + _output_preview(output)
+            + "\n--- end preview ---"
         )
 
     def historical_message(self, observation: ToolObservation) -> str:
@@ -201,7 +246,11 @@ class ObservationStore:
         min_chars: int = STALE_REPLACEMENT_MIN_CHARS,
         protect_from_index: int | None = None,
     ) -> list[str]:
-        """Replace only long stale observation messages with compact summaries."""
+        """Replace stale observation messages with compact summaries.
+
+        Large inline outputs are the main target, but compact file refs
+        may still contain preview text from the original output — always
+        replace so stale content doesn't leak into subsequent turns."""
         replaced: list[str] = []
         for observation in self.observations:
             if not observation.stale or observation.message_index is None:
@@ -211,7 +260,9 @@ class ObservationStore:
             if observation.message_index >= len(messages):
                 continue
             content = messages[observation.message_index].get("content") or ""
-            if len(content) < min_chars:
+            # Replace when content is long, or always for stale obs with
+            # compact refs (which carry preview text that should be removed).
+            if len(content) < min_chars and "--- preview ---" not in content:
                 continue
             messages[observation.message_index]["content"] = self.historical_message(observation)
             replaced.append(observation.id)

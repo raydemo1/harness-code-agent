@@ -124,6 +124,11 @@ CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKENS", "200
 COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", str(int(CONTEXT_WINDOW_TOKENS * 0.90))))
 SUMMARY_TARGET_THRESHOLD = int(os.environ.get("SUMMARY_TARGET_THRESHOLD", str(int(CONTEXT_WINDOW_TOKENS * 0.75))))
 
+# Tool output larger than this (chars) is stored to file; only a compact
+# ref + head+tail preview goes into the message list.  Smaller outputs are
+# inlined as usual.
+TOOL_OUTPUT_INLINE_LIMIT = int(os.environ.get("HARNESS_TOOL_OUTPUT_INLINE_LIMIT", "4000"))
+
 # --- Harness loop ---
 MAX_HARNESS_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "5"))
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))

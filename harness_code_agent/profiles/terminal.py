@@ -69,6 +69,7 @@ CRITICAL RULES:
 - Your primary action is run_bash. Execute commands instead of describing them.
 - run_bash uses one persistent shell session for the whole run; preserve useful shell state such as cwd and exported variables intentionally.
 - Long-running run_bash commands return shell job ids; use read_shell_output, list_shell_jobs, and stop_shell_job to inspect logs and stop background jobs.
+- Large tool outputs (>4k chars) are stored as observation files and only a head+tail preview appears inline.  Use read_file on the raw_output path from the OBS header to inspect the full result.
 {PLANNING_MODE_POLICY}
 - Follow task specifications literally: exact paths, exact output, exact formats, exact filenames.
 - Prefer command-driven evidence. Use commands that match the active shell. On Windows, run_bash uses PowerShell by default; prefer PowerShell cmdlets/syntax, and use cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd.
