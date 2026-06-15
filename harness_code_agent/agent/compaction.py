@@ -15,15 +15,13 @@ COALESCE_SECONDS = 30
 
 @dataclass(frozen=True)
 class CompactionThresholds:
-    compact: int          # 90% — start lightweight auto-compaction
-    summary_target: int   # 75% — target only when summary is necessary
+    compact: int          # 85% — start lightweight auto-compaction
 
 
 def get_thresholds(context_window: int | None = None) -> CompactionThresholds:
     w = context_window or config.CONTEXT_WINDOW_TOKENS
     return CompactionThresholds(
-        compact=int(w * 0.90) if context_window is not None else config.COMPRESS_THRESHOLD,
-        summary_target=int(w * 0.75) if context_window is not None else config.SUMMARY_TARGET_THRESHOLD,
+        compact=int(w * 0.85) if context_window is not None else config.COMPRESS_THRESHOLD,
     )
 
 

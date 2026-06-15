@@ -271,7 +271,7 @@ def _latest_compacted_summary(messages: list[dict]) -> str | None:
         content = str(message.get("content") or "")
         if not (
             content.startswith("[COMPACTED CONTEXT")
-            or content.startswith("[REBUILD_WORKING_CONTEXT]")
+            or content.startswith("[HANDOFF RESET]")
         ):
             continue
         _header, _sep, body = content.partition("\n")

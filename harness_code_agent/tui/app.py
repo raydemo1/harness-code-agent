@@ -653,7 +653,6 @@ class TuiApp(App):
         )
         self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
         self.state.snapshot.context_compact_threshold = thresholds.compact
-        self.state.snapshot.context_summary_target_threshold = thresholds.summary_target
 
     def _redraw_transcript(self) -> None:
         try:

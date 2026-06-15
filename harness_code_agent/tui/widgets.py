@@ -262,7 +262,7 @@ class ContextBar(Static):
     context_percent: reactive[int] = reactive(0)
     permission_mode: reactive[str] = reactive("workspace-write")
     token_label: reactive[str] = reactive("0K/0K")
-    compact_percent: reactive[int] = reactive(90)
+    compact_percent: reactive[int] = reactive(85)
 
     def render(self) -> Text:
         pct = self.context_percent
@@ -270,9 +270,9 @@ class ContextBar(Static):
         filled = int(bar_width * min(pct, 100) / 100)
         bar = "▓" * filled + "░" * (bar_width - filled)
 
-        if pct >= 90:
+        if pct >= self.compact_percent:
             bar_color = "#bf616a"
-        elif pct >= 85:
+        elif pct >= max(0, self.compact_percent - 10):
             bar_color = "#ebcb8b"
         else:
             bar_color = "#a3be8c"
@@ -300,7 +300,7 @@ class ContextBar(Static):
         if snap.context_window_tokens > 0 and snap.context_compact_threshold > 0:
             self.compact_percent = int(round(snap.context_compact_threshold * 100 / snap.context_window_tokens))
         else:
-            self.compact_percent = 90
+            self.compact_percent = 85
 
     def on_click(self) -> None:
         return None

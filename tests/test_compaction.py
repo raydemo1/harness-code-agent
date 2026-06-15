@@ -103,8 +103,7 @@ class CompactionThresholdTests(unittest.TestCase):
         with patch.dict(os.environ, {"HARNESS_CONTEXT_WINDOW_TOKENS": "100000"}):
             from harness_code_agent.agent import compaction
             thresholds = compaction.get_thresholds(100000)
-            self.assertEqual(thresholds.compact, 90000)          # 90%
-            self.assertEqual(thresholds.summary_target, 75000)   # 75%
+            self.assertEqual(thresholds.compact, 85000)          # 85%
 
     def test_below_compact_threshold_no_action(self):
         from harness_code_agent.agent.compaction import compaction_action
@@ -335,8 +334,8 @@ class CompactMessagesTests(unittest.TestCase):
         self.assertEqual(summarized, messages)
         llm.assert_not_called()
 
-    def test_rebuild_working_context_keeps_working_state_and_drops_old_outputs(self):
-        from harness_code_agent.agent.context import rebuild_working_context
+    def test_handoff_reset_persists_handoff_and_restores_fresh_context(self):
+        from harness_code_agent.agent.context import create_handoff_reset, restore_from_handoff_reset
 
         old_output = "OLD_FULL_TOOL_OUTPUT" * 500
         messages = [
@@ -359,21 +358,31 @@ class CompactMessagesTests(unittest.TestCase):
             "next_recommended_action": "fix failing assertion",
         }
 
-        rebuilt = rebuild_working_context(
+        handoff, path = create_handoff_reset(
             messages,
             state,
-            current_turn_start_index=4,
+            lambda _request: (
+                "# Handoff Reset\n\n"
+                "## Summary\ncurrent task\n\n"
+                "## Suggested Skills\n- diagnose\n\n"
+                "## Next Steps\nfix failing assertion"
+            ),
+            session_id="session/test",
+            profile="coding-agent",
+            workspace="C:/repo",
             max_turns=5,
         )
+        rebuilt = restore_from_handoff_reset(handoff, "sys", path)
         text = "\n".join(str(item.get("content", "")) for item in rebuilt)
 
+        self.assertTrue(path.exists())
+        self.assertNotIn(str(Path.cwd()), str(path))
         self.assertEqual(rebuilt[0], messages[0])
-        self.assertIn("REBUILD_WORKING_CONTEXT", text)
+        self.assertIn("HANDOFF RESET", text)
+        self.assertIn(str(path), text)
         self.assertIn("current task", text)
-        self.assertIn("step 2 in progress", text)
-        self.assertIn("app.py", text)
-        self.assertIn("pytest failed", text)
         self.assertIn("fix failing assertion", text)
+        self.assertIn("Suggested Skills", text)
         self.assertNotIn("OLD_FULL_TOOL_OUTPUT", text)
 
 
@@ -577,7 +586,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
                 "harness_code_agent.agent.conversation.context.count_tokens",
                 side_effect=[
                     thresholds.compact,
-                    thresholds.summary_target - 1,
+                    thresholds.compact - 1,
                 ],
             ),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
@@ -627,7 +636,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             with (
                 patch(
                     "harness_code_agent.agent.conversation.context.count_tokens",
-                    side_effect=[thresholds.compact] + [thresholds.summary_target - 1] * 10,
+                    side_effect=[thresholds.compact] + [thresholds.compact - 1] * 10,
                 ),
                 patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
                 patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=summarized_messages),
@@ -662,7 +671,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             ),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=conv.messages) as summarize,
-            patch("harness_code_agent.agent.conversation.context.rebuild_working_context") as rebuild,
+            patch("harness_code_agent.agent.conversation.context.create_handoff_reset") as handoff_reset,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -675,10 +684,10 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             conv.run_until_idle()
 
         self.assertEqual(summarize.call_count, 1)
-        rebuild.assert_not_called()
+        handoff_reset.assert_not_called()
         self.assertTrue(conv.runtime_state.auto_compaction_suspended)
 
-    def test_rebuild_working_context_after_two_rapid_refills(self):
+    def test_handoff_reset_after_two_rapid_refills(self):
         from harness_code_agent.agent.compaction import get_thresholds
         from harness_code_agent.agent.loop import Agent
 
@@ -686,23 +695,23 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         agent = Agent("test_agent", "sys", use_tools=False)
         conv = agent.start_conversation("first")
         conv.runtime_state.context_refill_streak = 1
-        rebuilt_messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "[REBUILD_WORKING_CONTEXT]\ncurrent task"},
-        ]
+        conv.runtime_state.fallback.request_stop(reason="loop_detected")
+        conv.runtime_state.recovery.mode = "SPEC_RECHECK"
 
         with (
             patch(
                 "harness_code_agent.agent.conversation.context.count_tokens",
                 side_effect=[
                     thresholds.compact,       # main loop → trigger
-                    thresholds.compact,       # after summarize → still over → rebuild
-                    thresholds.compact - 1,   # inside rebuild → below → done
+                    thresholds.compact,       # after summarize → still over → handoff reset
                 ],
             ),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=conv.messages),
-            patch("harness_code_agent.agent.conversation.context.rebuild_working_context", return_value=rebuilt_messages) as rebuild,
+            patch(
+                "harness_code_agent.agent.conversation.context.create_handoff_reset",
+                return_value=("# Handoff\n\n## Suggested Skills\n- diagnose", "C:/tmp/handoff.md"),
+            ) as handoff_reset,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -711,8 +720,12 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         ):
             conv.run_until_idle()
 
-        rebuild.assert_called_once()
-        self.assertEqual(conv.messages, rebuilt_messages + [{"role": "assistant", "content": "done"}])
+        handoff_reset.assert_called_once()
+        self.assertIn("[HANDOFF RESET]", conv.messages[1]["content"])
+        self.assertIn("C:/tmp/handoff.md", conv.messages[1]["content"])
+        self.assertEqual(conv.runtime_state.context_refill_streak, 0)
+        self.assertFalse(conv.runtime_state.fallback.stop_requested)
+        self.assertEqual(conv.runtime_state.recovery.mode, "NORMAL")
 
     def test_context_anxiety_below_threshold_only_records_soft_signal(self):
         from harness_code_agent.agent.compaction import get_thresholds
@@ -739,7 +752,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=thresholds.compact - 1),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=signal),
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation") as summarize,
-            patch("harness_code_agent.agent.conversation.context.rebuild_working_context") as rebuild,
+            patch("harness_code_agent.agent.conversation.context.create_handoff_reset") as handoff_reset,
             patch.object(
                 conv,
                 "_request_assistant_message",
@@ -749,7 +762,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             conv.run_until_idle()
 
         summarize.assert_not_called()
-        rebuild.assert_not_called()
+        handoff_reset.assert_not_called()
         anxiety_events = [event for event in observed if event["type"] == "context_anxiety_observed"]
         self.assertEqual(len(anxiety_events), 1)
         self.assertEqual(anxiety_events[0]["payload"]["score"], 2)
@@ -865,14 +878,14 @@ class CompactionEventTests(unittest.TestCase):
         from harness_code_agent.sessions.events import ContextAnxietyObservedEvent
         event = ContextAnxietyObservedEvent(
             token_count=120000,
-            threshold=180000,
+            threshold=170000,
             score=2,
             reasons=["due to context limit", "let me wrap up"],
         )
         structured = event.to_event()
         self.assertEqual(structured.type, "context_anxiety_observed")
         self.assertEqual(structured.payload["score"], 2)
-        self.assertEqual(structured.payload["threshold"], 180000)
+        self.assertEqual(structured.payload["threshold"], 170000)
         self.assertEqual(structured.payload["reasons"], ["due to context limit", "let me wrap up"])
 
 # ---------------------------------------------------------------------------
@@ -915,24 +928,24 @@ class TuiStateCompactionTests(unittest.TestCase):
         block = state.apply_event(event)
         self.assertIsNotNone(block)
 
-    def test_rebuild_working_context_shows_notice(self):
+    def test_handoff_reset_shows_notice(self):
         state = self._make_state()
         event = MagicMock()
         event.to_dict.return_value = {
             "type": "context_compaction_started",
-            "payload": {"token_count": 180000, "phase": "rebuilding_working_context"},
+            "payload": {"token_count": 180000, "phase": "handoff_reset"},
         }
         block = state.apply_event(event)
         self.assertIsNotNone(block)
-        self.assertIn("rebuilding working context", block.title.lower())
-        self.assertIn("rebuilding working context", state.snapshot.status.lower())
+        self.assertIn("handoff reset", block.title.lower())
+        self.assertIn("handoff reset", state.snapshot.status.lower())
 
     def test_context_anxiety_observed_shows_soft_notice(self):
         state = self._make_state()
         event = MagicMock()
         event.to_dict.return_value = {
             "type": "context_anxiety_observed",
-            "payload": {"token_count": 120000, "threshold": 180000, "score": 2, "reasons": ["due to context limit"]},
+            "payload": {"token_count": 120000, "threshold": 170000, "score": 2, "reasons": ["due to context limit"]},
         }
         block = state.apply_event(event)
         self.assertIsNotNone(block)
@@ -952,27 +965,23 @@ class ContextWindowConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HARNESS_CONTEXT_WINDOW_TOKENS", None)
             os.environ.pop("COMPRESS_THRESHOLD", None)
-            os.environ.pop("SUMMARY_TARGET_THRESHOLD", None)
             import importlib
             from harness_code_agent import config
             importlib.reload(config)
             self.assertEqual(config.CONTEXT_WINDOW_TOKENS, 200000)
-            self.assertEqual(config.COMPRESS_THRESHOLD, 180000)
-            self.assertEqual(config.SUMMARY_TARGET_THRESHOLD, 150000)
+            self.assertEqual(config.COMPRESS_THRESHOLD, 170000)
             # Restore default for later tests in this process.
             importlib.reload(config)
 
     def test_context_window_configurable(self):
         with patch.dict(os.environ, {"HARNESS_CONTEXT_WINDOW_TOKENS": "64000"}):
             os.environ.pop("COMPRESS_THRESHOLD", None)
-            os.environ.pop("SUMMARY_TARGET_THRESHOLD", None)
             # Need to reload to pick up env change
             import importlib
             from harness_code_agent import config
             importlib.reload(config)
             self.assertEqual(config.CONTEXT_WINDOW_TOKENS, 64000)
-            self.assertEqual(config.COMPRESS_THRESHOLD, 57600)
-            self.assertEqual(config.SUMMARY_TARGET_THRESHOLD, 48000)
+            self.assertEqual(config.COMPRESS_THRESHOLD, 54400)
             # Restore default
             importlib.reload(config)
 

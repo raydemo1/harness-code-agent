@@ -803,20 +803,20 @@ class TuiRichRenderTests(unittest.TestCase):
         bar.permission_mode = "workspace-write"
         text = bar.render()
         self.assertIsInstance(text, Text)
-        self.assertIn("auto-compact @90%", text.plain)
+        self.assertIn("auto-compact @85%", text.plain)
         self.assertTrue(any("50%" in text.plain[span.start:span.end] and "#a3be8c" in str(span.style) for span in text.spans))
 
-        # Yellow near the single 90% auto-compact trigger.
+        # Yellow near the single 85% auto-compact trigger.
+        bar.context_percent = 80
+        text = bar.render()
+        self.assertIn("80%", text.plain)
+        self.assertTrue(any("80%" in text.plain[span.start:span.end] and "#ebcb8b" in str(span.style) for span in text.spans))
+
+        # Red at or above 85%.
         bar.context_percent = 85
         text = bar.render()
         self.assertIn("85%", text.plain)
-        self.assertTrue(any("85%" in text.plain[span.start:span.end] and "#ebcb8b" in str(span.style) for span in text.spans))
-
-        # Red at or above 90%.
-        bar.context_percent = 90
-        text = bar.render()
-        self.assertIn("90%", text.plain)
-        self.assertTrue(any("90%" in text.plain[span.start:span.end] and "#bf616a" in str(span.style) for span in text.spans))
+        self.assertTrue(any("85%" in text.plain[span.start:span.end] and "#bf616a" in str(span.style) for span in text.spans))
 
     def test_context_bar_uses_configured_compaction_threshold_label(self):
         bar = ContextBar()

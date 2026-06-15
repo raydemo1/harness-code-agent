@@ -14,7 +14,7 @@ from .cancellation import CancelledError
 from .compaction import CompactionGate, compaction_action, get_thresholds
 from .observations import FactTracker, ObservationStore
 from .providers import ProviderAdapter, current_adapter, get_client
-from .runtime_state import AgentFallbackState, AgentRuntimeState, TaskBoard
+from .runtime_state import AgentFallbackState, AgentRuntimeState, RecoveryState, TaskBoard
 from .tool_executor import ToolExecutor
 from .trace import TraceWriter
 from .utils import (
@@ -69,7 +69,7 @@ class Agent:
     This is the 'managed agent loop' from the architecture:
     - while loop with llm.call(prompt)
     - tool execution
-    - context lifecycle (lightweight compaction / REBUILD_WORKING_CONTEXT)
+    - context lifecycle (lightweight compaction / handoff reset)
 
     Skills are handled via progressive disclosure:
     - Level 1: skill catalog (name + description) is baked into system_prompt
@@ -405,7 +405,7 @@ class AgentConversation:
             state.context_refill_streak = 0
             return
 
-        # Layer 2 — rebuild working context from structured state
+        # Layer 2 — reset context from a persisted handoff document
         state.context_refill_streak += 1
         state.auto_compaction_suspended = True
         self._emit_compaction_started(
@@ -415,43 +415,53 @@ class AgentConversation:
         )
         self.trace.context_event("auto_compaction_suspended", f"streak={state.context_refill_streak}")
         if state.context_refill_streak >= 2:
-            self._rebuild_working_context(agent, token_count=tokens_after_summary, thresholds=thresholds)
+            self._handoff_reset_context(agent, token_count=tokens_after_summary, thresholds=thresholds)
 
-    def _rebuild_working_context(self, agent: Agent, *, token_count: int, thresholds) -> None:
+    def _handoff_reset_context(self, agent: Agent, *, token_count: int, thresholds) -> None:
         self._emit_compaction_started(
             token_count=token_count,
             threshold=thresholds.compact,
-            phase="rebuilding_working_context",
+            phase="handoff_reset",
         )
         messages_before = len(self.messages)
-        rebuilt = context.rebuild_working_context(
+        system_prompt = (
+            self.messages[0].get("content", "")
+            if self.messages and self.messages[0].get("role") == "system"
+            else agent.system_prompt
+        )
+        workspace = (
+            str(self.agent.tool_context.workspace.root)
+            if self.agent.tool_context is not None
+            else str(config.WORKSPACE)
+        )
+        handoff, handoff_path = context.create_handoff_reset(
             self.messages,
             self._working_context_state(),
-            current_turn_start_index=self.runtime_state.current_turn_start_index,
+            llm_call_simple,
+            session_id=self.runtime_state.session_id,
+            profile=agent.name,
+            workspace=workspace,
             max_turns=5,
         )
-        self._replace_messages(rebuilt)
-        if context.count_request_tokens(self.messages, tool_schemas=_tool_schemas_for_agent(agent)) >= thresholds.compact:
-            rebuilt = context.rebuild_working_context(
-                self.messages,
-                self._working_context_state(),
-                current_turn_start_index=min(self.runtime_state.current_turn_start_index, len(self.messages)),
-                max_turns=3,
-            )
-            self._replace_messages(rebuilt)
+        reset_messages = context.restore_from_handoff_reset(handoff, system_prompt, handoff_path)
+        self._replace_messages(reset_messages)
         self.runtime_state.current_turn_start_index = max(1, len(self.messages) - 1)
         self.compaction_gate.mark_compacted()
         self.runtime_state.context_refill_streak = 0
         self.runtime_state.auto_compaction_suspended = True
+        self.runtime_state.auto_compaction_turn_start_index = -1
+        self.runtime_state.context_anxiety_turn_start_index = -1
+        self.runtime_state.fallback = AgentFallbackState()
+        self.runtime_state.recovery = RecoveryState()
         summary_text = _first_compacted_summary(self.messages)
         self._emit_compaction_committed(
             messages_before=messages_before,
             token_count_before=token_count,
             summary_chars=len(summary_text),
             summary_text=summary_text,
-            phase="rebuilding_working_context",
+            phase="handoff_reset",
         )
-        self._refresh_dynamic_context_after_compaction(phase="rebuilding_working_context")
+        self._refresh_dynamic_context_after_compaction(phase="handoff_reset")
 
     def _working_context_state(self) -> dict:
         board = self.runtime_state.task_board
@@ -1128,7 +1138,7 @@ def _first_compacted_summary(messages: list[dict]) -> str:
         content = str(message.get("content") or "")
         if not (
             content.startswith("[COMPACTED CONTEXT")
-            or content.startswith("[REBUILD_WORKING_CONTEXT]")
+            or content.startswith("[HANDOFF RESET]")
         ):
             continue
         _header, _sep, body = content.partition("\n")

@@ -122,7 +122,6 @@ def format_config_show(workspace: Path) -> str:
     lines.extend([
         "checkpoint_auto: interactive default",
         f"compress_threshold: {config.COMPRESS_THRESHOLD}",
-        f"summary_target_threshold: {config.SUMMARY_TARGET_THRESHOLD}",
         "auto_reset: disabled",
         f"max_agent_iterations: {config.MAX_AGENT_ITERATIONS}",
         f"max_agent_total_tokens: {config.MAX_AGENT_TOTAL_TOKENS}",

@@ -23,7 +23,6 @@ class SessionStatusSnapshot:
     context_tokens: int = 0
     context_window_tokens: int = 0
     context_compact_threshold: int = 0
-    context_summary_target_threshold: int = 0
     context_hint: bool = False
 
 
@@ -208,7 +207,7 @@ class TuiState:
                 "cleaning_older_outputs": "cleaning older outputs",
                 "summarizing_history": "summarizing history",
                 "auto_compaction_suspended": "auto-compaction suspended",
-                "rebuilding_working_context": "rebuilding working context",
+                "handoff_reset": "handoff reset",
             }
             label = labels.get(phase, "context compaction started")
             self.snapshot.status = label
