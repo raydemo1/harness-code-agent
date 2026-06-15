@@ -65,7 +65,7 @@ def run_bash(
     shell_session = None
     owns_shell = False
     if use_temporary_shell:
-        from ..workspace.shell_session import PersistentShellSession
+        from ...workspace.shell_session import PersistentShellSession
 
         shell_session = PersistentShellSession(config.WORKSPACE)
         owns_shell = True

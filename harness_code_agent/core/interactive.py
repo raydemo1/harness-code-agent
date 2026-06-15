@@ -449,12 +449,13 @@ class InteractiveSession:
             baseline_dirty=baseline_dirty,
             baseline_staged=baseline_staged,
         )
+        duration_seconds = time.time() - turn_started_at
         self._maybe_emit_turn_summary(
             user_prompt=user_prompt,
             assistant_text=text,
             checkpoint=checkpoint,
             turn_event_start=turn_event_start,
-            duration_seconds=time.time() - turn_started_at,
+            duration_seconds=duration_seconds,
         )
         self.event_bus.emit(
             "turn_finished",
@@ -462,6 +463,7 @@ class InteractiveSession:
             payload={
                 "turn": self.turn_count,
                 "checkpoint": checkpoint,
+                "duration_seconds": duration_seconds,
             },
         )
         return TurnResult(text=text, checkpoint=checkpoint, notice=notice, streamed=streamed)

@@ -1,0 +1,81 @@
+{
+  "suite": "memory_ab",
+  "description": "Fixed A/B tasks for measuring long-term memory impact. Baseline disables memory; treatment seeds these records.",
+  "tasks": [
+    {
+      "id": "context_tail_budget",
+      "profile": "coding-agent",
+      "prompt": "Find where the recent tail token budget is implemented and explain the default formula.",
+      "success_markers": ["DEFAULT_RECENT_TAIL_TOKENS", "context_window", "0.5"],
+      "memory_records": [
+        {
+          "file": "project.md",
+          "title": "Context tail budget implementation",
+          "summary": "The token-bounded recent tail lives in harness_code_agent/agent/context.py. DEFAULT_RECENT_TAIL_TOKENS is 16384 and the default budget is min(16384, context window * 0.5).",
+          "tags": ["context", "compaction", "tail-budget"],
+          "source_paths": ["harness_code_agent/agent/context.py"]
+        }
+      ]
+    },
+    {
+      "id": "deepseek_reasoning_strip",
+      "profile": "coding-agent",
+      "prompt": "Find how DeepSeek reasoning_content is kept locally but stripped before provider calls.",
+      "success_markers": ["reasoning_content", "strip", "provider"],
+      "memory_records": [
+        {
+          "file": "decisions.md",
+          "title": "DeepSeek reasoning_content provider boundary",
+          "summary": "DeepSeek reasoning_content is preserved in local assistant messages but stripped from outbound provider messages in harness_code_agent/agent/providers.py by _strip_response_only_message_fields.",
+          "tags": ["deepseek", "provider", "reasoning_content"],
+          "source_paths": ["harness_code_agent/agent/providers.py"]
+        }
+      ]
+    },
+    {
+      "id": "cache_diagnostics",
+      "profile": "coding-agent",
+      "prompt": "Find the cache diagnostics helper and explain which prefix changes it can detect.",
+      "success_markers": ["cache_diagnostics", "system", "tools", "log_rewrite"],
+      "memory_records": [
+        {
+          "file": "project.md",
+          "title": "Prompt cache diagnostics helper",
+          "summary": "Cache diagnostics are implemented in harness_code_agent/agent/utils.py. compare_prompt_cache_shapes detects system, tools, and log_rewrite prefix changes.",
+          "tags": ["cache", "diagnostics", "prefix"],
+          "source_paths": ["harness_code_agent/agent/utils.py"]
+        }
+      ]
+    },
+    {
+      "id": "observability_tokens",
+      "profile": "coding-agent",
+      "prompt": "Find where session observability aggregates cache hit and miss tokens.",
+      "success_markers": ["cache_miss_tokens", "cached_tokens", "observability"],
+      "memory_records": [
+        {
+          "file": "project.md",
+          "title": "Session observability token aggregation",
+          "summary": "Session observability aggregates LLM usage, cached_tokens, cache_miss_tokens, tool metrics, audit metrics, and cache hit ratio in harness_code_agent/sessions/observability.py.",
+          "tags": ["observability", "tokens", "cache"],
+          "source_paths": ["harness_code_agent/sessions/observability.py"]
+        }
+      ]
+    },
+    {
+      "id": "memory_middleware",
+      "profile": "coding-agent",
+      "prompt": "Find how long-term memory is injected into the agent prompt.",
+      "success_markers": ["MemoryMiddleware", "MEMORY.md", "memory_search"],
+      "memory_records": [
+        {
+          "file": "project.md",
+          "title": "Memory middleware injection points",
+          "summary": "MemoryMiddleware injects a compact MEMORY.md index at conversation start and after compaction, and augments user turns with MemoryRecall search results.",
+          "tags": ["memory", "middleware", "recall"],
+          "source_paths": ["harness_code_agent/runtime/middleware/memory.py"]
+        }
+      ]
+    }
+  ]
+}

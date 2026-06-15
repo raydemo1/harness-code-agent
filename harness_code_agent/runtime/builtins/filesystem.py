@@ -103,11 +103,13 @@ def read_file(
 
 def read_skill_file(path: str) -> ToolResult:
     """Read a file from the skills directory (outside workspace). Path must be relative to project root."""
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = Path(__file__).resolve().parents[3]
     p = (project_root / path).resolve()
     # Must stay within the skills directory
     skills_dir = (project_root / "skills").resolve()
-    if not str(p).startswith(str(skills_dir)):
+    try:
+        p.relative_to(skills_dir)
+    except ValueError:
         return ToolResult(
             tool="read_skill_file",
             status="failed",

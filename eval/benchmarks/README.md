@@ -1,4 +1,4 @@
-# Benchmarks
+# Eval Benchmarks
 
 Adapters for running the harness agent on standard evaluation benchmarks.
 
@@ -22,19 +22,19 @@ export $(grep -v '^#' .env | xargs)
 ```bash
 # Prepare a local Terminal-Bench 2.0 checkout, rewrite task docker_image
 # entries to GHCR, then run a single task
-python benchmarks/run_terminal_bench.py --task fix-git
+python eval/benchmarks/run_terminal_bench.py --task fix-git
 
 # Run multiple tasks from the local rewritten dataset
-python benchmarks/run_terminal_bench.py --task fix-git --task query-optimize
+python eval/benchmarks/run_terminal_bench.py --task fix-git --task query-optimize
 
 # Run the full local 2.0 dataset
-python benchmarks/run_terminal_bench.py --full
+python eval/benchmarks/run_terminal_bench.py --full
 
 # Use Daytona instead of local Docker
-python benchmarks/run_terminal_bench.py --task fix-git --env daytona
+python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 
 # Force Harbor to build environments instead of using task docker_image
-python benchmarks/run_terminal_bench.py --task fix-git --force-build
+python eval/benchmarks/run_terminal_bench.py --task fix-git --force-build
 ```
 
 ### How it works

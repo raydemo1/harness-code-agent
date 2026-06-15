@@ -18,6 +18,7 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent.skills.registry import SkillRegistry
+from harness_code_agent.runtime.builtins.filesystem import read_skill_file
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,16 @@ class SkillCatalogTests(unittest.TestCase):
         ]:
             with self.subTest(skill=skill_name):
                 self.assertIn(f"**{skill_name}**", prompt)
+
+    def test_catalog_paths_can_be_loaded_by_read_skill_file(self):
+        registry = SkillRegistry()
+
+        self.assertTrue(registry.catalog)
+        for skill in registry.catalog:
+            with self.subTest(skill=skill["name"], path=skill["path"]):
+                result = read_skill_file(skill["path"])
+                self.assertEqual(result.status, "success", result.output)
+                self.assertIn("name:", result.output)
 
     def test_skill_files_do_not_include_scraped_metadata(self):
         forbidden_markers = [

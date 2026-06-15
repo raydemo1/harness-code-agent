@@ -11,7 +11,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 
 ## 功能特点
 
-- **Profile 驱动**：内置 `coding-agent`、`app-builder`、`terminal`、`swe-bench`、`plan` 五种任务模式。
+- **Profile 驱动**：内置 `coding-agent`、`app-builder`、`terminal`、`swe-bench`、`plan`、`review` 六种任务模式。
 - **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
 - **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
 - **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
@@ -19,9 +19,9 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 - **会话与事件记录**：每次运行会写入 `.harness/` 元数据、事件和文件快照。
 - **工具系统**：支持文件读写、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
 - **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
-- **Benchmark 适配**：`benchmarks/` 下提供 Terminal-Bench 2.0 / Harbor 运行入口。
+- **评估与 Benchmark 适配**：`eval/` 下提供轻量评估脚本、任务集、结果汇总，以及 Terminal-Bench 2.0 / Harbor 运行入口。
 - **项目规则文件**：交互式 session 启动时会读取当前工作区根目录的 `HARNESS.md`，并作为稳定系统提示的一部分注入。
-- **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。warmup 后平均缓存命中率从约 `49.8%` 提升到约 `87.5%`，第 6 轮从 `4352/8187 = 53.2%` 提升到 `7296/8148 = 89.5%`。
+- **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。当前 DeepSeek context cache 评估中，stable warmup 从 `0.0%` 提升到 `98.6%`，5-turn 平均命中率为 `79.1%`。
 
 ## 项目结构
 
@@ -37,7 +37,11 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 │   ├── skills/             # skill registry
 │   └── profiles/           # 不同任务场景的 profile
 ├── skills/                 # agent 可读取的本地技能说明
-├── benchmarks/             # benchmark launcher 和 Harbor adapter
+├── eval/                   # 评估脚本、任务集、结果、benchmark adapter
+│   ├── scripts/            # cache / memory / latency / tbench 评估入口和报告汇总
+│   ├── tasks/              # 固定轻量评估任务配置
+│   ├── benchmarks/         # Terminal-Bench launcher 和 Harbor adapter
+│   └── results/            # 真实运行产物
 └── tests/                  # unittest 测试
 ```
 
@@ -188,6 +192,7 @@ hca --resume <session-id> "Continue the previous parser work"
 | `terminal` | 面向 Terminal-Bench 2.0 风格的 CLI / shell 任务 |
 | `swe-bench` | 面向真实仓库 issue 修复任务 |
 | `plan` | 调查和方案设计，输出结构化 Markdown 计划；只允许写计划 Markdown 和 planning state |
+| `review` | 只读代码评审模式，按 findings-first 结构输出，不修改工作区 |
 
 `plan` profile 在交互模式下会进入显式 handoff：计划输出后不会自动改代码，而是提示用户选择下一步。
 
@@ -369,7 +374,7 @@ python -m unittest tests.test_product_runtime
 
 ## Terminal-Bench 运行
 
-`benchmarks/` 目录提供 Harbor adapter。基础准备：
+`eval/benchmarks/` 目录提供 Harbor adapter。基础准备：
 
 ```bash
 pip install harbor
@@ -379,28 +384,28 @@ docker info
 确保 `.env` 中 API 配置可用后，运行单个任务：
 
 ```bash
-python benchmarks/run_terminal_bench.py --task fix-git
+python eval/benchmarks/run_terminal_bench.py --task fix-git
 ```
 
 运行多个任务：
 
 ```bash
-python benchmarks/run_terminal_bench.py --task fix-git --task query-optimize
+python eval/benchmarks/run_terminal_bench.py --task fix-git --task query-optimize
 ```
 
 运行本地完整数据集：
 
 ```bash
-python benchmarks/run_terminal_bench.py --full
+python eval/benchmarks/run_terminal_bench.py --full
 ```
 
 使用 Daytona 云环境：
 
 ```bash
-python benchmarks/run_terminal_bench.py --task fix-git --env daytona
+python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 ```
 
-更多细节见 `benchmarks/README.md`。
+更多细节见 `eval/README.md` 和 `eval/benchmarks/README.md`。
 
 ## 开发指南
 

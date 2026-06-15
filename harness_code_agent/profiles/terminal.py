@@ -126,7 +126,7 @@ AVAILABLE TOOLS:
         if cls._tb2_tasks is None:
             import json
             from pathlib import Path
-            tb2_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tb2_tasks.json"
+            tb2_path = Path(__file__).resolve().parents[2] / "eval" / "benchmarks" / "tb2_tasks.json"
             if tb2_path.exists():
                 cls._tb2_tasks = json.loads(tb2_path.read_text(encoding="utf-8"))
             else:

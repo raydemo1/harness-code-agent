@@ -1,0 +1,32 @@
+{
+  "cache": {
+    "compaction_last_hit_ratio": 0.9148797920727745,
+    "compaction_run": "2026-06-08_155422_deepseek_context_eval_compaction_rewrite_24turns",
+    "prefix_changes": [
+      {
+        "label": "after_rewrite_turn_1",
+        "reasons": [
+          "log_rewrite"
+        ],
+        "turn": 3
+      }
+    ],
+    "run": "2026-06-08_152759_deepseek_context_eval_smoke",
+    "stable_avg_hit_ratio": 0.7911342360661575,
+    "stable_first_hit_ratio": 0.0,
+    "stable_last_hit_ratio": 0.9864702860078781,
+    "stable_run": "2026-06-08_152846_deepseek_context_eval_context_mechanism"
+  },
+  "generated_at": "2026-06-15T16:34:12",
+  "latency": {},
+  "memory": {},
+  "result_root": "eval\\results",
+  "source_runs": [
+    "eval\\results\\2026-06-08_152759_deepseek_context_eval_smoke",
+    "eval\\results\\2026-06-08_152846_deepseek_context_eval_context_mechanism",
+    "eval\\results\\2026-06-08_153318_deepseek_context_eval_compaction_rewrite_postwarm",
+    "eval\\results\\2026-06-08_155226_deepseek_context_eval_compaction_rewrite_12turns",
+    "eval\\results\\2026-06-08_155422_deepseek_context_eval_compaction_rewrite_24turns"
+  ],
+  "tbench": {}
+}

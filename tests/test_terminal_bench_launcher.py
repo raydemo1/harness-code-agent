@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from benchmarks.run_terminal_bench import (
+from eval.benchmarks.run_terminal_bench import (
     build_harbor_run_command,
     build_launch_environment,
     default_local_dataset_path,
@@ -39,7 +39,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                 "-d",
                 "terminal-bench@2.0",
                 "--agent-import-path",
-                "benchmarks.harbor_agent:HarnessAgent",
+                "eval.benchmarks.harbor_agent:HarnessAgent",
                 "--include-task-name",
                 "fix-git",
                 "--include-task-name",
@@ -64,7 +64,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                 "--path",
                 "E:\\tmp\\terminal-bench-2",
                 "--agent-import-path",
-                "benchmarks.harbor_agent:HarnessAgent",
+                "eval.benchmarks.harbor_agent:HarnessAgent",
                 "--env",
                 "daytona",
                 "--include-task-name",
@@ -89,7 +89,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                 "--path",
                 "E:\\tmp\\terminal-bench-2",
                 "--agent-import-path",
-                "benchmarks.harbor_agent:HarnessAgent",
+                "eval.benchmarks.harbor_agent:HarnessAgent",
                 "--force-build",
                 "--include-task-name",
                 "fix-git",
@@ -128,7 +128,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             harbor_path = scripts_dir / "harbor.exe"
             harbor_path.write_text("", encoding="utf-8")
 
-            with patch("benchmarks.run_terminal_bench.shutil.which", return_value=None):
+            with patch("eval.benchmarks.run_terminal_bench.shutil.which", return_value=None):
                 resolved = resolve_harbor_executable(
                     {
                         "APPDATA": str(appdata),
@@ -180,8 +180,8 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             (task_dir / "task.toml").write_text("name='fix-git'\n", encoding="utf-8")
 
         try:
-            with patch("benchmarks.run_terminal_bench.shutil.rmtree") as rmtree_mock, patch(
-                "benchmarks.run_terminal_bench._download_and_extract_dataset_archive",
+            with patch("eval.benchmarks.run_terminal_bench.shutil.rmtree") as rmtree_mock, patch(
+                "eval.benchmarks.run_terminal_bench._download_and_extract_dataset_archive",
                 side_effect=fake_download,
             ) as download_mock:
                 resolved = ensure_local_dataset(dataset_path)

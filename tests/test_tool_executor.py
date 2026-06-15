@@ -141,6 +141,24 @@ class ToolExecutorTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(classify_shell_lane(command), expected)
 
+    def test_run_bash_read_lane_uses_temporary_shell(self):
+        from harness_code_agent import config
+
+        old_workspace = config.WORKSPACE
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config.WORKSPACE = temp_dir
+            try:
+                result = tools.run_bash(
+                    "pwd",
+                    timeout=10,
+                    execution_lane=tools.ToolExecutionLane.SHELL_READ,
+                )
+            finally:
+                config.WORKSPACE = old_workspace
+
+        self.assertEqual(result.status, "success")
+        self.assertTrue(result.output.strip())
+
     def test_shell_lane_uses_shared_stateful_classifier(self):
         from harness_code_agent.agent.tool_executor import classify_shell_lane
 

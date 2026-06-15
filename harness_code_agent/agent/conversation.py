@@ -580,6 +580,10 @@ class AgentConversation:
         if self.agent.stream_callback is not None:
             stream_kwargs = dict(kwargs)
             stream_kwargs["stream"] = True
+            call_id = self._next_llm_call_id()
+            request_started = time.perf_counter()
+            first_token_ms: int | None = None
+            self._emit_llm_request_started(call_id, streamed=True, kwargs=stream_kwargs)
             saw_chunk = False
             thought_start_time: float | None = None
 
@@ -588,6 +592,10 @@ class AgentConversation:
                 saw_chunk = True
 
             def on_text_delta(delta: str) -> None:
+                nonlocal first_token_ms
+                if first_token_ms is None:
+                    first_token_ms = int((time.perf_counter() - request_started) * 1000)
+                    self._emit_llm_first_token(call_id, first_token_ms, kwargs=stream_kwargs)
                 self.last_run_streamed_text = True
                 self.agent.stream_callback(delta)
 
@@ -623,6 +631,14 @@ class AgentConversation:
                             source=self.provider.name,
                         ).to_event()
                     )
+                self._emit_llm_response_finished(
+                    call_id,
+                    int((time.perf_counter() - request_started) * 1000),
+                    finish_reason=result.finish_reason,
+                    streamed=True,
+                    first_token_ms=first_token_ms,
+                    kwargs=stream_kwargs,
+                )
                 self._emit_llm_usage(result.usage, kwargs.get("prompt_cache_key"))
                 return result.assistant_message, result.finish_reason
             except CancelledError:
@@ -633,14 +649,85 @@ class AgentConversation:
                 self.trace.error("stream_fallback", str(exc))
 
         self._check_cancelled(cancellation_token)
+        call_id = self._next_llm_call_id()
+        request_started = time.perf_counter()
+        self._emit_llm_request_started(call_id, streamed=False, kwargs=kwargs)
         response = self.client.chat.completions.create(**kwargs)
         self._check_cancelled(cancellation_token)
         if not response.choices:
             return None
         choice = response.choices[0]
+        self._emit_llm_response_finished(
+            call_id,
+            int((time.perf_counter() - request_started) * 1000),
+            finish_reason=choice.finish_reason,
+            streamed=False,
+            first_token_ms=None,
+            kwargs=kwargs,
+        )
         self._emit_llm_usage(_usage_to_dict(getattr(response, "usage", None)), kwargs.get("prompt_cache_key"))
 
         return self.provider.assistant_message_from_response(choice.message), choice.finish_reason
+
+    def _next_llm_call_id(self) -> str:
+        return f"{self.agent.name}-{time.time_ns()}"
+
+    def _emit_llm_request_started(self, call_id: str, *, streamed: bool, kwargs: dict) -> None:
+        if self._event_bus is None:
+            return
+        from ..sessions.events import LlmRequestStartedEvent
+
+        self._event_bus.emit_event(
+            LlmRequestStartedEvent(
+                call_id=call_id,
+                provider=self.provider.name,
+                model=str(kwargs.get("model") or config.MODEL),
+                streamed=streamed,
+                agent=self.agent.name,
+            ).to_event()
+        )
+
+    def _emit_llm_first_token(self, call_id: str, elapsed_ms: int, *, kwargs: dict) -> None:
+        if self._event_bus is None:
+            return
+        from ..sessions.events import LlmFirstTokenEvent
+
+        self._event_bus.emit_event(
+            LlmFirstTokenEvent(
+                call_id=call_id,
+                elapsed_ms=elapsed_ms,
+                provider=self.provider.name,
+                model=str(kwargs.get("model") or config.MODEL),
+                agent=self.agent.name,
+            ).to_event()
+        )
+
+    def _emit_llm_response_finished(
+        self,
+        call_id: str,
+        duration_ms: int,
+        *,
+        finish_reason: str | None,
+        streamed: bool,
+        first_token_ms: int | None,
+        kwargs: dict,
+    ) -> None:
+        if self._event_bus is None:
+            return
+        from ..sessions.events import LlmResponseFinishedEvent
+
+        self._event_bus.emit_event(
+            LlmResponseFinishedEvent(
+                call_id=call_id,
+                duration_ms=max(0, int(duration_ms)),
+                provider=self.provider.name,
+                model=str(kwargs.get("model") or config.MODEL),
+                streamed=streamed,
+                finish_reason=finish_reason,
+                first_token_ms=first_token_ms,
+                agent=self.agent.name,
+            ).to_event()
+        )
 
     def _emit_llm_usage(self, usage: dict | None, prompt_cache_key: str | None) -> None:
         fallback = self.runtime_state.fallback

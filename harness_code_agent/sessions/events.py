@@ -340,6 +340,74 @@ class LlmUsageEvent:
 
 
 @dataclass(frozen=True)
+class LlmRequestStartedEvent:
+    call_id: str
+    provider: str
+    model: str
+    streamed: bool = False
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "llm_request_started",
+            {
+                "call_id": self.call_id,
+                "provider": self.provider,
+                "model": self.model,
+                "streamed": self.streamed,
+            },
+            self.agent,
+        )
+
+
+@dataclass(frozen=True)
+class LlmFirstTokenEvent:
+    call_id: str
+    elapsed_ms: int
+    provider: str
+    model: str
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        return StructuredEvent(
+            "llm_first_token",
+            {
+                "call_id": self.call_id,
+                "elapsed_ms": self.elapsed_ms,
+                "provider": self.provider,
+                "model": self.model,
+            },
+            self.agent,
+        )
+
+
+@dataclass(frozen=True)
+class LlmResponseFinishedEvent:
+    call_id: str
+    duration_ms: int
+    provider: str
+    model: str
+    streamed: bool = False
+    finish_reason: str | None = None
+    first_token_ms: int | None = None
+    agent: str | None = "main_agent"
+
+    def to_event(self) -> StructuredEvent:
+        payload: dict[str, Any] = {
+            "call_id": self.call_id,
+            "duration_ms": self.duration_ms,
+            "provider": self.provider,
+            "model": self.model,
+            "streamed": self.streamed,
+        }
+        if self.finish_reason is not None:
+            payload["finish_reason"] = self.finish_reason
+        if self.first_token_ms is not None:
+            payload["first_token_ms"] = self.first_token_ms
+        return StructuredEvent("llm_response_finished", payload, self.agent)
+
+
+@dataclass(frozen=True)
 class ContextCompactionStartedEvent:
     token_count: int
     threshold: int

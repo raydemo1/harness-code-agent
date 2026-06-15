@@ -14,16 +14,16 @@ Usage:
 
   # Test on hello-world task
   harbor run -d "terminal-bench@2.0" \
-    --agent-import-path benchmarks.harbor_agent:HarnessAgent \
+    --agent-import-path eval.benchmarks.harbor_agent:HarnessAgent \
     --task-names hello-world
 
   # Full benchmark
   harbor run -d "terminal-bench@2.0" \
-    --agent-import-path benchmarks.harbor_agent:HarnessAgent
+    --agent-import-path eval.benchmarks.harbor_agent:HarnessAgent
 
   # With Daytona (no Docker needed locally)
   harbor run -d "terminal-bench@2.0" \
-    --agent-import-path benchmarks.harbor_agent:HarnessAgent \
+    --agent-import-path eval.benchmarks.harbor_agent:HarnessAgent \
     --env daytona
 """
 from __future__ import annotations

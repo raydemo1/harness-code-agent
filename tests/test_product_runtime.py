@@ -1084,6 +1084,11 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(usage.payload["cached_tokens"], 80)
         self.assertEqual(usage.payload["prompt_tokens"], 100)
         self.assertEqual(usage.payload["cache_hit_ratio"], 0.8)
+        self.assertTrue([event for event in events if event.type == "llm_request_started"])
+        finished = [event for event in events if event.type == "llm_response_finished"]
+        self.assertEqual(len(finished), 1)
+        self.assertGreaterEqual(finished[0].payload["duration_ms"], 0)
+        self.assertFalse(finished[0].payload["streamed"])
 
     def test_agent_loop_emits_cache_diagnostics_when_tool_schema_changes(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation

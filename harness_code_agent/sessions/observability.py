@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -124,6 +125,84 @@ class ToolMetrics:
 
 
 @dataclass
+class DistributionMetrics:
+    values: list[int] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        return len(self.values)
+
+    @property
+    def min(self) -> int:
+        return min(self.values) if self.values else 0
+
+    @property
+    def max(self) -> int:
+        return max(self.values) if self.values else 0
+
+    @property
+    def mean(self) -> float:
+        if not self.values:
+            return 0.0
+        return sum(self.values) / len(self.values)
+
+    @property
+    def p50(self) -> int:
+        return _percentile(self.values, 0.50)
+
+    @property
+    def p95(self) -> int:
+        return _percentile(self.values, 0.95)
+
+    @property
+    def p99(self) -> int:
+        return _percentile(self.values, 0.99)
+
+    def add_value(self, value: int | float | None) -> None:
+        if value is None:
+            return
+        try:
+            numeric = int(round(float(value)))
+        except (TypeError, ValueError):
+            return
+        if numeric >= 0:
+            self.values.append(numeric)
+
+    def add(self, other: "DistributionMetrics") -> None:
+        self.values.extend(other.values)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "count": self.count,
+            "min": self.min,
+            "max": self.max,
+            "mean": self.mean,
+            "p50": self.p50,
+            "p95": self.p95,
+            "p99": self.p99,
+        }
+
+
+@dataclass
+class PerformanceMetrics:
+    llm_response_latency_ms: DistributionMetrics = field(default_factory=DistributionMetrics)
+    llm_first_token_ms: DistributionMetrics = field(default_factory=DistributionMetrics)
+    turn_duration_ms: DistributionMetrics = field(default_factory=DistributionMetrics)
+
+    def add(self, other: "PerformanceMetrics") -> None:
+        self.llm_response_latency_ms.add(other.llm_response_latency_ms)
+        self.llm_first_token_ms.add(other.llm_first_token_ms)
+        self.turn_duration_ms.add(other.turn_duration_ms)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "llm_response_latency_ms": self.llm_response_latency_ms.to_dict(),
+            "llm_first_token_ms": self.llm_first_token_ms.to_dict(),
+            "turn_duration_ms": self.turn_duration_ms.to_dict(),
+        }
+
+
+@dataclass
 class AuditMetrics:
     failures: int = 0
     failure_categories: Counter[str] = field(default_factory=Counter)
@@ -182,6 +261,7 @@ class SessionObservability:
     created_at: str = ""
     tokens: TokenMetrics = field(default_factory=TokenMetrics)
     tools: ToolMetrics = field(default_factory=ToolMetrics)
+    performance: PerformanceMetrics = field(default_factory=PerformanceMetrics)
     audit: AuditMetrics = field(default_factory=AuditMetrics)
     recent_events: list[str] = field(default_factory=list)
 
@@ -195,6 +275,7 @@ class SessionObservability:
             "created_at": self.created_at,
             "tokens": self.tokens.to_dict(),
             "tools": self.tools.to_dict(),
+            "performance": self.performance.to_dict(),
             "audit": self.audit.to_dict(),
             "recent_events": list(self.recent_events),
         }
@@ -205,6 +286,7 @@ class ProjectObservability:
     session_count: int = 0
     tokens: TokenMetrics = field(default_factory=TokenMetrics)
     tools: ToolMetrics = field(default_factory=ToolMetrics)
+    performance: PerformanceMetrics = field(default_factory=PerformanceMetrics)
     audit: AuditMetrics = field(default_factory=AuditMetrics)
     sessions: list[SessionObservability] = field(default_factory=list)
     top_token_sessions: list[SessionObservability] = field(default_factory=list)
@@ -216,6 +298,7 @@ class ProjectObservability:
             "session_count": self.session_count,
             "tokens": self.tokens.to_dict(),
             "tools": self.tools.to_dict(),
+            "performance": self.performance.to_dict(),
             "audit": self.audit.to_dict(),
             "sessions": [session.to_dict() for session in self.sessions],
             "top_token_sessions": [session.to_dict() for session in self.top_token_sessions],
@@ -244,6 +327,7 @@ def build_session_observability(metadata: dict[str, Any], events: list[dict[str,
     )
 
     tool_breakdowns: defaultdict[str, ToolBreakdown] = defaultdict(ToolBreakdown)
+    first_token_call_ids: set[str] = set()
     for event in events:
         event_name = _event_type(event)
         data = _payload(event)
@@ -287,6 +371,23 @@ def build_session_observability(metadata: dict[str, Any], events: list[dict[str,
             snapshot.audit.tokens_saved += _int_value(data.get("tokens_saved"))
         elif event_name == "context_anxiety_observed":
             snapshot.audit.context_anxiety_observed += 1
+        elif event_name == "llm_response_finished":
+            snapshot.performance.llm_response_latency_ms.add_value(data.get("duration_ms"))
+            call_id = str(data.get("call_id") or "")
+            if call_id not in first_token_call_ids:
+                snapshot.performance.llm_first_token_ms.add_value(data.get("first_token_ms"))
+        elif event_name == "llm_first_token":
+            snapshot.performance.llm_first_token_ms.add_value(data.get("elapsed_ms"))
+            call_id = str(data.get("call_id") or "")
+            if call_id:
+                first_token_call_ids.add(call_id)
+        elif event_name == "turn_finished":
+            duration_seconds = data.get("duration_seconds")
+            if duration_seconds is not None:
+                try:
+                    snapshot.performance.turn_duration_ms.add_value(float(duration_seconds) * 1000)
+                except (TypeError, ValueError):
+                    pass
         elif event_name == "approval_requested":
             snapshot.audit.approvals_requested += 1
         elif event_name == "approval_decided":
@@ -315,6 +416,7 @@ def build_project_observability(store: "SessionStore") -> ProjectObservability:
         sessions.append(snapshot)
         project.tokens.add(snapshot.tokens)
         project.tools.add(snapshot.tools)
+        project.performance.add(snapshot.performance)
         project.audit.add(snapshot.audit)
 
     project.sessions = sessions
@@ -357,6 +459,7 @@ def render_session_observability(snapshot: SessionObservability) -> str:
         "",
         _token_line(snapshot.tokens),
         _tool_line(snapshot.tools),
+        _performance_line(snapshot.performance),
         _audit_line(snapshot.audit),
         "",
         "tool breakdown:",
@@ -384,6 +487,7 @@ def render_project_observability(snapshot: ProjectObservability) -> str:
         "",
         _token_line(snapshot.tokens),
         _tool_line(snapshot.tools),
+        _performance_line(snapshot.performance),
         _audit_line(snapshot.audit),
         "",
         "top token sessions:",
@@ -464,6 +568,15 @@ def _tool_line(tools: ToolMetrics) -> str:
         f"calls={tools.tool_calls}, results={tools.tool_results}, "
         f"success={tools.successes}, failed={tools.failures}, unknown={tools.unknown}, "
         f"pending: {tools.pending_calls}, success rate: {_percent(tools.success_rate)}"
+    )
+
+
+def _performance_line(performance: PerformanceMetrics) -> str:
+    return (
+        "performance: "
+        f"llm_response={_distribution_summary(performance.llm_response_latency_ms)}, "
+        f"ttft={_distribution_summary(performance.llm_first_token_ms)}, "
+        f"turn={_distribution_summary(performance.turn_duration_ms)}"
     )
 
 
@@ -548,6 +661,20 @@ def _int_value(value: Any) -> int:
 
 def _percent(value: float) -> str:
     return f"{value * 100:.1f}%"
+
+
+def _distribution_summary(metrics: DistributionMetrics) -> str:
+    if metrics.count <= 0:
+        return "n=0"
+    return f"n={metrics.count}, p50={metrics.p50}ms, p95={metrics.p95}ms, p99={metrics.p99}ms"
+
+
+def _percentile(values: list[int], quantile: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    idx = max(0, min(len(ordered) - 1, math.ceil(quantile * len(ordered)) - 1))
+    return ordered[idx]
 
 
 def _format_counter(counter: Counter[str]) -> str:

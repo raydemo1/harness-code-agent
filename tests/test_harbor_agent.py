@@ -49,8 +49,8 @@ def _install_fake_harbor_modules() -> None:
 class HarnessAgentInstallTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         _install_fake_harbor_modules()
-        sys.modules.pop("benchmarks.harbor_agent", None)
-        self.module = importlib.import_module("benchmarks.harbor_agent")
+        sys.modules.pop("eval.benchmarks.harbor_agent", None)
+        self.module = importlib.import_module("eval.benchmarks.harbor_agent")
 
     async def test_install_uses_user_repo_urls(self):
         commands = []

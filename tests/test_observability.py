@@ -53,6 +53,9 @@ class ObservabilityAggregationTests(unittest.TestCase):
             _event(16, "file_change", {"path": "app.py"}),
             _event(17, "file_change", {"path": "app.py"}),
             _event(18, "context_anxiety_observed", {"score": 2, "reasons": ["due to context limit"]}),
+            _event(19, "llm_response_finished", {"duration_ms": 100, "first_token_ms": 25}),
+            _event(20, "llm_response_finished", {"duration_ms": 300, "first_token_ms": 75}),
+            _event(21, "turn_finished", {"duration_seconds": 2.5}),
         ]
 
         snapshot = build_session_observability(metadata, events)
@@ -84,6 +87,10 @@ class ObservabilityAggregationTests(unittest.TestCase):
         self.assertEqual(snapshot.audit.approvals_approved, 1)
         self.assertEqual(snapshot.audit.approvals_denied, 1)
         self.assertEqual(snapshot.audit.changed_files, ["app.py"])
+        self.assertEqual(snapshot.performance.llm_response_latency_ms.count, 2)
+        self.assertEqual(snapshot.performance.llm_response_latency_ms.p95, 300)
+        self.assertEqual(snapshot.performance.llm_first_token_ms.p50, 25)
+        self.assertEqual(snapshot.performance.turn_duration_ms.p99, 2500)
 
     def test_project_observability_aggregates_sessions_and_skips_bad_records(self):
         from harness_code_agent.sessions.observability import build_project_observability

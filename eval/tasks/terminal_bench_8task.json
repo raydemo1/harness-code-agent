@@ -1,0 +1,16 @@
+{
+  "suite": "terminal_bench_8task",
+  "task_set": "8task",
+  "benchmark_name": "Terminal-Bench 2.0 8-task subset",
+  "description": "Fixed lightweight Terminal-Bench 2.0 8-task subset for the default interview-project benchmark run.",
+  "tasks": [
+    "fix-git",
+    "overfull-hbox",
+    "build-cython-ext",
+    "custom-memory-heap-crash",
+    "git-leak-recovery",
+    "log-summary-date-ranges",
+    "large-scale-text-editing",
+    "query-optimize"
+  ]
+}

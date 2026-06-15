@@ -143,7 +143,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-root",
-        default=str(PROJECT_ROOT / "Eval" / "results"),
+        default=str(PROJECT_ROOT / "eval" / "results"),
         help="Directory for eval result folders.",
     )
     parser.add_argument("--run-name", default="", help="Optional suffix for the result directory.")

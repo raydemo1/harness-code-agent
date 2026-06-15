@@ -139,7 +139,7 @@ def build_harbor_run_command(
     else:
         command.extend(["--path", str(dataset_path)])
 
-    command.extend(["--agent-import-path", "benchmarks.harbor_agent:HarnessAgent"])
+    command.extend(["--agent-import-path", "eval.benchmarks.harbor_agent:HarnessAgent"])
 
     if runner_env:
         command.extend(["--env", runner_env])
@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     env = build_launch_environment(repo_root)
     harbor_executable = resolve_harbor_executable(env)
 
