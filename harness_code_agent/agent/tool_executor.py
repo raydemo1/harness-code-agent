@@ -356,7 +356,6 @@ class ToolExecutor:
             "tool_call_id": prepared.tool_call_id,
             "content": self.conversation.observation_store.observed_message(observation, tool_result),
         })
-        observation.message_index = len(self.conversation.messages) - 1
         invalidation = self.conversation.fact_tracker.apply_mutation(
             tool=prepared.name,
             args=prepared.args,
@@ -365,11 +364,7 @@ class ToolExecutor:
             exclude_ids={observation.id},
         )
         if invalidation:
-            replaced = self.conversation.observation_store.replace_long_stale_messages(self.conversation.messages)
-            notice = invalidation
-            if replaced:
-                notice += "\nCompressed stale long observations: " + ", ".join(replaced)
-            self.conversation._append_message({"role": "user", "content": notice})
+            self.conversation._append_message({"role": "user", "content": invalidation})
 
         for mw in self.agent.middlewares:
             inject = mw.post_tool(

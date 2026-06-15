@@ -223,7 +223,6 @@ class AgentConversation:
 
     def _replace_messages(self, messages: list[dict]) -> None:
         self.messages = list(messages)
-        self.observation_store.detach_message_indexes(self.messages)
         self._log_rewrite_version += 1
         self.compaction_gate.bump_revision()
 
@@ -244,7 +243,6 @@ class AgentConversation:
             return False
         self.messages = kept
         self.runtime_state.current_turn_start_index = max(1, turn_start - removed_before_turn)
-        self.observation_store.detach_message_indexes(self.messages)
         self.compaction_gate.bump_revision()
         return True
 
@@ -261,7 +259,6 @@ class AgentConversation:
             )
         if self.runtime_state.current_turn_start_index >= insert_at:
             self.runtime_state.current_turn_start_index += len(injected)
-        self.observation_store.detach_message_indexes(self.messages)
         self.compaction_gate.bump_revision()
 
     def _refresh_dynamic_context_after_compaction(self, *, phase: str) -> None:

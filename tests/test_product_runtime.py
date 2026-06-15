@@ -1008,42 +1008,6 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(result["cache_hit_tokens"], 70)
         self.assertEqual(result["cache_miss_tokens"], 30)
 
-    def test_context_replacement_detaches_observation_indexes_and_summarizes_survivors(self):
-        from harness_code_agent.agent.loop import Agent, AgentConversation
-        from harness_code_agent.runtime.tool_result import ToolResult
-
-        with patch("harness_code_agent.agent.conversation.get_client"):
-            conversation = AgentConversation(Agent("test", "system", use_tools=False))
-
-        result = ToolResult(tool="read_file", status="success", output="SECRET_RAW_CONTENT")
-        observation = conversation.observation_store.create(
-            tool="read_file",
-            args={"path": "note.txt"},
-            result=result,
-            fact_tracker=conversation.fact_tracker,
-        )
-        observed = conversation.observation_store.observed_message(observation, result)
-        conversation.messages.extend(
-            [
-                {"role": "user", "content": "old turn"},
-                {"role": "tool", "tool_call_id": "tc_read", "content": observed},
-            ]
-        )
-        observation.message_index = 2
-
-        conversation._replace_messages(
-            [
-                conversation.messages[0],
-                {"role": "user", "content": "summary"},
-                {"role": "tool", "tool_call_id": "tc_read", "content": observed},
-            ]
-        )
-
-        prompt_text = json.dumps(conversation.messages, ensure_ascii=False)
-        self.assertNotIn("SECRET_RAW_CONTENT", prompt_text)
-        self.assertIn("historical", prompt_text)
-        self.assertIsNone(observation.message_index)
-
     def test_agent_loop_records_llm_cached_token_usage_event(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
         from harness_code_agent.sessions.events import EventBus
@@ -1146,7 +1110,7 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(second_diag["cache_hit_tokens"], 80)
         self.assertEqual(second_diag["cache_miss_tokens"], 20)
 
-    def test_invalidated_long_observation_is_compressed_and_notice_is_appended(self):
+    def test_invalidated_long_observation_keeps_original_message_and_appends_notice(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
 
         class FakeCompletions:
@@ -1219,11 +1183,12 @@ class ProductRuntimeTests(unittest.TestCase):
             third_prompt = json.dumps(fake_client.chat.completions.calls[2], ensure_ascii=False)
 
             self.assertIn("SECRET_FULL_CONTENT_UNSAFE", second_prompt)
-            self.assertNotIn("SECRET_FULL_CONTENT_UNSAFE", third_prompt)
-            self.assertIn("[OBS", third_prompt)
-            self.assertIn("stale", third_prompt)
+            self.assertIn("SECRET_FULL_CONTENT_UNSAFE", third_prompt)
+            self.assertIn("[OBS obs_0001 observed]", third_prompt)
+            self.assertNotIn("[OBS obs_0001 stale]", third_prompt)
             self.assertIn("FACT INVALIDATION", third_prompt)
-            self.assertIn("Compressed stale long observations", third_prompt)
+            self.assertIn("Stale observations: obs_0001", third_prompt)
+            self.assertNotIn("Compressed stale long observations", third_prompt)
             self.assertTrue(list((root / ".harness" / "observations").rglob("*.txt")))
 
     def test_invalidated_short_observation_keeps_original_message_and_appends_notice(self):

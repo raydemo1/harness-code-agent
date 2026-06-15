@@ -12,7 +12,6 @@ from ..runtime.tool_result import ToolResult
 
 
 FRESH_DETAIL_LIMIT = 12_000
-STALE_REPLACEMENT_MIN_CHARS = 4_000
 _OBS_ID_PREFIX = "[OBS "
 
 # Preview budget for compact tool-output refs: head + tail chars shown inline
@@ -50,7 +49,6 @@ class ToolObservation:
     output_chars: int
     output_hash: str
     created_at: float = field(default_factory=time.time)
-    message_index: int | None = None
     stale: bool = False
 
 
@@ -238,59 +236,6 @@ class ObservationStore:
             f"summary: {observation.summary}\n"
             "current truth rule: This is a historical observation, not current truth. Re-read files or rerun commands before relying on exact/current facts."
         )
-
-    def replace_long_stale_messages(
-        self,
-        messages: list[dict],
-        *,
-        min_chars: int = STALE_REPLACEMENT_MIN_CHARS,
-        protect_from_index: int | None = None,
-    ) -> list[str]:
-        """Replace stale observation messages with compact summaries.
-
-        Large inline outputs are the main target, but compact file refs
-        may still contain preview text from the original output — always
-        replace so stale content doesn't leak into subsequent turns."""
-        replaced: list[str] = []
-        for observation in self.observations:
-            if not observation.stale or observation.message_index is None:
-                continue
-            if protect_from_index is not None and observation.message_index >= protect_from_index:
-                continue
-            if observation.message_index >= len(messages):
-                continue
-            content = messages[observation.message_index].get("content") or ""
-            # Replace when content is long, or always for stale obs with
-            # compact refs (which carry preview text that should be removed).
-            if len(content) < min_chars and "--- preview ---" not in content:
-                continue
-            messages[observation.message_index]["content"] = self.historical_message(observation)
-            replaced.append(observation.id)
-        return replaced
-
-    def detach_message_indexes(self, messages: list[dict]) -> None:
-        """Drop durable message indexes after context replacement.
-
-        Compaction/rebuild can reorder or replace messages, so stored indexes are
-        no longer trustworthy. Any observation messages that survived in the
-        new list are rewritten to historical summaries before indexes are
-        cleared, preventing stale raw detail from lingering indefinitely.
-        """
-        observations_by_id = {observation.id: observation for observation in self.observations}
-        for message in messages:
-            if message.get("role") != "tool":
-                continue
-            content = message.get("content") or ""
-            obs_id = _observation_id_from_header(content)
-            if obs_id is None:
-                continue
-            observation = observations_by_id.get(obs_id)
-            if observation is None:
-                continue
-            message["content"] = self.historical_message(observation)
-        for observation in self.observations:
-            observation.message_index = None
-
 
 def _args_summary(args: dict[str, Any]) -> str:
     redacted = dict(args or {})
