@@ -38,6 +38,8 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from eval.benchmarks.usage_metrics import parse_eval_metrics_from_text
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -197,7 +199,7 @@ class HarnessAgent(BaseInstalledAgent):
                 env_vars[key] = val
 
         # Run hca from the task workspace while importing the cloned agent code.
-        await self.exec_as_agent(
+        result = await self.exec_as_agent(
             environment,
             command=(
                 f"WORKSPACE=/app; "
@@ -211,6 +213,9 @@ class HarnessAgent(BaseInstalledAgent):
             ),
             env=env_vars,
         )
+        metrics = parse_eval_metrics_from_text(getattr(result, "stdout", "") or "")
+        if metrics:
+            _populate_agent_context(context, metrics)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         """Called after run() completes. Could parse logs if needed."""
@@ -243,3 +248,15 @@ def _copy_repo_snapshot(source: Path, dest: Path) -> None:
         return ignored
 
     shutil.copytree(source, dest, ignore=ignore)
+
+
+def _populate_agent_context(context: AgentContext, metrics: dict) -> None:
+    tokens = metrics.get("tokens") or {}
+    usage_cost = metrics.get("usage_cost") or {}
+    context.n_input_tokens = tokens.get("prompt_tokens")
+    context.n_cache_tokens = tokens.get("cached_tokens")
+    context.n_output_tokens = tokens.get("completion_tokens")
+    context.cost_usd = usage_cost.get("estimated_cost_usd")
+    metadata = dict(context.metadata or {})
+    metadata["hca_eval_metrics"] = metrics
+    context.metadata = metadata

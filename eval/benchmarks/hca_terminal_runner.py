@@ -20,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         from harness_code_agent.core.interactive import InteractiveSession, print_turn_result
+        from eval.benchmarks.usage_metrics import build_session_eval_metrics, print_eval_metrics
 
         session = InteractiveSession(
             cwd=workspace,
@@ -30,12 +31,21 @@ def main(argv: list[str] | None = None) -> int:
         session.checkpoint.auto = False
         try:
             result = session.submit(args.prompt)
+            session_id = session.session_id
+            session_store = session.session_store
             if session.session_id:
                 print(f"hca session: {session.session_id}")
             print(f"workspace: {session.cwd}")
             print_turn_result(result)
         finally:
             session.close()
+        if session_id:
+            metrics = build_session_eval_metrics(
+                session_store,
+                session_id,
+                model=os.environ.get("HARNESS_MODEL", ""),
+            )
+            print_eval_metrics(metrics)
     except Exception:
         traceback.print_exc()
         return 1

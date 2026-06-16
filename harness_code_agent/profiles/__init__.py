@@ -2,6 +2,7 @@
 
 from .base import BaseProfile, AgentConfig, ProfileConfig
 from .app_builder import AppBuilderProfile
+from .basic_eval import BasicEvalProfile
 from .coding_agent import CodingAgentProfile
 from .plan import PlanProfile
 from .review import ReviewProfile
@@ -10,6 +11,7 @@ from .swe_bench import SWEBenchProfile
 
 PROFILES: dict[str, type[BaseProfile]] = {
     "coding-agent": CodingAgentProfile,
+    "basic-eval": BasicEvalProfile,
     "app-builder": AppBuilderProfile,
     "terminal": TerminalProfile,
     "swe-bench": SWEBenchProfile,

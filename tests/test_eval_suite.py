@@ -99,6 +99,33 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertEqual(payload["dataset_config"], "lite")
         self.assertEqual(payload["split"], "test")
 
+    def test_deepseek_v4_flash_cost_uses_official_cache_split(self):
+        from eval.benchmarks.usage_metrics import estimate_usage_cost
+
+        cost = estimate_usage_cost(
+            {
+                "prompt_tokens": 1000,
+                "cached_tokens": 800,
+                "cache_miss_tokens": 200,
+                "completion_tokens": 500,
+            },
+            model="deepseek-v4-flash",
+        )
+
+        self.assertEqual(cost["pricing_source"], "https://api-docs.deepseek.com/quick_start/pricing")
+        self.assertEqual(cost["pricing_per_1m_tokens"]["input_cache_hit"], 0.0028)
+        self.assertEqual(cost["pricing_per_1m_tokens"]["input_cache_miss"], 0.14)
+        self.assertEqual(cost["pricing_per_1m_tokens"]["output"], 0.28)
+        self.assertAlmostEqual(cost["estimated_cost_usd"], (800 * 0.0028 + 200 * 0.14 + 500 * 0.28) / 1_000_000)
+
+    def test_legacy_deepseek_model_names_do_not_use_v4_pricing_alias(self):
+        from eval.benchmarks.usage_metrics import estimate_usage_cost
+
+        cost = estimate_usage_cost({"prompt_tokens": 1000, "completion_tokens": 500}, model="deepseek-reasoner")
+
+        self.assertIsNone(cost["estimated_cost_usd"])
+        self.assertIsNone(cost["pricing_per_1m_tokens"])
+
     def test_claw_swe_bench_eval_dry_run_includes_lite80(self):
         from eval.scripts.run_claw_swe_bench_eval import _dry_run_plan, parse_args
 
@@ -125,7 +152,27 @@ class EvalSuiteTests(unittest.TestCase):
         def fake_run(command, **kwargs):
             task = command[-1]
             returncode = 1 if task == "overfull-hbox" else 0
-            return subprocess.CompletedProcess(command, returncode, stdout=f"stdout {task}", stderr=f"stderr {task}")
+            stdout = f"stdout {task}"
+            if task == "fix-git":
+                stdout += "\nHCA_TERMINAL_BENCH_RESULT:" + json.dumps({
+                    "task_results": [{
+                        "task": "fix-git",
+                        "metrics": {
+                            "turns": {"started": 1, "finished": 1},
+                            "tokens": {
+                                "llm_calls": 2,
+                                "prompt_tokens": 100,
+                                "cached_tokens": 40,
+                                "cache_miss_tokens": 60,
+                                "completion_tokens": 30,
+                                "total_tokens": 130,
+                            },
+                            "tools": {"tool_calls": 3},
+                            "usage_cost": {"estimated_cost_usd": 0.00002},
+                        },
+                    }]
+                })
+            return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=f"stderr {task}")
 
         with patch("eval.scripts.run_terminal_bench_eval.subprocess.run", side_effect=fake_run) as run_mock:
             run_dir = run_tbench_suite(args)
@@ -138,6 +185,37 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertAlmostEqual(summary["pass_rate"], 7 / 8)
         self.assertEqual(summary["category_results"]["debugging"]["task_count"], 3)
         self.assertEqual(summary["category_results"]["debugging"]["passed"], 2)
+        self.assertEqual(summary["turn_totals"]["finished"], 1)
+        self.assertEqual(summary["token_totals"]["total_tokens"], 130)
+        self.assertEqual(summary["tool_calls"], 3)
+        self.assertAlmostEqual(summary["estimated_cost_usd"], 0.00002)
+
+    def test_basic_metrics_memory_cases_run_with_full_access_permissions(self):
+        from eval.scripts.run_basic_metrics_eval import parse_args, run_memory_suite
+
+        args = parse_args([
+            "--suites",
+            "memory",
+            "--memory-limit",
+            "1",
+            "--output-root",
+            str(self.root / "results"),
+            "--run-name",
+            "unit",
+        ])
+
+        def fake_run(command, **kwargs):
+            self.assertEqual(kwargs["env"]["HARNESS_PERMISSION_MODE"], "danger-full-access")
+            return subprocess.CompletedProcess(command, 0, stdout="hca session: missing\nmarker", stderr="")
+
+        with (
+            patch("eval.scripts.run_basic_metrics_eval.subprocess.run", side_effect=fake_run),
+            patch("eval.scripts.run_basic_metrics_eval._session_metrics", return_value={}),
+        ):
+            run_dir = run_memory_suite(args)
+
+        summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["task_count"], 1)
 
     def test_run_claw_suite_invokes_launcher(self):
         from eval.scripts.run_claw_swe_bench_eval import parse_args, run_claw_suite
@@ -208,6 +286,10 @@ class EvalSuiteTests(unittest.TestCase):
             "task_count": 24,
             "passed": 18,
             "pass_rate": 0.75,
+            "token_totals": {"total_tokens": 4567},
+            "turn_totals": {"finished": 24},
+            "tool_calls": 90,
+            "estimated_cost_usd": 0.1234,
             "category_results": {
                 "debugging": {"task_count": 5, "passed": 4, "pass_rate": 0.8},
                 "software-engineering": {"task_count": 6, "passed": 5, "pass_rate": 5 / 6},
@@ -237,6 +319,8 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("Memory A/B", resume)
         self.assertIn("p95", resume)
         self.assertIn("debugging 4/5", resume)
+        self.assertIn("tokens=4567", resume)
+        self.assertIn("est. cost=$0.1234", resume)
         self.assertIn("Claw-SWE-Bench Lite80", resume)
         self.assertIn("64/80 patches", resume)
 
@@ -265,7 +349,7 @@ class EvalSuiteTests(unittest.TestCase):
 
     def test_eval_scripts_self_test(self):
         for script in (
-            "eval/scripts/run_memory_cache_eval.py",
+            "eval/scripts/run_basic_metrics_eval.py",
             "eval/scripts/run_terminal_bench_eval.py",
             "eval/scripts/run_claw_swe_bench_eval.py",
             "eval/scripts/summarize_eval.py",

@@ -17,7 +17,7 @@ eval/
 
 ## File Relationships
 
-- `scripts/run_memory_cache_eval.py` runs local cache, memory, and latency suites by default.
+- `scripts/run_basic_metrics_eval.py` runs local basic metrics suites: memory and latency by default; cache is available when explicitly selected.
 - `scripts/run_terminal_bench_eval.py` runs the fixed Terminal-Bench subsets and delegates each task to `benchmarks/run_terminal_bench.py`.
 - `scripts/run_claw_swe_bench_eval.py` runs Claw-SWE-Bench through the local harness adapter.
 - `scripts/deepseek_context_eval.py` runs the DeepSeek context/cache scenarios and writes timestamped outputs under `results/`.
@@ -32,9 +32,10 @@ eval/
 ## Common Commands
 
 ```bash
-python eval/scripts/run_memory_cache_eval.py --dry-run
-python eval/scripts/run_memory_cache_eval.py --suites cache,memory,latency
-python eval/scripts/run_memory_cache_eval.py --suites latency
+python eval/scripts/run_basic_metrics_eval.py --dry-run
+python eval/scripts/run_basic_metrics_eval.py --suites memory,latency
+python eval/scripts/run_basic_metrics_eval.py --suites cache
+python eval/scripts/run_basic_metrics_eval.py --suites latency
 python eval/scripts/run_terminal_bench_eval.py --dry-run
 python eval/scripts/run_terminal_bench_eval.py --tbench-task-set 24task
 python eval/scripts/run_claw_swe_bench_eval.py --dry-run --claw-limit 5

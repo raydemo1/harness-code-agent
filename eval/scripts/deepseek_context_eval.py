@@ -643,7 +643,6 @@ def write_run_config(run_dir: Path, args: argparse.Namespace) -> None:
         "model_intensity": config.MODEL_INTENSITY,
         "context_window_tokens": config.CONTEXT_WINDOW_TOKENS,
         "compress_threshold": config.COMPRESS_THRESHOLD,
-        "summary_target_threshold": config.SUMMARY_TARGET_THRESHOLD,
         "args": {
             key: value
             for key, value in vars(args).items()

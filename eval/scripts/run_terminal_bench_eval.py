@@ -29,6 +29,7 @@ from eval.scripts.eval_common import (
     write_eval_reports,
     write_suite_summary,
 )
+from eval.benchmarks.usage_metrics import aggregate_usage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,6 +101,7 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
             "command": command,
+            "metrics": _launcher_task_metrics(completed.stdout, task),
         })
     elapsed = time.perf_counter() - started
     passed = sum(1 for item in task_results if item["status"] == "passed")
@@ -115,6 +117,7 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
         "tasks": tasks,
         "task_results": task_results,
         "category_results": category_results(task_results),
+        **aggregate_usage(task_results),
     }
     write_suite_summary(run_dir, summary, [])
     return run_dir
@@ -129,6 +132,21 @@ def _dry_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         "terminal_bench_benchmark_name": payload.get("benchmark_name"),
         "terminal_bench_tasks": payload["tasks"],
     }
+
+
+def _launcher_task_metrics(stdout: str, task: str) -> dict[str, Any]:
+    prefix = "HCA_TERMINAL_BENCH_RESULT:"
+    for line in reversed((stdout or "").splitlines()):
+        if prefix not in line:
+            continue
+        try:
+            payload = json.loads(line.split(prefix, 1)[1].strip())
+        except json.JSONDecodeError:
+            continue
+        for item in payload.get("task_results") or []:
+            if item.get("task") == task:
+                return item.get("metrics") or {}
+    return {}
 
 
 def run_self_test() -> None:

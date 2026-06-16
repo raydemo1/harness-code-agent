@@ -258,6 +258,10 @@ def _tbench_summary(payload: dict[str, Any], run_name: str) -> dict[str, Any]:
         "pass_rate": _number(payload.get("pass_rate")),
         "status": str(payload.get("status") or "unknown"),
         "category_results": payload.get("category_results") or {},
+        "token_totals": payload.get("token_totals") or {},
+        "turn_totals": payload.get("turn_totals") or {},
+        "tool_calls": _int(payload.get("tool_calls")),
+        "estimated_cost_usd": payload.get("estimated_cost_usd"),
     }
 
 
@@ -315,9 +319,22 @@ def _tbench_line(data: dict[str, Any]) -> str:
     category_detail = _category_line(data.get("category_results") or {})
     category_suffix = f"; categories: {category_detail}" if category_detail else ""
     task_set = str(data.get("task_set") or "subset")
+    tokens = data.get("token_totals") or {}
+    usage_parts = []
+    if _int(tokens.get("total_tokens")):
+        usage_parts.append(f"tokens={_int(tokens.get('total_tokens'))}")
+    turns = data.get("turn_totals") or {}
+    if _int(turns.get("finished")):
+        usage_parts.append(f"turns={_int(turns.get('finished'))}")
+    if _int(data.get("tool_calls")):
+        usage_parts.append(f"tools={_int(data.get('tool_calls'))}")
+    cost = data.get("estimated_cost_usd")
+    if cost is not None:
+        usage_parts.append(f"est. cost=${_number(cost):.4f}")
+    usage_suffix = f"; {', '.join(usage_parts)}" if usage_parts else ""
     return (
         f"{_int(data.get('passed'))}/{_int(data.get('task_count'))} passed "
-        f"({_percent(_number(data.get('pass_rate')))}), {task_set}{category_suffix}"
+        f"({_percent(_number(data.get('pass_rate')))}), {task_set}{category_suffix}{usage_suffix}"
     )
 
 

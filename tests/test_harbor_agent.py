@@ -117,10 +117,14 @@ class HarnessAgentInstallTests(unittest.IsolatedAsyncioTestCase):
         commands = []
         envs = []
 
+        class ExecResult:
+            stdout = ""
+
         class RecordingAgent(self.module.HarnessAgent):
             async def exec_as_agent(self, environment, command, env=None):
                 commands.append(command)
                 envs.append(env or {})
+                return ExecResult()
 
         agent = RecordingAgent()
         with patch.dict(
@@ -145,6 +149,35 @@ class HarnessAgentInstallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(envs[-1]["OPENAI_API_KEY"], "test-key")
         self.assertEqual(envs[-1]["HARNESS_MODEL_INTENSITY"], "normal")
         self.assertNotIn("HARNESS_WORKSPACE=/app", command)
+
+    async def test_run_populates_agent_context_with_usage_metrics(self):
+        class ExecResult:
+            stdout = (
+                "assistant done\n"
+                'HCA_EVAL_METRICS:{"session_id":"s1","tokens":{"prompt_tokens":100,'
+                '"cached_tokens":40,"completion_tokens":30},"usage_cost":{"estimated_cost_usd":0.02}}\n'
+            )
+
+        class Context:
+            n_input_tokens = None
+            n_cache_tokens = None
+            n_output_tokens = None
+            cost_usd = None
+            metadata = None
+
+        class RecordingAgent(self.module.HarnessAgent):
+            async def exec_as_agent(self, environment, command, env=None):
+                return ExecResult()
+
+        context = Context()
+        agent = RecordingAgent()
+        await agent.run("fix shell", environment=object(), context=context)
+
+        self.assertEqual(context.n_input_tokens, 100)
+        self.assertEqual(context.n_cache_tokens, 40)
+        self.assertEqual(context.n_output_tokens, 30)
+        self.assertEqual(context.cost_usd, 0.02)
+        self.assertEqual(context.metadata["hca_eval_metrics"]["session_id"], "s1")
 
 
 if __name__ == "__main__":

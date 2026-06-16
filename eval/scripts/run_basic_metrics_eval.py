@@ -1,4 +1,4 @@
-"""Run local memory/cache evals without importing benchmark launchers."""
+"""Run local basic metrics evals without importing benchmark launchers."""
 from __future__ import annotations
 
 import argparse
@@ -69,11 +69,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run local cache, memory, and latency eval suites.")
+    parser = argparse.ArgumentParser(description="Run local basic metrics eval suites: cache, memory, and latency.")
     parser.add_argument(
         "--suites",
-        default="cache,memory,latency",
-        help="Comma-separated local suites: cache,memory,latency. Defaults to cache,memory,latency.",
+        default="memory,latency",
+        help="Comma-separated local suites: cache,memory,latency. Defaults to memory,latency.",
     )
     add_common_args(parser)
     parser.add_argument("--task-timeout", type=int, default=900)
@@ -84,6 +84,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def run_cache_suite(args: argparse.Namespace) -> Path:
+    env = base_env()
+    env["HARNESS_PERMISSION_MODE"] = "danger-full-access"
     command = [
         sys.executable,
         str(PROJECT_ROOT / "eval" / "scripts" / "deepseek_context_eval.py"),
@@ -104,7 +106,7 @@ def run_cache_suite(args: argparse.Namespace) -> Path:
         "--run-name",
         run_suffix(args, "cache"),
     ]
-    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=True)
     return Path(args.output_root)
 
 
@@ -118,7 +120,9 @@ def run_memory_suite(args: argparse.Namespace) -> Path:
             env = base_env()
             memory_root = run_dir / "memory_roots" / str(task["id"]) / variant
             env["HARNESS_MEMORY_ROOT"] = str(memory_root)
+            env["HARNESS_PERMISSION_MODE"] = "danger-full-access"
             env["HARNESS_STREAM"] = "0"
+            _apply_basic_eval_limits(env)
             if variant == "baseline":
                 env["HARNESS_MEMORY_DISABLED"] = "1"
             else:
@@ -128,8 +132,8 @@ def run_memory_suite(args: argparse.Namespace) -> Path:
                 suite="memory_ab",
                 case_id=str(task["id"]),
                 variant=variant,
-                prompt=str(task["prompt"]),
-                profile=str(task.get("profile") or "coding-agent"),
+                prompt=_basic_eval_prompt(str(task["prompt"])),
+                profile=str(task.get("profile") or "basic-eval"),
                 env=env,
                 run_dir=run_dir,
                 timeout=args.task_timeout,
@@ -150,13 +154,15 @@ def run_latency_suite(args: argparse.Namespace) -> Path:
     results: list[CaseResult] = []
     for task in tasks:
         env = base_env()
+        env["HARNESS_PERMISSION_MODE"] = "danger-full-access"
         env["HARNESS_STREAM"] = "1"
+        _apply_basic_eval_limits(env)
         result = _run_hca_case(
             suite="latency",
             case_id=str(task["id"]),
             variant="streaming",
-            prompt=str(task["prompt"]),
-            profile=str(task.get("profile") or "coding-agent"),
+            prompt=_basic_eval_prompt(str(task["prompt"])),
+            profile=str(task.get("profile") or "basic-eval"),
             env=env,
             run_dir=run_dir,
             timeout=args.task_timeout,
@@ -216,6 +222,21 @@ def _run_hca_case(
         stderr_path=str(stderr_path),
         metrics=metrics,
     )
+
+
+def _basic_eval_prompt(prompt: str) -> str:
+    return (
+        prompt.strip()
+        + "\n\nBasic eval constraints: answer this as a read-only repository lookup. "
+        "Use at most 8 tool calls. Prefer rg/list_files/read_file with narrow paths. "
+        "Do not inspect .harness, eval/results, __pycache__, virtualenvs, or generated artifacts. "
+        "Do not run tests or broad recursive listings. Stop as soon as you have the first reliable answer."
+    )
+
+
+def _apply_basic_eval_limits(env: dict[str, str]) -> None:
+    env["MAX_AGENT_ITERATIONS"] = "14"
+    env["MAX_AGENT_TOTAL_TOKENS"] = "120000"
 
 
 def _seed_memory(memory_root: Path, task: dict[str, Any]) -> None:
@@ -325,7 +346,7 @@ def _local_suite_names(value: str) -> list[str]:
 
 def _dry_run_plan(suites: list[str], args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "runner": "memory_cache",
+        "runner": "basic_metrics",
         "suites": suites,
         "output_root": str(Path(args.output_root)),
         "cache_turns": args.cache_turns,

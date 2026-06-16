@@ -15,6 +15,9 @@ from ..runtime.tool_result import ToolResult
 class ReviewOnlyMiddleware(AgentMiddleware):
     """Keep review mode read-only even if a blocked tool call slips through."""
 
+    def __init__(self, *, profile_label: str = "review profile"):
+        self._profile_label = profile_label
+
     _WRITE_OR_CONTROL_TOOLS = {
         "write_file",
         "apply_patch",
@@ -37,9 +40,9 @@ class ReviewOnlyMiddleware(AgentMiddleware):
             return ToolResult(
                 tool=tool_name,
                 status="failed",
-                output="[blocked] The review profile is read-only and must not modify files, control workflow state, ask the user, or run browser sessions.",
-                error="review profile is read-only",
-                metadata={"status_source": "review_profile"},
+                output=f"[blocked] The {self._profile_label} is read-only and must not modify files, control workflow state, ask the user, or run browser sessions.",
+                error=f"{self._profile_label} is read-only",
+                metadata={"status_source": self._profile_label.replace(" ", "_")},
             )
         if tool_name == "run_bash":
             command = str(tool_args.get("command", ""))
@@ -47,9 +50,9 @@ class ReviewOnlyMiddleware(AgentMiddleware):
                 return ToolResult(
                     tool=tool_name,
                     status="failed",
-                    output="[blocked] The review profile only allows safe verification or read-only shell commands.",
+                    output=f"[blocked] The {self._profile_label} only allows safe verification or read-only shell commands.",
                     error="only safe verification shell commands are allowed",
-                    metadata={"status_source": "review_profile"},
+                    metadata={"status_source": self._profile_label.replace(" ", "_")},
                 )
         return None
 

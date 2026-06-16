@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
+
+PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT_BOOTSTRAP) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT_BOOTSTRAP))
+
+from eval.benchmarks.usage_metrics import collect_harbor_job_usage
 
 
 DATASET_ARCHIVE_URL = (
@@ -211,8 +219,26 @@ def main() -> int:
     print(f"Rewrote {rewritten_count} task images to GHCR")
     print(f"Running: {' '.join(command)}")
 
+    jobs_root = repo_root / "jobs"
+    before_jobs = _job_names(jobs_root)
     completed = subprocess.run(command, cwd=repo_root, env=env)
+    for job_dir in _new_job_dirs(jobs_root, before_jobs):
+        summary = collect_harbor_job_usage(job_dir)
+        print("HCA_TERMINAL_BENCH_RESULT:" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return completed.returncode
+
+
+def _job_names(jobs_root: Path) -> set[str]:
+    if not jobs_root.exists():
+        return set()
+    return {path.name for path in jobs_root.iterdir() if path.is_dir()}
+
+
+def _new_job_dirs(jobs_root: Path, before: set[str]) -> list[Path]:
+    if not jobs_root.exists():
+        return []
+    new_dirs = [path for path in jobs_root.iterdir() if path.is_dir() and path.name not in before]
+    return sorted(new_dirs, key=lambda item: item.stat().st_mtime)
 
 
 if __name__ == "__main__":
