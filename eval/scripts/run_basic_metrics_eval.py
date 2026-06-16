@@ -122,7 +122,7 @@ def run_memory_suite(args: argparse.Namespace) -> Path:
             env["HARNESS_MEMORY_ROOT"] = str(memory_root)
             env["HARNESS_PERMISSION_MODE"] = "danger-full-access"
             env["HARNESS_STREAM"] = "0"
-            _apply_basic_eval_limits(env)
+            _apply_basic_eval_limits(env, suite="memory")
             if variant == "baseline":
                 env["HARNESS_MEMORY_DISABLED"] = "1"
             else:
@@ -132,7 +132,7 @@ def run_memory_suite(args: argparse.Namespace) -> Path:
                 suite="memory_ab",
                 case_id=str(task["id"]),
                 variant=variant,
-                prompt=_basic_eval_prompt(str(task["prompt"])),
+                prompt=_basic_eval_prompt(str(task["prompt"]), suite="memory"),
                 profile=str(task.get("profile") or "basic-eval"),
                 env=env,
                 run_dir=run_dir,
@@ -156,12 +156,12 @@ def run_latency_suite(args: argparse.Namespace) -> Path:
         env = base_env()
         env["HARNESS_PERMISSION_MODE"] = "danger-full-access"
         env["HARNESS_STREAM"] = "1"
-        _apply_basic_eval_limits(env)
+        _apply_basic_eval_limits(env, suite="latency")
         result = _run_hca_case(
             suite="latency",
             case_id=str(task["id"]),
             variant="streaming",
-            prompt=_basic_eval_prompt(str(task["prompt"])),
+            prompt=_basic_eval_prompt(str(task["prompt"]), suite="latency"),
             profile=str(task.get("profile") or "basic-eval"),
             env=env,
             run_dir=run_dir,
@@ -224,19 +224,38 @@ def _run_hca_case(
     )
 
 
-def _basic_eval_prompt(prompt: str) -> str:
+def _basic_eval_prompt(prompt: str, *, suite: str) -> str:
+    common = (
+        "Use PowerShell-compatible commands only; prefer simple rg commands with no Bash redirection. "
+        "Do not inspect .harness, __pycache__, virtualenvs, or generated artifacts. "
+        "Do not run tests, broad recursive listings, or repeated shell variants after a failure. "
+        "Stop as soon as you have the first reliable answer."
+    )
+    if suite == "latency":
+        return (
+            prompt.strip()
+            + "\n\nBasic eval constraints: keep this latency probe short. "
+            "Answer directly when the question does not require repository evidence. "
+            "Use at most 4 tool calls when inspection is needed. "
+            "Only inspect eval/results when the task explicitly asks for an eval result. "
+            + common
+        )
     return (
         prompt.strip()
         + "\n\nBasic eval constraints: answer this as a read-only repository lookup. "
         "Use at most 8 tool calls. Prefer rg/list_files/read_file with narrow paths. "
-        "Do not inspect .harness, eval/results, __pycache__, virtualenvs, or generated artifacts. "
-        "Do not run tests or broad recursive listings. Stop as soon as you have the first reliable answer."
+        "Do not inspect eval/results. "
+        + common
     )
 
 
-def _apply_basic_eval_limits(env: dict[str, str]) -> None:
-    env["MAX_AGENT_ITERATIONS"] = "14"
-    env["MAX_AGENT_TOTAL_TOKENS"] = "120000"
+def _apply_basic_eval_limits(env: dict[str, str], *, suite: str) -> None:
+    if suite == "latency":
+        env["MAX_AGENT_ITERATIONS"] = "8"
+        env["MAX_AGENT_TOTAL_TOKENS"] = "80000"
+    else:
+        env["MAX_AGENT_ITERATIONS"] = "12"
+        env["MAX_AGENT_TOTAL_TOKENS"] = "100000"
 
 
 def _seed_memory(memory_root: Path, task: dict[str, Any]) -> None:
