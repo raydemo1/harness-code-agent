@@ -14,9 +14,11 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Input, RichLog, Static, TextArea
 
+from .state import TranscriptBlock
+
 if TYPE_CHECKING:
     from .commands import SlashCommandRegistry
-    from .state import PlanStep, SessionStatusSnapshot, TranscriptBlock
+    from .state import PlanStep, SessionStatusSnapshot
 
 
 # ── SubmitTextArea ──────────────────────────────────────────────────────────
