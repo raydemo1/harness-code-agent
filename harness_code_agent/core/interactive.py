@@ -96,6 +96,7 @@ class InteractiveSession:
         output_sink: Callable[[str], None] | None = None,
         stream_callback=None,
         profile_explicit: bool | None = None,
+        enable_turn_summary: bool = True,
     ):
         self.cwd = Path(cwd).resolve()
         config.WORKSPACE = str(self.cwd)
@@ -107,6 +108,7 @@ class InteractiveSession:
         self.approval_provider = self._approval_provider_for_mode(self.permission_mode)
         self.question_provider = question_provider or ConsoleQuestionProvider()
         self.output_sink = output_sink or print
+        self.enable_turn_summary = enable_turn_summary
         self.skill_registry = SkillRegistry()
         self.session_store = SessionStore(self.cwd / ".harness")
         self.session_store.root.mkdir(parents=True, exist_ok=True)
@@ -480,6 +482,8 @@ class InteractiveSession:
         duration_seconds: float,
     ) -> None:
         if self.event_bus is None or self.event_listener is None:
+            return
+        if not self.enable_turn_summary:
             return
         events = [
             event.to_dict() if hasattr(event, "to_dict") else dict(event)

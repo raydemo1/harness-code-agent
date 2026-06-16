@@ -89,9 +89,8 @@ class TuiState:
         ]
 
     def append_streaming_text(self, text: str) -> None:
-        """Append streaming text to the last block's body."""
-        if self.blocks:
-            self.blocks[-1].body += text
+        """Streaming text is rendered by TranscriptView as an active block."""
+        return None
 
     def apply_event(self, event: Any) -> TranscriptBlock | None:
         data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
@@ -172,11 +171,10 @@ class TuiState:
             return TranscriptBlock("failure", "agent fallback", _payload_summary(payload), "blocked", turn=self.snapshot.turn, detail=False)
         if event_type == "approval_requested":
             self.pending_approval = payload
-            return TranscriptBlock("approval", "approval requested", _approval_summary(payload), "pending", turn=self.snapshot.turn, detail=False)
+            return None
         if event_type == "approval_decided":
             self.pending_approval = None
-            status = "approved" if payload.get("approved") else "denied"
-            return TranscriptBlock("approval", f"approval {status}", _payload_summary(payload), status, turn=self.snapshot.turn, detail=False)
+            return None
         if event_type == "profile_switched":
             self.snapshot.profile = str(payload.get("profile") or self.snapshot.profile)
             self.snapshot.pending_plan = False
@@ -186,9 +184,7 @@ class TuiState:
             return TranscriptBlock("profile", "profile switched", f"{previous} -> {current} ({reason})")
         if event_type == "permission_mode_switched":
             self.snapshot.permission_mode = str(payload.get("permission_mode") or self.snapshot.permission_mode)
-            previous = payload.get("previous_permission_mode", "")
-            current = payload.get("permission_mode", "")
-            return TranscriptBlock("status", "permission mode switched", f"{previous} -> {current}")
+            return None
         if event_type == "plan_ready":
             self.snapshot.pending_plan = True
             self.snapshot.status = "plan ready"
@@ -230,19 +226,12 @@ class TuiState:
         if event_type == "turn_summary":
             turn = _payload_turn(payload, self.snapshot.turn)
             self.snapshot.status = "idle"
-            if payload.get("fold_details", True):
-                self.collapsed_turns.add(turn)
-                self._latest_collapsed_turn = turn
-            summary = str(payload.get("summary") or "")
-            if payload.get("fold_details", True):
-                summary = summary.rstrip() + "\n\n[Ctrl+D toggles details]"
-            return TranscriptBlock("summary", f"turn {turn} summary", summary, "collapsed" if turn in self.collapsed_turns else "", turn=turn)
+            return None
         if event_type == "turn_finished":
             self.snapshot.status = "idle"
             self.snapshot.running_tool = ""
             self.snapshot.checkpoint = str(payload.get("checkpoint") or "")
-            turn = _payload_turn(payload, self.snapshot.turn)
-            return TranscriptBlock("status", f"turn {turn} finished", self.snapshot.checkpoint, turn=turn, detail=True)
+            return None
         if event_type == "session_finished":
             self.snapshot.status = str(payload.get("status") or "closed")
             return TranscriptBlock("session", "session finished", _payload_summary(payload))

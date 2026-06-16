@@ -230,7 +230,7 @@ class TuiTests(unittest.TestCase):
         self.assertFalse(state.snapshot.pending_plan)
         self.assertEqual(state.snapshot.checkpoint, "checkpoint created: abc")
         self.assertEqual(state.snapshot.running_tool, "")
-        self.assertGreaterEqual(len(state.blocks), 5)
+        self.assertGreaterEqual(len(state.blocks), 4)
 
     def test_fallback_events_update_tui_attention_state(self):
         state = TuiState(
@@ -297,7 +297,7 @@ class TuiTests(unittest.TestCase):
             ],
         )
 
-    def test_approval_requested_summary_omits_repeated_args_blob(self):
+    def test_approval_events_update_state_without_transcript_block(self):
         state = TuiState(
             SessionStatusSnapshot(
                 profile="coding-agent",
@@ -321,13 +321,8 @@ class TuiTests(unittest.TestCase):
             }
         )
 
-        self.assertIsNotNone(block)
-        self.assertEqual(block.status, "pending")
-        self.assertIn("tool=run_bash", block.body)
-        self.assertIn("risk=shell_risky", block.body)
-        self.assertIn("reason=workspace-write mode requires user approval", block.body)
-        self.assertNotIn("args=", block.body)
-        self.assertNotIn("content=", block.body)
+        self.assertIsNone(block)
+        self.assertEqual(state.pending_approval["tool"], "run_bash")
 
     def test_python_command_does_not_persist_bare_prefix(self):
         self.assertIsNone(_derive_persistent_prefix("python"))
@@ -593,7 +588,7 @@ class TuiNoiseReductionTests(unittest.TestCase):
         self.assertEqual(stored_result.payload["output"], large_output)
         self.assertNotIn(large_output, state.blocks[-1].body)
 
-    def test_turn_summary_collapses_detail_blocks(self):
+    def test_turn_summary_is_hidden_and_does_not_collapse_details(self):
         state = self._make_state()
         events = [
             {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
@@ -609,14 +604,14 @@ class TuiNoiseReductionTests(unittest.TestCase):
             state.add_block(state.apply_event(event))
 
         visible = state.visible_blocks()
-        self.assertIn(1, state.collapsed_turns)
-        self.assertTrue(any(block.kind == "summary" for block in visible))
+        self.assertNotIn(1, state.collapsed_turns)
+        self.assertFalse(any(block.kind == "summary" for block in visible))
         self.assertTrue(any(block.kind == "user" for block in visible))
         self.assertTrue(any(block.kind == "assistant" for block in visible))
-        self.assertFalse(any(block.kind == "tool" for block in visible))
-        self.assertFalse(any(block.kind == "file" for block in visible))
+        self.assertTrue(any(block.kind == "tool" for block in visible))
+        self.assertTrue(any(block.kind == "file" for block in visible))
 
-    def test_toggle_latest_turn_details_expands_and_recovers(self):
+    def test_toggle_latest_turn_details_noops_without_folded_summary(self):
         state = self._make_state()
         for event in [
             {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
@@ -625,13 +620,11 @@ class TuiNoiseReductionTests(unittest.TestCase):
         ]:
             state.add_block(state.apply_event(event))
 
-        self.assertFalse(any(block.kind == "tool" for block in state.visible_blocks()))
-        self.assertTrue(state.toggle_latest_turn_details())
         self.assertTrue(any(block.kind == "tool" for block in state.visible_blocks()))
-        self.assertTrue(state.toggle_latest_turn_details())
-        self.assertFalse(any(block.kind == "tool" for block in state.visible_blocks()))
+        self.assertFalse(state.toggle_latest_turn_details())
+        self.assertTrue(any(block.kind == "tool" for block in state.visible_blocks()))
 
-    def test_failure_and_approval_remain_visible_when_turn_is_collapsed(self):
+    def test_failure_remains_visible_while_approval_and_summary_are_hidden(self):
         state = self._make_state()
         for event in [
             {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
@@ -644,8 +637,8 @@ class TuiNoiseReductionTests(unittest.TestCase):
 
         visible_kinds = [block.kind for block in state.visible_blocks()]
         self.assertIn("failure", visible_kinds)
-        self.assertIn("approval", visible_kinds)
-        self.assertIn("summary", visible_kinds)
+        self.assertNotIn("approval", visible_kinds)
+        self.assertNotIn("summary", visible_kinds)
 
 
 class TuiThoughtTests(unittest.TestCase):
@@ -742,43 +735,33 @@ class TuiRichRenderTests(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_user_block_renders_with_blue_border(self):
-        from rich.panel import Panel
         block = TranscriptBlock("user", "user turn 1", "fix the bug")
-        panel = block_to_rich(block)
-        self.assertIsInstance(panel, Panel)
-        self.assertEqual(panel.title, "You")
-        self.assertEqual(panel.border_style, "#3874cb")
+        rendered = block_to_rich(block)
+        self.assertNotEqual(rendered.__class__.__name__, "Panel")
+        self.assertIn("You", rendered.renderables[0].plain)
 
     def test_assistant_block_renders_with_green_border(self):
-        from rich.panel import Panel
         block = TranscriptBlock("assistant", "assistant", "I'll fix it.")
-        panel = block_to_rich(block)
-        self.assertIsInstance(panel, Panel)
-        self.assertEqual(panel.title, "Assistant")
-        self.assertEqual(panel.border_style, "#4caf50")
+        rendered = block_to_rich(block)
+        self.assertNotEqual(rendered.__class__.__name__, "Panel")
+        self.assertIn("Assistant", rendered.renderables[0].plain)
 
     def test_tool_block_renders_with_yellow_border(self):
-        from rich.panel import Panel
         block = TranscriptBlock("tool", "read_file(path=x.py)", "", "running")
-        panel = block_to_rich(block)
-        self.assertIsInstance(panel, Panel)
-        self.assertIn("read_file", panel.title)
-        self.assertEqual(panel.border_style, "#d79921")
+        rendered = block_to_rich(block)
+        self.assertNotEqual(rendered.__class__.__name__, "Panel")
+        self.assertIn("read_file", str(rendered))
 
     def test_thought_block_renders_with_purple_border(self):
-        from rich.panel import Panel
         block = TranscriptBlock("thought", "thinking", "thought for 12.3s", "thought")
-        panel = block_to_rich(block)
-        self.assertIsInstance(panel, Panel)
-        self.assertEqual(panel.border_style, "#b48ead")
+        rendered = block_to_rich(block)
+        self.assertNotEqual(rendered.__class__.__name__, "Panel")
+        self.assertIn("thinking", str(rendered))
 
     def test_failure_block_renders_with_red_border(self):
-        from rich.panel import Panel
         block = TranscriptBlock("failure", "failure", "something went wrong", "failed")
-        panel = block_to_rich(block)
-        self.assertIsInstance(panel, Panel)
-        self.assertIn("Error", panel.title)
-        self.assertEqual(panel.border_style, "#bf616a")
+        rendered = block_to_rich(block)
+        self.assertIn("Error", rendered.title)
 
     def test_status_bar_renders_from_snapshot(self):
         from rich.text import Text
@@ -804,11 +787,13 @@ class TuiRichRenderTests(unittest.TestCase):
         text = bar.render()
         self.assertIsInstance(text, Text)
         self.assertIn("auto-compact @85%", text.plain)
+        self.assertIn("mode: workspace-write", text.plain)
         self.assertTrue(any("50%" in text.plain[span.start:span.end] and "#a3be8c" in str(span.style) for span in text.spans))
         bar.permission_mode = "llm-auto"
         text = bar.render()
-        self.assertIn("llm-auto", text.plain)
+        self.assertIn("mode: llm-auto", text.plain)
         self.assertTrue(any("llm-auto" in text.plain[span.start:span.end] and "#ebcb8b" in str(span.style) for span in text.spans))
+        self.assertNotIn("Ctrl+P", text.plain)
 
         # Yellow near the single 85% auto-compact trigger.
         bar.context_percent = 80

@@ -18,51 +18,54 @@
     "stable_run": "2026-06-16_215107_deepseek_context_eval_cache_full_danger"
   },
   "claw": {},
-  "generated_at": "2026-06-16T22:54:26",
+  "generated_at": "2026-06-17T00:20:57",
   "latency": {
     "llm_first_token_ms": {
-      "count": 24,
-      "max": 5855,
-      "mean": 2313.5833333333335,
-      "min": 943,
-      "p50": 2117,
-      "p95": 5855,
-      "p99": 5855
+      "count": 12,
+      "max": 4284,
+      "mean": 3040.0,
+      "min": 1221,
+      "p50": 2372,
+      "p95": 4284,
+      "p99": 4284
     },
     "llm_response_latency_ms": {
       "count": 30,
-      "max": 11160,
-      "mean": 3984.266666666667,
-      "min": 1476,
-      "p50": 3056,
-      "p95": 11160,
-      "p99": 11160
+      "max": 5974,
+      "mean": 3486.8,
+      "min": 1639,
+      "p50": 2939,
+      "p95": 5974,
+      "p99": 5974
     },
-    "run": "2026-06-16_224333_latency",
+    "run": "2026-06-17_000535_latency",
     "turn_duration_ms": {
       "count": 30,
-      "max": 96329,
-      "mean": 56745.3,
-      "min": 7923,
-      "p50": 61954,
-      "p95": 96329,
-      "p99": 96329
+      "max": 336366,
+      "mean": 84692.4,
+      "min": 6434,
+      "p50": 31652,
+      "p95": 336366,
+      "p99": 336366
     }
   },
   "memory": {
-    "elapsed_seconds_reduction_ratio": 0.5174451412197896,
-    "run": "2026-06-16_223239_memory_ab",
-    "success_delta": 0.4,
+    "elapsed_seconds_reduction_ratio": 0.44151309964451074,
+    "run": "2026-06-16_234204_memory_ab",
+    "success_delta": 0.6,
     "task_count": 5,
-    "tool_calls_reduction_ratio": 0.8220858895705522,
-    "total_tokens_reduction_ratio": 0.9069731506864435
+    "tool_calls_reduction_ratio": 0.6029411764705882,
+    "total_tokens_reduction_ratio": 0.6358034520999801
   },
   "result_root": "eval\\results",
   "source_runs": [
     "eval\\results\\2026-06-16_213101_deepseek_context_eval_cache",
     "eval\\results\\2026-06-16_215107_deepseek_context_eval_cache_full_danger",
     "eval\\results\\2026-06-16_223239_memory_ab",
-    "eval\\results\\2026-06-16_224333_latency"
+    "eval\\results\\2026-06-16_224333_latency",
+    "eval\\results\\2026-06-16_225637_memory_ab",
+    "eval\\results\\2026-06-16_234204_memory_ab",
+    "eval\\results\\2026-06-17_000535_latency"
   ],
   "tbench": {}
 }

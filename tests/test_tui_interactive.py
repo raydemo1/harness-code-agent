@@ -328,7 +328,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertEqual(status_bar.status, "running")
         _run(_test())
 
-    def test_ctrl_p_toggles_permission_mode(self):
+    def test_click_context_bar_toggles_permission_mode(self):
         async def _test():
             mock = _mock_session(self.root)
 
@@ -342,10 +342,49 @@ class TuiInteractiveTests(unittest.TestCase):
                 MockSession.return_value = mock
                 app = TuiApp(cwd=self.root, profile_name="coding-agent")
                 async with app.run_test() as pilot:
-                    await pilot.press("ctrl+p")
+                    await pilot.click("#context-bar")
                     await pilot.pause(0.01)
                     self.assertEqual(app.state.snapshot.permission_mode, "llm-auto")
-                    self.assertTrue(any(block.title == "permission mode switched" for block in app.state.blocks))
+                    self.assertFalse(any(block.title == "permission mode switched" for block in app.state.blocks))
+        _run(_test())
+
+    def test_ctrl_p_no_longer_toggles_permission_mode(self):
+        async def _test():
+            mock = _mock_session(self.root)
+            toggled = []
+
+            def toggle_permission_mode():
+                toggled.append(True)
+                mock.permission_mode = "llm-auto"
+                return "permission mode switched: workspace-write -> llm-auto"
+
+            mock.toggle_permission_mode = toggle_permission_mode
+
+            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
+                MockSession.return_value = mock
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test() as pilot:
+                    await pilot.press("ctrl+p")
+                    await pilot.pause(0.01)
+                    self.assertEqual(toggled, [])
+                    self.assertEqual(app.state.snapshot.permission_mode, "workspace-write")
+        _run(_test())
+
+    def test_stream_delta_is_visible_before_final_assistant_message(self):
+        async def _test():
+            app = self._make_app()
+            async with app.run_test() as pilot:
+                from harness_code_agent.tui.app import StreamDelta
+
+                app.post_message(StreamDelta("Hello "))
+                await pilot.pause(0.01)
+                app.post_message(StreamDelta("world"))
+                await pilot.pause(0.01)
+
+                transcript = app.query_one("#transcript")
+                rendered = "\n".join(str(line) for line in transcript.lines)
+                self.assertIn("Hello", rendered)
+                self.assertIn("world", rendered)
         _run(_test())
 
     # ── Approval panel ──────────────────────────────────────────────────────

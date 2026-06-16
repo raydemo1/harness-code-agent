@@ -87,7 +87,6 @@ class TuiApp(App):
         Binding("ctrl+t", "toggle_thought", "Toggle thought", show=False, priority=True),
         Binding("ctrl+d", "toggle_details", "Details", show=False, priority=True),
         Binding("ctrl+o", "observe", "Observe", show=False, priority=True),
-        Binding("ctrl+p", "toggle_permission", "Permissions", show=False, priority=True),
         # Panel keys: check_action guards these to only fire when a panel is active.
         # priority=True ensures they are checked before widget-level handlers so
         # panel input works even if focus has drifted from the panel widget.
@@ -255,6 +254,7 @@ class TuiApp(App):
             approval_provider=approval_provider,
             question_provider=question_provider,
             output_sink=self._output,
+            enable_turn_summary=False,
         )
         display_profile = getattr(self.session, "display_profile", self.session.profile.name())
         session_id = getattr(
@@ -347,9 +347,7 @@ class TuiApp(App):
         render_block = None if event_type == "assistant_message" and self._streaming_current_response else block
 
         self.state.add_block(block)
-        if event_type == "turn_summary":
-            self._redraw_transcript()
-        elif render_block is not None:
+        if render_block is not None:
             transcript = self.query_one("#transcript", TranscriptView)
             transcript.append_block(render_block)
 
@@ -397,6 +395,7 @@ class TuiApp(App):
         self._streaming_current_response = True
         self.state.append_streaming_text(msg.delta)
         transcript.append_streaming(msg.delta)
+        self._redraw_transcript()
 
     def on_session_event(self, msg: SessionEvent) -> None:
         """Handle session event from background thread."""
@@ -406,17 +405,33 @@ class TuiApp(App):
             self._streaming_current_response = False
             self._stream_header_printed = False
 
+        if (
+            self._streaming_current_response
+            and event_type not in {"assistant_message", "thought_started", "thought_finished"}
+        ):
+            transcript = self.query_one("#transcript", TranscriptView)
+            active_block = transcript.flush_streaming()
+            if active_block is not None and not self._last_block_matches(active_block):
+                self.state.add_block(active_block)
+            self._streaming_current_response = False
+            self._stream_header_printed = False
+            self._redraw_transcript()
+
         block = self.state.apply_event(msg.event)
         render_block = block
 
         # If we streamed the response, flush the buffered text as a complete block
+        streamed_assistant_message = False
         if event_type == "assistant_message" and self._streaming_current_response:
             transcript = self.query_one("#transcript", TranscriptView)
             transcript.flush_streaming()
             render_block = None
+            streamed_assistant_message = True
+            self._streaming_current_response = False
+            self._stream_header_printed = False
 
         self.state.add_block(block)
-        if event_type == "turn_summary":
+        if streamed_assistant_message:
             self._redraw_transcript()
         elif render_block is not None:
             transcript = self.query_one("#transcript", TranscriptView)
@@ -429,14 +444,17 @@ class TuiApp(App):
         # Flush any remaining streaming buffer
         try:
             transcript = self.query_one("#transcript", TranscriptView)
-            transcript.flush_streaming()
+            block = transcript.flush_streaming()
+            if block is not None and not self._last_block_matches(block):
+                self.state.add_block(block)
+                self._redraw_transcript()
         except NoMatches:
             self._submitting = False
             return
         result = msg.result
         if hasattr(result, "notice") and result.notice:
             self._output(result.notice, title="notice")
-        if hasattr(result, "checkpoint") and result.checkpoint:
+        if hasattr(result, "checkpoint") and self._should_show_checkpoint(result.checkpoint):
             self._output(result.checkpoint, title="checkpoint")
         self._submitting = False
         self._input_enabled(True)
@@ -445,7 +463,9 @@ class TuiApp(App):
         """Handle submit cancellation."""
         try:
             transcript = self.query_one("#transcript", TranscriptView)
-            transcript.flush_streaming()
+            block = transcript.flush_streaming()
+            if block is not None and not self._last_block_matches(block):
+                self.state.add_block(block)
         except NoMatches:
             self._submitting = False
             return
@@ -459,7 +479,9 @@ class TuiApp(App):
         """Handle submit error."""
         try:
             transcript = self.query_one("#transcript", TranscriptView)
-            transcript.flush_streaming()
+            block = transcript.flush_streaming()
+            if block is not None and not self._last_block_matches(block):
+                self.state.add_block(block)
         except NoMatches:
             self._submitting = False
             return
@@ -469,6 +491,9 @@ class TuiApp(App):
 
     def on_output_event(self, msg: OutputEvent) -> None:
         """Handle background thread output (compact, permission, etc.)."""
+        if msg.title == "__refresh_only__":
+            self._refresh_bars()
+            return
         self._output(msg.text, title=msg.title)
         self._refresh_bars()
 
@@ -528,9 +553,9 @@ class TuiApp(App):
     def _run_toggle_permission(self) -> None:
         """Worker thread: toggle permission and post result to UI thread."""
         try:
-            result = self.session.toggle_permission_mode()
+            self.session.toggle_permission_mode()
             self.state.snapshot.permission_mode = self.session.permission_mode
-            self.post_message(OutputEvent(result, title="permission mode switched"))
+            self.post_message(OutputEvent("", title="__refresh_only__"))
         except Exception as exc:
             self.post_message(OutputEvent(f"Error: {exc}", title="permission mode error"))
 
@@ -661,10 +686,24 @@ class TuiApp(App):
             transcript.show_welcome(self.state.snapshot)
             for block in self.state.visible_blocks():
                 transcript.append_block(block)
+            streaming_block = transcript.streaming_block()
+            if streaming_block is not None:
+                transcript.append_block(streaming_block)
         except NoMatches:
             log.debug("Transcript not found while redrawing")
         except Exception:
             log.warning("Error redrawing transcript", exc_info=True)
+
+    def _last_block_matches(self, block: TranscriptBlock) -> bool:
+        if self.state is None or not self.state.blocks:
+            return False
+        last = self.state.blocks[-1]
+        return last.kind == block.kind and last.body == block.body
+
+    @staticmethod
+    def _should_show_checkpoint(checkpoint: str) -> bool:
+        text = str(checkpoint or "").strip()
+        return text.startswith("checkpoint created:")
 
     def exit(self, *args, **kwargs) -> None:
         """Clean shutdown."""

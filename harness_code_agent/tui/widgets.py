@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from rich.console import Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -101,23 +102,35 @@ _KIND_BORDER_COLORS = {
 }
 
 
-def block_to_rich(block: TranscriptBlock) -> Panel:
-    """Convert a TranscriptBlock to a Rich Panel renderable."""
+def block_to_rich(block: TranscriptBlock):
+    """Convert a TranscriptBlock to a Rich renderable."""
     border = _KIND_BORDER_COLORS.get(block.kind, "#555555")
     status = f" [{block.status}]" if block.status else ""
 
     if block.kind == "user":
-        title = f"You{status}"
-        return Panel(Text(block.body), title=title, border_style=border, expand=True)
+        header = Text(f"You{status}", style=f"bold {border}")
+        body = Text(block.body)
+        return Group(header, body, Text(""))
     if block.kind == "assistant":
-        title = f"Assistant{status}"
-        return Panel(Markdown(block.body) if block.body else Text(""), title=title, border_style=border)
+        header = Text(f"Assistant{status}", style=f"bold {border}")
+        body = Markdown(block.body) if block.body else Text("")
+        return Group(header, body, Text(""))
     if block.kind == "tool":
-        title = f"⚙️ {block.title}{status}"
-        return Panel(Text(block.body or ""), title=title, border_style=border)
+        marker = "tool"
+        if block.status == "success":
+            marker = "ok"
+        elif block.status == "failed":
+            marker = "error"
+        elif block.status == "running":
+            marker = "run"
+        text = Text()
+        text.append(f"  {marker} ", style=f"bold {border}")
+        text.append(block.title, style=f"bold {border}")
+        if block.body:
+            text.append(f"  {block.body}", style="dim")
+        return text
     if block.kind == "thought":
-        title = f"\U0001f4ad {block.title}{status}"
-        return Panel(Text(block.body or "(thinking)"), title=title, border_style=border)
+        return Text(f"  thinking {block.body or ''}", style=f"dim {border}")
     if block.kind == "failure":
         title = f"❌ Error{status}"
         return Panel(Text(block.body or ""), title=title, border_style=border)
@@ -136,9 +149,11 @@ def block_to_rich(block: TranscriptBlock) -> Panel:
     if block.kind == "file":
         title = f"File{status}"
         return Panel(Text(block.body or ""), title=title, border_style=border)
-    # session, status, etc.
-    title = f"{block.title}{status}"
-    return Panel(Text(block.body or ""), title=title, border_style=border)
+    text = Text()
+    text.append(f"  {block.title}{status}", style=f"dim {border}")
+    if block.body:
+        text.append(f"  {block.body}", style="dim")
+    return text
 
 
 def welcome_rich(snapshot: SessionStatusSnapshot) -> Panel:
@@ -158,8 +173,8 @@ def welcome_rich(snapshot: SessionStatusSnapshot) -> Panel:
 class TranscriptView(RichLog):
     """Transcript area built on RichLog.
 
-    During streaming responses, text is buffered and written as a single
-    Markdown Panel when streaming completes, avoiding visual fragmentation.
+    During streaming responses, text is buffered as an active assistant block.
+    The app redraws committed transcript cells plus that active block.
     """
 
     def __init__(self, **kwargs):
@@ -184,13 +199,20 @@ class TranscriptView(RichLog):
         """Accumulate streaming text in the buffer."""
         self._streaming_buffer += text
 
-    def flush_streaming(self) -> None:
-        """Write the complete streaming response as a single Markdown Panel."""
+    def streaming_block(self) -> TranscriptBlock | None:
+        """Return the active assistant block without committing it."""
+        if self._streaming_active and self._streaming_buffer:
+            return TranscriptBlock("assistant", "assistant", self._streaming_buffer)
+        return None
+
+    def flush_streaming(self) -> TranscriptBlock | None:
+        """Return the complete streaming response and clear the active block."""
+        block = None
         if self._streaming_active and self._streaming_buffer:
             block = TranscriptBlock("assistant", "assistant", self._streaming_buffer)
-            self.write(block_to_rich(block))
         self._streaming_active = False
         self._streaming_buffer = ""
+        return block
 
     def show_welcome(self, snapshot: SessionStatusSnapshot) -> None:
         self.write(welcome_rich(snapshot))
@@ -259,7 +281,7 @@ class StatusBar(Static):
 # ── ContextBar ──────────────────────────────────────────────────────────────
 
 class ContextBar(Static):
-    """Context progress bar and permission mode indicator."""
+    """Context progress bar and clickable permission mode indicator."""
 
     context_percent: reactive[int] = reactive(0)
     permission_mode: reactive[str] = reactive("workspace-write")
@@ -293,8 +315,8 @@ class ContextBar(Static):
         text.append(f" {self.token_label}", style="dim")
         text.append(f" auto-compact @{self.compact_percent}%", style="dim")
         text.append(f" │ ", style="dim")
-        text.append(f"▶ {self.permission_mode}", style=perm_color)
-        text.append(" │ Ctrl+P perms", style="dim")
+        text.append(f"mode: {self.permission_mode}", style=f"bold {perm_color}")
+        text.append(" (click)", style="dim")
         return text
 
     def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
@@ -310,7 +332,9 @@ class ContextBar(Static):
             self.compact_percent = 85
 
     def on_click(self) -> None:
-        return None
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_toggle_permission"):
+            app.action_toggle_permission()
 
 
 # ── CommandPalette ──────────────────────────────────────────────────────────
