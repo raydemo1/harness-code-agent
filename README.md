@@ -15,7 +15,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 - **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
 - **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
 - **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
-- **运行时权限策略**：支持 `workspace-write`、`danger-full-access` 两种权限模式；受限调查/计划工作使用 `plan` profile。
+- **运行时权限策略**：支持 `workspace-write`、`llm-auto`、`danger-full-access` 三种权限模式；受限调查/计划工作使用 `plan` profile。
 - **会话与事件记录**：每次运行会写入 `.harness/` 元数据、事件和文件快照。
 - **工具系统**：支持文件读写、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
 - **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
@@ -300,7 +300,7 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 | `HARNESS_PROVIDER` | `auto` | Provider adapter：`auto` / `openai` / `deepseek` / `openai-compatible` |
 | `HARNESS_STREAM` | `auto` | CLI streaming：`auto` 表示仅 TTY 实时输出，`1` 强制开启，`0` 关闭 |
 | `HARNESS_WINDOWS_SHELL` | `auto` | Windows shell 后端：`auto` / `pwsh` / `powershell` / `cmd` |
-| `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式：`workspace-write` / `danger-full-access` |
+| `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式：`workspace-write` / `llm-auto` / `danger-full-access` |
 | `HARNESS_SANDBOX_MODE` | `host` | Shell sandbox：`host` 使用宿主 shell，`docker` 让 `run_bash` 在 Docker 容器内执行 |
 | `HARNESS_DOCKER_IMAGE` | `python:3.12` | Docker sandbox 使用的镜像 |
 | `HARNESS_DOCKER_NETWORK` | `none` | Docker sandbox 网络：`none` / `bridge` |
@@ -336,6 +336,7 @@ PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.45
 | 模式 | 行为 |
 | --- | --- |
 | `workspace-write` | 默认模式，允许读工具、路径受控的项目内结构化写工具、白名单 shell；非白名单 shell 和未知工具需要批准；极危黑名单命令永远阻断 |
+| `llm-auto` | LLM 自动审批模式，允许范围与 `workspace-write` 相同；原本需要人工批准的 risky shell、unknown、dangerous 调用由 fast 模型判断，低置信或失败默认拒绝；极危黑名单命令永远阻断 |
 | `danger-full-access` | 放行非黑名单工具调用，适合受控 benchmark 环境；极危黑名单命令仍永远阻断 |
 
 文件写入会通过 `WorkspaceService` 做路径约束，防止写出工作区；默认也会拒绝写入 `.git/` 和敏感 `.env` 文件。

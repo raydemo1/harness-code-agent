@@ -805,6 +805,10 @@ class TuiRichRenderTests(unittest.TestCase):
         self.assertIsInstance(text, Text)
         self.assertIn("auto-compact @85%", text.plain)
         self.assertTrue(any("50%" in text.plain[span.start:span.end] and "#a3be8c" in str(span.style) for span in text.spans))
+        bar.permission_mode = "llm-auto"
+        text = bar.render()
+        self.assertIn("llm-auto", text.plain)
+        self.assertTrue(any("llm-auto" in text.plain[span.start:span.end] and "#ebcb8b" in str(span.style) for span in text.spans))
 
         # Yellow near the single 85% auto-compact trigger.
         bar.context_percent = 80

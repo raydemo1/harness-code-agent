@@ -38,7 +38,7 @@ def _mock_session(root: Path):
         handle_slash_command=lambda line: True,
         submit=lambda text, cancellation_token=None: SimpleNamespace(notice="", checkpoint=""),
         interrupt_current_shell=lambda: None,
-        toggle_permission_mode=lambda: "permission mode switched: workspace-write -> danger-full-access",
+        toggle_permission_mode=lambda: "permission mode switched: workspace-write -> llm-auto",
     )
 
 
@@ -59,7 +59,7 @@ def _mock_pending_session(root: Path):
         handle_slash_command=lambda line: True,
         submit=lambda text, cancellation_token=None: SimpleNamespace(notice="", checkpoint=""),
         interrupt_current_shell=lambda: None,
-        toggle_permission_mode=lambda: "permission mode switched: workspace-write -> danger-full-access",
+        toggle_permission_mode=lambda: "permission mode switched: workspace-write -> llm-auto",
     )
 
 
@@ -333,8 +333,8 @@ class TuiInteractiveTests(unittest.TestCase):
             mock = _mock_session(self.root)
 
             def toggle_permission_mode():
-                mock.permission_mode = "danger-full-access"
-                return "permission mode switched: workspace-write -> danger-full-access"
+                mock.permission_mode = "llm-auto"
+                return "permission mode switched: workspace-write -> llm-auto"
 
             mock.toggle_permission_mode = toggle_permission_mode
 
@@ -344,7 +344,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 async with app.run_test() as pilot:
                     await pilot.press("ctrl+p")
                     await pilot.pause(0.01)
-                    self.assertEqual(app.state.snapshot.permission_mode, "danger-full-access")
+                    self.assertEqual(app.state.snapshot.permission_mode, "llm-auto")
                     self.assertTrue(any(block.title == "permission mode switched" for block in app.state.blocks))
         _run(_test())
 
@@ -553,4 +553,3 @@ class TuiInteractiveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

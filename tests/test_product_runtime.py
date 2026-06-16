@@ -2369,6 +2369,29 @@ class ProductRuntimeTests(unittest.TestCase):
         ]
         unknown_decision = workspace_policy.decide_tool_call("new_tool", {})
 
+        llm_auto_policy = PermissionPolicy(mode="llm-auto")
+        llm_read_decision = llm_auto_policy.decide_tool_call("read_file", {"path": "x.txt"})
+        llm_edit_decision = llm_auto_policy.decide_tool_call("write_file", {"path": "x.txt"})
+        llm_plan_decision = llm_auto_policy.decide_tool_call("update_plan_state", {"mode": "light"})
+        llm_safe_shell_decision = llm_auto_policy.decide_tool_call(
+            "run_bash",
+            {"command": "git status --short"},
+        )
+        llm_risky_shell_decision = llm_auto_policy.decide_tool_call(
+            "run_bash",
+            {"command": "npm install"},
+        )
+        llm_unknown_decision = llm_auto_policy.decide_tool_call("new_tool", {})
+        llm_dangerous_decision = llm_auto_policy.decide_tool_call(
+            "mcp_tool",
+            {},
+            tool_permission="dangerous",
+        )
+        llm_blocked_decision = llm_auto_policy.decide_tool_call(
+            "run_bash",
+            {"command": "rm -rf /"},
+        )
+
         full_access_policy = PermissionPolicy(mode="danger-full-access")
         full_access_decision = full_access_policy.decide_tool_call(
             "run_bash",
@@ -2393,6 +2416,16 @@ class ProductRuntimeTests(unittest.TestCase):
                 self.assertFalse(blocked_decision.requires_approval)
                 self.assertEqual(blocked_decision.risk, "shell_blocked")
         self.assertTrue(unknown_decision.requires_approval)
+        self.assertTrue(llm_read_decision.allowed)
+        self.assertTrue(llm_edit_decision.allowed)
+        self.assertTrue(llm_plan_decision.allowed)
+        self.assertTrue(llm_safe_shell_decision.allowed)
+        self.assertTrue(llm_risky_shell_decision.requires_approval)
+        self.assertTrue(llm_unknown_decision.requires_approval)
+        self.assertTrue(llm_dangerous_decision.requires_approval)
+        self.assertFalse(llm_blocked_decision.allowed)
+        self.assertFalse(llm_blocked_decision.requires_approval)
+        self.assertEqual(llm_blocked_decision.risk, "shell_blocked")
         self.assertTrue(full_access_decision.allowed)
         self.assertFalse(full_access_blocked_decision.allowed)
         self.assertEqual(full_access_blocked_decision.risk, "shell_blocked")
@@ -2409,6 +2442,69 @@ class ProductRuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PermissionPolicy(mode="unsupported-mode")
 
+    def test_llm_auto_approval_provider_approves_only_high_confidence_json(self):
+        from harness_code_agent.runtime.approvals import ApprovalRequest, LlmAutoApprovalProvider
+
+        class FakeCompletions:
+            def __init__(self, content: str):
+                self.content = content
+
+            def create(self, **kwargs):
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content=self.content),
+                        )
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self, content: str):
+                self.chat = SimpleNamespace(completions=FakeCompletions(content))
+
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "npm install"},
+            risk="shell_risky",
+            reason="llm-auto mode requires automatic LLM approval",
+        )
+
+        with patch("harness_code_agent.agent.providers.get_client", return_value=FakeClient('{"approved": true, "confidence": 0.9, "reason": "bounded install"}')):
+            approved = LlmAutoApprovalProvider().request(request)
+        with patch("harness_code_agent.agent.providers.get_client", return_value=FakeClient('{"approved": true, "confidence": 0.5, "reason": "not sure"}')):
+            low_confidence = LlmAutoApprovalProvider().request(request)
+        with patch("harness_code_agent.agent.providers.get_client", return_value=FakeClient('{"approved": false, "confidence": 0.95, "reason": "too broad"}')):
+            denied = LlmAutoApprovalProvider().request(request)
+        with patch("harness_code_agent.agent.providers.get_client", return_value=FakeClient("not json")):
+            invalid = LlmAutoApprovalProvider().request(request)
+
+        self.assertTrue(approved.approved)
+        self.assertEqual(approved.metadata["approval_source"], "llm_auto")
+        self.assertEqual(approved.metadata["confidence"], 0.9)
+        self.assertFalse(low_confidence.approved)
+        self.assertFalse(denied.approved)
+        self.assertFalse(invalid.approved)
+        self.assertEqual(invalid.metadata["approval_source"], "llm_auto")
+        self.assertIn("error", invalid.metadata)
+
+    def test_llm_auto_approval_provider_rejects_model_exceptions(self):
+        from harness_code_agent.runtime.approvals import ApprovalRequest, LlmAutoApprovalProvider
+
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "npm install"},
+            risk="shell_risky",
+            reason="llm-auto mode requires automatic LLM approval",
+        )
+
+        with patch("harness_code_agent.agent.providers.get_client", side_effect=RuntimeError("network down")):
+            result = LlmAutoApprovalProvider().request(request)
+
+        self.assertFalse(result.approved)
+        self.assertEqual(result.reason, "llm-auto approval failed")
+        self.assertEqual(result.metadata["approval_source"], "llm_auto")
+        self.assertIn("network down", result.metadata["error"])
+
     def test_interactive_session_switches_permission_mode_and_updates_context(self):
         from harness_code_agent.core.interactive import InteractiveSession
         from harness_code_agent.runtime.permissions import PermissionPolicy
@@ -2422,10 +2518,23 @@ class ProductRuntimeTests(unittest.TestCase):
                 session.ensure_profile_bound_for_first_task("inspect permissions")
                 metadata = session.session_store.read_metadata(session.session.id)
 
-                self.assertIn("workspace-write -> danger-full-access", result)
-                self.assertEqual(session.permission_mode, "danger-full-access")
-                self.assertEqual(metadata["permission_mode"], "danger-full-access")
+                self.assertIn("workspace-write -> llm-auto", result)
+                self.assertEqual(session.permission_mode, "llm-auto")
+                self.assertEqual(metadata["permission_mode"], "llm-auto")
                 self.assertIsInstance(session.tool_context.permission_policy, PermissionPolicy)
+                self.assertTrue(
+                    session.tool_context.permission_policy.decide_tool_call(
+                        "run_bash",
+                        {"command": "rm -rf build"},
+                    ).requires_approval
+                )
+                from harness_code_agent.runtime.approvals import LlmAutoApprovalProvider
+                self.assertIsInstance(session.tool_context.approval_provider, LlmAutoApprovalProvider)
+
+                result = session.toggle_permission_mode()
+
+                self.assertIn("llm-auto -> danger-full-access", result)
+                self.assertEqual(session.permission_mode, "danger-full-access")
                 self.assertTrue(
                     session.tool_context.permission_policy.decide_tool_call(
                         "run_bash",
@@ -3073,6 +3182,61 @@ class ProductRuntimeTests(unittest.TestCase):
             self.assertEqual(requested["payload"]["risk"], "shell_risky")
             self.assertEqual(decided["payload"]["tool"], "run_bash")
             self.assertTrue(decided["payload"]["approved"])
+
+    def test_permission_middleware_records_llm_auto_approval_metadata(self):
+        from harness_code_agent.runtime.approvals import StaticApprovalProvider
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.runtime.permission_middleware import PermissionMiddleware
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / ".harness" / "events.jsonl"
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="llm-auto"),
+                event_bus=EventBus(events_path),
+                approval_provider=StaticApprovalProvider(
+                    approved=True,
+                    reason="llm-auto approved: bounded",
+                ),
+            )
+            context.approval_provider.request = lambda request: SimpleNamespace(
+                approved=True,
+                reason="llm-auto approved: bounded",
+                metadata={
+                    "approval_source": "llm_auto",
+                    "model": "fast-model",
+                    "confidence": 0.9,
+                    "raw_reason": "bounded",
+                },
+            )
+            middleware = PermissionMiddleware(
+                tool_context=context,
+                tool_registry=tools.BUILTIN_TOOL_REGISTRY,
+            )
+
+            result = middleware.before_tool(
+                "run_bash",
+                {"command": "npm install"},
+                messages=[],
+                agent_name="main_agent",
+            )
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+            self.assertIsNone(result)
+            requested = [event for event in events if event["type"] == "approval_requested"][0]
+            decided = [event for event in events if event["type"] == "approval_decided"][0]
+            self.assertEqual(requested["payload"]["risk"], "shell_risky")
+            self.assertTrue(decided["payload"]["approved"])
+            self.assertEqual(decided["payload"]["metadata"]["approval_source"], "llm_auto")
+            self.assertEqual(decided["payload"]["metadata"]["confidence"], 0.9)
 
     def test_static_verifier_passes_clean_python_file(self):
         import subprocess

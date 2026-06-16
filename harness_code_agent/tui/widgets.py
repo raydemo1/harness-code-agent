@@ -277,7 +277,12 @@ class ContextBar(Static):
         else:
             bar_color = "#a3be8c"
 
-        perm_color = "#bf616a" if self.permission_mode == "danger-full-access" else "#a3be8c"
+        if self.permission_mode == "danger-full-access":
+            perm_color = "#bf616a"
+        elif self.permission_mode == "llm-auto":
+            perm_color = "#ebcb8b"
+        else:
+            perm_color = "#a3be8c"
 
         text = Text()
         text.append(f" context ", style="dim")

@@ -18,7 +18,7 @@ from ..profiles.base import BaseProfile
 from ..profiles.router import RouteDecision, route_profile_for_task
 from ..runtime.builtins.browser import stop_dev_server
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
-from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider
+from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider, LlmAutoApprovalProvider
 from ..runtime.middleware import MemoryMiddleware, StaticVerifierMiddleware, TimeBudgetMiddleware
 from ..runtime.mcp import McpClientManager, McpConfigError, load_mcp_config
 from ..runtime.permission_middleware import PermissionMiddleware
@@ -101,7 +101,10 @@ class InteractiveSession:
         config.WORKSPACE = str(self.cwd)
         self.stream_sink = stream_sink or stream_callback
         self.event_listener = event_listener
-        self.approval_provider = approval_provider or ConsoleApprovalProvider()
+        self.permission_mode = os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write")
+        PermissionPolicy(mode=self.permission_mode)
+        self._manual_approval_provider = approval_provider or ConsoleApprovalProvider()
+        self.approval_provider = self._approval_provider_for_mode(self.permission_mode)
         self.question_provider = question_provider or ConsoleQuestionProvider()
         self.output_sink = output_sink or print
         self.skill_registry = SkillRegistry()
@@ -125,7 +128,6 @@ class InteractiveSession:
 
         self.profile = get_profile(self._pending_profile_name)
         _ensure_git_repository(self.cwd)
-        self.permission_mode = os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write")
         self.session: Session | None = None
         self.event_bus = None
         self.tool_context: ToolContext | None = None
@@ -676,8 +678,10 @@ class InteractiveSession:
         if previous == permission_mode:
             return f"permission mode already active: {permission_mode}"
         self.permission_mode = permission_mode
+        self.approval_provider = self._approval_provider_for_mode(permission_mode)
         if self.tool_context is not None:
             self.tool_context.permission_policy = PermissionPolicy(mode=permission_mode)
+            self.tool_context.approval_provider = self.approval_provider
         if self.session is not None:
             self.session_store.update_permission_mode(self.session.id, permission_mode)
         if self.event_bus is not None:
@@ -692,12 +696,22 @@ class InteractiveSession:
         return f"permission mode switched: {previous} -> {permission_mode}"
 
     def toggle_permission_mode(self) -> str:
-        next_mode = (
-            PermissionPolicy.DANGER_FULL_ACCESS
-            if self.permission_mode == PermissionPolicy.WORKSPACE_WRITE
-            else PermissionPolicy.WORKSPACE_WRITE
-        )
+        modes = [
+            PermissionPolicy.WORKSPACE_WRITE,
+            PermissionPolicy.LLM_AUTO,
+            PermissionPolicy.DANGER_FULL_ACCESS,
+        ]
+        try:
+            index = modes.index(self.permission_mode)
+        except ValueError:
+            index = 0
+        next_mode = modes[(index + 1) % len(modes)]
         return self.set_permission_mode(next_mode)
+
+    def _approval_provider_for_mode(self, permission_mode: str) -> ApprovalProvider:
+        if permission_mode == PermissionPolicy.LLM_AUTO:
+            return LlmAutoApprovalProvider()
+        return self._manual_approval_provider
 
     def mcp_status(self) -> str:
         self._ensure_mcp_tools_loaded()

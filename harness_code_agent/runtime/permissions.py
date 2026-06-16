@@ -60,8 +60,9 @@ class PermissionPolicy:
     """Runtime-enforced permission policy for tool calls."""
 
     WORKSPACE_WRITE = "workspace-write"
+    LLM_AUTO = "llm-auto"
     DANGER_FULL_ACCESS = "danger-full-access"
-    VALID_MODES = {WORKSPACE_WRITE, DANGER_FULL_ACCESS}
+    VALID_MODES = {WORKSPACE_WRITE, LLM_AUTO, DANGER_FULL_ACCESS}
 
     def __init__(self, mode: str = WORKSPACE_WRITE):
         if mode not in self.VALID_MODES:
@@ -88,6 +89,14 @@ class PermissionPolicy:
                     "workspace-write mode requires user approval for non-whitelisted commands and tools",
                 )
             return PermissionDecision("allow", risk, f"workspace-write mode allows {risk}")
+        if self.mode == self.LLM_AUTO:
+            if risk in {"shell_risky", "unknown", "dangerous"}:
+                return PermissionDecision(
+                    "ask",
+                    risk,
+                    "llm-auto mode requires automatic LLM approval for non-whitelisted commands and tools",
+                )
+            return PermissionDecision("allow", risk, f"llm-auto mode allows {risk}")
         return PermissionDecision("deny", risk, f"{self.mode} mode does not allow {risk}")
 
     def classify_tool_call(
