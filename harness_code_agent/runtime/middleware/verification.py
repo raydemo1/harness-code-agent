@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from .base import AgentMiddleware
@@ -35,6 +36,22 @@ class PreExitVerificationMiddleware(AgentMiddleware):
         self._exit_attempts = 0
 
     @staticmethod
+    def _current_user_task(messages: list[dict], runtime_state=None) -> str | None:
+        start = getattr(runtime_state, "current_turn_start_index", 0) if runtime_state is not None else 0
+        user_messages: list[str] = []
+        for msg in messages[start:]:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
+            content = content.strip()
+            if not content or _is_middleware_user_message(content):
+                continue
+            user_messages.append(content)
+        return user_messages[-1] if user_messages else None
+
+    @staticmethod
     def _has_done_work(messages: list[dict], runtime_state=None) -> bool:
         """Check if the agent has called any action tools."""
         action_tools = {"run_bash", "write_file", "consult_subagent"}
@@ -50,23 +67,24 @@ class PreExitVerificationMiddleware(AgentMiddleware):
     @staticmethod
     def _extract_task_requirements(messages: list[dict], runtime_state=None) -> str | None:
         """Extract the current turn's task requirements from the conversation."""
-        start = getattr(runtime_state, "current_turn_start_index", 0) if runtime_state is not None else 0
-        for msg in reversed(messages[start:]):
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if isinstance(content, str) and len(content) > 20:
-                    if len(content) > 3000:
-                        content = content[:3000] + "\n... (truncated)"
-                    return content
+        content = PreExitVerificationMiddleware._current_user_task(messages, runtime_state)
+        if content:
+            if len(content) > 3000:
+                content = content[:3000] + "\n... (truncated)"
+            return content
         return None
 
     def pre_exit(self, messages: list[dict], runtime_state=None,
                  agent_name: str | None = None) -> str | None:
         self._exit_attempts += 1
         has_worked = self._has_done_work(messages, runtime_state)
+        task_text = self._current_user_task(messages, runtime_state) or ""
 
         # Gate 1: Agent hasn't done ANY work — force it to start
         if not has_worked:
+            if _allows_text_only_exit(task_text):
+                log.info("Pre-exit: allowing no-tool response for text-only task")
+                return None
             log.warning(f"Pre-exit: agent wants to stop but has done NO work (attempt {self._exit_attempts})")
             if self._exit_attempts <= 3:  # give up to 3 chances to start working
                 return (
@@ -283,3 +301,157 @@ def _check_ruff_diff(workspace_root: str | None) -> list[tuple[str, str, str]]:
         else:
             findings.append(("", "", line))
     return findings
+
+
+def _is_middleware_user_message(content: str) -> bool:
+    stripped = content.lstrip()
+    return stripped.startswith(("[SYSTEM]", "[blocked]"))
+
+
+def _allows_text_only_exit(task_text: str) -> bool:
+    """Return True when the current turn is plainly conversational/read-only."""
+    text = " ".join(str(task_text or "").strip().split())
+    if not text:
+        return False
+
+    lowered = text.lower()
+    if _is_identity_or_greeting(text, lowered):
+        return True
+    if _is_capability_question(text, lowered):
+        return True
+    if _has_actionable_workspace_intent(text, lowered):
+        return False
+    if _looks_like_question(text, lowered) and len(text) <= 160:
+        return True
+    if lowered.startswith(("explain ", "what is ", "what are ", "why ", "tell me ")):
+        return True
+    if text.startswith(("解释", "说明", "介绍", "什么是", "为什么")):
+        return True
+    return False
+
+
+def _is_identity_or_greeting(text: str, lowered: str) -> bool:
+    normalized = text.strip(" \t\r\n?？!！.。")
+    if normalized in {
+        "你是谁",
+        "你是誰",
+        "你是什么",
+        "你是干什么的",
+        "你能做什么",
+        "你好",
+        "嗨",
+        "哈喽",
+        "hello",
+        "hi",
+        "hey",
+        "who are you",
+        "what are you",
+        "what can you do",
+    }:
+        return True
+    return bool(re.fullmatch(r"(hi|hello|hey)[!. ]*", lowered))
+
+
+def _is_capability_question(text: str, lowered: str) -> bool:
+    if "?" not in text and "？" not in text:
+        return False
+    if any(phrase in lowered for phrase in ("can you", "could you", "what can you do", "who are you")):
+        return True
+    return "你" in text and any(term in text for term in ("能", "可以", "会", "會")) and any(
+        term in text for term in ("做什么", "干什么", "修改", "写代码", "运行", "测试", "帮我")
+    )
+
+
+def _has_actionable_workspace_intent(text: str, lowered: str) -> bool:
+    chinese_action_terms = (
+        "修复",
+        "修改",
+        "改动",
+        "调整",
+        "实现",
+        "新增",
+        "添加",
+        "创建",
+        "生成",
+        "写",
+        "运行",
+        "执行",
+        "测试",
+        "检查",
+        "查看",
+        "审查",
+        "评审",
+        "调试",
+        "诊断",
+        "构建",
+        "安装",
+        "删除",
+        "提交",
+        "部署",
+        "打开",
+        "读取",
+        "搜索",
+        "列出",
+    )
+    english_action_terms = (
+        "fix",
+        "modify",
+        "edit",
+        "implement",
+        "add",
+        "create",
+        "write",
+        "run",
+        "execute",
+        "test",
+        "check",
+        "inspect",
+        "review",
+        "debug",
+        "diagnose",
+        "build",
+        "install",
+        "remove",
+        "delete",
+        "commit",
+        "deploy",
+        "open",
+        "read",
+        "search",
+        "list",
+        "refactor",
+        "update",
+    )
+    if any(term in text for term in chinese_action_terms):
+        return True
+    if re.search(r"\b(" + "|".join(re.escape(term) for term in english_action_terms) + r")\b", lowered):
+        return True
+
+    local_terms = (
+        "repo",
+        "repository",
+        "workspace",
+        "project",
+        "file",
+        "path",
+        "codebase",
+        "仓库",
+        "工作区",
+        "项目",
+        "文件",
+        "目录",
+        "代码库",
+    )
+    local_references = ("this", "current", "local", "here", "这个", "当前", "本地", "这里")
+    if any(term in lowered or term in text for term in local_terms) and any(
+        ref in lowered or ref in text for ref in local_references
+    ):
+        return True
+
+    return bool(re.search(r"([A-Za-z]:\\|[/\\].+\.[A-Za-z0-9]{1,8}\b|\b\w+\.(py|js|ts|tsx|jsx|json|md|toml|yaml|yml|txt)\b)", text))
+
+
+def _looks_like_question(text: str, lowered: str) -> bool:
+    if text.endswith(("?", "？")):
+        return True
+    return lowered.startswith(("who ", "what ", "why ", "how ", "when ", "where ", "which "))
