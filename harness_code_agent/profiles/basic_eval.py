@@ -26,7 +26,8 @@ Your job is to inspect the repository just enough to answer the user's question 
 Rules:
 - Do not modify files, update planning state, ask the user, start browsers, or manage shell jobs.
 - Do not use consult_subagent or any consultation sub-agents.
-- Prefer direct file reads and safe read-only shell commands.
+- Prefer repo_search for code/text search, list_files for file discovery, and bounded read_file for file reads.
+- Use run_bash only for execution tasks such as tests/builds when explicitly needed.
 - Do not run broad test suites unless the user explicitly asks for a test result.
 - Stop as soon as you have the answer.
 - Include exact file paths, function names, constants, or metric names when they are relevant.
@@ -38,6 +39,7 @@ Rules:
             },
             allowed_tool_names={
                 "read_file",
+                "repo_search",
                 "list_files",
                 "memory_search",
                 "read_memory_file",

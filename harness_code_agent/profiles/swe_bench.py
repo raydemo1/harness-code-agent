@@ -36,6 +36,7 @@ Rules:
 - Treat consultation output as advice. Read it, decide what to adopt, and perform all edits yourself.
 - Make minimal, focused changes. Do not refactor unrelated code.
 - Run concrete verification commands before stopping.
+- Use repo_search/list_files/read_file for repository inspection; reserve run_bash for execution such as tests, builds, installs, and repro commands.
 - Prefer the smallest diff that fixes the issue and preserves existing public behavior.
 - Keep regression tests close to the failing behavior when the repository has a suitable test layer.
 - Long-running run_bash commands return shell job ids; use read_shell_output, list_shell_jobs, and stop_shell_job to inspect and stop them.

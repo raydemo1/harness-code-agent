@@ -19,7 +19,7 @@ from ..profiles.router import RouteDecision, route_profile_for_task
 from ..runtime.builtins.browser import stop_dev_server
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
 from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider, LlmAutoApprovalProvider
-from ..runtime.middleware import MemoryMiddleware, StaticVerifierMiddleware, TimeBudgetMiddleware
+from ..runtime.middleware import MemoryMiddleware, StaticVerifierMiddleware, TimeBudgetMiddleware, ToolPolicyMiddleware
 from ..runtime.mcp import McpClientManager, McpConfigError, load_mcp_config
 from ..runtime.permission_middleware import PermissionMiddleware
 from ..runtime.permissions import PermissionPolicy
@@ -186,6 +186,7 @@ class InteractiveSession:
             acceptance_criteria=acceptance_criteria,
         )
         middlewares = list(cfg.middlewares)
+        middlewares.append(ToolPolicyMiddleware())
         if getattr(cfg, "memory_enabled", True):
             middlewares.append(MemoryMiddleware(workspace=self.cwd))
         middlewares.append(

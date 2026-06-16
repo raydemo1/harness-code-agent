@@ -192,29 +192,53 @@ def _run_hca_case(
     case_dir.mkdir(parents=True, exist_ok=True)
     command = [sys.executable, "-m", "harness_code_agent.cli", "--profile", profile, "-p", prompt]
     started = time.perf_counter()
-    completed = subprocess.run(
-        command,
-        cwd=PROJECT_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    timed_out = False
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = completed.stdout
+        stderr = completed.stderr
+        returncode = completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        stdout = _coerce_output(exc.stdout)
+        stderr = _coerce_output(exc.stderr)
+        stderr = (stderr + "\n" if stderr else "") + f"[timeout] case exceeded {timeout}s"
+        returncode = 124
     elapsed = time.perf_counter() - started
     stdout_path = case_dir / "stdout.txt"
     stderr_path = case_dir / "stderr.txt"
-    stdout_path.write_text(completed.stdout, encoding="utf-8", newline="\n")
-    stderr_path.write_text(completed.stderr, encoding="utf-8", newline="\n")
-    session_id = session_id_from_stdout(completed.stdout)
+    stdout_path.write_text(stdout, encoding="utf-8", newline="\n")
+    stderr_path.write_text(stderr, encoding="utf-8", newline="\n")
+    session_id = session_id_from_stdout(stdout)
     metrics = _session_metrics(session_id) if session_id else {}
-    combined = f"{completed.stdout}\n{completed.stderr}".lower()
+    combined = f"{stdout}\n{stderr}".lower()
     marker_success = all(str(marker).lower() in combined for marker in success_markers)
-    success = completed.returncode == 0 and (marker_success if success_markers else True)
+    fallback_reason = str(((metrics.get("audit") or {}).get("latest_fallback") or "")).strip()
+    bad_fallbacks = {
+        "max_iterations",
+        "token_budget_exceeded",
+        "tool_call_budget_exceeded",
+        "repeated_tool_failure",
+        "loop_detected",
+    }
+    success = (
+        returncode == 0
+        and not timed_out
+        and fallback_reason not in bad_fallbacks
+        and (marker_success if success_markers else True)
+    )
     return CaseResult(
         suite=suite,
         case_id=case_id,
         variant=variant,
-        returncode=completed.returncode,
+        returncode=returncode,
         elapsed_seconds=elapsed,
         success=success,
         session_id=session_id,
@@ -226,7 +250,8 @@ def _run_hca_case(
 
 def _basic_eval_prompt(prompt: str, *, suite: str) -> str:
     common = (
-        "Use PowerShell-compatible commands only; prefer simple rg commands with no Bash redirection. "
+        "Use repo_search for code/text search, list_files for file discovery, and read_file for bounded reads. "
+        "Use PowerShell-compatible shell only for execution tasks such as builds, installs, and tests. "
         "Do not inspect .harness, __pycache__, virtualenvs, or generated artifacts. "
         "Do not run tests, broad recursive listings, or repeated shell variants after a failure. "
         "Stop as soon as you have the first reliable answer."
@@ -243,10 +268,18 @@ def _basic_eval_prompt(prompt: str, *, suite: str) -> str:
     return (
         prompt.strip()
         + "\n\nBasic eval constraints: answer this as a read-only repository lookup. "
-        "Use at most 8 tool calls. Prefer rg/list_files/read_file with narrow paths. "
+        "Use at most 8 tool calls. Prefer repo_search/list_files/read_file with narrow paths. "
         "Do not inspect eval/results. "
         + common
     )
+
+
+def _coerce_output(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _apply_basic_eval_limits(env: dict[str, str], *, suite: str) -> None:

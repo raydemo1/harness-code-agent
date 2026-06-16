@@ -176,8 +176,58 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "repo_search",
+            "description": (
+                "Search workspace code/text using bounded ripgrep. Use this for repository exploration instead of run_bash rg/grep/find commands. "
+                "The harness always supplies an explicit path, short timeout, default generated-directory excludes, and max result limits."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["pattern"],
+                "properties": {
+                    "pattern": {"type": "string", "description": "Text or regex pattern to search for."},
+                    "path": {
+                        "type": "string",
+                        "description": "Relative file or directory path to search. Defaults to workspace root.",
+                        "default": ".",
+                    },
+                    "glob": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional ripgrep glob filters, e.g. ['*.py'] or ['!*.lock'].",
+                        "default": [],
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "Whether search should be case-sensitive.",
+                        "default": False,
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "description": "Maximum result lines to return.",
+                        "default": 100,
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 5,
+                        "description": "Context lines around each match.",
+                        "default": 0,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_files",
-            "description": "List all files in a directory recursively.",
+            "description": (
+                "List workspace files and directories with bounded depth. Defaults to depth=2. "
+                "Use higher depth only when you also provide bounded max_results and exclusions."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -185,7 +235,32 @@ CORE_TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Relative directory path (default: root)",
                         "default": ".",
-                    }
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "Maximum listing depth. depth=1 lists only direct children; default depth=2 includes one nested level.",
+                        "default": 2,
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "description": "Maximum entries to return.",
+                        "default": 200,
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "Include hidden dot paths except protected internal/generated defaults.",
+                        "default": False,
+                    },
+                    "exclude": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional directory names to exclude.",
+                        "default": [],
+                    },
                 },
             },
         },
@@ -352,6 +427,8 @@ CORE_TOOL_SCHEMAS = [
                     else "On POSIX this runs a shell suitable for standard Bash-style commands. "
                 )
                 + "Use for installing deps, running builds, starting servers, running tests, etc. "
+                "Do not use shell for repository search or file listing; use repo_search/list_files/read_file. "
+                "Repository-browsing shell commands such as bare rg, recursive grep/findstr, Get-ChildItem -Recurse, or dir /s may be blocked or rewritten. "
                 "For long-running verification commands (compilation, training), increase the timeout parameter. "
                 "For dev servers, watch mode, and runserver commands, this returns a background shell job id; use read_shell_output, list_shell_jobs, and stop_shell_job to manage it. "
                 "Prefer bounded inspection commands such as rg, head/tail, sed -n, Select-Object -First/-Last, or line counts instead of dumping whole files or logs. "

@@ -12,7 +12,7 @@ from ..permissions import (
 from ..tool_registry import ToolExecutionLane, ToolRegistry
 from .browser import browser_test, stop_dev_server
 from .discovery import tool_search
-from .filesystem import apply_patch, list_files, read_file, read_skill_file, write_file
+from .filesystem import apply_patch, list_files, read_file, read_skill_file, repo_search, write_file
 from .interaction import ask_user
 from .memory_tools import memory_search, read_memory_file, remember_memory
 from .planning import update_plan_state
@@ -26,6 +26,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
     handlers = {
         "read_file": read_file,
         "read_skill_file": read_skill_file,
+        "repo_search": repo_search,
         "tool_search": tool_search,
         "write_file": write_file,
         "apply_patch": apply_patch,
@@ -48,6 +49,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
     permissions = {
         "read_file": TOOL_PERMISSION_READ,
         "read_skill_file": TOOL_PERMISSION_READ,
+        "repo_search": TOOL_PERMISSION_READ,
         "tool_search": TOOL_PERMISSION_READ,
         "list_files": TOOL_PERMISSION_READ,
         "ask_user": TOOL_PERMISSION_READ,
@@ -70,6 +72,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
     lanes = {
         "read_file": ToolExecutionLane.WORKSPACE_READ,
         "read_skill_file": ToolExecutionLane.WORKSPACE_READ,
+        "repo_search": ToolExecutionLane.WORKSPACE_READ,
         "tool_search": ToolExecutionLane.CONTROL_SERIAL,
         "list_files": ToolExecutionLane.WORKSPACE_READ,
         "ask_user": ToolExecutionLane.CONTROL_SERIAL,

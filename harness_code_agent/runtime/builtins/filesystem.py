@@ -1,6 +1,8 @@
 """Workspace filesystem tools."""
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 from ... import config
@@ -10,15 +12,204 @@ from ..tool_result import ToolResult
 
 READ_FILE_MAX_LINES = 500
 READ_FILE_MAX_OUTPUT_CHARS = 100_000
+REPO_SEARCH_TIMEOUT_SECONDS = 15
+REPO_SEARCH_MAX_RESULTS = 500
+LIST_FILES_MAX_RESULTS = 1000
+DEFAULT_EXCLUDE_PARTS = {
+    ".git",
+    ".harness",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "node_modules",
+}
+DEFAULT_EXCLUDE_PATHS = {
+    ("eval", "results"),
+}
 
 
 def _resolve(path: str) -> Path:
     """Resolve a relative path inside the workspace. Prevent escaping."""
     p = Path(config.WORKSPACE, path).resolve()
     ws = Path(config.WORKSPACE).resolve()
-    if not str(p).startswith(str(ws)):
-        raise ValueError(f"Path escapes workspace: {path}")
+    try:
+        p.relative_to(ws)
+    except ValueError as exc:
+        raise ValueError(f"Path escapes workspace: {path}") from exc
     return p
+
+
+def _workspace_root(tool_context: ToolContext | None = None) -> Path:
+    if tool_context is not None:
+        return tool_context.workspace.root.resolve()
+    return Path(config.WORKSPACE).resolve()
+
+
+def _resolve_with_context(path: str, tool_context: ToolContext | None = None) -> Path:
+    if tool_context is not None:
+        return tool_context.workspace.resolve(path)
+    return _resolve(path)
+
+
+def _relative_to_workspace(path: Path, workspace: Path) -> str:
+    rel = path.resolve().relative_to(workspace.resolve())
+    return "." if str(rel) == "." else rel.as_posix()
+
+
+def _has_excluded_part(path: Path, workspace: Path, extra_exclude: set[str] | None = None) -> bool:
+    try:
+        rel = path.resolve().relative_to(workspace.resolve())
+    except ValueError:
+        return True
+    parts = rel.parts
+    excluded = DEFAULT_EXCLUDE_PARTS | (extra_exclude or set())
+    if any(part in excluded for part in parts):
+        return True
+    lower_parts = tuple(part.lower() for part in parts)
+    return any(_contains_path_parts(lower_parts, blocked) for blocked in DEFAULT_EXCLUDE_PATHS)
+
+
+def _contains_path_parts(parts: tuple[str, ...], blocked: tuple[str, ...]) -> bool:
+    if not blocked or len(parts) < len(blocked):
+        return False
+    blocked_lower = tuple(part.lower() for part in blocked)
+    return any(parts[index:index + len(blocked_lower)] == blocked_lower for index in range(len(parts) - len(blocked_lower) + 1))
+
+
+def _rg_exclude_globs() -> list[str]:
+    globs = [f"!**/{name}/**" for name in sorted(DEFAULT_EXCLUDE_PARTS)]
+    globs.append("!eval/results/**")
+    globs.append("!**/eval/results/**")
+    return globs
+
+
+def _clamp_int(value: int | None, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _observation_path_blocked(path: Path, workspace: Path) -> bool:
+    if os.environ.get("HARNESS_ALLOW_OBSERVATION_READ", "").strip() in {"1", "true", "yes"}:
+        return False
+    try:
+        rel = path.resolve().relative_to(workspace.resolve())
+    except ValueError:
+        return True
+    return ".harness" in rel.parts and "observations" in rel.parts
+
+
+def repo_search(
+    pattern: str,
+    path: str = ".",
+    glob: list[str] | None = None,
+    case_sensitive: bool = False,
+    max_results: int = 100,
+    context_lines: int = 0,
+    tool_context: ToolContext | None = None,
+) -> ToolResult:
+    workspace = _workspace_root(tool_context)
+    p = _resolve_with_context(path or ".", tool_context)
+    if not p.exists():
+        return ToolResult(
+            tool="repo_search",
+            status="failed",
+            output=f"[error] Search path not found: {path}",
+            error=f"Search path not found: {path}",
+            metadata={"path": path, "status_source": "native"},
+        )
+    if _has_excluded_part(p, workspace):
+        return ToolResult(
+            tool="repo_search",
+            status="failed",
+            output=f"[blocked] repo_search does not search internal/generated paths by default: {path}",
+            error=f"repo_search blocked for excluded path: {path}",
+            metadata={"path": path, "status_source": "permission", "reason": "excluded_path"},
+        )
+    limit = _clamp_int(max_results, default=100, minimum=1, maximum=REPO_SEARCH_MAX_RESULTS)
+    context = _clamp_int(context_lines, default=0, minimum=0, maximum=5)
+    search_path = _relative_to_workspace(p, workspace)
+    args = [
+        "rg",
+        "--line-number",
+        "--with-filename",
+        "--color",
+        "never",
+    ]
+    if not case_sensitive:
+        args.append("--ignore-case")
+    if context:
+        args.extend(["--context", str(context)])
+    for item in _rg_exclude_globs():
+        args.extend(["--glob", item])
+    for item in glob or []:
+        if item:
+            args.extend(["--glob", str(item)])
+    args.extend(["--", pattern, search_path])
+
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            timeout=REPO_SEARCH_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return ToolResult(
+            tool="repo_search",
+            status="failed",
+            output="[error] ripgrep (rg) is not installed or not on PATH.",
+            error="ripgrep (rg) is not installed or not on PATH.",
+            metadata={"path": path, "status_source": "native"},
+        )
+    except subprocess.TimeoutExpired:
+        return ToolResult(
+            tool="repo_search",
+            status="failed",
+            output=f"[error] repo_search timed out after {REPO_SEARCH_TIMEOUT_SECONDS}s. Narrow the path or pattern.",
+            error=f"repo_search timed out after {REPO_SEARCH_TIMEOUT_SECONDS}s",
+            metadata={"path": path, "status_source": "timeout"},
+        )
+
+    stdout = completed.stdout or ""
+    stderr = (completed.stderr or "").strip()
+    if completed.returncode not in {0, 1}:
+        output = f"[error] rg exited with code {completed.returncode}"
+        if stderr:
+            output += f"\n{stderr}"
+        return ToolResult(
+            tool="repo_search",
+            status="failed",
+            output=output,
+            error=output.removeprefix("[error] "),
+            metadata={"path": path, "status_source": "native", "returncode": completed.returncode},
+        )
+
+    lines = stdout.splitlines()
+    truncated = len(lines) > limit
+    selected = lines[:limit]
+    if not selected:
+        output = "(no matches)"
+    else:
+        output = "\n".join(selected)
+        if truncated:
+            output += f"\n[truncated] Showing first {limit} result lines. Narrow path/pattern or raise max_results."
+    return ToolResult(
+        tool="repo_search",
+        status="success",
+        output=output,
+        metadata={
+            "path": path,
+            "explicit_path": search_path,
+            "match_lines": len(lines),
+            "returned_lines": len(selected),
+            "truncated": truncated,
+            "status_source": "native",
+        },
+    )
 
 
 def read_file(
@@ -28,7 +219,19 @@ def read_file(
     include_line_numbers: bool = False,
     tool_context: ToolContext | None = None,
 ) -> ToolResult:
-    p = tool_context.workspace.resolve(path) if tool_context is not None else _resolve(path)
+    p = _resolve_with_context(path, tool_context)
+    workspace = _workspace_root(tool_context)
+    if _observation_path_blocked(p, workspace):
+        return ToolResult(
+            tool="read_file",
+            status="failed",
+            output=(
+                "[blocked] read_file cannot read raw .harness/observations artifacts during normal runs. "
+                "Use the summarized tool result in the conversation, or set HARNESS_ALLOW_OBSERVATION_READ=1 for diagnosis."
+            ),
+            error="read_file blocked for .harness/observations",
+            metadata={"path": path, "status_source": "permission", "reason": "internal_observation_artifact"},
+        )
     if not p.exists():
         return ToolResult(
             tool="read_file",
@@ -236,8 +439,16 @@ def apply_patch(
     )
 
 
-def list_files(directory: str = ".") -> ToolResult:
-    p = _resolve(directory)
+def list_files(
+    directory: str = ".",
+    depth: int = 2,
+    max_results: int = 200,
+    include_hidden: bool = False,
+    exclude: list[str] | None = None,
+    tool_context: ToolContext | None = None,
+) -> ToolResult:
+    p = _resolve_with_context(directory or ".", tool_context)
+    workspace = _workspace_root(tool_context)
     if not p.is_dir():
         return ToolResult(
             tool="list_files",
@@ -246,21 +457,70 @@ def list_files(directory: str = ".") -> ToolResult:
             error=f"Not a directory: {directory}",
             metadata={"directory": directory, "status_source": "native"},
         )
-    entries = []
-    for item in sorted(p.rglob("*")):
-        if item.is_file():
-            rel = item.relative_to(Path(config.WORKSPACE).resolve())
-            entries.append(str(rel))
+    limit = _clamp_int(max_results, default=200, minimum=1, maximum=LIST_FILES_MAX_RESULTS)
+    max_depth = _clamp_int(depth, default=2, minimum=1, maximum=20)
+    extra_exclude = {str(item) for item in (exclude or []) if str(item).strip()}
+    entries: list[str] = []
+    total_seen = 0
+
+    def should_skip(item: Path) -> bool:
+        if not include_hidden and any(part.startswith(".") for part in item.relative_to(workspace).parts):
+            return True
+        return _has_excluded_part(item, workspace, extra_exclude)
+
+    for root, dirnames, filenames in os.walk(p):
+        root_path = Path(root)
+        current_depth = len(root_path.relative_to(p).parts)
+        include_children = current_depth + 1 <= max_depth
+        descend = current_depth + 1 < max_depth
+        dirnames[:] = [
+            name
+            for name in sorted(dirnames)
+            if descend and not should_skip(root_path / name)
+        ]
+        if not include_children:
+            dirnames[:] = []
+            continue
+        for dirname in dirnames:
+            item = root_path / dirname
+            total_seen += 1
+            if len(entries) < limit:
+                entries.append(_relative_to_workspace(item, workspace) + "/")
+        for filename in sorted(filenames):
+            item = root_path / filename
+            if should_skip(item):
+                continue
+            total_seen += 1
+            if len(entries) < limit:
+                entries.append(_relative_to_workspace(item, workspace))
     if not entries:
         return ToolResult(
             tool="list_files",
             status="success",
             output="(empty)",
-            metadata={"directory": directory, "status_source": "native"},
+            metadata={
+                "directory": directory,
+                "depth": max_depth,
+                "status_source": "native",
+                "count": total_seen,
+                "returned": 0,
+                "truncated": False,
+            },
         )
+    truncated = total_seen > len(entries)
+    output = "\n".join(entries)
+    if truncated:
+        output += f"\n[truncated] Showing first {len(entries)} entries. Narrow directory or increase max_results."
     return ToolResult(
         tool="list_files",
         status="success",
-        output="\n".join(entries[:200]),
-        metadata={"directory": directory, "status_source": "native", "count": len(entries)},
+        output=output,
+        metadata={
+            "directory": directory,
+            "depth": max_depth,
+            "status_source": "native",
+            "count": total_seen,
+            "returned": len(entries),
+            "truncated": truncated,
+        },
     )

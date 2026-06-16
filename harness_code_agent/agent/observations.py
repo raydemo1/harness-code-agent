@@ -31,7 +31,7 @@ def _output_preview(output: str) -> str:
     omitted = len(output) - head_chars - tail_chars
     return (
         f"{head}\n\n"
-        f"...[{omitted} chars omitted — use read_file for full output]...\n\n"
+        f"...[{omitted} chars omitted — raw observation output is internal; rerun a narrower command if more detail is needed]...\n\n"
         f"{tail}"
     )
 
@@ -216,8 +216,8 @@ class ObservationStore:
             f"resource_keys: {', '.join(observation.resource_keys) or 'none'}\n"
             f"raw_output: {observation.raw_output_path}\n"
             f"summary: {observation.summary}\n"
-            "observation: Full output stored in file.  Use read_file on the "
-            "raw_output path if you need the complete result.\n\n"
+            "observation: Full output is stored as an internal artifact. "
+            "Use the preview, or rerun a narrower command if more detail is needed.\n\n"
             "--- preview ---\n"
             + _output_preview(output)
             + "\n--- end preview ---"

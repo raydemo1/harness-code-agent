@@ -8,6 +8,7 @@ from .memory import MemoryMiddleware
 from .recovery import RecoveryStrategyMiddleware
 from .task_tracking import TaskTrackingEnforcementMiddleware, TaskTrackingMiddleware
 from .time_budget import TimeBudgetMiddleware
+from .tool_policy import ToolPolicyMiddleware
 from .verification import (
     StaticVerifierMiddleware,
     PreExitVerificationMiddleware,
@@ -30,6 +31,7 @@ __all__ = [
     "TaskTrackingEnforcementMiddleware",
     "TaskTrackingMiddleware",
     "TimeBudgetMiddleware",
+    "ToolPolicyMiddleware",
     "StaticVerifierMiddleware",
     "PreExitVerificationMiddleware",
     "VERDICT_BLOCK",
