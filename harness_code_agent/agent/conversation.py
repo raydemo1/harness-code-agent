@@ -908,7 +908,7 @@ class AgentConversation:
             # --- Context lifecycle check ---
             tool_schemas = _tool_schemas_for_agent(agent)
             token_count = context.count_request_tokens(self.messages, tool_schemas=tool_schemas)
-            log.info(f"[{agent.name}] iteration={iteration}  tokens≈{token_count}")
+            log.info(f"[{agent.name}] iteration={iteration}  tokens~{token_count}")
             self.trace.iteration(iteration, token_count)
 
             thresholds = get_thresholds()
