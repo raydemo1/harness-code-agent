@@ -74,12 +74,15 @@ class UserInputEvent:
 class AssistantMessageEvent:
     text: str
     turn: int | None = None
+    streamed: bool = False
     agent: str | None = "main_agent"
 
     def to_event(self) -> StructuredEvent:
         payload: dict[str, Any] = {"text": self.text}
         if self.turn is not None:
             payload["turn"] = self.turn
+        if self.streamed:
+            payload["streamed"] = self.streamed
         return StructuredEvent("assistant_message", payload, self.agent)
 
 

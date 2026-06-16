@@ -5,15 +5,15 @@
 | Metric | Result |
 | --- | --- |
 | DeepSeek context cache | warmup 0.0% -> 99.0% |
-| Memory A/B | 5 tasks; tool calls -60.3%, elapsed -44.2%, tokens -63.6% |
-| Latency p95/p99 | turn p95=336366ms p99=336366ms; LLM p95=5974ms; TTFT p95=4284ms |
+| Memory A/B | 5 tasks; tool calls -24.4%, elapsed --62.9%, tokens -33.9% |
+| Latency p95/p99 | turn p95=21153ms p99=21153ms; LLM p95=6211ms; TTFT p95=3185ms |
 | Terminal-Bench 2.0 subset | not run |
 | Claw-SWE-Bench | not run |
 
 ## Mechanism Effects
 
 - Cache: warmup 0.0% -> 99.0%
-- Memory: 5 tasks; tool calls -60.3%, elapsed -44.2%, tokens -63.6%
+- Memory: 5 tasks; tool calls -24.4%, elapsed --62.9%, tokens -33.9%
 - Compaction: rewrite diagnosed via log_rewrite; post-rewrite hit 83.9%
 
 ## Resume Bullets

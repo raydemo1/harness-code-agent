@@ -2,13 +2,25 @@
 from __future__ import annotations
 
 import logging
-import re
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from .base import AgentMiddleware
 
 
 log = logging.getLogger("harness")
+
+
+@dataclass(frozen=True)
+class ExitIntentDecision:
+    mode: str
+    confidence: float = 0.0
+    reason: str = ""
+
+    @property
+    def should_continue(self) -> bool:
+        return self.mode == "continue" and self.confidence >= 0.75
 
 
 class PreExitVerificationMiddleware(AgentMiddleware):
@@ -53,16 +65,38 @@ class PreExitVerificationMiddleware(AgentMiddleware):
 
     @staticmethod
     def _has_done_work(messages: list[dict], runtime_state=None) -> bool:
-        """Check if the agent has called any action tools."""
-        action_tools = {"run_bash", "write_file", "consult_subagent"}
+        """Check if the agent has used any non-planning tool this turn."""
+        ignored_tools = {"update_plan_state"}
         start = getattr(runtime_state, "current_turn_start_index", 0) if runtime_state is not None else 0
         for msg in messages[start:]:
             if msg.get("role") == "assistant":
                 for tc in msg.get("tool_calls", []):
                     fn_name = tc.get("function", {}).get("name", "")
-                    if fn_name in action_tools:
+                    if fn_name and fn_name not in ignored_tools:
                         return True
         return False
+
+    @staticmethod
+    def _tool_names_used(messages: list[dict], runtime_state=None) -> list[str]:
+        start = getattr(runtime_state, "current_turn_start_index", 0) if runtime_state is not None else 0
+        names: list[str] = []
+        for msg in messages[start:]:
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []):
+                fn_name = tc.get("function", {}).get("name", "")
+                if fn_name:
+                    names.append(fn_name)
+        return names
+
+    @staticmethod
+    def _last_assistant_text(messages: list[dict], runtime_state=None) -> str:
+        start = getattr(runtime_state, "current_turn_start_index", 0) if runtime_state is not None else 0
+        for msg in reversed(messages[start:]):
+            if msg.get("role") == "assistant":
+                content = msg.get("content") or ""
+                return content if isinstance(content, str) else ""
+        return ""
 
     @staticmethod
     def _extract_task_requirements(messages: list[dict], runtime_state=None) -> str | None:
@@ -79,23 +113,32 @@ class PreExitVerificationMiddleware(AgentMiddleware):
         self._exit_attempts += 1
         has_worked = self._has_done_work(messages, runtime_state)
         task_text = self._current_user_task(messages, runtime_state) or ""
+        assistant_text = self._last_assistant_text(messages, runtime_state)
+        tool_names = self._tool_names_used(messages, runtime_state)
+        decision = classify_exit_intent(
+            user_task=task_text,
+            assistant_text=assistant_text,
+            tool_names=tool_names,
+        )
+        if not decision.should_continue:
+            log.info(
+                "Pre-exit: allowing exit after intent gate mode=%s confidence=%.2f reason=%s",
+                decision.mode,
+                decision.confidence,
+                decision.reason,
+            )
+            return None
 
         # Gate 1: Agent hasn't done ANY work — force it to start
         if not has_worked:
-            if _allows_text_only_exit(task_text):
-                log.info("Pre-exit: allowing no-tool response for text-only task")
-                return None
             log.warning(f"Pre-exit: agent wants to stop but has done NO work (attempt {self._exit_attempts})")
-            if self._exit_attempts <= 3:  # give up to 3 chances to start working
+            if self._exit_attempts == 1:
                 return (
-                    "[SYSTEM] You have NOT completed the task. You have not executed any commands "
-                    "or written any files yet.\n"
-                    "You MUST use run_bash to execute commands and write_file to create output files.\n"
-                    "Read the task requirements again and START WORKING. Do not just describe "
-                    "what you would do — actually DO it using the available tools."
+                    "[SYSTEM] The user request appears to require workspace action before answering.\n"
+                    "Continue with the smallest relevant tool action, such as inspecting files or "
+                    "running a check. Edit or create files only when the user explicitly requested "
+                    "a change or a file edit is necessary to satisfy the task."
                 )
-            # After 3 attempts with no work, give up
-            log.error("Pre-exit: agent refused to work after 3 attempts")
             return None
 
         # Gate 2: Agent has done work, first exit → force verification
@@ -308,150 +351,92 @@ def _is_middleware_user_message(content: str) -> bool:
     return stripped.startswith(("[SYSTEM]", "[blocked]"))
 
 
-def _allows_text_only_exit(task_text: str) -> bool:
-    """Return True when the current turn is plainly conversational/read-only."""
-    text = " ".join(str(task_text or "").strip().split())
-    if not text:
-        return False
+def classify_exit_intent(
+    *,
+    user_task: str,
+    assistant_text: str = "",
+    tool_names: list[str] | None = None,
+) -> ExitIntentDecision:
+    """Use a small LLM gate to decide whether the agent should continue.
 
-    lowered = text.lower()
-    if _is_identity_or_greeting(text, lowered):
-        return True
-    if _is_capability_question(text, lowered):
-        return True
-    if _has_actionable_workspace_intent(text, lowered):
-        return False
-    if _looks_like_question(text, lowered) and len(text) <= 160:
-        return True
-    if lowered.startswith(("explain ", "what is ", "what are ", "why ", "tell me ")):
-        return True
-    if text.startswith(("解释", "说明", "介绍", "什么是", "为什么")):
-        return True
-    return False
+    The safe fallback is intentionally permissive: if the gate is unavailable,
+    ambiguous, or malformed, allow the assistant to exit instead of pushing it
+    into unnecessary tool calls.
+    """
+    user_task = str(user_task or "").strip()
+    if not user_task:
+        return ExitIntentDecision(mode="exit", reason="empty user task")
 
+    try:
+        from ... import config
+        from ...agent.providers import ProviderAdapter, get_client
 
-def _is_identity_or_greeting(text: str, lowered: str) -> bool:
-    normalized = text.strip(" \t\r\n?？!！.。")
-    if normalized in {
-        "你是谁",
-        "你是誰",
-        "你是什么",
-        "你是干什么的",
-        "你能做什么",
-        "你好",
-        "嗨",
-        "哈喽",
-        "hello",
-        "hi",
-        "hey",
-        "who are you",
-        "what are you",
-        "what can you do",
-    }:
-        return True
-    return bool(re.fullmatch(r"(hi|hello|hey)[!. ]*", lowered))
-
-
-def _is_capability_question(text: str, lowered: str) -> bool:
-    if "?" not in text and "？" not in text:
-        return False
-    if any(phrase in lowered for phrase in ("can you", "could you", "what can you do", "who are you")):
-        return True
-    return "你" in text and any(term in text for term in ("能", "可以", "会", "會")) and any(
-        term in text for term in ("做什么", "干什么", "修改", "写代码", "运行", "测试", "帮我")
-    )
-
-
-def _has_actionable_workspace_intent(text: str, lowered: str) -> bool:
-    chinese_action_terms = (
-        "修复",
-        "修改",
-        "改动",
-        "调整",
-        "实现",
-        "新增",
-        "添加",
-        "创建",
-        "生成",
-        "写",
-        "运行",
-        "执行",
-        "测试",
-        "检查",
-        "查看",
-        "审查",
-        "评审",
-        "调试",
-        "诊断",
-        "构建",
-        "安装",
-        "删除",
-        "提交",
-        "部署",
-        "打开",
-        "读取",
-        "搜索",
-        "列出",
-    )
-    english_action_terms = (
-        "fix",
-        "modify",
-        "edit",
-        "implement",
-        "add",
-        "create",
-        "write",
-        "run",
-        "execute",
-        "test",
-        "check",
-        "inspect",
-        "review",
-        "debug",
-        "diagnose",
-        "build",
-        "install",
-        "remove",
-        "delete",
-        "commit",
-        "deploy",
-        "open",
-        "read",
-        "search",
-        "list",
-        "refactor",
-        "update",
-    )
-    if any(term in text for term in chinese_action_terms):
-        return True
-    if re.search(r"\b(" + "|".join(re.escape(term) for term in english_action_terms) + r")\b", lowered):
-        return True
-
-    local_terms = (
-        "repo",
-        "repository",
-        "workspace",
-        "project",
-        "file",
-        "path",
-        "codebase",
-        "仓库",
-        "工作区",
-        "项目",
-        "文件",
-        "目录",
-        "代码库",
-    )
-    local_references = ("this", "current", "local", "here", "这个", "当前", "本地", "这里")
-    if any(term in lowered or term in text for term in local_terms) and any(
-        ref in lowered or ref in text for ref in local_references
-    ):
-        return True
-
-    return bool(re.search(r"([A-Za-z]:\\|[/\\].+\.[A-Za-z0-9]{1,8}\b|\b\w+\.(py|js|ts|tsx|jsx|json|md|toml|yaml|yml|txt)\b)", text))
+        profile = config.resolve_model_profile("fast")
+        adapter = ProviderAdapter(profile.provider)
+        response = get_client().chat.completions.create(**adapter.chat_kwargs(
+            profile=profile,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an exit gate for a local coding agent. Decide whether "
+                        "the agent may stop now or should continue with tools.\n"
+                        "Return JSON only with keys: mode, confidence, reason.\n"
+                        "mode must be exactly \"exit\" or \"continue\".\n"
+                        "Be lenient: choose exit for greetings, identity/capability "
+                        "questions, conceptual explanations, general advice, and anything "
+                        "that can be honestly answered from the conversation.\n"
+                        "Choose continue only when the user's request cannot be satisfied "
+                        "without actual local workspace action: inspecting repository state, "
+                        "running commands/tests/builds, editing code, producing an on-disk "
+                        "artifact, or verifying a concrete local result.\n"
+                        "Do not require file edits merely because tools may be useful. "
+                        "If ambiguous, choose exit."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "user_task": user_task,
+                            "assistant_about_to_send": str(assistant_text or "")[:2000],
+                            "tools_used_this_turn": list(tool_names or []),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            max_tokens=160,
+        ))
+        raw = response.choices[0].message.content or ""
+        return _parse_exit_intent_decision(raw)
+    except Exception as exc:
+        log.info("Pre-exit intent gate failed open: %s", exc)
+        return ExitIntentDecision(mode="exit", reason="intent gate unavailable")
 
 
-def _looks_like_question(text: str, lowered: str) -> bool:
-    if text.endswith(("?", "？")):
-        return True
-    return lowered.startswith(("who ", "what ", "why ", "how ", "when ", "where ", "which "))
+def _parse_exit_intent_decision(raw: str) -> ExitIntentDecision:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return ExitIntentDecision(mode="exit", reason="invalid gate JSON")
+
+    mode = str(data.get("mode") or "exit").strip().lower()
+    if mode not in {"exit", "continue"}:
+        mode = "exit"
+    try:
+        confidence = float(data.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    reason = str(data.get("reason") or "").strip()[:300]
+    return ExitIntentDecision(mode=mode, confidence=confidence, reason=reason)

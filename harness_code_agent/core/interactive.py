@@ -445,6 +445,7 @@ class InteractiveSession:
             AssistantMessageEvent(
                 text=text,
                 turn=self.turn_count,
+                streamed=streamed,
             ).to_event()
         )
         self.last_user_task = user_prompt

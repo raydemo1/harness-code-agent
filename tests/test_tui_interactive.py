@@ -387,6 +387,61 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertIn("world", rendered)
         _run(_test())
 
+    def test_streamed_assistant_message_does_not_duplicate_streamed_block(self):
+        async def _test():
+            app = self._make_app()
+            async with app.run_test() as pilot:
+                from harness_code_agent.tui.app import SessionEvent, StreamDelta
+
+                app.post_message(StreamDelta("Hello "))
+                await pilot.pause(0.01)
+                app.post_message(StreamDelta("world"))
+                await pilot.pause(0.01)
+
+                event = SimpleNamespace(
+                    to_dict=lambda: {
+                        "type": "assistant_message",
+                        "payload": {"turn": 1, "text": "Hello world", "streamed": True},
+                    },
+                )
+                app.post_message(SessionEvent(event))
+                await pilot.pause(0.01)
+
+                assistant_blocks = [
+                    block
+                    for block in app.state.blocks
+                    if block.kind == "assistant" and block.body == "Hello world"
+                ]
+                self.assertEqual(len(assistant_blocks), 1)
+        _run(_test())
+
+    def test_submit_complete_before_assistant_event_does_not_duplicate_streamed_text(self):
+        async def _test():
+            app = self._make_app()
+            async with app.run_test() as pilot:
+                from harness_code_agent.tui.app import SessionEvent, StreamDelta, SubmitComplete
+
+                app.post_message(StreamDelta("Hello world"))
+                await pilot.pause(0.01)
+                app.post_message(SubmitComplete(SimpleNamespace(notice="", checkpoint="")))
+                await pilot.pause(0.01)
+                event = SimpleNamespace(
+                    to_dict=lambda: {
+                        "type": "assistant_message",
+                        "payload": {"turn": 1, "text": "Hello world"},
+                    },
+                )
+                app.post_message(SessionEvent(event))
+                await pilot.pause(0.01)
+
+                assistant_blocks = [
+                    block
+                    for block in app.state.blocks
+                    if block.kind == "assistant" and block.body == "Hello world"
+                ]
+                self.assertEqual(len(assistant_blocks), 1)
+        _run(_test())
+
     # ── Approval panel ──────────────────────────────────────────────────────
 
     def test_approval_panel_replaces_input(self):

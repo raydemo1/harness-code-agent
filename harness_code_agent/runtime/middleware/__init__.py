@@ -10,6 +10,7 @@ from .task_tracking import TaskTrackingEnforcementMiddleware, TaskTrackingMiddle
 from .time_budget import TimeBudgetMiddleware
 from .tool_policy import ToolPolicyMiddleware
 from .verification import (
+    ExitIntentDecision,
     StaticVerifierMiddleware,
     PreExitVerificationMiddleware,
     VERDICT_BLOCK,
@@ -32,6 +33,7 @@ __all__ = [
     "TaskTrackingMiddleware",
     "TimeBudgetMiddleware",
     "ToolPolicyMiddleware",
+    "ExitIntentDecision",
     "StaticVerifierMiddleware",
     "PreExitVerificationMiddleware",
     "VERDICT_BLOCK",

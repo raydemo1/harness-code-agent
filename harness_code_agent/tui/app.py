@@ -346,8 +346,8 @@ class TuiApp(App):
         block = self.state.apply_event(event)
         render_block = None if event_type == "assistant_message" and self._streaming_current_response else block
 
-        self.state.add_block(block)
-        if render_block is not None:
+        added = self._add_block_if_new(block)
+        if render_block is not None and added:
             transcript = self.query_one("#transcript", TranscriptView)
             transcript.append_block(render_block)
 
@@ -411,8 +411,7 @@ class TuiApp(App):
         ):
             transcript = self.query_one("#transcript", TranscriptView)
             active_block = transcript.flush_streaming()
-            if active_block is not None and not self._last_block_matches(active_block):
-                self.state.add_block(active_block)
+            self._add_block_if_new(active_block)
             self._streaming_current_response = False
             self._stream_header_printed = False
             self._redraw_transcript()
@@ -430,10 +429,10 @@ class TuiApp(App):
             self._streaming_current_response = False
             self._stream_header_printed = False
 
-        self.state.add_block(block)
+        added = self._add_block_if_new(block)
         if streamed_assistant_message:
             self._redraw_transcript()
-        elif render_block is not None:
+        elif render_block is not None and added:
             transcript = self.query_one("#transcript", TranscriptView)
             transcript.append_block(render_block)
 
@@ -445,8 +444,9 @@ class TuiApp(App):
         try:
             transcript = self.query_one("#transcript", TranscriptView)
             block = transcript.flush_streaming()
-            if block is not None and not self._last_block_matches(block):
-                self.state.add_block(block)
+            self._streaming_current_response = False
+            self._stream_header_printed = False
+            if self._add_block_if_new(block):
                 self._redraw_transcript()
         except NoMatches:
             self._submitting = False
@@ -464,8 +464,9 @@ class TuiApp(App):
         try:
             transcript = self.query_one("#transcript", TranscriptView)
             block = transcript.flush_streaming()
-            if block is not None and not self._last_block_matches(block):
-                self.state.add_block(block)
+            self._streaming_current_response = False
+            self._stream_header_printed = False
+            self._add_block_if_new(block)
         except NoMatches:
             self._submitting = False
             return
@@ -480,8 +481,9 @@ class TuiApp(App):
         try:
             transcript = self.query_one("#transcript", TranscriptView)
             block = transcript.flush_streaming()
-            if block is not None and not self._last_block_matches(block):
-                self.state.add_block(block)
+            self._streaming_current_response = False
+            self._stream_header_printed = False
+            self._add_block_if_new(block)
         except NoMatches:
             self._submitting = False
             return
@@ -699,6 +701,17 @@ class TuiApp(App):
             return False
         last = self.state.blocks[-1]
         return last.kind == block.kind and last.body == block.body
+
+    def _add_block_if_new(self, block: TranscriptBlock | None) -> bool:
+        if block is None:
+            return False
+        if self._last_block_matches(block):
+            last = self.state.blocks[-1]
+            if last.turn is None and block.turn is not None:
+                last.turn = block.turn
+            return False
+        self.state.add_block(block)
+        return True
 
     @staticmethod
     def _should_show_checkpoint(checkpoint: str) -> bool:

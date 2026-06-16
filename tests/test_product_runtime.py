@@ -1617,6 +1617,15 @@ class ProductRuntimeTests(unittest.TestCase):
             "task_outcome",
         })
 
+    def test_assistant_message_event_records_streamed_flag_when_present(self):
+        from harness_code_agent.sessions.events import AssistantMessageEvent
+
+        event = AssistantMessageEvent(text="done", turn=1, streamed=True).to_event()
+
+        self.assertEqual(event.payload["text"], "done")
+        self.assertEqual(event.payload["turn"], 1)
+        self.assertTrue(event.payload["streamed"])
+
     def test_failure_classification_uses_stable_sources_before_text(self):
         from harness_code_agent.runtime.tool_result import ToolResult
         from harness_code_agent.sessions.events import classify_tool_failure
