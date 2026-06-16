@@ -5,7 +5,7 @@ Harbor has two agent types:
   - External (BaseAgent): agent runs outside container, sends commands via environment.exec()
   - Installed (BaseInstalledAgent): agent is installed inside the container
 
-We use Installed agent — the hca CLI module runs natively inside the
+We use Installed agent — a small headless runner executes natively inside the
 container, so run_bash just works as subprocess without any bridging.
 
 Usage:
@@ -30,11 +30,16 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
+import tempfile
 from pathlib import Path
 
 from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class HarnessAgent(BaseInstalledAgent):
@@ -58,41 +63,29 @@ class HarnessAgent(BaseInstalledAgent):
         1. Ensure git exists (apt-get only for git, which is tiny and fast)
         2. Clone repo (includes vendor_wheels/)
         3. If no python3 → download standalone python from GitHub (~30MB)
-        4. Install openai from vendored wheels (fully offline)
+        4. Install only the lightweight runtime deps needed by the headless
+           terminal runner. Avoid full requirements.txt because eval/UI deps
+           make per-task container setup slow.
         """
-        # Step 1: Get harness code into container
-        # Try git clone first, fall back to curl/wget tarball if no git
+        # Step 1: Get the current local harness code into the container so evals
+        # test this checkout, including uncommitted adapter/runtime changes.
+        await self.exec_as_root(environment, command="rm -rf /home/user/harness-agent && mkdir -p /home/user/harness-agent")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot = Path(temp_dir) / "harness-agent"
+            _copy_repo_snapshot(PROJECT_ROOT, snapshot)
+            await environment.upload_dir(snapshot, "/home/user/harness-agent")
+
+        # Step 2: Ensure git exists. Some minimal Terminal-Bench images omit it,
+        # but the session store uses git for lightweight workspace snapshots.
         await self.exec_as_root(
             environment,
             command=(
-                # Ensure we have a download tool (curl or wget)
-                # Most images have at least one; if not, install curl
-                "( command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || "
-                "  ( for i in $(seq 1 15); do "
-                "      fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break; sleep 2; "
-                "    done && "
-                "    apt-get update -qq 2>/dev/null && "
-                "    apt-get install -y -qq curl 2>/dev/null ) "
-                ") || true"
-            ),
-        )
-
-        await self.exec_as_agent(
-            environment,
-            command=(
-                "if [ -d /home/user/harness-agent ]; then "
-                "  echo 'harness-agent already exists'; "
-                "elif command -v git >/dev/null 2>&1; then "
-                "  git clone --depth 1 "
-                "    https://github.com/lyxhnu/multi-agent.git "
-                "    /home/user/harness-agent; "
-                "else "
-                "  echo 'No git, downloading tarball...' && "
-                "  mkdir -p /home/user/harness-agent && "
-                "  URL='https://github.com/lyxhnu/multi-agent/archive/refs/heads/main.tar.gz' && "
-                "  ( curl -sL \"$URL\" 2>/dev/null || wget -qO- \"$URL\" 2>/dev/null ) "
-                "    | tar -xz --strip-components=1 -C /home/user/harness-agent; "
-                "fi"
+                "command -v git >/dev/null 2>&1 || "
+                "( command -v apt-get >/dev/null 2>&1 && "
+                "  apt-get update -qq && apt-get install -y -qq git ) || "
+                "( command -v apk >/dev/null 2>&1 && apk add --no-cache git ) || "
+                "( command -v yum >/dev/null 2>&1 && yum install -y -q git ) || "
+                "echo 'FATAL: git is not installed and no supported package manager was found'"
             ),
         )
 
@@ -143,35 +136,35 @@ class HarnessAgent(BaseInstalledAgent):
             ),
         )
 
-        # Step 4: Install openai from vendored wheels (fully offline)
-        # Use /usr/local/bin/python3 explicitly to ensure we target the
-        # correct interpreter (the standalone 3.12 if we just installed it,
-        # not a stale system python that might still be on PATH).
+        # Step 4: Install runtime dependencies. Keep this intentionally small:
+        # the agent's terminal profile needs the OpenAI stack plus psutil for
+        # shell job management. Full requirements.txt includes eval/UI/browser
+        # packages and can exceed Harbor's setup timeout inside every task.
         await self.exec_as_root(
             environment,
             command=(
                 "PYTHON=$(command -v python3); "
-                # Verify openai actually imports cleanly — a stale install
-                # against an old Python will fail at import time even though
-                # the package directory exists.
-                "$PYTHON -c 'import openai; print(\"openai OK\")' 2>/dev/null || "
-                # Try pip with vendored wheels
-                "( $PYTHON -m pip install --break-system-packages --no-index --force-reinstall "
-                "  --find-links=/home/user/harness-agent/vendor_wheels "
-                "  openai 2>/dev/null && "
-                "  $PYTHON -c 'import openai' 2>/dev/null ) || "
-                "( pip3 install --break-system-packages --no-index --force-reinstall "
-                "  --find-links=/home/user/harness-agent/vendor_wheels "
-                "  openai 2>/dev/null && "
-                "  $PYTHON -c 'import openai' 2>/dev/null ) || "
-                # No pip at all — unzip wheels directly into the new python's site-packages
+                "$PYTHON -m ensurepip --upgrade >/dev/null 2>&1 || true; "
+                "$PYTHON -m pip install --break-system-packages --no-index --force-reinstall -q "
+                "  --find-links=/home/user/harness-agent/vendor_wheels openai && "
+                "( $PYTHON -m pip install --break-system-packages -q 'psutil>=5.9.8,<8' || "
+                "  $PYTHON -m pip install --break-system-packages -q "
+                "    -i https://pypi.org/simple 'psutil>=5.9.8,<8' || "
+                "  $PYTHON -m pip install --break-system-packages -q "
+                "    -i https://pypi.tuna.tsinghua.edu.cn/simple 'psutil>=5.9.8,<8' ) && "
+                "$PYTHON -c 'import openai, psutil' || "
                 "( SITE=$($PYTHON -c 'import site; print(site.getsitepackages()[0])') && "
                 "  mkdir -p \"$SITE\" && "
                 "  for whl in /home/user/harness-agent/vendor_wheels/*.whl; do "
                 "    $PYTHON -m zipfile -e \"$whl\" \"$SITE\" 2>/dev/null; "
                 "  done && "
-                "  $PYTHON -c 'import openai; print(\"openai installed via wheel unzip\")' ) || "
-                "echo 'FATAL: failed to install openai'"
+                "  $PYTHON -m pip install --break-system-packages -q "
+                "    -i https://pypi.tuna.tsinghua.edu.cn/simple 'psutil>=5.9.8,<8' && "
+                "  $PYTHON -c 'import openai, psutil; print(\"minimal harness deps installed\")' ) || "
+                "( command -v apt-get >/dev/null 2>&1 && "
+                "  apt-get update -qq && apt-get install -y -qq python3-psutil && "
+                "  $PYTHON -c 'import openai, psutil' ) || "
+                "( echo 'FATAL: failed to install harness dependencies'; exit 1 )"
             ),
         )
 
@@ -185,26 +178,68 @@ class HarnessAgent(BaseInstalledAgent):
         """Run our harness with --profile terminal on the given task."""
         escaped = shlex.quote(instruction)
 
-        # Build env vars string for the command
-        env_vars = []
-        for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "HARNESS_MODEL"):
+        # Pass secrets through Harbor's env channel instead of embedding them
+        # in the logged shell command.
+        env_vars = {}
+        for key in (
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "HARNESS_PROVIDER",
+            "HARNESS_MODEL",
+            "HARNESS_MODEL_INTENSITY",
+            "HARNESS_MODEL_FAST",
+            "HARNESS_MODEL_NORMAL",
+            "HARNESS_MODEL_HARD",
+            "HARNESS_MODEL_MAX",
+        ):
             val = os.environ.get(key)
             if val:
-                env_vars.append(f"{key}={shlex.quote(val)}")
-
-        env_prefix = " ".join(env_vars)
+                env_vars[key] = val
 
         # Run hca from the task workspace while importing the cloned agent code.
         await self.exec_as_agent(
             environment,
             command=(
-                f"cd /app && "
+                f"WORKSPACE=/app; "
+                f"[ -d \"$WORKSPACE\" ] || WORKSPACE=/workspace; "
+                f"[ -d \"$WORKSPACE\" ] || WORKSPACE=/root; "
+                f"[ -d \"$WORKSPACE\" ] || WORKSPACE=/; "
+                f"cd \"$WORKSPACE\" && "
                 f"PYTHONPATH=/home/user/harness-agent "
-                f"{env_prefix} "
-                f"python3 -m harness_code_agent.cli --profile terminal {escaped}"
+                f"python3 /home/user/harness-agent/eval/benchmarks/hca_terminal_runner.py "
+                f"--workspace \"$WORKSPACE\" {escaped}"
             ),
+            env=env_vars,
         )
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         """Called after run() completes. Could parse logs if needed."""
         pass
+
+
+def _copy_repo_snapshot(source: Path, dest: Path) -> None:
+    source = source.resolve()
+
+    def ignore(path: str, names: list[str]) -> set[str]:
+        current = Path(path).resolve()
+        ignored: set[str] = set()
+        for name in names:
+            item = current / name
+            rel = item.relative_to(source).as_posix()
+            if name in {".git", ".pytest_cache", "__pycache__"}:
+                ignored.add(name)
+            elif name == ".harbor" and current == source:
+                ignored.add(name)
+            elif name == "jobs" and current == source:
+                ignored.add(name)
+            elif name == "workspace" and current == source:
+                ignored.add(name)
+            elif rel == "eval/results":
+                ignored.add(name)
+            elif name == ".env" or name.startswith(".env."):
+                ignored.add(name)
+            elif name.endswith(".pyc"):
+                ignored.add(name)
+        return ignored
+
+    shutil.copytree(source, dest, ignore=ignore)

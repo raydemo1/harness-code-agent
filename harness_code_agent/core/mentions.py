@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,11 @@ class MentionResolutionError(ValueError):
 
 
 def parse_mentions(text: str) -> list[Mention]:
+    mode = os.environ.get("HARNESS_MENTION_MODE", "explicit").strip().lower()
+    if mode == "off":
+        return []
+    if mode != "explicit":
+        mode = "explicit"
     mentions: list[Mention] = []
     seen: set[tuple[str, str]] = set()
     for raw, token in _iter_mention_tokens(text):
@@ -49,8 +55,7 @@ def parse_mentions(text: str) -> list[Mention]:
             target = token.removeprefix("skill:")
             kind = "skill"
         else:
-            target = token
-            kind = "file"
+            continue
         key = (kind, target)
         if key in seen:
             continue
@@ -68,36 +73,19 @@ def _iter_mention_tokens(text: str):
             continue
         start = i
         i += 1
-        if i < n and text[i] == '"':
-            i += 1
-            chars = []
-            escaped = False
-            while i < n:
-                ch = text[i]
-                if escaped:
-                    chars.append(ch)
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == '"':
-                    i += 1
-                    break
-                else:
-                    chars.append(ch)
-                i += 1
-            token = "".join(chars).strip()
-            raw = text[start:i]
-            if token:
-                yield raw, token
-            continue
-
         typed_prefix = None
         for prefix in ("file:", "skill:", "session:"):
-            if text.startswith(prefix + '"', i):
+            if text.startswith(prefix, i):
                 typed_prefix = prefix
                 break
-        if typed_prefix is not None:
-            i += len(typed_prefix) + 1
+        if typed_prefix is None:
+            while i < n and not text[i].isspace():
+                i += 1
+            continue
+
+        i += len(typed_prefix)
+        if i < n and text[i] == '"':
+            i += 1
             chars = []
             escaped = False
             while i < n:
@@ -125,8 +113,8 @@ def _iter_mention_tokens(text: str):
         token = text[token_start:i].rstrip(".,;:!?)]}")
         if not token or token.startswith("@"):
             continue
-        raw = "@" + token
-        yield raw, token
+        raw = text[start:i]
+        yield raw, typed_prefix + token
 
 
 

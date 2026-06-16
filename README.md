@@ -38,7 +38,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 │   └── profiles/           # 不同任务场景的 profile
 ├── skills/                 # agent 可读取的本地技能说明
 ├── eval/                   # 评估脚本、任务集、结果、benchmark adapter
-│   ├── scripts/            # cache / memory / latency / tbench 评估入口和报告汇总
+│   ├── scripts/            # memory/cache、Terminal-Bench、Claw-SWE-Bench 独立评估入口和报告汇总
 │   ├── tasks/              # 固定轻量评估任务配置
 │   ├── benchmarks/         # Terminal-Bench launcher 和 Harbor adapter
 │   └── results/            # 真实运行产物

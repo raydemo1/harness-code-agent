@@ -225,6 +225,43 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertIn("slow", result_outputs[0])
         self.assertIn("fast", result_outputs[1])
 
+    def test_post_tool_user_injection_waits_until_all_tool_results(self):
+        registry = tools.ToolRegistry()
+
+        def read_tool(label):
+            return ToolResult(tool="parallel_read", status="success", output=f"ok {label}")
+
+        registry.register(_schema("parallel_read"), read_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+
+        class NudgeMiddle(AgentMiddleware):
+            def post_tool(self, tool_name, tool_args, result, messages, runtime_state=None, agent_name=None):
+                if tool_args.get("label") == "a":
+                    return "[SYSTEM] nudge after a"
+                return None
+
+        tool_calls = [
+            _tool_call("tc_a", "parallel_read", {"label": "a"}),
+            _tool_call("tc_b", "parallel_read", {"label": "b"}),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation, _context = _conversation_with_registry(Path(tmp), registry, tool_calls, middlewares=[NudgeMiddle()])
+            with (
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+            ):
+                conversation.run_until_idle()
+
+        roles_after_assistant = [
+            msg["role"]
+            for msg in conversation.messages
+            if msg.get("role") in {"assistant", "tool", "user"}
+        ]
+        self.assertEqual(roles_after_assistant[:4], ["assistant", "tool", "tool", "user"])
+        tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
+        self.assertEqual([msg["tool_call_id"] for msg in tool_messages], ["tc_a", "tc_b"])
+        self.assertIn("nudge after a", conversation.messages[-2]["content"])
+
     def test_tool_search_reveals_deferred_schema_for_next_iteration(self):
         registry = tools.BUILTIN_TOOL_REGISTRY.copy()
         registry.register(

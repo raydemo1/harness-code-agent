@@ -23,6 +23,8 @@ def resolve_harbor_executable(env: dict[str, str]) -> str:
         return harbor_path
 
     candidates = [
+        Path(env.get("USERPROFILE", "")) / ".local" / "bin" / "harbor.exe",
+        Path(env.get("USERPROFILE", "")) / ".local" / "bin" / "harbor",
         Path(env.get("APPDATA", "")) / "Python" / "Python312" / "Scripts" / "harbor.exe",
         Path(env.get("USERPROFILE", "")) / "AppData" / "Roaming" / "Python" / "Python312" / "Scripts" / "harbor.exe",
     ]

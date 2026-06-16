@@ -127,13 +127,13 @@ class TuiTests(unittest.TestCase):
         self.assertIsNone(screen._current_session_id())
         self.assertIn("No active session yet", screen._current_session_body())
 
-    def test_quoted_file_mention_resolves_paths_with_spaces(self):
+    def test_explicit_quoted_file_mention_resolves_paths_with_spaces(self):
         Path(self.temp_dir, "space name.md").write_text("hello space\n", encoding="utf-8")
         store = SessionStore(Path(self.temp_dir) / ".harness")
 
-        mentions = parse_mentions('read @"space name.md" now')
+        mentions = parse_mentions('read @file:"space name.md" now')
         resolved = resolve_mentions(
-            'read @"space name.md" now',
+            'read @file:"space name.md" now',
             workspace_root=self.temp_dir,
             session_store=store,
         )

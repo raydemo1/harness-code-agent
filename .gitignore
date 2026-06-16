@@ -18,6 +18,8 @@ htmlcov/
 .agents/
 .claude/
 .codex/
+.harbor/
+jobs/
 
 
 # Virtual environments

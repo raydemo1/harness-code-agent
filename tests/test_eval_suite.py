@@ -77,25 +77,43 @@ class EvalSuiteTests(unittest.TestCase):
             self.assertIn(task, metadata)
             self.assertLessEqual(float(metadata[task]["agent_timeout_sec"]), 1800.0)
 
-    def test_run_eval_suite_dry_run_defaults_to_8task_and_can_select_24task(self):
-        from eval.scripts.run_eval_suite import _dry_run_plan, _suite_names, parse_args
+    def test_terminal_bench_eval_dry_run_defaults_to_8task_and_can_select_24task(self):
+        from eval.scripts.run_terminal_bench_eval import _dry_run_plan, parse_args
 
-        default_args = parse_args(["--suites", "tbench", "--dry-run"])
-        default_plan = _dry_run_plan(_suite_names(default_args.suites), default_args)
+        default_args = parse_args(["--dry-run"])
+        default_plan = _dry_run_plan(default_args)
         self.assertEqual(default_plan["terminal_bench_task_set"], "8task")
         self.assertEqual(len(default_plan["terminal_bench_tasks"]), 8)
 
-        larger_args = parse_args(["--suites", "tbench", "--dry-run", "--tbench-task-set", "24task"])
-        larger_plan = _dry_run_plan(_suite_names(larger_args.suites), larger_args)
+        larger_args = parse_args(["--dry-run", "--tbench-task-set", "24task"])
+        larger_plan = _dry_run_plan(larger_args)
         self.assertEqual(larger_plan["terminal_bench_task_set"], "24task")
         self.assertEqual(len(larger_plan["terminal_bench_tasks"]), 24)
 
+    def test_claw_swe_bench_lite80_config_is_fixed(self):
+        payload = json.loads(Path("eval/tasks/claw_swe_bench_lite80.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["suite"], "claw_swe_bench_lite80")
+        self.assertEqual(payload["task_set"], "lite80")
+        self.assertEqual(payload["benchmark_name"], "Claw-SWE-Bench Lite80")
+        self.assertEqual(payload["dataset_name"], "TokenRhythm/Claw-SWE-Bench")
+        self.assertEqual(payload["dataset_config"], "lite")
+        self.assertEqual(payload["split"], "test")
+
+    def test_claw_swe_bench_eval_dry_run_includes_lite80(self):
+        from eval.scripts.run_claw_swe_bench_eval import _dry_run_plan, parse_args
+
+        args = parse_args(["--dry-run", "--claw-limit", "3"])
+        plan = _dry_run_plan(args)
+
+        self.assertEqual(plan["claw_swe_bench_task_set"], "lite80")
+        self.assertEqual(plan["claw_swe_bench_benchmark_name"], "Claw-SWE-Bench Lite80")
+        self.assertEqual(plan["claw_swe_bench_dataset"]["dataset_name"], "TokenRhythm/Claw-SWE-Bench")
+        self.assertEqual(plan["claw_swe_bench_dataset"]["limit"], 3)
+
     def test_run_tbench_suite_records_per_task_category_results(self):
-        from eval.scripts.run_eval_suite import parse_args, run_tbench_suite
+        from eval.scripts.run_terminal_bench_eval import parse_args, run_tbench_suite
 
         args = parse_args([
-            "--suites",
-            "tbench",
             "--tbench-task-set",
             "8task",
             "--output-root",
@@ -109,7 +127,7 @@ class EvalSuiteTests(unittest.TestCase):
             returncode = 1 if task == "overfull-hbox" else 0
             return subprocess.CompletedProcess(command, returncode, stdout=f"stdout {task}", stderr=f"stderr {task}")
 
-        with patch("eval.scripts.run_eval_suite.subprocess.run", side_effect=fake_run) as run_mock:
+        with patch("eval.scripts.run_terminal_bench_eval.subprocess.run", side_effect=fake_run) as run_mock:
             run_dir = run_tbench_suite(args)
 
         self.assertEqual(run_mock.call_count, 8)
@@ -121,6 +139,28 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertEqual(summary["category_results"]["debugging"]["task_count"], 3)
         self.assertEqual(summary["category_results"]["debugging"]["passed"], 2)
 
+    def test_run_claw_suite_invokes_launcher(self):
+        from eval.scripts.run_claw_swe_bench_eval import parse_args, run_claw_suite
+
+        args = parse_args([
+            "--claw-limit",
+            "2",
+            "--output-root",
+            str(self.root / "results"),
+            "--run-name",
+            "unit",
+            "--claw-no-install-deps",
+        ])
+
+        with patch("eval.scripts.run_claw_swe_bench_eval.subprocess.run") as run_mock:
+            run_claw_suite(args)
+
+        command = run_mock.call_args.args[0]
+        self.assertIn("run_claw_swe_bench.py", command[1])
+        self.assertIn("--limit", command)
+        self.assertIn("2", command)
+        self.assertIn("--no-install-deps", command)
+
     def test_summarize_eval_writes_resume_report_from_suite_summaries(self):
         from eval.scripts.summarize_eval import summarize_result_root, write_reports
 
@@ -129,7 +169,8 @@ class EvalSuiteTests(unittest.TestCase):
         memory_dir = results / "2026-06-08_memory_ab"
         latency_dir = results / "2026-06-08_latency"
         tbench_dir = results / "2026-06-08_tbench"
-        for path in (cache_dir, memory_dir, latency_dir, tbench_dir):
+        claw_dir = results / "2026-06-08_claw"
+        for path in (cache_dir, memory_dir, latency_dir, tbench_dir, claw_dir):
             path.mkdir(parents=True)
 
         (cache_dir / "summary.json").write_text(json.dumps({
@@ -172,6 +213,17 @@ class EvalSuiteTests(unittest.TestCase):
                 "software-engineering": {"task_count": 6, "passed": 5, "pass_rate": 5 / 6},
             },
         }), encoding="utf-8")
+        (claw_dir / "summary.json").write_text(json.dumps({
+            "suite": "claw_swe_bench",
+            "benchmark_name": "Claw-SWE-Bench Lite80",
+            "task_set": "lite80",
+            "task_count": 80,
+            "patch_collected": 64,
+            "patch_collection_rate": 0.8,
+            "patch_empty": 4,
+            "model": "deepseek-v4-flash",
+            "token_totals": {"total_tokens": 123456},
+        }), encoding="utf-8")
 
         summary = summarize_result_root(results)
         out_dir = self.root / "out"
@@ -185,9 +237,39 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("Memory A/B", resume)
         self.assertIn("p95", resume)
         self.assertIn("debugging 4/5", resume)
+        self.assertIn("Claw-SWE-Bench Lite80", resume)
+        self.assertIn("64/80 patches", resume)
+
+    def test_harness_claw_adapter_builds_container_args_and_command(self):
+        from eval.benchmarks.harness_claw_adapter import HarnessCodeAgentAdapter, _agent_command
+
+        adapter = HarnessCodeAgentAdapter(
+            model="deepseek-v4-flash",
+            timeout=120,
+            max_turns=12,
+            repo_root=Path.cwd(),
+            install_deps=False,
+        )
+        args = adapter.container_run_args("example__repo-1")
+        joined = " ".join(args)
+        self.assertIn("/opt/harness-code-agent:ro", joined)
+        self.assertIn("HARNESS_WORKSPACE=/testbed", joined)
+        self.assertIn("HARNESS_MODEL=deepseek-v4-flash", joined)
+        self.assertIn("HARNESS_MODEL_HARD=deepseek-v4-flash", joined)
+        self.assertIn("HARNESS_MODEL_INTENSITY=normal", joined)
+        self.assertIn("MAX_AGENT_ITERATIONS=12", joined)
+
+        command = _agent_command(timeout=120, max_turns=12)
+        self.assertIn("PROFILE_SWE_BENCH_TASK_BUDGET=120", command)
+        self.assertIn("hca_claw_runner.py", command)
 
     def test_eval_scripts_self_test(self):
-        for script in ("eval/scripts/run_eval_suite.py", "eval/scripts/summarize_eval.py"):
+        for script in (
+            "eval/scripts/run_memory_cache_eval.py",
+            "eval/scripts/run_terminal_bench_eval.py",
+            "eval/scripts/run_claw_swe_bench_eval.py",
+            "eval/scripts/summarize_eval.py",
+        ):
             completed = subprocess.run(
                 [sys.executable, script, "--self-test"],
                 cwd=Path.cwd(),

@@ -78,6 +78,7 @@ class ToolExecutor:
         self._tool_calls: list = []
         self._block_remaining_after_index: int | None = None
         self._executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        self._deferred_user_messages: list[str] = []
 
     def execute(self, tool_calls: list) -> bool:
         self._tool_calls = list(tool_calls or [])
@@ -102,7 +103,9 @@ class ToolExecutor:
                             self._tool_calls[self._block_remaining_after_index:],
                             self.runtime_state.fallback.stop_reason,
                         )
+                    self._flush_deferred_user_messages()
                     return True
+            self._flush_deferred_user_messages()
             return False
         finally:
             self.conversation.compaction_gate.end_tool_call()
@@ -364,7 +367,7 @@ class ToolExecutor:
             exclude_ids={observation.id},
         )
         if invalidation:
-            self.conversation._append_message({"role": "user", "content": invalidation})
+            self._deferred_user_messages.append(invalidation)
 
         for mw in self.agent.middlewares:
             inject = mw.post_tool(
@@ -376,9 +379,14 @@ class ToolExecutor:
                 agent_name=self.agent.name,
             )
             if inject:
-                self.conversation._append_message({"role": "user", "content": inject})
+                self._deferred_user_messages.append(inject)
                 self.conversation.trace.middleware_inject(type(mw).__name__, "post_tool", inject)
                 break
+
+    def _flush_deferred_user_messages(self) -> None:
+        while self._deferred_user_messages:
+            content = self._deferred_user_messages.pop(0)
+            self.conversation._append_message({"role": "user", "content": content})
 
     def _reveal_tool_schemas_from_result(self, tool_result: ToolResult) -> None:
         if tool_result.tool != "tool_search":

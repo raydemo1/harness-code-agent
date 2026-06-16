@@ -1,6 +1,8 @@
 import importlib
 import os
+from pathlib import Path
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -52,39 +54,73 @@ class HarnessAgentInstallTests(unittest.IsolatedAsyncioTestCase):
         sys.modules.pop("eval.benchmarks.harbor_agent", None)
         self.module = importlib.import_module("eval.benchmarks.harbor_agent")
 
-    async def test_install_uses_user_repo_urls(self):
+    async def test_install_uploads_current_repo_snapshot(self):
         commands = []
+        uploads = []
+
+        class RecordingEnvironment:
+            async def upload_dir(self, source_dir, target_dir):
+                uploads.append((source_dir, target_dir))
 
         class RecordingAgent(self.module.HarnessAgent):
-            async def exec_as_root(self, environment, command):
+            async def exec_as_root(self, environment, command, **kwargs):
                 commands.append(("root", command))
 
-            async def exec_as_agent(self, environment, command):
+            async def exec_as_agent(self, environment, command, **kwargs):
                 commands.append(("agent", command))
 
         agent = RecordingAgent()
-        await agent.install(environment=object())
+        await agent.install(environment=RecordingEnvironment())
 
         all_commands = "\n".join(command for _, command in commands)
+        old_harness_repo = (
+            "https://github.com/" + "lazyFrogLOL" + "/" + "Harness" + "_Engineering.git"
+        )
+        old_multi_agent_repo = "https://github.com/" + "lyx" + "hnu" + "/" + "multi" + "-agent.git"
+        old_multi_agent_tarball = old_multi_agent_repo.replace(
+            ".git",
+            "/archive/refs/heads/main.tar.gz",
+        )
         self.assertNotIn(
-            "https://github.com/lazyFrogLOL/Harness_Engineering.git",
+            old_harness_repo,
             all_commands,
         )
-        self.assertIn(
-            "https://github.com/lyxhnu/multi-agent.git",
+        self.assertNotIn(
+            old_multi_agent_repo,
             all_commands,
         )
-        self.assertIn(
-            "https://github.com/lyxhnu/multi-agent/archive/refs/heads/main.tar.gz",
+        self.assertNotIn(
+            old_multi_agent_tarball,
             all_commands,
         )
+        self.assertTrue(uploads)
+        self.assertEqual(uploads[-1][1], "/home/user/harness-agent")
 
-    async def test_run_invokes_hca_cli_from_task_workspace(self):
+    async def test_snapshot_keeps_package_workspace_module(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            root.mkdir()
+            (root / "workspace").mkdir()
+            (root / "jobs").mkdir()
+            package_workspace = root / "harness_code_agent" / "workspace"
+            package_workspace.mkdir(parents=True)
+            (package_workspace / "__init__.py").write_text("", encoding="utf-8")
+
+            dest = Path(temp_dir) / "snapshot"
+            self.module._copy_repo_snapshot(root, dest)
+
+            self.assertFalse((dest / "workspace").exists())
+            self.assertFalse((dest / "jobs").exists())
+            self.assertTrue((dest / "harness_code_agent" / "workspace" / "__init__.py").exists())
+
+    async def test_run_invokes_headless_terminal_runner_from_task_workspace(self):
         commands = []
+        envs = []
 
         class RecordingAgent(self.module.HarnessAgent):
-            async def exec_as_agent(self, environment, command):
+            async def exec_as_agent(self, environment, command, env=None):
                 commands.append(command)
+                envs.append(env or {})
 
         agent = RecordingAgent()
         with patch.dict(
@@ -93,14 +129,21 @@ class HarnessAgentInstallTests(unittest.IsolatedAsyncioTestCase):
                 "OPENAI_API_KEY": "test-key",
                 "OPENAI_BASE_URL": "https://api.example.test",
                 "HARNESS_MODEL": "test-model",
+                "HARNESS_MODEL_INTENSITY": "normal",
             },
         ):
             await agent.run("fix shell", environment=object(), context=object())
 
         command = commands[-1]
-        self.assertIn("cd /app &&", command)
+        self.assertIn("WORKSPACE=/app", command)
+        self.assertIn('cd "$WORKSPACE" &&', command)
         self.assertIn("PYTHONPATH=/home/user/harness-agent", command)
-        self.assertIn("python3 -m harness_code_agent.cli --profile terminal", command)
+        self.assertIn("/home/user/harness-agent/eval/benchmarks/hca_terminal_runner.py", command)
+        self.assertIn('--workspace "$WORKSPACE"', command)
+        self.assertNotIn("python3 -m harness_code_agent.cli", command)
+        self.assertNotIn("OPENAI_API_KEY", command)
+        self.assertEqual(envs[-1]["OPENAI_API_KEY"], "test-key")
+        self.assertEqual(envs[-1]["HARNESS_MODEL_INTENSITY"], "normal")
         self.assertNotIn("HARNESS_WORKSPACE=/app", command)
 
 

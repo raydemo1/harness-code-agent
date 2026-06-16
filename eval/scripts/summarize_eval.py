@@ -24,6 +24,7 @@ class EvalSummary:
     memory: dict[str, Any] = field(default_factory=dict)
     latency: dict[str, Any] = field(default_factory=dict)
     tbench: dict[str, Any] = field(default_factory=dict)
+    claw: dict[str, Any] = field(default_factory=dict)
     source_runs: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -34,6 +35,7 @@ class EvalSummary:
             "memory": self.memory,
             "latency": self.latency,
             "tbench": self.tbench,
+            "claw": self.claw,
             "source_runs": list(self.source_runs),
         }
 
@@ -82,6 +84,8 @@ def summarize_result_root(result_root: str | Path) -> EvalSummary:
             summary.latency = _latency_summary(payload, path.parent.name)
         elif suite == "tbench":
             summary.tbench = _tbench_summary(payload, path.parent.name)
+        elif suite == "claw_swe_bench":
+            summary.claw = _claw_summary(payload, path.parent.name)
     return summary
 
 
@@ -125,6 +129,7 @@ def render_internal_report(summary: EvalSummary) -> str:
         f"| Memory A/B | {_memory_line(summary.memory)} |",
         f"| Latency | {_latency_line(summary.latency)} |",
         f"| {_tbench_label(summary.tbench)} | {_tbench_line(summary.tbench)} |",
+        f"| {_claw_label(summary.claw)} | {_claw_line(summary.claw)} |",
         "",
     ])
     return "\n".join(lines)
@@ -144,6 +149,8 @@ def render_resume_report(summary: EvalSummary) -> str:
         bullets.append("- Reported latency p50/p95/p99 from completed evaluation runs.")
     if summary.tbench:
         bullets.append(f"- Reported {_tbench_label(summary.tbench)} pass-rate results from completed benchmark runs.")
+    if summary.claw:
+        bullets.append(f"- Added Claw-SWE-Bench reporting with patch-generation and token telemetry for SWE-style harness evaluation.")
 
     lines = [
         "# Resume-Ready Agent Eval Report",
@@ -156,6 +163,7 @@ def render_resume_report(summary: EvalSummary) -> str:
         f"| Memory A/B | {_memory_line(summary.memory)} |",
         f"| Latency p95/p99 | {_latency_line(summary.latency)} |",
         f"| {_tbench_label(summary.tbench)} | {_tbench_line(summary.tbench)} |",
+        f"| {_claw_label(summary.claw)} | {_claw_line(summary.claw)} |",
         "",
         "## Mechanism Effects",
         "",
@@ -184,6 +192,8 @@ def _suite_name(payload: dict[str, Any], dirname: str) -> str:
         return "latency"
     if "tbench" in lowered or "terminal" in lowered:
         return "tbench"
+    if "claw" in lowered:
+        return "claw_swe_bench"
     return "unknown"
 
 
@@ -251,6 +261,23 @@ def _tbench_summary(payload: dict[str, Any], run_name: str) -> dict[str, Any]:
     }
 
 
+def _claw_summary(payload: dict[str, Any], run_name: str) -> dict[str, Any]:
+    token_totals = payload.get("token_totals") or {}
+    return {
+        "run": run_name,
+        "benchmark_name": str(payload.get("benchmark_name") or "Claw-SWE-Bench"),
+        "task_set": str(payload.get("task_set") or "subset"),
+        "task_count": _int(payload.get("task_count")),
+        "patch_collected": _int(payload.get("patch_collected")),
+        "failed": _int(payload.get("failed")),
+        "timed_out": _int(payload.get("timed_out")),
+        "patch_empty": _int(payload.get("patch_empty")),
+        "patch_collection_rate": _number(payload.get("patch_collection_rate")),
+        "model": str(payload.get("model") or ""),
+        "token_totals": token_totals,
+    }
+
+
 def _cache_line(data: dict[str, Any]) -> str:
     if not data:
         return "not run"
@@ -298,6 +325,30 @@ def _tbench_label(data: dict[str, Any]) -> str:
     if not data:
         return "Terminal-Bench 2.0 subset"
     return str(data.get("benchmark_name") or "Terminal-Bench 2.0 subset")
+
+
+def _claw_line(data: dict[str, Any]) -> str:
+    if not data:
+        return "not run"
+    tokens = data.get("token_totals") or {}
+    token_suffix = ""
+    total_tokens = _int(tokens.get("total_tokens"))
+    if total_tokens:
+        token_suffix = f"; tokens={total_tokens}"
+    model = str(data.get("model") or "").strip()
+    model_suffix = f"; model={model}" if model else ""
+    return (
+        f"{_int(data.get('patch_collected'))}/{_int(data.get('task_count'))} patches "
+        f"({_percent(_number(data.get('patch_collection_rate')))}), "
+        f"empty={_int(data.get('patch_empty'))}, {data.get('task_set')}"
+        f"{model_suffix}{token_suffix}"
+    )
+
+
+def _claw_label(data: dict[str, Any]) -> str:
+    if not data:
+        return "Claw-SWE-Bench"
+    return str(data.get("benchmark_name") or "Claw-SWE-Bench")
 
 
 def _category_line(category_results: dict[str, Any]) -> str:
@@ -354,7 +405,8 @@ def run_self_test() -> None:
         memory_dir = root / "memory"
         latency_dir = root / "latency"
         tbench_dir = root / "tbench"
-        for path in (cache_dir, memory_dir, latency_dir, tbench_dir):
+        claw_dir = root / "claw"
+        for path in (cache_dir, memory_dir, latency_dir, tbench_dir, claw_dir):
             path.mkdir(parents=True)
         (cache_dir / "summary.json").write_text(json.dumps({
             "scenarios": {"stable_warmup": {"first_hit_ratio": 0, "last_hit_ratio": 0.99}}
@@ -377,6 +429,17 @@ def run_self_test() -> None:
             "pass_rate": 0.75,
             "category_results": {"debugging": {"task_count": 3, "passed": 2, "pass_rate": 2 / 3}},
         }), encoding="utf-8")
+        (claw_dir / "summary.json").write_text(json.dumps({
+            "suite": "claw_swe_bench",
+            "benchmark_name": "Claw-SWE-Bench Lite80",
+            "task_set": "lite80",
+            "task_count": 2,
+            "patch_collected": 1,
+            "patch_collection_rate": 0.5,
+            "patch_empty": 1,
+            "model": "deepseek-v4-flash",
+            "token_totals": {"total_tokens": 123},
+        }), encoding="utf-8")
         summary = summarize_result_root(root)
         out = Path(temp_dir) / "out"
         write_reports(summary, output_dir=out)
@@ -384,6 +447,7 @@ def run_self_test() -> None:
         report = (out / "report_resume.md").read_text(encoding="utf-8")
         assert "Terminal-Bench 2.0 8-task subset" in report
         assert "debugging 2/3" in report
+        assert "Claw-SWE-Bench Lite80" in report
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
     print("self-test passed")

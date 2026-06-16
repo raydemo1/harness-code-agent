@@ -828,7 +828,7 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertNotIn("hello docs", formatted)
         self.assertIn("User turn:\nuse @file:README.md please", formatted)
 
-    def test_legacy_file_mention_still_resolves_as_light_file_reference(self):
+    def test_bare_at_file_text_is_not_resolved_as_mention(self):
         Path(self.temp_dir, "README.md").write_text("hello docs\n", encoding="utf-8")
         store = SessionStore(Path(self.temp_dir) / ".harness")
 
@@ -837,10 +837,8 @@ class InteractiveCliTests(unittest.TestCase):
             workspace_root=self.temp_dir,
             session_store=store,
         )
-        formatted = format_turn_with_mentions("use @README.md please", resolved)
 
-        self.assertEqual(resolved[0].kind, "file")
-        self.assertNotIn("hello docs", formatted)
+        self.assertEqual(resolved, [])
 
     def test_directory_mention_is_light_reference(self):
         Path(self.temp_dir, "docs").mkdir()
@@ -885,10 +883,22 @@ class InteractiveCliTests(unittest.TestCase):
 
         with self.assertRaises(MentionResolutionError):
             resolve_mentions(
-                "read @missing.md",
+                "read @file:missing.md",
                 workspace_root=self.temp_dir,
                 session_store=store,
             )
+
+    def test_mentions_can_be_turned_off_for_benchmark_prompts(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+
+        with patch.dict(os.environ, {"HARNESS_MENTION_MODE": "off"}):
+            resolved = resolve_mentions(
+                "Java annotation @com.google.inject.name.Named(value=ForTheEagerness should stay literal",
+                workspace_root=self.temp_dir,
+                session_store=store,
+            )
+
+        self.assertEqual(resolved, [])
 
     def test_file_mention_rejects_path_escape(self):
         outside = Path(self.temp_dir).parent / "outside-mention.txt"
@@ -898,7 +908,7 @@ class InteractiveCliTests(unittest.TestCase):
         try:
             with self.assertRaises(MentionResolutionError):
                 resolve_mentions(
-                    "read @../outside-mention.txt",
+                    "read @file:../outside-mention.txt",
                     workspace_root=self.temp_dir,
                     session_store=store,
                 )
