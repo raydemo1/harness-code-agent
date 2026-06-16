@@ -13,7 +13,24 @@ from .sessions.store import SessionStore
 from .tui import TuiApp
 
 
+def _configure_stdio_encoding() -> None:
+    """Reconfigure stdout/stderr to use UTF-8 on Windows.
+
+    Without this, print() of CJK characters fails with UnicodeEncodeError
+    on GBK terminals, or produces garbled output.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass  # non-TTY or already configured — best-effort
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdio_encoding()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "run":
         _print_error("Error: 'run' is no longer supported. Use 'hca \"<task>\"' or start 'hca' interactively.")
