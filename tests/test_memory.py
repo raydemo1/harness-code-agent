@@ -1,11 +1,12 @@
 import json
 import inspect
+import builtins
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class MemoryStoreTests(unittest.TestCase):
@@ -176,6 +177,98 @@ class MemoryRecallTests(unittest.TestCase):
         no_hits = MemoryRecall(self.store).search("billing invoice export", min_score=1.0)
         self.assertEqual(no_hits, [])
 
+    def test_memory_block_tells_agent_to_use_memory_before_searching(self):
+        from harness_code_agent.memory.recall import MemoryHit, MemoryRecall
+        from harness_code_agent.memory.store import MemoryRecord
+
+        recall = MemoryRecall(self.store)
+        block = recall.format_block(
+            [
+                MemoryHit(
+                    record=MemoryRecord(
+                        id="mem_1",
+                        file="project.md",
+                        anchor="cache",
+                        title="Cache note",
+                        summary="Cache diagnostics live in harness_code_agent/agent/utils.py.",
+                        status="active",
+                    ),
+                    score=1.0,
+                )
+            ]
+        )
+
+        self.assertIn("Use these notes before searching", block)
+        self.assertIn("inspect files only to fill gaps", block)
+        self.assertIn("harness_code_agent/agent/utils.py", block)
+
+    def test_small_memory_corpus_does_not_import_bm25(self):
+        from harness_code_agent.runtime.tool_search import SearchDocument, search_bm25
+
+        documents = [
+            SearchDocument(
+                key="mem_1",
+                text="Session observability aggregates cached_tokens and cache_miss_tokens.",
+            )
+        ]
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "BM25":
+                raise AssertionError("small corpus search should not import BM25")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=guarded_import):
+            hits = search_bm25(documents, "observability cache tokens", limit=3)
+
+        self.assertEqual([hit.key for hit in hits], ["mem_1"])
+
+    def test_memory_recall_reuses_bm25_index_until_records_change(self):
+        from harness_code_agent.memory.recall import MemoryRecall
+        from harness_code_agent.memory.store import MemoryRecord
+        from harness_code_agent.runtime.tool_search import SearchHit
+
+        records = [
+            MemoryRecord(
+                id=f"mem_{idx}",
+                file="project.md",
+                anchor=f"cache-{idx}",
+                title=f"Cache note {idx}",
+                summary=f"Prompt cache diagnostic note {idx}.",
+                tags=["cache"],
+                status="active",
+            )
+            for idx in range(2)
+        ]
+        self.store.atomic_write_records(records)
+        fake_retriever = object()
+
+        def fake_search(documents, query, *, limit=8, retriever=None, **kwargs):
+            self.assertIs(retriever, fake_retriever)
+            self.assertFalse(kwargs.get("allow_index_build", True))
+            return [
+                SearchHit(
+                    key="mem_0",
+                    score=2.0,
+                    document=documents[0].text,
+                    metadata=dict(documents[0].metadata),
+                )
+            ]
+
+        with (
+            patch.dict("os.environ", {"HARNESS_BM25_MIN_DOCS": "1"}),
+            patch("harness_code_agent.memory.recall.build_bm25_retriever", return_value=fake_retriever) as build,
+            patch("harness_code_agent.memory.recall.search_bm25", side_effect=fake_search) as search,
+        ):
+            recall = MemoryRecall(self.store)
+            first = recall.search("cache diagnostic", min_score=0.1)
+            second = recall.search("cache diagnostic", min_score=0.1)
+
+        self.assertEqual([hit.record.id for hit in first], ["mem_0"])
+        self.assertEqual([hit.record.id for hit in second], ["mem_0"])
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(search.call_count, 2)
+
 
 class MemoryQueryTests(unittest.TestCase):
     def test_query_composer_does_not_accept_profile_or_repo_name(self):
@@ -231,10 +324,46 @@ class MemoryMiddlewareTests(unittest.TestCase):
         content = messages[0]["content"]
         self.assertEqual(messages[0]["role"], "system")
         self.assertTrue(content.startswith(MEMORY_INDEX_MARKER))
+        self.assertIn("exact tools memory_search and read_memory_file", content)
+        self.assertNotIn("memory_read", content)
         self.assertIn("line 0", content)
         self.assertIn("line 2", content)
         self.assertNotIn("line 3", content)
         self.assertIn("truncated", content.lower())
+
+    def test_memory_middleware_reuses_recall_instance_for_same_store(self):
+        from harness_code_agent.memory.store import MemoryRecord, MemoryStore
+        from harness_code_agent.runtime.middleware.memory import MemoryMiddleware
+
+        store = MemoryStore(self.temp_dir / "memory", workspace=self.temp_dir)
+        store.ensure_initialized()
+        store.atomic_write_records([
+            MemoryRecord(
+                id="mem_1",
+                file="project.md",
+                anchor="cache",
+                title="Cache note",
+                summary="Prompt cache diagnostic note.",
+                status="active",
+            )
+        ])
+        middleware = MemoryMiddleware(workspace=self.temp_dir)
+        recall = SimpleNamespace(
+            search=Mock(return_value=[]),
+            format_block=Mock(return_value=""),
+        )
+
+        with (
+            patch.object(middleware, "_store", return_value=store),
+            patch("harness_code_agent.memory.dream.should_dream", return_value=False),
+            patch("harness_code_agent.memory.recall.MemoryRecall", return_value=recall) as recall_cls,
+            patch.dict("os.environ", {"HARNESS_MEMORY_DISABLED": ""}),
+        ):
+            middleware.augment_user_prompt("cache", [], mention_paths=[])
+            middleware.augment_user_prompt("cache", [], mention_paths=[])
+
+        self.assertEqual(recall_cls.call_count, 1)
+        self.assertEqual(recall.search.call_count, 2)
 
 
 class MemoryToolTests(unittest.TestCase):

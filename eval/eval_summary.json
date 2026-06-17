@@ -1,58 +1,74 @@
 {
-  "cache": {},
+  "cache": {
+    "compaction_last_hit_ratio": 0.8320693391115926,
+    "prefix_changes": [
+      {
+        "label": "after_rewrite_turn_1",
+        "reasons": [
+          "log_rewrite"
+        ],
+        "turn": 3
+      }
+    ],
+    "run": "2026-06-17_171758_deepseek_context_eval_cache",
+    "stable_avg_hit_ratio": 0.8491695509532515,
+    "stable_first_hit_ratio": 0.2916484094294979,
+    "stable_last_hit_ratio": 0.9910661107802263
+  },
   "claw": {},
-  "generated_at": "2026-06-17T15:31:51",
+  "generated_at": "2026-06-17T18:27:00",
   "latency": {
     "llm_first_token_ms": {
-      "count": 27,
-      "max": 4357,
-      "mean": 1938.2222222222222,
-      "min": 872,
-      "p50": 1386,
-      "p95": 4357,
-      "p99": 4357
+      "count": 30,
+      "max": 3348,
+      "mean": 2097.0333333333333,
+      "min": 1257,
+      "p50": 1780,
+      "p95": 3348,
+      "p99": 3348
     },
     "llm_response_latency_ms": {
       "count": 30,
-      "max": 8527,
-      "mean": 4223.633333333333,
-      "min": 1408,
-      "p50": 3145,
-      "p95": 8527,
-      "p99": 8527
+      "max": 7983,
+      "mean": 4366.166666666667,
+      "min": 1643,
+      "p50": 4242,
+      "p95": 7983,
+      "p99": 7983
     },
-    "run": "2026-06-17_152258_latency",
+    "run": "2026-06-17_171923_latency",
     "turn_duration_ms": {
       "count": 30,
-      "max": 27475,
-      "mean": 14423.5,
-      "min": 6810,
-      "p50": 13308,
-      "p95": 27475,
-      "p99": 27475
+      "max": 22542,
+      "mean": 14121.3,
+      "min": 5981,
+      "p50": 13842,
+      "p95": 22542,
+      "p99": 22542
     }
   },
   "memory": {
-    "elapsed_seconds_reduction_ratio": -0.5223509772738612,
-    "run": "2026-06-17_151752_memory_ab",
-    "success_delta": 0.0,
+    "elapsed_seconds_reduction_ratio": 0.18815162090070878,
+    "run": "2026-06-17_160835_memory_ab",
+    "success_delta": 0.19999999999999996,
     "task_count": 5,
-    "tool_calls_reduction_ratio": 0.275,
-    "total_tokens_reduction_ratio": 0.20209669438326525
+    "tool_calls_reduction_ratio": 0.5,
+    "total_tokens_reduction_ratio": 0.44674094599318925
   },
   "result_root": "eval\\results",
   "source_runs": [
-    "eval\\results\\2026-06-17_013123_latency",
-    "eval\\results\\2026-06-17_151752_memory_ab",
-    "eval\\results\\2026-06-17_152258_latency",
-    "eval\\results\\2026-06-17_153037_tbench"
+    "eval\\results\\2026-06-17_160835_memory_ab",
+    "eval\\results\\2026-06-17_153336_tbench",
+    "eval\\results\\2026-06-17_171758_deepseek_context_eval_cache",
+    "eval\\results\\2026-06-17_171923_latency",
+    "eval\\results\\2026-06-17_174214_tbench_hca_8task_full_metrics"
   ],
   "tbench": {
     "benchmark_name": "Terminal-Bench 2.0 8-task subset",
     "category_results": {
       "data-processing": {
-        "pass_rate": 0.0,
-        "passed": 0,
+        "pass_rate": 1.0,
+        "passed": 1,
         "task_count": 1
       },
       "data-science": {
@@ -66,35 +82,125 @@
         "task_count": 3
       },
       "file-operations": {
-        "pass_rate": 0.0,
-        "passed": 0,
+        "pass_rate": 1.0,
+        "passed": 1,
         "task_count": 1
       },
       "software-engineering": {
-        "pass_rate": 0.0,
-        "passed": 0,
+        "pass_rate": 0.5,
+        "passed": 1,
         "task_count": 2
       }
     },
-    "estimated_cost_usd": null,
-    "pass_rate": 0.0,
-    "passed": 0,
-    "run": "2026-06-17_153037_tbench",
+    "estimated_cost_usd": 0.0537097064,
+    "pass_rate": 0.375,
+    "passed": 3,
+    "run": "2026-06-17_174214_tbench_hca_8task_full_metrics",
     "status": "failed",
     "task_count": 8,
+    "task_results": [
+      {
+        "category": "software-engineering",
+        "difficulty": "easy",
+        "elapsed_seconds": 33.4437528999988,
+        "estimated_cost_usd": null,
+        "status": "failed",
+        "task": "fix-git",
+        "tool_calls": null,
+        "total_tokens": null,
+        "turns_finished": null
+      },
+      {
+        "category": "debugging",
+        "difficulty": "easy",
+        "elapsed_seconds": 573.0981661999976,
+        "estimated_cost_usd": 0.0106333024,
+        "status": "failed",
+        "task": "overfull-hbox",
+        "tool_calls": 37,
+        "total_tokens": 604109,
+        "turns_finished": 1
+      },
+      {
+        "category": "debugging",
+        "difficulty": "medium",
+        "elapsed_seconds": 276.23787430000084,
+        "estimated_cost_usd": 0.004588220000000001,
+        "status": "failed",
+        "task": "build-cython-ext",
+        "tool_calls": 24,
+        "total_tokens": 162471,
+        "turns_finished": 0
+      },
+      {
+        "category": "debugging",
+        "difficulty": "medium",
+        "elapsed_seconds": 150.47116499999902,
+        "estimated_cost_usd": null,
+        "status": "failed",
+        "task": "custom-memory-heap-crash",
+        "tool_calls": null,
+        "total_tokens": null,
+        "turns_finished": null
+      },
+      {
+        "category": "software-engineering",
+        "difficulty": "medium",
+        "elapsed_seconds": 190.08744849999857,
+        "estimated_cost_usd": 0.0014219967999999999,
+        "status": "passed",
+        "task": "git-leak-recovery",
+        "tool_calls": 17,
+        "total_tokens": 80503,
+        "turns_finished": 1
+      },
+      {
+        "category": "data-processing",
+        "difficulty": "medium",
+        "elapsed_seconds": 128.646828500001,
+        "estimated_cost_usd": 0.0021867552000000004,
+        "status": "passed",
+        "task": "log-summary-date-ranges",
+        "tool_calls": 11,
+        "total_tokens": 100948,
+        "turns_finished": 1
+      },
+      {
+        "category": "file-operations",
+        "difficulty": "medium",
+        "elapsed_seconds": 534.2771986000007,
+        "estimated_cost_usd": 0.0071972096,
+        "status": "passed",
+        "task": "large-scale-text-editing",
+        "tool_calls": 26,
+        "total_tokens": 239590,
+        "turns_finished": 1
+      },
+      {
+        "category": "data-science",
+        "difficulty": "medium",
+        "elapsed_seconds": 799.3404261000032,
+        "estimated_cost_usd": 0.0276822224,
+        "status": "failed",
+        "task": "query-optimize",
+        "tool_calls": 73,
+        "total_tokens": 1756911,
+        "turns_finished": 1
+      }
+    ],
     "task_set": "8task",
     "token_totals": {
-      "cache_miss_tokens": 0,
-      "cached_tokens": 0,
-      "completion_tokens": 0,
-      "llm_calls": 0,
-      "prompt_tokens": 0,
-      "total_tokens": 0
+      "cache_miss_tokens": 133509,
+      "cached_tokens": 2713088,
+      "completion_tokens": 97935,
+      "llm_calls": 139,
+      "prompt_tokens": 2846597,
+      "total_tokens": 2944532
     },
-    "tool_calls": 0,
+    "tool_calls": 188,
     "turn_totals": {
-      "finished": 0,
-      "started": 0
+      "finished": 5,
+      "started": 6
     }
   }
 }

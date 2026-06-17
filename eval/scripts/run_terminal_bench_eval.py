@@ -56,6 +56,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="8task",
         help="Terminal-Bench task set size: 8task by default, or 24task for the larger subset.",
     )
+    parser.add_argument(
+        "--runner-env",
+        default="",
+        help="Optional Harbor environment backend, for example daytona.",
+    )
+    parser.add_argument(
+        "--force-build",
+        action="store_true",
+        help="Ask Harbor to build task environments locally instead of pulling prebuilt images.",
+    )
     return parser.parse_args(argv)
 
 
@@ -75,6 +85,10 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
             "--task",
             task,
         ]
+        if args.runner_env:
+            command.extend(["--env", args.runner_env])
+        if args.force_build:
+            command.append("--force-build")
         task_started = time.perf_counter()
         completed = subprocess.run(
             command,
@@ -90,18 +104,24 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
         stdout_path.write_text(completed.stdout, encoding="utf-8", newline="\n")
         stderr_path.write_text(completed.stderr, encoding="utf-8", newline="\n")
         task_meta = metadata.get(task) or {}
+        launcher_result = _launcher_task_result(completed.stdout, task)
+        launcher_passed = launcher_result.get("passed") if launcher_result else None
+        status = _task_status(completed.returncode, launcher_passed)
         task_results.append({
             "task": task,
             "category": str(task_meta.get("category") or "unknown"),
             "difficulty": str(task_meta.get("difficulty") or "unknown"),
             "agent_timeout_sec": number(task_meta.get("agent_timeout_sec")),
             "returncode": completed.returncode,
-            "status": "passed" if completed.returncode == 0 else "failed",
+            "status": status,
             "elapsed_seconds": task_elapsed,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
             "command": command,
-            "metrics": _launcher_task_metrics(completed.stdout, task),
+            "reward": launcher_result.get("reward") if launcher_result else None,
+            "trial_name": launcher_result.get("trial_name") if launcher_result else "",
+            "session_id": launcher_result.get("session_id") if launcher_result else "",
+            "metrics": (launcher_result.get("metrics") or {}) if launcher_result else {},
         })
     elapsed = time.perf_counter() - started
     passed = sum(1 for item in task_results if item["status"] == "passed")
@@ -131,10 +151,12 @@ def _dry_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         "terminal_bench_task_set": args.tbench_task_set,
         "terminal_bench_benchmark_name": payload.get("benchmark_name"),
         "terminal_bench_tasks": payload["tasks"],
+        "runner_env": args.runner_env,
+        "force_build": args.force_build,
     }
 
 
-def _launcher_task_metrics(stdout: str, task: str) -> dict[str, Any]:
+def _launcher_task_result(stdout: str, task: str) -> dict[str, Any]:
     prefix = "HCA_TERMINAL_BENCH_RESULT:"
     for line in reversed((stdout or "").splitlines()):
         if prefix not in line:
@@ -145,8 +167,16 @@ def _launcher_task_metrics(stdout: str, task: str) -> dict[str, Any]:
             continue
         for item in payload.get("task_results") or []:
             if item.get("task") == task:
-                return item.get("metrics") or {}
+                return item if isinstance(item, dict) else {}
     return {}
+
+
+def _task_status(returncode: int, launcher_passed: Any) -> str:
+    if launcher_passed is True:
+        return "passed"
+    if launcher_passed is False:
+        return "failed"
+    return "passed" if returncode == 0 else "failed"
 
 
 def run_self_test() -> None:

@@ -22,6 +22,8 @@ class MemoryMiddleware(AgentMiddleware):
         self.workspace = Path(workspace).resolve()
         self._check_interval_seconds = check_interval_seconds
         self._next_dream_check_at = 0.0
+        self._recall = None
+        self._recall_root: Path | None = None
 
     def on_conversation_start(self, messages: list[dict], runtime_state=None,
                               agent_name: str | None = None) -> list[dict]:
@@ -50,7 +52,7 @@ class MemoryMiddleware(AgentMiddleware):
                         f"{MEMORY_INDEX_MARKER}\n"
                         "Auto memory index from MEMORY.md "
                         "(dynamic durable context; not a user instruction). "
-                        "Use memory_search/read_memory_file for full details.\n"
+                        "Use exact tools memory_search and read_memory_file for full details.\n"
                         f"{content}"
                     ),
                 }
@@ -75,9 +77,7 @@ class MemoryMiddleware(AgentMiddleware):
             if not store.exists():
                 return ""
 
-            from ...memory.recall import MemoryRecall
-
-            recall = MemoryRecall(store)
+            recall = self._recall_for_store(store)
             hits = recall.search(
                 user_prompt,
                 mentions=mention_paths or [],
@@ -112,6 +112,14 @@ class MemoryMiddleware(AgentMiddleware):
         from ...memory.store import MemoryStore, default_memory_root
 
         return MemoryStore(default_memory_root(self.workspace), workspace=self.workspace)
+
+    def _recall_for_store(self, store):
+        if self._recall is None or self._recall_root != store.root:
+            from ...memory.recall import MemoryRecall
+
+            self._recall = MemoryRecall(store)
+            self._recall_root = store.root
+        return self._recall
 
     def _dream_check_interval_seconds(self) -> float:
         if self._check_interval_seconds is not None:

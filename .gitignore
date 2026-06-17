@@ -42,6 +42,8 @@ logs/
 run_logs/
 outputs/
 results/
+eval/results/
+eval/local_results/
 tmp/
 temp/
 docs/

@@ -110,12 +110,15 @@ def collect_harbor_job_usage(job_dir: Path) -> dict[str, Any]:
     task_results: list[dict[str, Any]] = []
     for result_path in sorted(job_dir.glob("*/result.json")):
         try:
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            result_text = result_path.read_text(encoding="utf-8")
+            payload = json.loads(result_text)
         except (OSError, json.JSONDecodeError):
             continue
         agent_result = payload.get("agent_result") or {}
         metadata = agent_result.get("metadata") or {}
         metrics = metadata.get("hca_eval_metrics") if isinstance(metadata, dict) else None
+        if not isinstance(metrics, dict) or not metrics:
+            metrics = _metrics_from_trial_outputs(result_path.parent, result_text, payload)
         rewards = ((payload.get("verifier_result") or {}).get("rewards") or {})
         task_results.append({
             "task": _task_name(payload),
@@ -134,6 +137,37 @@ def collect_harbor_job_usage(job_dir: Path) -> dict[str, Any]:
         "task_results": task_results,
         **aggregate_usage(task_results),
     }
+
+
+def _metrics_from_trial_outputs(trial_dir: Path, result_text: str, payload: dict[str, Any]) -> dict[str, Any]:
+    for text in _payload_text_fields(payload):
+        metrics = parse_eval_metrics_from_text(text)
+        if metrics:
+            return metrics
+    metrics = parse_eval_metrics_from_text(result_text)
+    if metrics:
+        return metrics
+    for name in ("trial.log", "exception.txt"):
+        path = trial_dir / name
+        try:
+            metrics = parse_eval_metrics_from_text(path.read_text(encoding="utf-8"))
+        except OSError:
+            metrics = None
+        if metrics:
+            return metrics
+    return {}
+
+
+def _payload_text_fields(payload: dict[str, Any]) -> list[str]:
+    fields: list[str] = []
+    for section_name in ("exception_info", "agent_result"):
+        section = payload.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for value in section.values():
+            if isinstance(value, str):
+                fields.append(value)
+    return fields
 
 
 def aggregate_usage(task_results: list[dict[str, Any]]) -> dict[str, Any]:

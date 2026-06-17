@@ -132,6 +132,7 @@ def render_internal_report(summary: EvalSummary) -> str:
         f"| {_claw_label(summary.claw)} | {_claw_line(summary.claw)} |",
         "",
     ])
+    lines.extend(_tbench_task_table(summary.tbench))
     return "\n".join(lines)
 
 
@@ -171,6 +172,7 @@ def render_resume_report(summary: EvalSummary) -> str:
         f"- Memory: {_memory_line(summary.memory)}",
         f"- Compaction: {_compaction_line(summary.cache)}",
         "",
+        *_tbench_task_table(summary.tbench),
         "## Resume Bullets",
         "",
         *bullets,
@@ -262,6 +264,7 @@ def _tbench_summary(payload: dict[str, Any], run_name: str) -> dict[str, Any]:
         "turn_totals": payload.get("turn_totals") or {},
         "tool_calls": _int(payload.get("tool_calls")),
         "estimated_cost_usd": payload.get("estimated_cost_usd"),
+        "task_results": _tbench_task_rows(payload.get("task_results") or []),
     }
 
 
@@ -295,9 +298,10 @@ def _memory_line(data: dict[str, Any]) -> str:
     if not data:
         return "not run"
     return (
-        f"{_int(data.get('task_count'))} tasks; tool calls -{_percent(_number(data.get('tool_calls_reduction_ratio')))}, "
-        f"elapsed -{_percent(_number(data.get('elapsed_seconds_reduction_ratio')))}, "
-        f"tokens -{_percent(_number(data.get('total_tokens_reduction_ratio')))}"
+        f"{_int(data.get('task_count'))} tasks; "
+        f"tool calls {_reduction_phrase(_number(data.get('tool_calls_reduction_ratio')))}, "
+        f"elapsed {_reduction_phrase(_number(data.get('elapsed_seconds_reduction_ratio')), worse_label='slower')}, "
+        f"tokens {_reduction_phrase(_number(data.get('total_tokens_reduction_ratio')))}"
     )
 
 
@@ -342,6 +346,65 @@ def _tbench_label(data: dict[str, Any]) -> str:
     if not data:
         return "Terminal-Bench 2.0 subset"
     return str(data.get("benchmark_name") or "Terminal-Bench 2.0 subset")
+
+
+def _tbench_task_rows(task_results: list[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in task_results:
+        if not isinstance(item, dict):
+            continue
+        metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+        tokens = metrics.get("tokens") if isinstance(metrics.get("tokens"), dict) else {}
+        turns = metrics.get("turns") if isinstance(metrics.get("turns"), dict) else {}
+        tools = metrics.get("tools") if isinstance(metrics.get("tools"), dict) else {}
+        usage_cost = metrics.get("usage_cost") if isinstance(metrics.get("usage_cost"), dict) else {}
+        cost = usage_cost.get("estimated_cost_usd") if usage_cost else item.get("cost_usd")
+        rows.append(
+            {
+                "task": str(item.get("task") or ""),
+                "status": str(item.get("status") or "unknown"),
+                "category": str(item.get("category") or "unknown"),
+                "difficulty": str(item.get("difficulty") or "unknown"),
+                "elapsed_seconds": _number(item.get("elapsed_seconds")),
+                "total_tokens": _optional_int(tokens.get("total_tokens")),
+                "turns_finished": _optional_int(turns.get("finished")),
+                "tool_calls": _optional_int(tools.get("tool_calls")),
+                "estimated_cost_usd": _optional_number(cost),
+            }
+        )
+    return rows
+
+
+def _tbench_task_table(data: dict[str, Any]) -> list[str]:
+    rows = data.get("task_results") if isinstance(data, dict) else []
+    if not rows:
+        return []
+    lines = [
+        "## Terminal-Bench Per-Task Telemetry",
+        "",
+        "| Task | Status | Category | Difficulty | Elapsed | Tokens | Turns | Tools | Est. Cost |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _table_cell(row.get("task")),
+                    _table_cell(row.get("status")),
+                    _table_cell(row.get("category")),
+                    _table_cell(row.get("difficulty")),
+                    _elapsed_cell(row.get("elapsed_seconds")),
+                    _missing_int_cell(row.get("total_tokens")),
+                    _missing_int_cell(row.get("turns_finished")),
+                    _missing_int_cell(row.get("tool_calls")),
+                    _cost_cell(row.get("estimated_cost_usd")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(["", "_`not captured` means the task passed, but no complete HCA session metrics were available for that task._", ""])
+    return lines
 
 
 def _claw_line(data: dict[str, Any]) -> str:
@@ -403,8 +466,52 @@ def _int(value: Any) -> int:
         return 0
 
 
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _percent(value: float) -> str:
     return f"{value * 100:.1f}%"
+
+
+def _reduction_phrase(value: float, *, worse_label: str = "higher") -> str:
+    if value < 0:
+        return f"+{_percent(abs(value))} {worse_label}"
+    return f"-{_percent(value)}"
+
+
+def _table_cell(value: Any) -> str:
+    text = str(value or "").replace("|", "\\|").strip()
+    return text or "not captured"
+
+
+def _elapsed_cell(value: Any) -> str:
+    seconds = _number(value)
+    return f"{seconds:.1f}s" if seconds > 0 else "not captured"
+
+
+def _missing_int_cell(value: Any) -> str:
+    parsed = _optional_int(value)
+    return str(parsed) if parsed is not None else "not captured"
+
+
+def _cost_cell(value: Any) -> str:
+    parsed = _optional_number(value)
+    return f"${parsed:.4f}" if parsed is not None else "not captured"
 
 
 def _display_path(path: Path) -> Path:

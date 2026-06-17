@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..runtime.tool_search import SearchDocument, search_bm25
+from ..runtime.tool_search import SearchDocument, build_bm25_retriever, search_bm25
 from .query import MemoryQueryComposer
 from .store import MemoryRecord, MemoryStore, _env_float, _env_int
 
@@ -24,6 +24,7 @@ class MemoryRecall:
         self._cached_mtime: float | None = None
         self._cached_documents: list[SearchDocument] = []
         self._cached_records: list[MemoryRecord] = []
+        self._cached_retriever = None
 
     def search(
         self,
@@ -50,7 +51,13 @@ class MemoryRecall:
             if min_score is not None
             else _env_float("HARNESS_MEMORY_MIN_SCORE", DEFAULT_MIN_SCORE)
         )
-        raw_hits = search_bm25(self._cached_documents, query.text, limit=limit)
+        raw_hits = search_bm25(
+            self._cached_documents,
+            query.text,
+            limit=limit,
+            retriever=self._cached_retriever,
+            allow_index_build=False,
+        )
         if not raw_hits or raw_hits[0].score < threshold:
             return []
 
@@ -68,7 +75,10 @@ class MemoryRecall:
     def format_block(self, hits: list[MemoryHit]) -> str:
         if not hits:
             return ""
-        lines = ["Relevant long-term memory:"]
+        lines = [
+            "Relevant long-term memory:",
+            "Use these notes before searching; if they fully answer the user turn, answer from them and inspect files only to fill gaps.",
+        ]
         lines.extend(self.format_hit_lines(hits))
         return "\n".join(lines)
 
@@ -92,6 +102,7 @@ class MemoryRecall:
             self._cached_mtime = None
             self._cached_documents = []
             self._cached_records = []
+            self._cached_retriever = None
             return
         mtime = records_path.stat().st_mtime
         if self._cached_mtime == mtime:
@@ -109,6 +120,7 @@ class MemoryRecall:
         self._cached_mtime = mtime
         self._cached_documents = documents
         self._cached_records = records
+        self._cached_retriever = build_bm25_retriever(documents)
 
 
 def _active_unique_records(records: list[MemoryRecord]) -> list[MemoryRecord]:

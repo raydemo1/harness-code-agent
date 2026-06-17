@@ -99,6 +99,29 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertEqual(payload["dataset_config"], "lite")
         self.assertEqual(payload["split"], "test")
 
+    def test_memory_ab_seed_records_cover_success_markers(self):
+        payload = json.loads(Path("eval/tasks/memory_ab.json").read_text(encoding="utf-8"))
+
+        for task in payload["tasks"]:
+            seed_text = " ".join(
+                [
+                    task.get("prompt", ""),
+                    *[
+                        " ".join(
+                            [
+                                record.get("title", ""),
+                                record.get("summary", ""),
+                                " ".join(record.get("tags", [])),
+                                " ".join(record.get("source_paths", [])),
+                            ]
+                        )
+                        for record in task.get("memory_records", [])
+                    ],
+                ]
+            ).lower()
+            for marker in task.get("success_markers", []):
+                self.assertIn(str(marker).lower(), seed_text, task["id"])
+
     def test_deepseek_v4_flash_cost_uses_official_cache_split(self):
         from eval.benchmarks.usage_metrics import estimate_usage_cost
 
@@ -157,6 +180,8 @@ class EvalSuiteTests(unittest.TestCase):
                 stdout += "\nHCA_TERMINAL_BENCH_RESULT:" + json.dumps({
                     "task_results": [{
                         "task": "fix-git",
+                        "passed": True,
+                        "reward": 1.0,
                         "metrics": {
                             "turns": {"started": 1, "finished": 1},
                             "tokens": {
@@ -172,6 +197,15 @@ class EvalSuiteTests(unittest.TestCase):
                         },
                     }]
                 })
+            if task == "build-cython-ext":
+                stdout += "\nHCA_TERMINAL_BENCH_RESULT:" + json.dumps({
+                    "task_results": [{
+                        "task": "build-cython-ext",
+                        "passed": False,
+                        "reward": 0.0,
+                        "metrics": {},
+                    }]
+                })
             return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=f"stderr {task}")
 
         with patch("eval.scripts.run_terminal_bench_eval.subprocess.run", side_effect=fake_run) as run_mock:
@@ -181,14 +215,47 @@ class EvalSuiteTests(unittest.TestCase):
         summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["task_set"], "8task")
         self.assertEqual(summary["task_count"], 8)
-        self.assertEqual(summary["passed"], 7)
-        self.assertAlmostEqual(summary["pass_rate"], 7 / 8)
+        self.assertEqual(summary["passed"], 6)
+        self.assertAlmostEqual(summary["pass_rate"], 6 / 8)
         self.assertEqual(summary["category_results"]["debugging"]["task_count"], 3)
-        self.assertEqual(summary["category_results"]["debugging"]["passed"], 2)
+        self.assertEqual(summary["category_results"]["debugging"]["passed"], 1)
         self.assertEqual(summary["turn_totals"]["finished"], 1)
         self.assertEqual(summary["token_totals"]["total_tokens"], 130)
         self.assertEqual(summary["tool_calls"], 3)
         self.assertAlmostEqual(summary["estimated_cost_usd"], 0.00002)
+        cython = next(item for item in summary["task_results"] if item["task"] == "build-cython-ext")
+        self.assertEqual(cython["status"], "failed")
+        self.assertEqual(cython["reward"], 0.0)
+
+    def test_harbor_usage_collects_metrics_from_result_text_fallback(self):
+        from eval.benchmarks.usage_metrics import collect_harbor_job_usage
+
+        trial_dir = self.root / "jobs" / "job-1" / "task-a__abc"
+        trial_dir.mkdir(parents=True)
+        metrics = {
+            "session_id": "session-a",
+            "turns": {"started": 1, "finished": 1},
+            "tokens": {"total_tokens": 42},
+            "tools": {"tool_calls": 2},
+            "usage_cost": {"estimated_cost_usd": 0.0001},
+        }
+        payload = {
+            "task_name": "terminal-bench/task-a",
+            "trial_name": "task-a__abc",
+            "agent_result": {"metadata": None},
+            "verifier_result": {"rewards": {"reward": 1.0}},
+            "exception_info": {
+                "exception_message": "stdout: HCA_EVAL_METRICS:" + json.dumps(metrics)
+            },
+        }
+        (trial_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+        usage = collect_harbor_job_usage(self.root / "jobs" / "job-1")
+
+        self.assertEqual(usage["task_results"][0]["session_id"], "session-a")
+        self.assertTrue(usage["task_results"][0]["passed"])
+        self.assertEqual(usage["turn_totals"]["finished"], 1)
+        self.assertEqual(usage["tool_calls"], 2)
 
     def test_basic_metrics_memory_cases_run_with_full_access_permissions(self):
         from eval.scripts.run_basic_metrics_eval import parse_args, run_memory_suite
@@ -294,6 +361,29 @@ class EvalSuiteTests(unittest.TestCase):
                 "debugging": {"task_count": 5, "passed": 4, "pass_rate": 0.8},
                 "software-engineering": {"task_count": 6, "passed": 5, "pass_rate": 5 / 6},
             },
+            "task_results": [
+                {
+                    "task": "fix-git",
+                    "status": "passed",
+                    "category": "software-engineering",
+                    "difficulty": "easy",
+                    "elapsed_seconds": 12.34,
+                    "metrics": {
+                        "tokens": {"total_tokens": 1234},
+                        "turns": {"finished": 1},
+                        "tools": {"tool_calls": 7},
+                        "usage_cost": {"estimated_cost_usd": 0.0012},
+                    },
+                },
+                {
+                    "task": "overfull-hbox",
+                    "status": "passed",
+                    "category": "debugging",
+                    "difficulty": "easy",
+                    "elapsed_seconds": 5.67,
+                    "metrics": {},
+                },
+            ],
         }), encoding="utf-8")
         (claw_dir / "summary.json").write_text(json.dumps({
             "suite": "claw_swe_bench",
@@ -321,8 +411,28 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("debugging 4/5", resume)
         self.assertIn("tokens=4567", resume)
         self.assertIn("est. cost=$0.1234", resume)
+        self.assertIn("Terminal-Bench Per-Task Telemetry", resume)
+        self.assertIn("| fix-git | passed | software-engineering | easy | 12.3s | 1234 | 1 | 7 | $0.0012 |", resume)
+        self.assertIn("| overfull-hbox | passed | debugging | easy | 5.7s | not captured | not captured | not captured | not captured |", resume)
         self.assertIn("Claw-SWE-Bench Lite80", resume)
         self.assertIn("64/80 patches", resume)
+
+    def test_memory_line_formats_negative_elapsed_as_slower(self):
+        from eval.scripts.summarize_eval import _memory_line
+
+        line = _memory_line(
+            {
+                "task_count": 5,
+                "tool_calls_reduction_ratio": 0.275,
+                "elapsed_seconds_reduction_ratio": -0.5223509772738612,
+                "total_tokens_reduction_ratio": 0.20209669438326525,
+            }
+        )
+
+        self.assertIn("tool calls -27.5%", line)
+        self.assertIn("elapsed +52.2% slower", line)
+        self.assertIn("tokens -20.2%", line)
+        self.assertNotIn("--52.2%", line)
 
     def test_harness_claw_adapter_builds_container_args_and_command(self):
         from eval.benchmarks.harness_claw_adapter import HarnessCodeAgentAdapter, _agent_command

@@ -56,7 +56,7 @@
         {
           "file": "project.md",
           "title": "Session observability token aggregation",
-          "summary": "Session observability aggregates LLM usage, cached_tokens, cache_miss_tokens, tool metrics, audit metrics, and cache hit ratio in harness_code_agent/sessions/observability.py.",
+          "summary": "Session observability aggregates LLM usage, cached_tokens, cache_miss_tokens, tool metrics, audit metrics, and cache hit ratio in build_session_observability in harness_code_agent/sessions/observability.py.",
           "tags": ["observability", "tokens", "cache"],
           "source_paths": ["harness_code_agent/sessions/observability.py"]
         }
@@ -71,7 +71,7 @@
         {
           "file": "project.md",
           "title": "Memory middleware injection points",
-          "summary": "MemoryMiddleware injects a compact MEMORY.md index at conversation start and after compaction, and augments user turns with MemoryRecall search results.",
+          "summary": "MemoryMiddleware injects a compact MEMORY.md index at conversation start and after compaction, and augments user turns with MemoryRecall search results surfaced through memory_search/read_memory_file tooling.",
           "tags": ["memory", "middleware", "recall"],
           "source_paths": ["harness_code_agent/runtime/middleware/memory.py"]
         }

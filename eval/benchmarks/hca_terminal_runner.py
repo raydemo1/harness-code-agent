@@ -6,6 +6,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,6 +19,11 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("HARNESS_MEMORY_DISABLED", "1")
     os.environ.setdefault("HARNESS_MEMORY_DREAM_CHECK_INTERVAL_SECONDS", "3600")
 
+    session: Any | None = None
+    session_store: Any | None = None
+    session_id = ""
+    result: Any | None = None
+    session_started = False
     try:
         from harness_code_agent.core.interactive import InteractiveSession, print_turn_result
         from eval.benchmarks.usage_metrics import build_session_eval_metrics, print_eval_metrics
@@ -28,18 +34,24 @@ def main(argv: list[str] | None = None) -> int:
             profile_explicit=True,
             stream_sink=None,
         )
+        session_started = True
         session.checkpoint.auto = False
         try:
-            result = session.submit(args.prompt)
             session_id = session.session_id
             session_store = session.session_store
+            result = session.submit(args.prompt)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            session_id = session_id or session.session_id
+            session_store = session_store or session.session_store
             if session.session_id:
                 print(f"hca session: {session.session_id}")
             print(f"workspace: {session.cwd}")
-            print_turn_result(result)
-        finally:
+            if result is not None:
+                print_turn_result(result)
             session.close()
-        if session_id:
+        if session_store is not None and session_id:
             metrics = build_session_eval_metrics(
                 session_store,
                 session_id,
@@ -49,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         traceback.print_exc()
         return 1
+    if session_started:
+        return 0
     return 0
 
 
