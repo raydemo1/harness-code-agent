@@ -1,73 +1,100 @@
 {
-  "cache": {
-    "compaction_last_hit_ratio": 0.8387942332896461,
-    "compaction_run": "2026-06-16_215107_deepseek_context_eval_cache_full_danger",
-    "prefix_changes": [
-      {
-        "label": "after_rewrite_turn_1",
-        "reasons": [
-          "log_rewrite"
-        ],
-        "turn": 3
-      }
-    ],
-    "run": "2026-06-16_213101_deepseek_context_eval_cache",
-    "stable_avg_hit_ratio": 0.7898243671770797,
-    "stable_first_hit_ratio": 0.0,
-    "stable_last_hit_ratio": 0.9898028552005439,
-    "stable_run": "2026-06-16_215107_deepseek_context_eval_cache_full_danger"
-  },
+  "cache": {},
   "claw": {},
-  "generated_at": "2026-06-17T01:35:31",
+  "generated_at": "2026-06-17T15:31:51",
   "latency": {
     "llm_first_token_ms": {
       "count": 27,
-      "max": 3185,
-      "mean": 2011.2222222222222,
-      "min": 917,
-      "p50": 2099,
-      "p95": 3185,
-      "p99": 3185
+      "max": 4357,
+      "mean": 1938.2222222222222,
+      "min": 872,
+      "p50": 1386,
+      "p95": 4357,
+      "p99": 4357
     },
     "llm_response_latency_ms": {
       "count": 30,
-      "max": 6211,
-      "mean": 3681.4,
-      "min": 1470,
-      "p50": 3534,
-      "p95": 6211,
-      "p99": 6211
+      "max": 8527,
+      "mean": 4223.633333333333,
+      "min": 1408,
+      "p50": 3145,
+      "p95": 8527,
+      "p99": 8527
     },
-    "run": "2026-06-17_013123_latency",
+    "run": "2026-06-17_152258_latency",
     "turn_duration_ms": {
       "count": 30,
-      "max": 21153,
-      "mean": 14225.0,
-      "min": 6877,
-      "p50": 13256,
-      "p95": 21153,
-      "p99": 21153
+      "max": 27475,
+      "mean": 14423.5,
+      "min": 6810,
+      "p50": 13308,
+      "p95": 27475,
+      "p99": 27475
     }
   },
   "memory": {
-    "elapsed_seconds_reduction_ratio": -0.6288145815924059,
-    "run": "2026-06-17_012523_memory_ab",
+    "elapsed_seconds_reduction_ratio": -0.5223509772738612,
+    "run": "2026-06-17_151752_memory_ab",
     "success_delta": 0.0,
     "task_count": 5,
-    "tool_calls_reduction_ratio": 0.24444444444444444,
-    "total_tokens_reduction_ratio": 0.3386621568843066
+    "tool_calls_reduction_ratio": 0.275,
+    "total_tokens_reduction_ratio": 0.20209669438326525
   },
   "result_root": "eval\\results",
   "source_runs": [
-    "eval\\results\\2026-06-16_213101_deepseek_context_eval_cache",
-    "eval\\results\\2026-06-16_215107_deepseek_context_eval_cache_full_danger",
-    "eval\\results\\2026-06-16_223239_memory_ab",
-    "eval\\results\\2026-06-16_224333_latency",
-    "eval\\results\\2026-06-16_225637_memory_ab",
-    "eval\\results\\2026-06-16_234204_memory_ab",
-    "eval\\results\\2026-06-17_000535_latency",
-    "eval\\results\\2026-06-17_012523_memory_ab",
-    "eval\\results\\2026-06-17_013123_latency"
+    "eval\\results\\2026-06-17_013123_latency",
+    "eval\\results\\2026-06-17_151752_memory_ab",
+    "eval\\results\\2026-06-17_152258_latency",
+    "eval\\results\\2026-06-17_153037_tbench"
   ],
-  "tbench": {}
+  "tbench": {
+    "benchmark_name": "Terminal-Bench 2.0 8-task subset",
+    "category_results": {
+      "data-processing": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "task_count": 1
+      },
+      "data-science": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "task_count": 1
+      },
+      "debugging": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "task_count": 3
+      },
+      "file-operations": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "task_count": 1
+      },
+      "software-engineering": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "task_count": 2
+      }
+    },
+    "estimated_cost_usd": null,
+    "pass_rate": 0.0,
+    "passed": 0,
+    "run": "2026-06-17_153037_tbench",
+    "status": "failed",
+    "task_count": 8,
+    "task_set": "8task",
+    "token_totals": {
+      "cache_miss_tokens": 0,
+      "cached_tokens": 0,
+      "completion_tokens": 0,
+      "llm_calls": 0,
+      "prompt_tokens": 0,
+      "total_tokens": 0
+    },
+    "tool_calls": 0,
+    "turn_totals": {
+      "finished": 0,
+      "started": 0
+    }
+  }
 }

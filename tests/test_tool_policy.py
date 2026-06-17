@@ -91,6 +91,19 @@ class ShellPolicyTests(unittest.TestCase):
         self.assertIsNotNone(blocked)
         self.assertIn("[blocked]", blocked.output)
 
+    def test_successful_file_content_with_timeout_text_does_not_trigger_failure_fallback(self) -> None:
+        middleware = ToolPolicyMiddleware(repeated_failure_threshold=2)
+        state = AgentRuntimeState()
+        args = {"path": "eval/benchmarks/run_terminal_bench.py", "max_lines": 40}
+        result = "parser.add_argument('--tbench-timeout', type=int, default=7200)\n"
+
+        first = middleware.post_tool("read_file", args, result, [], runtime_state=state)
+        second = middleware.post_tool("read_file", args, result, [], runtime_state=state)
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertFalse(state.fallback.stop_requested)
+
 
 if __name__ == "__main__":
     unittest.main()

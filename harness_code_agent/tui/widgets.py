@@ -101,6 +101,11 @@ _KIND_BORDER_COLORS = {
     "status": "#555555",
 }
 
+_ASSISTANT_MARKDOWN_CHAR_LIMIT = 12_000
+_ASSISTANT_DISPLAY_HEAD_CHARS = 4_000
+_ASSISTANT_DISPLAY_TAIL_CHARS = 4_000
+_ASSISTANT_STREAM_TAIL_CHARS = 12_000
+
 
 def block_to_rich(block: TranscriptBlock):
     """Convert a TranscriptBlock to a Rich renderable."""
@@ -113,7 +118,7 @@ def block_to_rich(block: TranscriptBlock):
         return Group(header, body, Text(""))
     if block.kind == "assistant":
         header = Text(f"Assistant{status}", style=f"bold {border}")
-        body = Markdown(block.body) if block.body else Text("")
+        body = _assistant_body_renderable(block.body, streaming=block.status == "streaming")
         return Group(header, body, Text(""))
     if block.kind == "tool":
         marker = "tool"
@@ -156,6 +161,42 @@ def block_to_rich(block: TranscriptBlock):
     return text
 
 
+def _assistant_body_renderable(body: str, *, streaming: bool):
+    if not body:
+        return Text("")
+    if streaming:
+        return Text(_streaming_body_excerpt(body))
+    if len(body) > _ASSISTANT_MARKDOWN_CHAR_LIMIT:
+        return Text(_assistant_body_excerpt(body))
+    return Markdown(body)
+
+
+def _assistant_body_excerpt(body: str) -> str:
+    head = body[:_ASSISTANT_DISPLAY_HEAD_CHARS].rstrip()
+    tail = body[-_ASSISTANT_DISPLAY_TAIL_CHARS:].lstrip()
+    omitted = max(0, len(body) - len(head) - len(tail))
+    return (
+        "[display truncated: showing first "
+        f"{len(head)} and last {len(tail)} of {len(body)} chars; "
+        "full response is stored in the session]\n\n"
+        f"{head}\n\n"
+        f"... [omitted {omitted} chars] ...\n\n"
+        f"{tail}"
+    )
+
+
+def _streaming_body_excerpt(body: str) -> str:
+    if len(body) <= _ASSISTANT_STREAM_TAIL_CHARS:
+        return body
+    tail = body[-_ASSISTANT_STREAM_TAIL_CHARS:].lstrip()
+    omitted = len(body) - len(tail)
+    return (
+        f"[streaming: showing latest {len(tail)} chars; "
+        f"{omitted} earlier chars buffered]\n\n"
+        f"{tail}"
+    )
+
+
 def welcome_rich(snapshot: SessionStatusSnapshot) -> Panel:
     """Render the welcome message as a Rich Panel."""
     session_text = snapshot.session_id if snapshot.session_id else "pending"
@@ -179,7 +220,7 @@ class TranscriptView(RichLog):
 
     def __init__(self, **kwargs):
         super().__init__(highlight=True, markup=True, wrap=True, auto_scroll=True, **kwargs)
-        self._streaming_buffer: str = ""
+        self._streaming_parts: list[str] = []
         self._streaming_active: bool = False
 
     def append_block(self, block: TranscriptBlock) -> None:
@@ -193,25 +234,25 @@ class TranscriptView(RichLog):
     def begin_streaming(self) -> None:
         """Start buffering streaming text instead of writing immediately."""
         self._streaming_active = True
-        self._streaming_buffer = ""
+        self._streaming_parts = []
 
     def append_streaming(self, text: str) -> None:
         """Accumulate streaming text in the buffer."""
-        self._streaming_buffer += text
+        self._streaming_parts.append(text)
 
     def streaming_block(self) -> TranscriptBlock | None:
         """Return the active assistant block without committing it."""
-        if self._streaming_active and self._streaming_buffer:
-            return TranscriptBlock("assistant", "assistant", self._streaming_buffer)
+        if self._streaming_active and self._streaming_parts:
+            return TranscriptBlock("assistant", "assistant", "".join(self._streaming_parts), "streaming")
         return None
 
     def flush_streaming(self) -> TranscriptBlock | None:
         """Return the complete streaming response and clear the active block."""
         block = None
-        if self._streaming_active and self._streaming_buffer:
-            block = TranscriptBlock("assistant", "assistant", self._streaming_buffer)
+        if self._streaming_active and self._streaming_parts:
+            block = TranscriptBlock("assistant", "assistant", "".join(self._streaming_parts))
         self._streaming_active = False
-        self._streaming_buffer = ""
+        self._streaming_parts = []
         return block
 
     def show_welcome(self, snapshot: SessionStatusSnapshot) -> None:

@@ -260,6 +260,21 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertGreater(len(transcript.lines), 0)
         _run(_test())
 
+    def test_bursty_stream_deltas_are_coalesced_before_redraw(self):
+        async def _test():
+            app = self._make_app()
+            async with app.run_test() as pilot:
+                from harness_code_agent.tui.app import StreamDelta
+
+                with patch.object(app, "_redraw_transcript", wraps=app._redraw_transcript) as redraw:
+                    for _ in range(40):
+                        app.post_message(StreamDelta("x"))
+                    await pilot.pause(0.05)
+
+                    self.assertGreater(redraw.call_count, 0)
+                    self.assertLess(redraw.call_count, 10)
+        _run(_test())
+
     def test_session_event_updates_state(self):
         async def _test():
             app = self._make_app()

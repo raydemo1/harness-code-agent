@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from pathlib import Path
 
 from textual import on, work
@@ -14,6 +15,9 @@ from textual.message import Message
 from textual.widgets import TextArea
 
 log = logging.getLogger("harness.tui")
+
+_STREAM_FLUSH_DELAY_SECONDS = 0.005
+_STREAM_FLUSH_MAX_CHARS = 4_096
 
 from .. import config
 from ..agent.cancellation import CancelledError, CancellationToken
@@ -210,6 +214,9 @@ class TuiApp(App):
         self._pending_events: list = []
         self._streaming_current_response = False
         self._stream_header_printed = False
+        self._pending_stream_chunks: deque[str] = deque()
+        self._pending_stream_chars = 0
+        self._stream_flush_scheduled = False
         self._submitting = False
         self._cancellation_token = CancellationToken()
 
@@ -340,6 +347,7 @@ class TuiApp(App):
         data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
         event_type = data.get("type")
         if event_type == "turn_started":
+            self._clear_pending_stream_deltas()
             self._streaming_current_response = False
             self._stream_header_printed = False
 
@@ -361,6 +369,7 @@ class TuiApp(App):
             return False
         self._submitting = True
         self._input_enabled(False)
+        self._clear_pending_stream_deltas()
         self._streaming_current_response = False
         self._stream_header_printed = False
         self._cancellation_token = CancellationToken()
@@ -385,25 +394,31 @@ class TuiApp(App):
     def on_stream_delta(self, msg: StreamDelta) -> None:
         """Handle streaming delta from background thread.
 
-        Text is buffered in TranscriptView and written as a complete
-        Markdown Panel when streaming finishes, avoiding fragmentation.
+        Deltas are coalesced on the UI thread so a burst of tiny chunks does
+        not redraw the whole transcript once per chunk.
         """
-        transcript = self.query_one("#transcript", TranscriptView)
-        if not self._stream_header_printed:
-            transcript.begin_streaming()
-            self._stream_header_printed = True
+        if not msg.delta:
+            return
         self._streaming_current_response = True
-        self.state.append_streaming_text(msg.delta)
-        transcript.append_streaming(msg.delta)
-        self._redraw_transcript()
+        self._pending_stream_chunks.append(msg.delta)
+        self._pending_stream_chars += len(msg.delta)
+        self._schedule_stream_flush()
 
     def on_session_event(self, msg: SessionEvent) -> None:
         """Handle session event from background thread."""
         data = msg.event.to_dict() if hasattr(msg.event, "to_dict") else dict(msg.event)
         event_type = data.get("type")
         if event_type == "turn_started":
+            self._clear_pending_stream_deltas()
             self._streaming_current_response = False
             self._stream_header_printed = False
+
+        if (
+            self._streaming_current_response
+            and self._pending_stream_chars
+            and event_type not in {"thought_started", "thought_finished"}
+        ):
+            self._flush_streaming_pending(drain_all=True)
 
         if (
             self._streaming_current_response
@@ -442,6 +457,7 @@ class TuiApp(App):
         """Handle submit completion."""
         # Flush any remaining streaming buffer
         try:
+            self._flush_streaming_pending(drain_all=True)
             transcript = self.query_one("#transcript", TranscriptView)
             block = transcript.flush_streaming()
             self._streaming_current_response = False
@@ -462,6 +478,7 @@ class TuiApp(App):
     def on_submit_cancelled(self, msg: SubmitCancelled) -> None:
         """Handle submit cancellation."""
         try:
+            self._flush_streaming_pending(drain_all=True)
             transcript = self.query_one("#transcript", TranscriptView)
             block = transcript.flush_streaming()
             self._streaming_current_response = False
@@ -479,6 +496,7 @@ class TuiApp(App):
     def on_submit_error(self, msg: SubmitError) -> None:
         """Handle submit error."""
         try:
+            self._flush_streaming_pending(drain_all=True)
             transcript = self.query_one("#transcript", TranscriptView)
             block = transcript.flush_streaming()
             self._streaming_current_response = False
@@ -518,6 +536,63 @@ class TuiApp(App):
         self.state.add_block(block)
         transcript = self.query_one("#transcript", TranscriptView)
         transcript.append_block(block)
+
+    def _schedule_stream_flush(self) -> None:
+        if self._stream_flush_scheduled:
+            return
+        self._stream_flush_scheduled = True
+        self.set_timer(_STREAM_FLUSH_DELAY_SECONDS, self._flush_streaming_pending)
+
+    def _flush_streaming_pending(self, *, drain_all: bool = False) -> None:
+        self._stream_flush_scheduled = False
+        if not self._pending_stream_chars:
+            return
+        delta = self._take_pending_stream_delta(
+            None if drain_all else _STREAM_FLUSH_MAX_CHARS
+        )
+        if not delta:
+            return
+        try:
+            transcript = self.query_one("#transcript", TranscriptView)
+        except NoMatches:
+            return
+        if not self._stream_header_printed:
+            transcript.begin_streaming()
+            self._stream_header_printed = True
+        self._streaming_current_response = True
+        self.state.append_streaming_text(delta)
+        transcript.append_streaming(delta)
+        self._redraw_transcript()
+        if self._pending_stream_chars:
+            self._schedule_stream_flush()
+
+    def _take_pending_stream_delta(self, max_chars: int | None) -> str:
+        if not self._pending_stream_chars:
+            return ""
+        if max_chars is None or self._pending_stream_chars <= max_chars:
+            text = "".join(self._pending_stream_chunks)
+            self._clear_pending_stream_deltas()
+            return text
+
+        remaining = max_chars
+        parts: list[str] = []
+        while remaining > 0 and self._pending_stream_chunks:
+            chunk = self._pending_stream_chunks[0]
+            if len(chunk) <= remaining:
+                parts.append(self._pending_stream_chunks.popleft())
+                self._pending_stream_chars -= len(chunk)
+                remaining -= len(chunk)
+                continue
+            parts.append(chunk[:remaining])
+            self._pending_stream_chunks[0] = chunk[remaining:]
+            self._pending_stream_chars -= remaining
+            remaining = 0
+        return "".join(parts)
+
+    def _clear_pending_stream_deltas(self) -> None:
+        self._pending_stream_chunks.clear()
+        self._pending_stream_chars = 0
+        self._stream_flush_scheduled = False
 
     # ── Actions ─────────────────────────────────────────────────────────────
 

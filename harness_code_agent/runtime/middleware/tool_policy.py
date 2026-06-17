@@ -337,9 +337,26 @@ def _result_failure_category(result: str) -> str | None:
     lowered = (result or "").lower()
     if "[blocked]" in lowered or "status_source" in lowered and "tool_policy" in lowered:
         return "blocked"
-    if "timed out" in lowered or "timeout" in lowered:
+    if _looks_like_timeout_failure(lowered):
         return "timeout"
     return None
+
+
+def _looks_like_timeout_failure(lowered_result: str) -> bool:
+    if "timed out" not in lowered_result and "timeout" not in lowered_result:
+        return False
+    failure_markers = (
+        "[error]",
+        "[timeout]",
+        "status: failed",
+        "status=failed",
+        "return_code: 124",
+        "returncode: 124",
+        "exit code: 124",
+        "timed out after",
+        "case exceeded",
+    )
+    return any(marker in lowered_result for marker in failure_markers)
 
 
 def _args_shape(tool_name: str, tool_args: dict) -> str:

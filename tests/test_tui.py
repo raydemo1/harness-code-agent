@@ -826,6 +826,15 @@ class TuiRichRenderTests(unittest.TestCase):
         self.assertNotEqual(rendered.__class__.__name__, "Panel")
         self.assertIn("Assistant", rendered.renderables[0].plain)
 
+    def test_large_assistant_block_uses_bounded_plain_rendering(self):
+        block = TranscriptBlock("assistant", "assistant", "line\n" * 5000)
+
+        rendered = block_to_rich(block)
+
+        body = rendered.renderables[1]
+        self.assertEqual(body.__class__.__name__, "Text")
+        self.assertIn("display truncated", body.plain)
+
     def test_tool_block_renders_with_yellow_border(self):
         block = TranscriptBlock("tool", "read_file(path=x.py)", "", "running")
         rendered = block_to_rich(block)

@@ -1,25 +1,20 @@
 # Agent Eval Internal Report
 
-Generated at: 2026-06-17T01:35:31
+Generated at: 2026-06-17T15:31:51
 Result root: eval\results
 
 ## Sources
-- eval\results\2026-06-16_213101_deepseek_context_eval_cache
-- eval\results\2026-06-16_215107_deepseek_context_eval_cache_full_danger
-- eval\results\2026-06-16_223239_memory_ab
-- eval\results\2026-06-16_224333_latency
-- eval\results\2026-06-16_225637_memory_ab
-- eval\results\2026-06-16_234204_memory_ab
-- eval\results\2026-06-17_000535_latency
-- eval\results\2026-06-17_012523_memory_ab
 - eval\results\2026-06-17_013123_latency
+- eval\results\2026-06-17_151752_memory_ab
+- eval\results\2026-06-17_152258_latency
+- eval\results\2026-06-17_153037_tbench
 
 ## Metrics
 
 | Area | Key Result |
 | --- | --- |
-| Context cache | warmup 0.0% -> 99.0% |
-| Memory A/B | 5 tasks; tool calls -24.4%, elapsed --62.9%, tokens -33.9% |
-| Latency | turn p95=21153ms p99=21153ms; LLM p95=6211ms; TTFT p95=3185ms |
-| Terminal-Bench 2.0 subset | not run |
+| Context cache | not run |
+| Memory A/B | 5 tasks; tool calls -27.5%, elapsed --52.2%, tokens -20.2% |
+| Latency | turn p95=27475ms p99=27475ms; LLM p95=8527ms; TTFT p95=4357ms |
+| Terminal-Bench 2.0 8-task subset | 0/8 passed (0.0%), 8task; categories: data-processing 0/1, data-science 0/1, debugging 0/3, file-operations 0/1, software-engineering 0/2 |
 | Claw-SWE-Bench | not run |
