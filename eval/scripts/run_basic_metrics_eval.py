@@ -122,7 +122,7 @@ def run_memory_suite(args: argparse.Namespace) -> Path:
             env["HARNESS_MEMORY_ROOT"] = str(memory_root)
             env["HARNESS_PERMISSION_MODE"] = "danger-full-access"
             env["HARNESS_STREAM"] = "0"
-            _apply_basic_eval_limits(env, suite="memory")
+            _apply_metrics_eval_limits(env, suite="memory")
             if variant == "baseline":
                 env["HARNESS_MEMORY_DISABLED"] = "1"
             else:
@@ -132,8 +132,8 @@ def run_memory_suite(args: argparse.Namespace) -> Path:
                 suite="memory_ab",
                 case_id=str(task["id"]),
                 variant=variant,
-                prompt=_basic_eval_prompt(str(task["prompt"]), suite="memory"),
-                profile=str(task.get("profile") or "basic-eval"),
+                prompt=_metrics_eval_prompt(str(task["prompt"]), suite="memory"),
+                profile=str(task.get("profile") or "general"),
                 env=env,
                 run_dir=run_dir,
                 timeout=args.task_timeout,
@@ -156,13 +156,13 @@ def run_latency_suite(args: argparse.Namespace) -> Path:
         env = base_env()
         env["HARNESS_PERMISSION_MODE"] = "danger-full-access"
         env["HARNESS_STREAM"] = "1"
-        _apply_basic_eval_limits(env, suite="latency")
+        _apply_metrics_eval_limits(env, suite="latency")
         result = _run_hca_case(
             suite="latency",
             case_id=str(task["id"]),
             variant="streaming",
-            prompt=_basic_eval_prompt(str(task["prompt"]), suite="latency"),
-            profile=str(task.get("profile") or "basic-eval"),
+            prompt=_metrics_eval_prompt(str(task["prompt"]), suite="latency"),
+            profile=str(task.get("profile") or "general"),
             env=env,
             run_dir=run_dir,
             timeout=args.task_timeout,
@@ -248,7 +248,7 @@ def _run_hca_case(
     )
 
 
-def _basic_eval_prompt(prompt: str, *, suite: str) -> str:
+def _metrics_eval_prompt(prompt: str, *, suite: str) -> str:
     common = (
         "Use repo_search for code/text search, list_files for file discovery, and read_file for bounded reads. "
         "Use PowerShell-compatible shell only for execution tasks such as builds, installs, and tests. "
@@ -282,7 +282,7 @@ def _coerce_output(value: Any) -> str:
     return str(value)
 
 
-def _apply_basic_eval_limits(env: dict[str, str], *, suite: str) -> None:
+def _apply_metrics_eval_limits(env: dict[str, str], *, suite: str) -> None:
     if suite == "latency":
         env["MAX_AGENT_ITERATIONS"] = "8"
         env["MAX_AGENT_TOTAL_TOKENS"] = "80000"

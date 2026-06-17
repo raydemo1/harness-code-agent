@@ -127,16 +127,21 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
-    def test_interactive_session_starts_pending_without_session_record(self):
-        with patch("harness_code_agent.agent.conversation.Agent.start_conversation") as start:
+    def test_interactive_session_starts_bound_to_general_with_session_record(self):
+        with patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()) as start:
             session = InteractiveSession(cwd=self.temp_dir)
         try:
-            self.assertFalse(session.is_bound)
-            self.assertIsNone(session.session)
-            self.assertIsNone(session.session_id)
-            self.assertEqual(session.display_profile, "pending")
-            self.assertEqual(session.session_store.list_sessions(), [])
-            start.assert_not_called()
+            self.assertTrue(session.is_bound)
+            self.assertIsNotNone(session.session)
+            self.assertIsNotNone(session.session_id)
+            self.assertEqual(session.profile.name(), "general")
+            self.assertEqual(session.display_profile, "general")
+            metadata = session.session_store.read_metadata(session.session.id)
+            self.assertEqual(metadata["profile"], "general")
+            self.assertEqual(metadata["initial_profile"], "general")
+            self.assertEqual(metadata["profile_source"], "default")
+            self.assertEqual(len(session.session_store.list_sessions()), 1)
+            start.assert_called_once()
         finally:
             session.close()
 
@@ -226,56 +231,56 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             pass
 
-    def test_first_task_routes_before_creating_session_metadata(self):
-        decision = SimpleNamespace(
-            profile_name="plan",
-            confidence=0.91,
-            reason="User asked for a design plan.",
-            fallback_used=False,
-            fallback_reason="",
-        )
-
+    def test_first_task_routes_inside_existing_general_session(self):
+        general_conversation = FakeConversation()
+        plan_conversation = FakeConversation()
         with (
-            patch("harness_code_agent.core.interactive.route_profile_for_task", return_value=decision),
-            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
+            patch(
+                "harness_code_agent.agent.conversation.Agent.start_conversation",
+                side_effect=[general_conversation, plan_conversation],
+            ),
         ):
             session = InteractiveSession(cwd=self.temp_dir)
             try:
-                result = session.submit("帮我设计一个修复方案")
+                metadata = session.session_store.read_metadata(session.session.id)
+                self.assertEqual(metadata["profile"], "general")
+                self.assertEqual(metadata["initial_profile"], "general")
+
+                result = session.submit("先给我一个实现方案，不要改代码")
 
                 self.assertEqual(result.text, "assistant done")
                 self.assertTrue(session.is_bound)
                 self.assertEqual(session.profile.name(), "plan")
                 metadata = session.session_store.read_metadata(session.session.id)
                 self.assertEqual(metadata["profile"], "plan")
-                self.assertEqual(metadata["profile_source"], "router")
-                event_types = [event.type for event in session.event_bus.events]
-                self.assertIn("profile_route_decision", event_types)
+                self.assertEqual(metadata["initial_profile"], "general")
+                self.assertEqual(metadata["profile_source"], "auto route")
+                self.assertEqual(plan_conversation.submissions[-1], "Task:\n先给我一个实现方案，不要改代码")
+                route_events = [event for event in session.event_bus.events if event.type == "profile_route_decision"]
+                self.assertTrue(route_events)
+                self.assertEqual(route_events[-1].payload["source"], "local")
+                self.assertTrue(route_events[-1].payload["switched"])
             finally:
                 session.close()
 
-    def test_pending_profile_slash_command_defers_session_creation_until_task(self):
+    def test_profile_slash_command_switches_existing_session(self):
         with patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()):
             session = InteractiveSession(cwd=self.temp_dir)
             try:
+                self.assertTrue(session.is_bound)
+                self.assertEqual(session.profile.name(), "general")
                 self.assertTrue(session.handle_slash_command("/plan"))
 
-                self.assertFalse(session.is_bound)
-                self.assertIsNone(session.session)
                 self.assertEqual(session.profile.name(), "plan")
                 self.assertEqual(session.display_profile, "plan")
-                self.assertEqual(session.session_store.list_sessions(), [])
-
-                session.submit("plan the parser fix")
-
-                self.assertTrue(session.is_bound)
                 metadata = session.session_store.read_metadata(session.session.id)
                 self.assertEqual(metadata["profile"], "plan")
-                self.assertEqual(metadata["profile_source"], "explicit")
+                self.assertEqual(metadata["initial_profile"], "general")
+                self.assertEqual(metadata["profile_source"], "slash command")
             finally:
                 session.close()
 
-    def test_resume_slash_command_before_first_task_queues_resume_context(self):
+    def test_resume_slash_command_injects_context_into_existing_session(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
         previous = store.create(
             profile="plan",
@@ -298,11 +303,9 @@ class InteractiveCliTests(unittest.TestCase):
 
                 self.assertTrue(session.handle_slash_command(f"/resume {previous.id}"))
 
-                self.assertFalse(session.is_bound)
+                self.assertTrue(session.is_bound)
                 self.assertEqual(session.resume_session_id, previous.id)
-                self.assertIn("queued", output.getvalue())
-
-                session.submit("continue the work")
+                self.assertIn("injected", output.getvalue())
 
                 metadata = session.session_store.read_metadata(session.session.id)
                 self.assertEqual(metadata["resumed_from"], previous.id)
@@ -733,6 +736,7 @@ class InteractiveCliTests(unittest.TestCase):
             session = InteractiveSession(cwd=self.temp_dir)
             try:
                 cases = [
+                    ("/general", "general"),
                     ("/plan", "plan"),
                     ("/code", "coding-agent"),
                     ("/terminal", "terminal"),
@@ -749,6 +753,7 @@ class InteractiveCliTests(unittest.TestCase):
 
     def test_review_slash_alias_is_registered(self):
         self.assertEqual(PROFILE_SLASH_ALIASES["/review"], "review")
+        self.assertEqual(PROFILE_SLASH_ALIASES["/general"], "general")
 
     def test_profile_switch_uses_handoff_context_without_copying_old_messages(self):
         coding_conversation = FakeConversation()
@@ -758,7 +763,11 @@ class InteractiveCliTests(unittest.TestCase):
             "harness_code_agent.agent.conversation.Agent.start_conversation",
             side_effect=[coding_conversation, plan_conversation],
         ):
-            session = InteractiveSession(cwd=self.temp_dir)
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="coding-agent",
+                profile_explicit=True,
+            )
             try:
                 session.submit("inspect the auth bug")
 
@@ -784,9 +793,9 @@ class InteractiveCliTests(unittest.TestCase):
         session = self._session()
         try:
             self.assertTrue(session.handle_slash_command("/coding-agent"))
-            self.assertEqual(session.profile.name(), "coding-agent")
+            self.assertEqual(session.profile.name(), "general")
             self.assertTrue(session.handle_slash_command("/swe-bench"))
-            self.assertEqual(session.profile.name(), "coding-agent")
+            self.assertEqual(session.profile.name(), "general")
         finally:
             session.close()
 

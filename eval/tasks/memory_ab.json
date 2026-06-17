@@ -4,7 +4,7 @@
   "tasks": [
     {
       "id": "context_tail_budget",
-      "profile": "basic-eval",
+      "profile": "general",
       "prompt": "Find where the recent tail token budget is implemented and explain the default formula.",
       "success_markers": ["DEFAULT_RECENT_TAIL_TOKENS", "target_tokens", "0.5"],
       "memory_records": [
@@ -19,7 +19,7 @@
     },
     {
       "id": "deepseek_reasoning_strip",
-      "profile": "basic-eval",
+      "profile": "general",
       "prompt": "Find how DeepSeek reasoning_content is kept locally but stripped before provider calls.",
       "success_markers": ["reasoning_content", "_strip_response_only_message_fields", "providers.py"],
       "memory_records": [
@@ -34,7 +34,7 @@
     },
     {
       "id": "cache_diagnostics",
-      "profile": "basic-eval",
+      "profile": "general",
       "prompt": "Find the cache diagnostics helper and explain which prefix changes it can detect.",
       "success_markers": ["compare_prompt_cache_shapes", "system", "tools", "log_rewrite"],
       "memory_records": [
@@ -49,7 +49,7 @@
     },
     {
       "id": "observability_tokens",
-      "profile": "basic-eval",
+      "profile": "general",
       "prompt": "Find where session observability aggregates cache hit and miss tokens.",
       "success_markers": ["cache_miss_tokens", "cached_tokens", "build_session_observability"],
       "memory_records": [
@@ -64,7 +64,7 @@
     },
     {
       "id": "memory_middleware",
-      "profile": "basic-eval",
+      "profile": "general",
       "prompt": "Find how long-term memory is injected into the agent prompt.",
       "success_markers": ["MemoryMiddleware", "MEMORY.md", "memory_search"],
       "memory_records": [

@@ -76,6 +76,7 @@ def default_command_registry() -> SlashCommandRegistry:
         CommandSpec("/help", "General", "/help", "Show commands grouped by workflow.", _help),
         CommandSpec("/exit", "General", "/exit", "Close the current TUI session.", _exit, aliases=("/quit",)),
         CommandSpec("/profiles", "Profiles", "/profiles", "List available profiles.", _profiles),
+        CommandSpec("/general", "Profiles", "/general", "Switch to general profile.", _profile("general", "/general")),
         CommandSpec("/code", "Profiles", "/code", "Switch to coding-agent profile.", _profile("coding-agent", "/code")),
         CommandSpec("/plan", "Profiles", "/plan", "Switch to constrained planning profile.", _profile("plan", "/plan")),
         CommandSpec("/terminal", "Profiles", "/terminal", "Switch to terminal task profile.", _profile("terminal", "/terminal")),

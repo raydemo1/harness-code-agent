@@ -15,7 +15,7 @@ from ..agent.conversation import AgentConversation
 from ..agent.prompts import GlobalRulesDoc, PromptPrefixBuilder
 from ..profiles import get_profile, list_profiles
 from ..profiles.base import BaseProfile
-from ..profiles.router import RouteDecision, route_profile_for_task
+from ..profiles.router import RouteDecision, route_profile_for_turn
 from ..runtime.builtins.browser import stop_dev_server
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
 from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider, LlmAutoApprovalProvider
@@ -39,11 +39,12 @@ from .mentions import MentionResolutionError, ResolvedMention, render_mention_co
 
 
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
-PRODUCT_DEFAULT_PROFILE = "coding-agent"
+PRODUCT_DEFAULT_PROFILE = "general"
 CHECKPOINT_EXCLUDES = [".harness", "global_plan", config.PROGRESS_FILE]
 TURN_INLINE_CHAR_LIMIT = 40_000
 TURN_EXCERPT_CHARS = 2_000
 PROFILE_SLASH_ALIASES = {
+    "/general": "general",
     "/code": "coding-agent",
     "/app": "app-builder",
     "/terminal": "terminal",
@@ -149,6 +150,7 @@ class InteractiveSession:
         self._started_at: float | None = None
         self._closed = False
         self._close_lock = threading.Lock()
+        self._bind_profile(self._pending_profile_name, source=self._profile_source)
 
     @property
     def is_bound(self) -> bool:
@@ -160,9 +162,7 @@ class InteractiveSession:
 
     @property
     def display_profile(self) -> str:
-        if self.is_bound or self._profile_source in {"explicit", "resume"}:
-            return self.profile.name()
-        return "pending"
+        return self.profile.name()
 
     def _build_agent(self, profile: BaseProfile):
         from ..agent.conversation import Agent
@@ -276,19 +276,38 @@ class InteractiveSession:
             if _is_plan_execution_confirmation(user_prompt):
                 return self.execute_pending_plan()
             return self.revise_pending_plan(user_prompt)
+        self._maybe_auto_route_profile(user_prompt)
         return self._submit_to_current_agent(user_prompt, cancellation_token=cancellation_token)
 
     def ensure_profile_bound_for_first_task(self, user_prompt: str) -> None:
         if self.is_bound:
             return
-        route_decision: RouteDecision | None = None
-        profile_name = self._pending_profile_name
-        source = self._profile_source
-        if source == "default":
-            route_decision = route_profile_for_task(user_prompt, workspace=self.cwd)
-            profile_name = route_decision.profile_name
-            source = "router" if not route_decision.fallback_used else "default"
-        self._bind_profile(profile_name, source=source, route_decision=route_decision)
+        self._bind_profile(self._pending_profile_name, source=self._profile_source)
+
+    def _maybe_auto_route_profile(self, user_prompt: str) -> None:
+        if not self.is_bound or self.event_bus is None:
+            return
+        current = self.profile.name()
+        decision = route_profile_for_turn(user_prompt, current_profile=current)
+        switched = decision.profile_name != current
+        self.event_bus.emit(
+            "profile_route_decision",
+            agent="main_agent",
+            payload={
+                "profile": decision.profile_name,
+                "current_profile": current,
+                "confidence": decision.confidence,
+                "margin": decision.margin,
+                "reason": decision.reason,
+                "fallback_used": decision.fallback_used,
+                "fallback_reason": decision.fallback_reason,
+                "elapsed_ms": round(float(getattr(decision, "elapsed_ms", 0.0)), 1),
+                "source": decision.source,
+                "switched": switched,
+            },
+        )
+        if switched:
+            self._switch_profile(decision.profile_name, reason="auto route")
 
     def _bind_profile(
         self,
@@ -349,6 +368,9 @@ class InteractiveSession:
                     "fallback_used": route_decision.fallback_used,
                     "fallback_reason": route_decision.fallback_reason,
                     "elapsed_ms": round(float(getattr(route_decision, "elapsed_ms", 0.0)), 1),
+                    "margin": getattr(route_decision, "margin", 0.0),
+                    "source": getattr(route_decision, "source", "llm"),
+                    "switched": False,
                 },
             )
         if self.resume_context:
@@ -538,7 +560,7 @@ class InteractiveSession:
         self.pending_plan_markdown = None
         self.pending_plan_revision = 0
         self._switch_profile(
-            PRODUCT_DEFAULT_PROFILE,
+            "coding-agent",
             reason="execute approved plan",
             plan_markdown=plan_markdown,
         )
@@ -617,6 +639,12 @@ class InteractiveSession:
             current=self.profile.name(),
             reason=reason,
         ))
+        if self.session is not None:
+            self.session_store.update_profile(
+                self.session.id,
+                self.profile.name(),
+                profile_source=reason,
+            )
         self.event_bus.emit(
             "profile_switched",
             agent="main_agent",
@@ -749,6 +777,8 @@ class InteractiveSession:
         self.resume_context = context_text
         if not self.is_bound:
             return f"Resume context queued for session: {session_id}"
+        if self.session is not None:
+            self.session_store.update_resumed_from(self.session.id, session_id)
         self._append_conversation_message({
             "role": "user",
             "content": f"Resume context:\n{context_text}",

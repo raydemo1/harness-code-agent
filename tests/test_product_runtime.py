@@ -523,147 +523,33 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", completions.calls[0])
         self.assertEqual(completions.calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
 
-    def test_profile_router_uses_fast_profile(self):
+    def test_local_turn_router_conservatively_routes_product_profiles(self):
         from harness_code_agent.profiles import router
 
-        class FakeCompletions:
-            def __init__(self):
-                self.calls = []
-
-            def create(self, **kwargs):
-                self.calls.append(kwargs)
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content='{"profile_name":"coding-agent","confidence":0.9,"reason":"coding"}'))]
-                )
-
-        completions = FakeCompletions()
-        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with (
-                patch("harness_code_agent.profiles.router.get_client", return_value=fake_client),
-                patch.object(router.config, "BASE_URL", "https://api.deepseek.com"),
-                patch.object(router.config, "PROFILE_ROUTER_TIMEOUT_SECONDS", 1.25),
-            ):
-                decision = router.route_profile_for_task("fix tests", workspace=Path(tmpdir))
-
-        self.assertEqual(decision.profile_name, "coding-agent")
-        self.assertEqual(completions.calls[0]["model"], "deepseek-v4-flash")
-        self.assertEqual(completions.calls[0]["timeout"], 1.25)
-        self.assertNotIn("reasoning_effort", completions.calls[0])
-        self.assertEqual(completions.calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
-        self.assertGreaterEqual(decision.elapsed_ms, 0.0)
-
-    def test_profile_router_can_disable_llm_for_fast_startup(self):
-        from harness_code_agent.profiles import router
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with (
-                patch.object(router.config, "PROFILE_ROUTER_MODE", "off"),
-                patch("harness_code_agent.profiles.router._call_router_llm") as call_router,
-            ):
-                decision = router.route_profile_for_task("fix tests", workspace=Path(tmpdir))
-
-        self.assertEqual(decision.profile_name, "coding-agent")
-        self.assertTrue(decision.fallback_used)
-        self.assertIn("disabled", decision.fallback_reason)
-        self.assertGreaterEqual(decision.elapsed_ms, 0.0)
-        call_router.assert_not_called()
-
-    def test_profile_router_short_circuits_explicit_review_intent(self):
-        from harness_code_agent.profiles import router
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("harness_code_agent.profiles.router._call_router_llm") as call_router:
-                decision = router.route_profile_for_task("please code review these changes", workspace=Path(tmpdir))
-
-        self.assertEqual(decision.profile_name, "review")
-        self.assertGreaterEqual(decision.confidence, 0.99)
-        self.assertFalse(decision.fallback_used)
-        call_router.assert_not_called()
-
-    def test_profile_router_short_circuits_common_chinese_review_intent(self):
-        from harness_code_agent.profiles import router
-
-        prompts = [
-            "帮我 review 这段代码",
-            "看一下代码有没有问题",
+        cases = [
+            ("你是谁", "general", "general"),
+            ("帮我修复这个 bug 并跑测试", "general", "coding-agent"),
+            ("帮我 review 这段代码有没有问题", "general", "review"),
+            ("先给我一个实现方案，不要改代码", "general", "plan"),
+            ("做一个好看的 todo 网页", "general", "app-builder"),
+            ("你是谁", "coding-agent", "general"),
         ]
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for prompt in prompts:
-                with self.subTest(prompt=prompt):
-                    with patch("harness_code_agent.profiles.router._call_router_llm") as call_router:
-                        decision = router.route_profile_for_task(prompt, workspace=Path(tmpdir))
-                    self.assertEqual(decision.profile_name, "review")
-                    self.assertFalse(decision.fallback_used)
-                    call_router.assert_not_called()
+        for prompt, current, expected in cases:
+            with self.subTest(prompt=prompt, current=current):
+                decision = router.route_profile_for_turn(prompt, current_profile=current)
+                self.assertEqual(decision.profile_name, expected)
+                self.assertEqual(decision.source, "local")
+                self.assertFalse(decision.fallback_used)
 
-    def test_profile_router_does_not_treat_review_filenames_as_review_intent(self):
+    def test_local_turn_router_does_not_hop_between_specialized_profiles(self):
         from harness_code_agent.profiles import router
 
-        class FakeCompletions:
-            def __init__(self):
-                self.calls = []
-
-            def create(self, **kwargs):
-                self.calls.append(kwargs)
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content='{"profile_name":"coding-agent","confidence":0.9,"reason":"filename only"}'))]
-                )
-
-        completions = FakeCompletions()
-        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("harness_code_agent.profiles.router.get_client", return_value=fake_client):
-                decision = router.route_profile_for_task("open docs/review.md and summarize it", workspace=Path(tmpdir))
-
-        self.assertEqual(decision.profile_name, "coding-agent")
-        self.assertEqual(len(completions.calls), 1)
-
-    def test_profile_router_does_not_short_circuit_review_plus_implementation(self):
-        from harness_code_agent.profiles import router
-
-        class FakeCompletions:
-            def __init__(self):
-                self.calls = []
-
-            def create(self, **kwargs):
-                self.calls.append(kwargs)
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content='{"profile_name":"coding-agent","confidence":0.91,"reason":"implementation requested"}'))]
-                )
-
-        completions = FakeCompletions()
-        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("harness_code_agent.profiles.router.get_client", return_value=fake_client):
-                decision = router.route_profile_for_task("帮我评审一下这个方案然后实现", workspace=Path(tmpdir))
-
-        self.assertEqual(decision.profile_name, "coding-agent")
-        self.assertEqual(len(completions.calls), 1)
-
-    def test_profile_router_falls_back_when_profile_catalog_fails(self):
-        from harness_code_agent.profiles import router
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("harness_code_agent.profiles.router.list_profiles", side_effect=RuntimeError("catalog failed")):
-                decision = router.route_profile_for_task("fix tests", workspace=Path(tmpdir))
+        decision = router.route_profile_for_turn("帮我 review 这段代码", current_profile="coding-agent")
 
         self.assertEqual(decision.profile_name, "coding-agent")
         self.assertTrue(decision.fallback_used)
-        self.assertIn("catalog failed", decision.fallback_reason)
-
-    def test_router_json_parser_strips_only_outer_code_fence(self):
-        from harness_code_agent.profiles.router import _parse_router_json
-
-        parsed = _parse_router_json(
-            '```json\n{"profile_name":"coding-agent","confidence":0.9,"reason":"keep `literal` ticks"}\n```'
-        )
-
-        self.assertEqual(parsed["reason"], "keep `literal` ticks")
+        self.assertIn("sticky", decision.fallback_reason)
 
     def test_read_only_command_whitelist_includes_common_verification_commands(self):
         from harness_code_agent.runtime.permissions import is_read_only_command
@@ -2541,7 +2427,7 @@ class ProductRuntimeTests(unittest.TestCase):
             session = InteractiveSession(cwd=tmp, profile_name="coding-agent")
             try:
                 result = session.toggle_permission_mode()
-                self.assertFalse(session.is_bound)
+                self.assertTrue(session.is_bound)
 
                 session.ensure_profile_bound_for_first_task("inspect permissions")
                 metadata = session.session_store.read_metadata(session.session.id)

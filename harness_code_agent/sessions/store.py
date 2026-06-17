@@ -61,6 +61,7 @@ class SessionStore:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "cwd": str(Path(cwd).resolve()),
             "profile": profile,
+            "initial_profile": profile,
             "profile_source": profile_source or "explicit",
             "model": model,
             "permission_mode": permission_mode,
@@ -158,6 +159,29 @@ class SessionStore:
     def update_permission_mode(self, session_id: str, permission_mode: str) -> dict[str, Any]:
         metadata = self.read_metadata(session_id)
         metadata["permission_mode"] = permission_mode
+        metadata_path = self._session_root(session_id) / "session.json"
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return metadata
+
+    def update_profile(self, session_id: str, profile: str, profile_source: str | None = None) -> dict[str, Any]:
+        metadata = self.read_metadata(session_id)
+        metadata.setdefault("initial_profile", metadata.get("profile", profile))
+        metadata["profile"] = profile
+        if profile_source:
+            metadata["profile_source"] = profile_source
+        metadata_path = self._session_root(session_id) / "session.json"
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return metadata
+
+    def update_resumed_from(self, session_id: str, resumed_from: str) -> dict[str, Any]:
+        metadata = self.read_metadata(session_id)
+        metadata["resumed_from"] = resumed_from
         metadata_path = self._session_root(session_id) / "session.json"
         metadata_path.write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",

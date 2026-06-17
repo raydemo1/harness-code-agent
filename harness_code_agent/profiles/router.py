@@ -1,24 +1,18 @@
-"""First-task profile routing.
-
-The router is intentionally separate from the real agent conversation: it may
-call an LLM, but its messages are never inserted into the bound profile slot.
-"""
+"""Local conservative profile routing."""
 from __future__ import annotations
 
-import json
+import math
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
-
-from .. import config
-from ..agent.providers import ProviderAdapter, get_client
-from . import list_profiles
+from functools import lru_cache
 
 
-DEFAULT_PROFILE = "coding-agent"
-MIN_CONFIDENCE = 0.70
+DEFAULT_PROFILE = "general"
+LOCAL_ROUTE_MIN_CONFIDENCE = 0.10
+LOCAL_ROUTE_MIN_MARGIN = 0.035
+LOCAL_ROUTE_PROFILES = {"general", "coding-agent", "review", "plan", "app-builder"}
 
 
 @dataclass(frozen=True)
@@ -29,186 +23,83 @@ class RouteDecision:
     fallback_used: bool = False
     fallback_reason: str = ""
     elapsed_ms: float = 0.0
+    margin: float = 0.0
+    source: str = "local"
 
 
-def route_profile_for_task(
+def route_profile_for_turn(
     user_prompt: str,
     *,
-    workspace: str | Path,
-    confidence_threshold: float = MIN_CONFIDENCE,
+    current_profile: str,
+    confidence_threshold: float = LOCAL_ROUTE_MIN_CONFIDENCE,
+    margin_threshold: float = LOCAL_ROUTE_MIN_MARGIN,
 ) -> RouteDecision:
-    """Choose the best profile for the first real user task.
-
-    Invalid model output, low confidence, unknown profiles, and provider
-    failures all fall back to the product default.
-    """
+    """Conservatively route a turn using local semantic prototypes only."""
     started_at = time.perf_counter()
-    if _is_explicit_review_intent(user_prompt):
-        return _with_elapsed(started_at, RouteDecision(
-            profile_name="review",
-            confidence=0.99,
-            reason="User explicitly requested a code review or review-style assessment.",
-        ))
-    if _router_llm_disabled():
-        return _with_elapsed(started_at, _fallback("profile router LLM disabled"))
-    try:
-        profiles = list_profiles()
-        valid_profiles = {item["name"] for item in profiles}
-        raw = _call_router_llm(
-            user_prompt=user_prompt,
-            workspace=Path(workspace),
-            profiles=profiles,
+    current = current_profile if current_profile in LOCAL_ROUTE_PROFILES else current_profile
+    if current not in LOCAL_ROUTE_PROFILES:
+        return _with_elapsed(
+            started_at,
+            RouteDecision(
+                profile_name=current,
+                confidence=0.0,
+                reason="Current profile is outside product auto-route candidates.",
+                fallback_used=True,
+                fallback_reason="profile is sticky",
+                source="local",
+            ),
         )
-        data = _parse_router_json(raw)
-        profile_name = str(data.get("profile_name") or "").strip()
-        confidence = float(data.get("confidence") or 0.0)
-        reason = str(data.get("reason") or "").strip()
-        if profile_name not in valid_profiles:
-            return _with_elapsed(started_at, _fallback(f"unknown profile: {profile_name or '<empty>'}"))
-        if confidence < confidence_threshold:
-            return _with_elapsed(started_at, _fallback(f"low confidence: {confidence:.2f}", router_reason=reason))
-        return _with_elapsed(started_at, RouteDecision(
-            profile_name=profile_name,
-            confidence=confidence,
-            reason=reason or "Router selected this profile for the first task.",
-        ))
-    except Exception as exc:
-        return _with_elapsed(started_at, _fallback(f"router failed: {exc}"))
 
+    scores = _local_route_scores(user_prompt)
+    if not scores:
+        return _with_elapsed(started_at, _local_fallback(current, "empty local route query"))
 
-def _call_router_llm(*, user_prompt: str, workspace: Path, profiles: list[dict[str, str]]) -> str:
-    profile_lines = "\n".join(
-        f"- {item['name']}: {item['description']}" for item in profiles
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    best_profile, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    margin = max(0.0, best_score - second_score)
+
+    if best_score < confidence_threshold or margin < margin_threshold:
+        decision = _local_fallback(current, "low local route confidence")
+        return _with_elapsed(started_at, _replace_route_scores(decision, best_score, margin))
+
+    if current != "general" and best_profile not in {current, "general"}:
+        decision = _local_fallback(current, f"specialized profile sticky; local best was {best_profile}")
+        return _with_elapsed(started_at, _replace_route_scores(decision, best_score, margin))
+
+    return _with_elapsed(
+        started_at,
+        RouteDecision(
+            profile_name=best_profile,
+            confidence=best_score,
+            margin=margin,
+            reason=f"Local semantic prototype matched {best_profile}.",
+            source="local",
+        ),
     )
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You route the first real user task to one Harness profile. "
-                "Return only compact JSON with keys: profile_name, confidence, reason. "
-                "confidence must be a number from 0 to 1."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "Available profiles:\n"
-                f"{profile_lines}\n\n"
-                "Workspace summary:\n"
-                f"{_workspace_summary(workspace)}\n\n"
-                "First user task:\n"
-                f"{user_prompt}"
-            ),
-        },
-    ]
-    profile = config.resolve_model_profile("fast")
-    adapter = ProviderAdapter(profile.provider)
-    response = get_client().chat.completions.create(**adapter.chat_kwargs(
-        profile=profile,
-        messages=messages,
-        max_tokens=512,
-    ), timeout=config.PROFILE_ROUTER_TIMEOUT_SECONDS)
-    return response.choices[0].message.content or ""
 
 
-def _parse_router_json(raw: str) -> dict[str, Any]:
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    return json.loads(text)
-
-
-def _is_explicit_review_intent(user_prompt: str) -> bool:
-    text = " ".join(str(user_prompt or "").strip().split())
-    if not text:
-        return False
-    lowered = text.lower()
-    if _includes_follow_up_implementation_intent(text, lowered):
-        return False
-    chinese_review_terms = ("审查", "评审")
-    if any(term in text for term in chinese_review_terms):
-        return True
-    chinese_code_terms = ("代码", "变更", "提交", "实现", "diff", "pr")
-    if "review" in lowered and any(term in lowered for term in chinese_code_terms):
-        return True
-    chinese_inspection_terms = ("看一下代码", "看看代码", "检查代码", "代码有没有问题")
-    if any(term in lowered for term in chinese_inspection_terms):
-        return True
-
-    review_patterns = [
-        r"\bcode[-\s]+review\b",
-        r"\breview\s+(?:this|these|the|my|our)?\s*(?:code|changes|change|diff|pr|pull\s+request|patch|commit|branch|implementation)\b",
-        r"\b(?:please\s+)?review\s+(?:this|these|the|my|our)\s+(?:changes?|code|diff|pr|pull\s+request|patch|commit|branch|implementation)\b",
-        r"\bdo\s+(?:a|an)\s+review\b",
-    ]
-    return any(re.search(pattern, lowered) for pattern in review_patterns)
-
-
-def _includes_follow_up_implementation_intent(text: str, lowered: str) -> bool:
-    chinese_action_terms = (
-        "然后",
-        "并实现",
-        "实现",
-        "修复",
-        "修改",
-        "改动",
-        "调整",
-        "执行",
-        "开始做",
-        "落地",
-    )
-    if any(term in text for term in chinese_action_terms):
-        return True
-    action_patterns = (
-        r"\b(?:and|then)\s+(?:fix|implement|apply|change|update|modify|refactor)\b",
-        r"\b(?:fix|implement|apply|change|update|modify|refactor)\s+(?:it|this|these|the|code|changes|issue|bug|fix)\b",
-    )
-    return any(re.search(pattern, lowered) for pattern in action_patterns)
-
-
-def _workspace_summary(workspace: Path) -> str:
-    try:
-        entries = sorted(workspace.iterdir(), key=lambda item: item.name.lower())
-    except OSError as exc:
-        return f"workspace unreadable: {exc}"
-    names = [item.name + ("/" if item.is_dir() else "") for item in entries[:40]]
-    manifests = [
-        name
-        for name in [
-            "pyproject.toml",
-            "package.json",
-            "Cargo.toml",
-            "go.mod",
-            "README.md",
-            "requirements.txt",
-        ]
-        if (workspace / name).exists()
-    ]
-    return "\n".join([
-        f"path: {workspace}",
-        "top-level: " + (", ".join(names) if names else "<empty>"),
-        "manifests: " + (", ".join(manifests) if manifests else "<none>"),
-    ])
-
-
-def _fallback(fallback_reason: str, *, router_reason: str = "") -> RouteDecision:
-    explanation = router_reason or "Using the default profile."
+def _local_fallback(profile_name: str, fallback_reason: str) -> RouteDecision:
     return RouteDecision(
-        profile_name=DEFAULT_PROFILE,
+        profile_name=profile_name,
         confidence=0.0,
-        reason=explanation,
+        reason="Keeping the current profile.",
         fallback_used=True,
         fallback_reason=fallback_reason,
+        source="local",
     )
 
 
-def _router_llm_disabled() -> bool:
-    return config.PROFILE_ROUTER_MODE in {"0", "false", "off", "disabled", "none"}
+def _replace_route_scores(decision: RouteDecision, confidence: float, margin: float) -> RouteDecision:
+    return RouteDecision(
+        profile_name=decision.profile_name,
+        confidence=confidence,
+        margin=margin,
+        reason=decision.reason,
+        fallback_used=decision.fallback_used,
+        fallback_reason=decision.fallback_reason,
+        source=decision.source,
+    )
 
 
 def _with_elapsed(started_at: float, decision: RouteDecision) -> RouteDecision:
@@ -219,4 +110,88 @@ def _with_elapsed(started_at: float, decision: RouteDecision) -> RouteDecision:
         fallback_used=decision.fallback_used,
         fallback_reason=decision.fallback_reason,
         elapsed_ms=(time.perf_counter() - started_at) * 1000,
+        margin=decision.margin,
+        source=decision.source,
     )
+
+
+def _local_route_scores(user_prompt: str) -> dict[str, float]:
+    query = _text_vector(user_prompt)
+    if not query:
+        return {}
+    return {
+        profile: _cosine_similarity(query, vector)
+        for profile, vector in _prototype_vectors().items()
+    }
+
+
+@lru_cache(maxsize=1)
+def _prototype_vectors() -> dict[str, Counter[str]]:
+    return {
+        profile: _text_vector(text)
+        for profile, text in _LOCAL_ROUTE_PROTOTYPES.items()
+    }
+
+
+def _text_vector(text: str) -> Counter[str]:
+    value = str(text or "").lower()
+    vector: Counter[str] = Counter()
+    for token in re.findall(r"[a-z0-9_./:-]+", value):
+        if len(token) > 1:
+            vector[token] += 1.0
+        for part in re.split(r"[^a-z0-9]+", token):
+            if len(part) > 2:
+                vector[part] += 0.5
+    for sequence in re.findall(r"[\u4e00-\u9fff]+", value):
+        if len(sequence) == 1:
+            vector[sequence] += 0.2
+            continue
+        for ngram_size in (2, 3):
+            if len(sequence) < ngram_size:
+                continue
+            for index in range(0, len(sequence) - ngram_size + 1):
+                vector[sequence[index:index + ngram_size]] += 1.0
+    return vector
+
+
+def _cosine_similarity(left: Counter[str], right: Counter[str]) -> float:
+    if not left or not right:
+        return 0.0
+    dot = sum(value * right.get(key, 0.0) for key, value in left.items())
+    if dot <= 0:
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left.values()))
+    right_norm = math.sqrt(sum(value * value for value in right.values()))
+    if left_norm <= 0 or right_norm <= 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+_LOCAL_ROUTE_PROTOTYPES = {
+    "general": """
+        who are you what can you do explain this concept answer a question summarize discuss compare
+        help me understand brainstorm talk through analyze this screenshot image product idea
+        你是谁 你能做什么 解释一下 说明一下 总结一下 讨论一下 分析这张图 帮我理解 普通问题
+        先聊聊 看看这个想法 回答即可
+    """,
+    "coding-agent": """
+        implement fix change update modify refactor migrate add feature edit files write code
+        run tests verify failing test bug regression make the code pass patch repository
+        修复 修改 实现 改代码 调整 迁移 加功能 跑测试 验证 落地 修 bug 提交补丁
+    """,
+    "review": """
+        review code review inspect changes find issues read-only assessment critique audit pull request diff
+        findings severity risk regression missing tests security correctness maintainability
+        审查 评审 review 看代码有没有问题 检查变更 找问题 只读评估 风险 严重程度
+    """,
+    "plan": """
+        plan design proposal implementation plan architecture plan do not implement investigate and produce plan
+        steps roadmap approach tradeoffs assumptions test plan decision complete
+        计划 方案 设计方案 实施方案 实现方案 不要实现 不要改代码 先规划 怎么做 路线 取舍 风险 假设
+    """,
+    "app-builder": """
+        build app create website web app page UI frontend component browser responsive design todo
+        html css javascript react vite interface polished app game dashboard landing page
+        做一个网页 创建应用 前端 UI 页面 浏览器 响应式 组件 看板 小游戏 可运行界面 todo
+    """,
+}
