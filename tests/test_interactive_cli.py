@@ -263,6 +263,45 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_specialized_profile_direct_answer_stays_in_current_slot(self):
+        conversation = FakeConversation()
+        with patch(
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
+            return_value=conversation,
+        ) as start_conversation:
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="coding-agent",
+                profile_explicit=True,
+            )
+            try:
+                result = session.submit("你是谁")
+
+                self.assertEqual(result.text, "assistant done")
+                self.assertEqual(session.profile.name(), "coding-agent")
+                self.assertEqual(session.display_profile, "coding-agent")
+                self.assertEqual(start_conversation.call_count, 1)
+                self.assertIn("coding-agent", session.profile_slots)
+                self.assertNotIn("general", session.profile_slots)
+                metadata = session.session_store.read_metadata(session.session.id)
+                self.assertEqual(metadata["profile"], "coding-agent")
+
+                submitted = conversation.submissions[-1]
+                self.assertIn("Turn handling instruction: answer this turn directly", submitted)
+                self.assertIn("Do not create or edit files", submitted)
+                self.assertIn("User request:\n你是谁", submitted)
+
+                route_events = [event for event in session.event_bus.events if event.type == "profile_route_decision"]
+                self.assertTrue(route_events)
+                payload = route_events[-1].payload
+                self.assertEqual(payload["profile"], "coding-agent")
+                self.assertEqual(payload["matched_profile"], "general")
+                self.assertEqual(payload["action"], "direct_answer")
+                self.assertEqual(payload["turn_mode"], "direct_answer")
+                self.assertFalse(payload["switched"])
+            finally:
+                session.close()
+
     def test_profile_slash_command_switches_existing_session(self):
         with patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()):
             session = InteractiveSession(cwd=self.temp_dir)

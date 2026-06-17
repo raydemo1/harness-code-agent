@@ -15,7 +15,12 @@ from ..agent.conversation import AgentConversation
 from ..agent.prompts import GlobalRulesDoc, PromptPrefixBuilder
 from ..profiles import get_profile, list_profiles
 from ..profiles.base import BaseProfile
-from ..profiles.router import RouteDecision, route_profile_for_turn
+from ..profiles.router import (
+    ROUTE_ACTION_SWITCH_PROFILE,
+    TURN_MODE_DIRECT_ANSWER,
+    RouteDecision,
+    route_profile_for_turn,
+)
 from ..runtime.builtins.browser import stop_dev_server
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
 from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider, LlmAutoApprovalProvider
@@ -40,6 +45,11 @@ from .mentions import MentionResolutionError, ResolvedMention, render_mention_co
 
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 PRODUCT_DEFAULT_PROFILE = "general"
+DIRECT_ANSWER_TURN_INSTRUCTION = (
+    "Turn handling instruction: answer this turn directly and briefly. "
+    "Do not create or edit files, run commands, launch browsers, or continue prior implementation work "
+    "unless the user explicitly asks for that in this turn."
+)
 CHECKPOINT_EXCLUDES = [".harness", "global_plan", config.PROGRESS_FILE]
 TURN_INLINE_CHAR_LIMIT = 40_000
 TURN_EXCERPT_CHARS = 2_000
@@ -276,26 +286,34 @@ class InteractiveSession:
             if _is_plan_execution_confirmation(user_prompt):
                 return self.execute_pending_plan()
             return self.revise_pending_plan(user_prompt)
-        self._maybe_auto_route_profile(user_prompt)
-        return self._submit_to_current_agent(user_prompt, cancellation_token=cancellation_token)
+        route_decision = self._maybe_auto_route_profile(user_prompt)
+        turn_instruction = _turn_instruction_for_route(route_decision)
+        return self._submit_to_current_agent(
+            user_prompt,
+            cancellation_token=cancellation_token,
+            turn_instruction=turn_instruction,
+        )
 
     def ensure_profile_bound_for_first_task(self, user_prompt: str) -> None:
         if self.is_bound:
             return
         self._bind_profile(self._pending_profile_name, source=self._profile_source)
 
-    def _maybe_auto_route_profile(self, user_prompt: str) -> None:
+    def _maybe_auto_route_profile(self, user_prompt: str) -> RouteDecision | None:
         if not self.is_bound or self.event_bus is None:
-            return
+            return None
         current = self.profile.name()
         decision = route_profile_for_turn(user_prompt, current_profile=current)
-        switched = decision.profile_name != current
+        switched = decision.action == ROUTE_ACTION_SWITCH_PROFILE and decision.profile_name != current
         self.event_bus.emit(
             "profile_route_decision",
             agent="main_agent",
             payload={
                 "profile": decision.profile_name,
                 "current_profile": current,
+                "matched_profile": decision.matched_profile,
+                "action": decision.action,
+                "turn_mode": decision.turn_mode,
                 "confidence": decision.confidence,
                 "margin": decision.margin,
                 "reason": decision.reason,
@@ -308,6 +326,7 @@ class InteractiveSession:
         )
         if switched:
             self._switch_profile(decision.profile_name, reason="auto route")
+        return decision
 
     def _bind_profile(
         self,
@@ -363,6 +382,9 @@ class InteractiveSession:
                 agent="main_agent",
                 payload={
                     "profile": route_decision.profile_name,
+                    "matched_profile": route_decision.matched_profile,
+                    "action": route_decision.action,
+                    "turn_mode": route_decision.turn_mode,
                     "confidence": route_decision.confidence,
                     "reason": route_decision.reason,
                     "fallback_used": route_decision.fallback_used,
@@ -416,7 +438,12 @@ class InteractiveSession:
         self._sync_time_budget()
         return created
 
-    def _submit_to_current_agent(self, user_prompt: str, cancellation_token=None) -> TurnResult:
+    def _submit_to_current_agent(
+        self,
+        user_prompt: str,
+        cancellation_token=None,
+        turn_instruction: str | None = None,
+    ) -> TurnResult:
         turn_started_at = time.time()
         baseline_dirty = git_dirty_paths(self.cwd)
         baseline_staged = git_staged_paths(self.cwd)
@@ -441,6 +468,8 @@ class InteractiveSession:
             resolved_for_model,
             context_block,
         )
+        if turn_instruction:
+            prompt_with_mentions = f"{turn_instruction}\n\nUser request:\n{prompt_with_mentions}"
         task = self.format_task(prompt_with_mentions)
         self.turn_count += 1
         self.event_bus.emit_event(
@@ -1047,6 +1076,12 @@ def _format_turn_with_mentions_and_memory(
         return user_text
     parts.append(f"User turn:\n{user_text}")
     return "\n\n".join(parts)
+
+
+def _turn_instruction_for_route(decision: RouteDecision | None) -> str | None:
+    if decision is None or decision.turn_mode != TURN_MODE_DIRECT_ANSWER:
+        return None
+    return DIRECT_ANSWER_TURN_INSTRUCTION
 
 
 def _is_plan_execution_confirmation(text: str) -> bool:

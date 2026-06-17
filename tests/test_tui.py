@@ -608,6 +608,8 @@ class TuiNoiseReductionTests(unittest.TestCase):
             "type": "profile_route_decision",
             "payload": {
                 "profile": "coding-agent",
+                "action": "direct_answer",
+                "turn_mode": "direct_answer",
                 "confidence": 0.91,
                 "reason": "coding task",
                 "fallback_used": False,
@@ -619,6 +621,8 @@ class TuiNoiseReductionTests(unittest.TestCase):
         self.assertIn("profile=coding-agent", block.body)
         self.assertIn("confidence=0.91", block.body)
         self.assertIn("elapsed=123ms", block.body)
+        self.assertNotIn("direct_answer", block.body)
+        self.assertNotIn("mode=", block.body)
 
     def test_tool_timing_from_call_to_result(self):
         """Tool summary should show elapsed time."""

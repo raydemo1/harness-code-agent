@@ -527,18 +527,20 @@ class ProductRuntimeTests(unittest.TestCase):
         from harness_code_agent.profiles import router
 
         cases = [
-            ("你是谁", "general", "general"),
-            ("帮我修复这个 bug 并跑测试", "general", "coding-agent"),
-            ("帮我 review 这段代码有没有问题", "general", "review"),
-            ("先给我一个实现方案，不要改代码", "general", "plan"),
-            ("做一个好看的 todo 网页", "general", "app-builder"),
-            ("你是谁", "coding-agent", "general"),
+            ("你是谁", "general", "general", "stay", "normal"),
+            ("帮我修复这个 bug 并跑测试", "general", "coding-agent", "switch_profile", "normal"),
+            ("帮我 review 这段代码有没有问题", "general", "review", "switch_profile", "normal"),
+            ("先给我一个实现方案，不要改代码", "general", "plan", "switch_profile", "normal"),
+            ("做一个好看的 todo 网页", "general", "app-builder", "switch_profile", "normal"),
+            ("你是谁", "coding-agent", "coding-agent", "direct_answer", "direct_answer"),
         ]
 
-        for prompt, current, expected in cases:
+        for prompt, current, expected, expected_action, expected_turn_mode in cases:
             with self.subTest(prompt=prompt, current=current):
                 decision = router.route_profile_for_turn(prompt, current_profile=current)
                 self.assertEqual(decision.profile_name, expected)
+                self.assertEqual(decision.action, expected_action)
+                self.assertEqual(decision.turn_mode, expected_turn_mode)
                 self.assertEqual(decision.source, "local")
                 self.assertFalse(decision.fallback_used)
 

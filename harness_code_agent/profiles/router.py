@@ -13,6 +13,11 @@ DEFAULT_PROFILE = "general"
 LOCAL_ROUTE_MIN_CONFIDENCE = 0.10
 LOCAL_ROUTE_MIN_MARGIN = 0.035
 LOCAL_ROUTE_PROFILES = {"general", "coding-agent", "review", "plan", "app-builder"}
+ROUTE_ACTION_STAY = "stay"
+ROUTE_ACTION_SWITCH_PROFILE = "switch_profile"
+ROUTE_ACTION_DIRECT_ANSWER = "direct_answer"
+TURN_MODE_NORMAL = "normal"
+TURN_MODE_DIRECT_ANSWER = "direct_answer"
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,9 @@ class RouteDecision:
     elapsed_ms: float = 0.0
     margin: float = 0.0
     source: str = "local"
+    action: str = ROUTE_ACTION_STAY
+    turn_mode: str = TURN_MODE_NORMAL
+    matched_profile: str = ""
 
 
 def route_profile_for_turn(
@@ -47,6 +55,7 @@ def route_profile_for_turn(
                 fallback_used=True,
                 fallback_reason="profile is sticky",
                 source="local",
+                matched_profile=current,
             ),
         )
 
@@ -63,7 +72,36 @@ def route_profile_for_turn(
         decision = _local_fallback(current, "low local route confidence")
         return _with_elapsed(started_at, _replace_route_scores(decision, best_score, margin))
 
-    if current != "general" and best_profile not in {current, "general"}:
+    if current == "general" and best_profile != "general":
+        return _with_elapsed(
+            started_at,
+            RouteDecision(
+                profile_name=best_profile,
+                confidence=best_score,
+                margin=margin,
+                reason=f"Local semantic prototype matched {best_profile}.",
+                source="local",
+                action=ROUTE_ACTION_SWITCH_PROFILE,
+                matched_profile=best_profile,
+            ),
+        )
+
+    if current != "general" and best_profile == "general":
+        return _with_elapsed(
+            started_at,
+            RouteDecision(
+                profile_name=current,
+                confidence=best_score,
+                margin=margin,
+                reason="Local semantic prototype matched general; answer directly in the current profile.",
+                source="local",
+                action=ROUTE_ACTION_DIRECT_ANSWER,
+                turn_mode=TURN_MODE_DIRECT_ANSWER,
+                matched_profile=best_profile,
+            ),
+        )
+
+    if current != "general" and best_profile != current:
         decision = _local_fallback(current, f"specialized profile sticky; local best was {best_profile}")
         return _with_elapsed(started_at, _replace_route_scores(decision, best_score, margin))
 
@@ -75,6 +113,8 @@ def route_profile_for_turn(
             margin=margin,
             reason=f"Local semantic prototype matched {best_profile}.",
             source="local",
+            action=ROUTE_ACTION_STAY,
+            matched_profile=best_profile,
         ),
     )
 
@@ -87,6 +127,8 @@ def _local_fallback(profile_name: str, fallback_reason: str) -> RouteDecision:
         fallback_used=True,
         fallback_reason=fallback_reason,
         source="local",
+        action=ROUTE_ACTION_STAY,
+        matched_profile=profile_name,
     )
 
 
@@ -99,6 +141,9 @@ def _replace_route_scores(decision: RouteDecision, confidence: float, margin: fl
         fallback_used=decision.fallback_used,
         fallback_reason=decision.fallback_reason,
         source=decision.source,
+        action=decision.action,
+        turn_mode=decision.turn_mode,
+        matched_profile=decision.matched_profile,
     )
 
 
@@ -112,6 +157,9 @@ def _with_elapsed(started_at: float, decision: RouteDecision) -> RouteDecision:
         elapsed_ms=(time.perf_counter() - started_at) * 1000,
         margin=decision.margin,
         source=decision.source,
+        action=decision.action,
+        turn_mode=decision.turn_mode,
+        matched_profile=decision.matched_profile,
     )
 
 
