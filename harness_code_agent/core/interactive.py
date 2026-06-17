@@ -218,6 +218,7 @@ class InteractiveSession:
             tool_context=self.tool_context,
             stream_callback=self.stream_sink,
             prompt_cache_identity=prefix.cache_identity,
+            initial_planning_mode=cfg.initial_planning_mode,
         )
 
     def _load_mcp_tools(self) -> None:

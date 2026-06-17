@@ -11,17 +11,17 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 
 ## 功能特点
 
-- **Profile 驱动**：内置 `coding-agent`、`app-builder`、`terminal`、`swe-bench`、`plan`、`review` 六种任务模式。
+- **Profile 驱动**：内置 `general`、`coding-agent`、`app-builder`、`terminal`、`swe-bench`、`plan`、`review` 七种任务模式；默认先进入轻量 `general`，再按任务语义自动切到专用 profile。
 - **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
 - **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
 - **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
 - **运行时权限策略**：支持 `workspace-write`、`llm-auto`、`danger-full-access` 三种权限模式；受限调查/计划工作使用 `plan` profile。
 - **会话与事件记录**：每次运行会写入 `.harness/` 元数据、事件和文件快照。
-- **工具系统**：支持文件读写、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
+- **工具系统**：支持 `repo_search` / `list_files` / `read_file` 仓库检查、受控 `parallel` 并行只读调用、文件写入、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
 - **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
 - **评估与 Benchmark 适配**：`eval/` 下提供轻量评估脚本、任务集、结果汇总，以及 Terminal-Bench 2.0 / Harbor 运行入口。
 - **项目规则文件**：交互式 session 启动时会读取当前工作区根目录的 `HARNESS.md`，并作为稳定系统提示的一部分注入。
-- **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。当前 DeepSeek context cache 评估中，stable warmup 从 `0.0%` 提升到 `98.6%`，5-turn 平均命中率为 `79.1%`。
+- **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。当前 DeepSeek context cache 评估中，stable warmup 从 `29.2%` 提升到 `99.1%`，compaction 后命中率为 `83.2%`。
 
 ## 项目结构
 
@@ -123,7 +123,7 @@ hca
 hca --list-profiles
 ```
 
-进入交互式本地开发助手。默认 profile 是 `coding-agent`，工作区就是启动 `hca` 时所在的当前目录；TTY 中会打开 Textual 全屏 TUI：
+进入交互式本地开发助手。默认 profile 是 `general`，工作区就是启动 `hca` 时所在的当前目录；TTY 中会打开 Textual 全屏 TUI。普通问答会直接回答，需要改代码、规划、review 或构建应用的任务会在当前 session 内自动切到对应 profile：
 
 ```bash
 hca
@@ -177,17 +177,20 @@ hca --resume <session-id> "Continue the previous parser work"
 
 ```text
 /code      # coding-agent，默认实施模式
+/general   # general，轻量问答和只读检查
 /plan      # 受限方案模式（只允许计划/状态工件写入）
 /terminal  # CLI / shell 任务
 /swe       # swe-bench issue 修复
 /app       # app-builder Web 应用构建
+/review    # 只读代码评审
 ```
 
 ## Profile 说明
 
 | Profile | 用途 |
 | --- | --- |
-| `coding-agent` | 默认产品模式，用于本地仓库代码任务，带会话、权限、规划和验证 |
+| `general` | 默认入口，用于普通问答、讨论和轻量只读仓库检查；不会改文件或运行 shell |
+| `coding-agent` | 本地仓库代码任务，用于修复、实现、重构、测试和验证 |
 | `app-builder` | 从 prompt 构建完整 Web 应用，可使用浏览器测试工具 |
 | `terminal` | 面向 Terminal-Bench 2.0 风格的 CLI / shell 任务 |
 | `swe-bench` | 面向真实仓库 issue 修复任务 |
@@ -293,7 +296,7 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API 地址 |
 | `HARNESS_MODEL` | `gpt-4o` | 全局兜底模型名；非 DeepSeek provider 和自定义档位默认使用它 |
 | `HARNESS_MODEL_INTENSITY` | `hard` | 主 agent 默认任务强度：`fast` / `normal` / `hard` / `max` |
-| `HARNESS_MODEL_FAST` | provider 默认 | 覆盖 `fast` 档模型；router 和 summary 固定使用该档 |
+| `HARNESS_MODEL_FAST` | provider 默认 | 覆盖 `fast` 档模型；summary 等轻量 LLM 任务使用该档 |
 | `HARNESS_MODEL_NORMAL` | provider 默认 | 覆盖 `normal` 档模型 |
 | `HARNESS_MODEL_HARD` | provider 默认 | 覆盖 `hard` 档模型；DeepSeek 默认是主 agent 档位 |
 | `HARNESS_MODEL_MAX` | provider 默认 | 覆盖 `max` 档模型 |
@@ -306,7 +309,7 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 | `HARNESS_DOCKER_NETWORK` | `none` | Docker sandbox 网络：`none` / `bridge` |
 | `HARNESS_DOCKER_USER` | 空 | 空值时 POSIX 非 root 自动使用 `uid:gid`，Windows 不映射；非空值原样传递为 `--user` |
 | `HARNESS_CONTEXT_WINDOW_TOKENS` | `200000` | 上下文窗口估算值，用于推导默认压缩/重置阈值 |
-| `COMPRESS_THRESHOLD` | `180000` | 自动压缩触发阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.90` |
+| `COMPRESS_THRESHOLD` | `170000` | 自动压缩触发阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.85` |
 | `MAX_AGENT_ITERATIONS` | `60` | 单次 agent loop 最大迭代数 |
 | `MAX_AGENT_TOTAL_TOKENS` | `0` | 单个 turn 的累计 LLM token 预算；`0` 表示不启用本地 token 预算限制 |
 | `MAX_AGENT_TOOL_CALLS` | `200` | 单个 turn 最大工具调用预算；超过后阻断未执行工具并触发本地 `agent_fallback` |
@@ -407,6 +410,13 @@ python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 
 更多细节见 `eval/README.md` 和 `eval/benchmarks/README.md`。
 
+当前已汇总的真实评估结果见 `eval/report_resume.md`。截至 2026-06-17 的汇总口径：
+
+- DeepSeek context cache warmup：`29.2% -> 99.1%`。
+- Memory A/B：5 个任务，tool calls `-50.0%`，elapsed `-18.8%`，tokens `-44.7%`。
+- Latency：turn p95 `22542ms`，LLM response p95 `7983ms`，TTFT p95 `3348ms`。
+- Terminal-Bench 2.0 8-task subset：`3/8` passed，`37.5%`；Claw-SWE-Bench 尚未运行。
+
 ## 开发指南
 
 新增 profile 时，通常需要：
@@ -432,7 +442,7 @@ python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 ## 注意事项
 
 - `.env` 不应提交到版本库，使用 `.env.template` 作为配置模板。
-- `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名；DeepSeek 默认 `fast/normal/hard/max` 映射为 flash non-thinking、flash high、pro high、pro max，router/summary 固定使用 `fast`。
+- `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名；DeepSeek 默认 `fast/normal/hard/max` 映射为 flash non-thinking、flash high、pro high、pro max，summary 等轻量 LLM 任务固定使用 `fast`。
 - `app-builder` 的浏览器能力依赖 Playwright；未安装时相关工具会不可用或报错。
 - `terminal` profile 针对非交互式 CLI 任务优化，会更积极地执行 shell 命令和本地验证。
 - 默认 `workspace-write` 模式会对白名单外 shell 命令和未知工具触发批准流程；自动化 benchmark 可按需切换权限模式。

@@ -48,6 +48,7 @@ class AgentConfig:
     middlewares: list = field(default_factory=list)  # list[AgentMiddleware]
     time_budget: float | None = None  # seconds; None = no limit
     memory_enabled: bool = True
+    initial_planning_mode: str = "unset"
 
 
 @dataclass

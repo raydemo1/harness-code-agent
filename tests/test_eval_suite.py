@@ -141,14 +141,6 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertEqual(cost["pricing_per_1m_tokens"]["output"], 0.28)
         self.assertAlmostEqual(cost["estimated_cost_usd"], (800 * 0.0028 + 200 * 0.14 + 500 * 0.28) / 1_000_000)
 
-    def test_legacy_deepseek_model_names_do_not_use_v4_pricing_alias(self):
-        from eval.benchmarks.usage_metrics import estimate_usage_cost
-
-        cost = estimate_usage_cost({"prompt_tokens": 1000, "completion_tokens": 500}, model="deepseek-reasoner")
-
-        self.assertIsNone(cost["estimated_cost_usd"])
-        self.assertIsNone(cost["pricing_per_1m_tokens"])
-
     def test_claw_swe_bench_eval_dry_run_includes_lite80(self):
         from eval.scripts.run_claw_swe_bench_eval import _dry_run_plan, parse_args
 

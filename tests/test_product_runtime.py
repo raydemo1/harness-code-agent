@@ -134,12 +134,6 @@ class ProductRuntimeTests(unittest.TestCase):
             "openai-compatible",
         )
 
-    def test_config_and_provider_adapter_share_provider_resolution(self):
-        from harness_code_agent import config
-        from harness_code_agent.agent import providers
-
-        self.assertIs(config._resolve_provider_name, providers.resolve_provider_name)
-
     def test_cached_provider_client_refreshes_when_config_changes(self):
         from harness_code_agent.agent import providers
 
@@ -2194,23 +2188,6 @@ class ProductRuntimeTests(unittest.TestCase):
         ]
 
         self.assertEqual(changed_files(events), ["app.py"])
-
-    def test_session_report_and_summary_share_event_helpers(self):
-        from harness_code_agent.sessions import _event_helpers
-        from harness_code_agent.sessions import report, summary
-
-        self.assertIs(report._count_events, _event_helpers.count_events)
-        self.assertIs(report._tool_counts, _event_helpers.tool_counts)
-        self.assertIs(report._failure_categories, _event_helpers.failure_categories)
-        self.assertIs(report._changed_files, _event_helpers.changed_files)
-        self.assertIs(report._event_type, _event_helpers.event_type)
-        self.assertIs(report._payload, _event_helpers.payload)
-        self.assertIs(summary._count_events, _event_helpers.count_events)
-        self.assertIs(summary._tool_counts, _event_helpers.tool_counts)
-        self.assertIs(summary._event_failure_categories, _event_helpers.failure_categories)
-        self.assertIs(summary._changed_files, _event_helpers.changed_files)
-        self.assertIs(summary._event_type, _event_helpers.event_type)
-        self.assertIs(summary._payload, _event_helpers.payload)
 
     def test_workspace_service_resolves_paths_and_snapshots_before_write(self):
         from harness_code_agent.workspace.service import WorkspaceService

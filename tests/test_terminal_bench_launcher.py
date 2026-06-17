@@ -11,8 +11,8 @@ from eval.benchmarks.run_terminal_bench import (
     default_local_dataset_path,
     ensure_local_dataset,
     is_valid_harbor_dataset,
+    repair_task_images,
     resolve_harbor_executable,
-    rewrite_task_images_to_ghcr,
 )
 
 
@@ -194,11 +194,11 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 
-    def test_rewrite_task_images_to_ghcr_rewrites_each_task_toml(self):
-        repo_root = self._workspace_path("test-terminal-bench-ghcr-rewrite")
+    def test_repair_task_images_rewrites_unavailable_image_to_dockerhub_fallback(self):
+        repo_root = self._workspace_path("test-terminal-bench-image-repair")
         dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2"
         try:
-            task_dir = dataset_path / "break-filter-js-from-html"
+            task_dir = dataset_path / "overfull-hbox"
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
@@ -207,19 +207,83 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                         'version = "1.0"',
                         "",
                         "[environment]",
-                        'docker_image = "alexgshaw/break-filter-js-from-html:20251031"',
+                        'docker_image = "ghcr.io/laude-institute/terminal-bench/overfull-hbox:2.0"',
                     ]
                 ),
                 encoding="utf-8",
             )
 
-            rewritten = rewrite_task_images_to_ghcr(dataset_path)
+            def fake_exists(image: str) -> bool:
+                return image == "alexgshaw/overfull-hbox:20251031"
+
+            with patch("eval.benchmarks.run_terminal_bench._docker_image_exists", side_effect=fake_exists):
+                rewritten = repair_task_images(dataset_path)
 
             self.assertEqual(rewritten, 1)
             self.assertIn(
-                'docker_image = "ghcr.io/laude-institute/terminal-bench/break-filter-js-from-html:2.0"',
+                'docker_image = "alexgshaw/overfull-hbox:20251031"',
                 task_file.read_text(encoding="utf-8"),
             )
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_repair_task_images_preserves_available_image(self):
+        repo_root = self._workspace_path("test-terminal-bench-image-preserve")
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2"
+        try:
+            task_dir = dataset_path / "fix-git"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            task_file = task_dir / "task.toml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "[environment]",
+                        'docker_image = "ghcr.io/laude-institute/terminal-bench/fix-git:2.0"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("eval.benchmarks.run_terminal_bench._docker_image_exists", return_value=True):
+                rewritten = repair_task_images(dataset_path)
+
+            self.assertEqual(rewritten, 0)
+            self.assertIn(
+                'docker_image = "ghcr.io/laude-institute/terminal-bench/fix-git:2.0"',
+                task_file.read_text(encoding="utf-8"),
+            )
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_repair_task_images_can_limit_to_selected_tasks(self):
+        repo_root = self._workspace_path("test-terminal-bench-image-filter")
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2"
+        try:
+            for task in ("overfull-hbox", "custom-memory-heap-crash"):
+                task_dir = dataset_path / task
+                task_dir.mkdir(parents=True, exist_ok=True)
+                (task_dir / "task.toml").write_text(
+                    "\n".join(
+                        [
+                            "[environment]",
+                            f'docker_image = "ghcr.io/laude-institute/terminal-bench/{task}:2.0"',
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+            seen: list[str] = []
+
+            def fake_exists(image: str) -> bool:
+                seen.append(image)
+                return image == "alexgshaw/overfull-hbox:20251031"
+
+            with patch("eval.benchmarks.run_terminal_bench._docker_image_exists", side_effect=fake_exists):
+                repaired = repair_task_images(dataset_path, ["overfull-hbox"])
+
+            self.assertEqual(repaired, 1)
+            self.assertIn("overfull-hbox", "\n".join(seen))
+            self.assertNotIn("custom-memory-heap-crash", "\n".join(seen))
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 

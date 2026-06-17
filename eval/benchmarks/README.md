@@ -20,11 +20,11 @@ export $(grep -v '^#' .env | xargs)
 ### Run
 
 ```bash
-# Prepare a local Terminal-Bench 2.0 checkout, rewrite task docker_image
-# entries to GHCR, then run a single task
+# Prepare a local Terminal-Bench 2.0 checkout, repair broken docker_image
+# entries when needed, then run a single task
 python eval/benchmarks/run_terminal_bench.py --task fix-git
 
-# Run multiple tasks from the local rewritten dataset
+# Run multiple tasks from the local repaired dataset
 python eval/benchmarks/run_terminal_bench.py --task fix-git --task query-optimize
 
 # Run the full local 2.0 dataset
@@ -40,8 +40,8 @@ python eval/benchmarks/run_terminal_bench.py --task fix-git --force-build
 ### How it works
 
 1. The launcher downloads a repo-local `terminal-bench-2` dataset archive when needed
-2. It rewrites each task's `docker_image` to `ghcr.io/laude-institute/terminal-bench/<task>:2.0`
-3. Harbor runs against the local dataset via `--path`, avoiding registry task metadata drift
+2. It preserves task `docker_image` values that are pullable, and repairs only broken image references to known Docker Hub fallbacks
+3. Harbor runs against the local dataset via `--path`, avoiding task metadata drift
 4. `HarnessAgent.install()` clones our repo inside the task container
 5. Harbor runs the headless terminal runner from `/app` in the container, with `PYTHONPATH` pointing at the uploaded agent code
 6. Harbor evaluates the result using the task's `tests/test.sh`

@@ -33,4 +33,4 @@ Result root: eval\results
 | large-scale-text-editing | passed | file-operations | medium | 534.3s | 239590 | 1 | 26 | $0.0072 |
 | query-optimize | failed | data-science | medium | 799.3s | 1756911 | 1 | 73 | $0.0277 |
 
-_`not captured` means the task passed, but no complete HCA session metrics were available for that task._
+_`not captured` means no complete HCA session metrics were available for that task._

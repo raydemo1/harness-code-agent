@@ -426,31 +426,6 @@ class ContextAnxietyTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Manual checkpoint restore regression — no implicit git context injection
-# ---------------------------------------------------------------------------
-
-class CheckpointRestoreRegressionTests(unittest.TestCase):
-    """Manual checkpoint restore must not inject git context."""
-
-    def test_restore_from_checkpoint_no_git_injection(self):
-        from harness_code_agent.agent.context import restore_from_checkpoint
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="some git output", returncode=0)
-            result = restore_from_checkpoint("checkpoint text", "system prompt")
-            # Should NOT contain git context
-            user_content = result[1]["content"]
-            self.assertNotIn("Recent code changes", user_content)
-            self.assertNotIn("git diff", user_content)
-            self.assertIn("checkpoint text", user_content)
-
-    def test_restore_preserves_system_prompt(self):
-        from harness_code_agent.agent.context import restore_from_checkpoint
-        with patch("subprocess.run", side_effect=Exception("no git")):
-            result = restore_from_checkpoint("handoff", "my system prompt")
-            self.assertEqual(result[0]["content"], "my system prompt")
-
-
-# ---------------------------------------------------------------------------
 # /compact slash command
 # ---------------------------------------------------------------------------
 

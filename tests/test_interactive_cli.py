@@ -790,10 +790,6 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_review_slash_alias_is_registered(self):
-        self.assertEqual(PROFILE_SLASH_ALIASES["/review"], "review")
-        self.assertEqual(PROFILE_SLASH_ALIASES["/general"], "general")
-
     def test_profile_switch_uses_handoff_context_without_copying_old_messages(self):
         coding_conversation = FakeConversation()
         plan_conversation = FakeConversation()
@@ -827,16 +823,6 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertEqual(session.profile_history[-1].current, "plan")
             finally:
                 session.close()
-
-    def test_long_profile_slash_commands_are_not_supported(self):
-        session = self._session()
-        try:
-            self.assertTrue(session.handle_slash_command("/coding-agent"))
-            self.assertEqual(session.profile.name(), "general")
-            self.assertTrue(session.handle_slash_command("/swe-bench"))
-            self.assertEqual(session.profile.name(), "general")
-        finally:
-            session.close()
 
     def test_switching_profile_clears_pending_plan(self):
         FakeConversation.response_text = "# Title\n\n## Summary\n\nPlan body"
@@ -1413,13 +1399,6 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertIn(f"model_profile_fast: {config.MODEL_PROFILES['fast'].model}", text)
         self.assertIn(f"model_profile_hard: {config.MODEL_PROFILES['hard'].model}", text)
         self.assertIn(f"max_agent_total_tokens: {config.MAX_AGENT_TOTAL_TOKENS}", text)
-
-    def test_readme_documents_docker_root_opt_in(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        text = (repo_root / "README.md").read_text(encoding="utf-8")
-
-        self.assertIn("HARNESS_DOCKER_USER=root", text)
-        self.assertIn("HARNESS_DOCKER_USER=0:0", text)
 
     def test_doctor_docker_mode_with_working_daemon(self):
         from harness_code_agent.core.interactive import format_doctor

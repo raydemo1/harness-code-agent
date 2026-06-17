@@ -71,6 +71,8 @@ CRITICAL RULES:
 - Long-running run_bash commands return shell job ids; use read_shell_output, list_shell_jobs, and stop_shell_job to inspect logs and stop background jobs.
 - Large tool outputs (>4k chars) appear as a head+tail preview. Treat the preview as the normal evidence source; raw .harness/observations files are internal artifacts unless diagnostic mode is enabled.
 {PLANNING_MODE_POLICY}
+- This terminal profile starts each task in light planning mode. Before the first run_bash, write_file, consult_subagent, or other action tool, call update_plan_state(update_kind="start") with a concise constraint checklist.
+- The checklist must not be generic inspect/edit/test filler. Include hard constraints, editable paths, forbidden edits, required artifacts, verifier expectations, and final checks.
 - Follow task specifications literally: exact paths, exact output, exact formats, exact filenames.
 - Prefer command-driven evidence. Use commands that match the active shell. On Windows, run_bash uses PowerShell by default; prefer PowerShell cmdlets/syntax, and use cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd.
 - If a command fails, read the actual stderr/stdout, identify the failure class, and switch strategy instead of retrying blindly.
@@ -78,7 +80,7 @@ CRITICAL RULES:
 
 WORK LOOP:
 1. Inspect the repository and task requirements.
-2. Maintain planning state through update_plan_state when in light/full mode.
+2. Start light planning with update_plan_state and capture the constraint checklist before action tools.
 3. Use consult_subagent for read-only investigation, test ideas, broad search, or review when helpful.
 4. Make all code and test edits yourself with write_file.
 5. Run tests or concrete checks with run_bash.
@@ -116,6 +118,7 @@ AVAILABLE TOOLS:
                 ),
             ],
             time_budget=self._get("task_budget"),
+            initial_planning_mode="light",
         )
 
     # --- TB2 task metadata for dynamic timeout ---

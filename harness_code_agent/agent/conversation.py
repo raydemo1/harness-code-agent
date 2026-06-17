@@ -85,7 +85,8 @@ class Agent:
                  tool_schemas: list[dict] | None = None,
                   tool_context: ToolContext | None = None,
                   stream_callback=None,
-                  prompt_cache_identity: dict[str, str] | None = None):
+                  prompt_cache_identity: dict[str, str] | None = None,
+                  initial_planning_mode: str = "unset"):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
@@ -97,10 +98,14 @@ class Agent:
         self.tool_context = tool_context
         self.stream_callback = stream_callback
         self.prompt_cache_identity = prompt_cache_identity
+        self.initial_planning_mode = _normalize_initial_planning_mode(initial_planning_mode)
         self._conversations: weakref.WeakSet[AgentConversation] = weakref.WeakSet()
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
-        return AgentRuntimeState(task_board=TaskBoard(goal=task))
+        return AgentRuntimeState(task_board=self._new_task_board(task))
+
+    def _new_task_board(self, task: str) -> TaskBoard:
+        return TaskBoard(goal=task, planning_mode=self.initial_planning_mode)
 
     def run(self, task: str) -> str:
         """
@@ -184,7 +189,7 @@ class AgentConversation:
 
     def add_user_turn(self, task: str) -> None:
         self.runtime_state.current_turn_start_index = len(self.messages)
-        self.runtime_state.task_board = TaskBoard(goal=task)
+        self.runtime_state.task_board = self.agent._new_task_board(task)
         self.runtime_state.action_tool_count = 0
         self.runtime_state.fallback = AgentFallbackState()
         self.runtime_state.auto_compaction_turn_start_index = -1
@@ -1153,6 +1158,13 @@ def _tool_names_from_schemas(tool_schemas: list[dict] | None) -> set[str]:
         if isinstance(function, dict) and function.get("name"):
             names.add(str(function["name"]))
     return names
+
+
+def _normalize_initial_planning_mode(value: str) -> str:
+    mode = (value or "unset").strip().lower()
+    if mode not in {"unset", "skip", "light", "full"}:
+        raise ValueError(f"Unsupported initial planning mode: {value!r}")
+    return mode
 
 
 def _tool_result_from_before_tool_block(tool_name: str, message: str) -> ToolResult:

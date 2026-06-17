@@ -22,7 +22,8 @@ from eval.benchmarks.usage_metrics import collect_harbor_job_usage
 DATASET_ARCHIVE_URL = (
     "https://github.com/laude-institute/terminal-bench-2/archive/refs/heads/main.zip"
 )
-GHCR_IMAGE_PREFIX = "ghcr.io/laude-institute/terminal-bench"
+DOCKERHUB_IMAGE_NAMESPACE = "alexgshaw"
+DOCKERHUB_IMAGE_TAG = "20251031"
 
 
 def resolve_harbor_executable(env: dict[str, str]) -> str:
@@ -119,21 +120,68 @@ def ensure_local_dataset(dataset_path: Path) -> Path:
     return resolved
 
 
-def rewrite_task_images_to_ghcr(dataset_path: Path) -> int:
-    rewritten = 0
-    for task_file in dataset_path.glob("*/task.toml"):
+def repair_task_images(dataset_path: Path, tasks: list[str] | None = None) -> int:
+    repaired = 0
+    task_files = _task_files(dataset_path, tasks)
+    for task_file in task_files:
         task_name = task_file.parent.name
         content = task_file.read_text(encoding="utf-8")
-        updated = re.sub(
-            r'^docker_image\s*=\s*".*"$',
-            f'docker_image = "{GHCR_IMAGE_PREFIX}/{task_name}:2.0"',
-            content,
-            flags=re.MULTILINE,
-        )
+        image = _task_docker_image(content)
+        if not image or _docker_image_exists(image):
+            continue
+
+        fallback = f"{DOCKERHUB_IMAGE_NAMESPACE}/{task_name}:{DOCKERHUB_IMAGE_TAG}"
+        if not _docker_image_exists(fallback):
+            continue
+
+        updated = _replace_task_docker_image(content, fallback)
         if updated != content:
             task_file.write_text(updated, encoding="utf-8")
-            rewritten += 1
-    return rewritten
+            repaired += 1
+    return repaired
+
+
+def rewrite_task_images_to_ghcr(dataset_path: Path) -> int:
+    """Backward-compatible name for older tests/integrations.
+
+    The old implementation rewrote every task to a guessed GHCR image. Some
+    Terminal-Bench 2.0 tasks do not have a public GHCR package, so the safe
+    behavior is now to repair only broken image references.
+    """
+    return repair_task_images(dataset_path)
+
+
+def _task_files(dataset_path: Path, tasks: list[str] | None) -> list[Path]:
+    if tasks:
+        return [dataset_path / task / "task.toml" for task in tasks if (dataset_path / task / "task.toml").exists()]
+    return list(dataset_path.glob("*/task.toml"))
+
+
+def _task_docker_image(content: str) -> str:
+    match = re.search(r'^docker_image\s*=\s*"([^"]+)"\s*$', content, flags=re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def _replace_task_docker_image(content: str, image: str) -> str:
+    return re.sub(
+        r'^docker_image\s*=\s*".*"$',
+        f'docker_image = "{image}"',
+        content,
+        flags=re.MULTILINE,
+    )
+
+
+def _docker_image_exists(image: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["docker", "manifest", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
 
 
 def build_harbor_run_command(
@@ -163,7 +211,7 @@ def build_harbor_run_command(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Terminal-Bench 2.0 from a local dataset rewritten to GHCR images."
+        description="Run Terminal-Bench 2.0 from a local dataset with repaired prebuilt image references."
     )
     parser.add_argument(
         "--task",
@@ -202,10 +250,9 @@ def main() -> int:
     env = build_launch_environment(repo_root)
     harbor_executable = resolve_harbor_executable(env)
 
-    dataset_path = ensure_local_dataset(args.dataset_path or default_local_dataset_path(repo_root))
-    rewritten_count = rewrite_task_images_to_ghcr(dataset_path)
-
     tasks = [] if args.full else args.task
+    dataset_path = ensure_local_dataset(args.dataset_path or default_local_dataset_path(repo_root))
+    repaired_count = repair_task_images(dataset_path, None if args.full else tasks)
     command = build_harbor_run_command(
         harbor_executable=harbor_executable,
         tasks=tasks,
@@ -216,7 +263,7 @@ def main() -> int:
 
     print(f"Using TEMP/TMP: {env['TEMP']}")
     print(f"Prepared local dataset: {dataset_path}")
-    print(f"Rewrote {rewritten_count} task images to GHCR")
+    print(f"Repaired {repaired_count} broken task docker_image entries")
     print(f"Running: {' '.join(command)}")
 
     jobs_root = repo_root / "jobs"
