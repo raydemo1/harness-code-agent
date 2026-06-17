@@ -35,6 +35,11 @@ class RepositoryToolPolicyTests(unittest.TestCase):
         self.assertIn("pkg/target.py", result.output.replace("\\", "/"))
         self.assertNotIn("__pycache__", result.output)
 
+    def test_repo_search_is_exported_from_legacy_tools_facade(self) -> None:
+        from harness_code_agent.runtime import tools
+
+        self.assertIs(tools.repo_search, repo_search)
+
     def test_list_files_defaults_to_depth_two_and_hides_internal_dirs(self) -> None:
         result = list_files(".")
 

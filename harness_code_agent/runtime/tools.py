@@ -25,6 +25,7 @@ from .builtins.filesystem import (
     list_files,
     read_file,
     read_skill_file,
+    repo_search,
     write_file,
 )
 from .builtins.interaction import ask_user

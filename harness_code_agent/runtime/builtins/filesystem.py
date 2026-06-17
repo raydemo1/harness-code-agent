@@ -243,8 +243,52 @@ def read_file(
     content = p.read_text(encoding="utf-8", errors="replace")
     lines = content.splitlines()
     total_lines = len(lines)
-    start = max(1, int(start_line or 1))
-    requested_lines = int(max_lines) if max_lines is not None else max(0, total_lines - start + 1)
+    try:
+        start = max(1, int(start_line or 1))
+    except (TypeError, ValueError):
+        return ToolResult(
+            tool="read_file",
+            status="failed",
+            output="[error] read_file start_line must be an integer >= 1.",
+            error="read_file start_line must be an integer >= 1",
+            metadata={
+                "path": path,
+                "start_line": start_line,
+                "max_lines": max_lines,
+                "total_lines": total_lines,
+                "status_source": "validation",
+            },
+        )
+    try:
+        requested_lines = int(max_lines) if max_lines is not None else max(0, total_lines - start + 1)
+    except (TypeError, ValueError):
+        return ToolResult(
+            tool="read_file",
+            status="failed",
+            output="[error] read_file max_lines must be an integer >= 1.",
+            error="read_file max_lines must be an integer >= 1",
+            metadata={
+                "path": path,
+                "start_line": start,
+                "max_lines": max_lines,
+                "total_lines": total_lines,
+                "status_source": "validation",
+            },
+        )
+    if requested_lines < 1:
+        return ToolResult(
+            tool="read_file",
+            status="failed",
+            output="[error] read_file max_lines must be an integer >= 1.",
+            error="read_file max_lines must be an integer >= 1",
+            metadata={
+                "path": path,
+                "start_line": start,
+                "max_lines": max_lines,
+                "total_lines": total_lines,
+                "status_source": "validation",
+            },
+        )
     if requested_lines > READ_FILE_MAX_LINES:
         return ToolResult(
             tool="read_file",

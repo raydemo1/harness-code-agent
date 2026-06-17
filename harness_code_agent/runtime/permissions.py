@@ -23,6 +23,9 @@ VALID_TOOL_PERMISSIONS = {
 DEFAULT_TOOL_PERMISSIONS = {
     "read_file": TOOL_PERMISSION_READ,
     "read_skill_file": TOOL_PERMISSION_READ,
+    "repo_search": TOOL_PERMISSION_READ,
+    "tool_search": TOOL_PERMISSION_READ,
+    "parallel": TOOL_PERMISSION_READ,
     "list_files": TOOL_PERMISSION_READ,
     "ask_user": TOOL_PERMISSION_READ,
     "memory_search": TOOL_PERMISSION_READ,

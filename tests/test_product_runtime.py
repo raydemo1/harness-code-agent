@@ -1649,6 +1649,40 @@ class ProductRuntimeTests(unittest.TestCase):
 
         self.assertEqual(output, "2: two\n3: three")
 
+    def test_read_file_rejects_invalid_range_arguments_without_exception(self):
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+        from harness_code_agent.runtime import tools
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("one\ntwo\n", encoding="utf-8")
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=EventBus(root / ".harness" / "events.jsonl"),
+            )
+
+            start_output = tools.execute_tool(
+                "read_file",
+                {"path": "note.txt", "start_line": "abc", "max_lines": 1},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+            max_output = tools.execute_tool(
+                "read_file",
+                {"path": "note.txt", "start_line": 1, "max_lines": 0},
+                tool_context=context,
+                agent_name="main_agent",
+            )
+
+        self.assertIn("[error]", start_output)
+        self.assertIn("start_line must be an integer", start_output)
+        self.assertIn("[error]", max_output)
+        self.assertIn("max_lines must be an integer", max_output)
+
     def test_read_file_requires_bounded_ranges_for_files_over_500_lines(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
@@ -2257,6 +2291,8 @@ class ProductRuntimeTests(unittest.TestCase):
 
         workspace_policy = PermissionPolicy(mode="workspace-write")
         read_decision = workspace_policy.decide_tool_call("read_file", {"path": "x.txt"})
+        repo_search_decision = workspace_policy.decide_tool_call("repo_search", {"pattern": "needle"})
+        parallel_decision = workspace_policy.decide_tool_call("parallel", {"tool_uses": []})
         edit_decision = workspace_policy.decide_tool_call("write_file", {"path": "x.txt"})
         plan_decision = workspace_policy.decide_tool_call("update_plan_state", {"mode": "light"})
         safe_shell_decision = workspace_policy.decide_tool_call(
@@ -2287,6 +2323,8 @@ class ProductRuntimeTests(unittest.TestCase):
 
         llm_auto_policy = PermissionPolicy(mode="llm-auto")
         llm_read_decision = llm_auto_policy.decide_tool_call("read_file", {"path": "x.txt"})
+        llm_repo_search_decision = llm_auto_policy.decide_tool_call("repo_search", {"pattern": "needle"})
+        llm_parallel_decision = llm_auto_policy.decide_tool_call("parallel", {"tool_uses": []})
         llm_edit_decision = llm_auto_policy.decide_tool_call("write_file", {"path": "x.txt"})
         llm_plan_decision = llm_auto_policy.decide_tool_call("update_plan_state", {"mode": "light"})
         llm_safe_shell_decision = llm_auto_policy.decide_tool_call(
@@ -2319,6 +2357,8 @@ class ProductRuntimeTests(unittest.TestCase):
         )
 
         self.assertTrue(read_decision.allowed)
+        self.assertTrue(repo_search_decision.allowed)
+        self.assertTrue(parallel_decision.allowed)
         self.assertTrue(edit_decision.allowed)
         self.assertTrue(plan_decision.allowed)
         self.assertTrue(safe_shell_decision.allowed)
@@ -2333,6 +2373,8 @@ class ProductRuntimeTests(unittest.TestCase):
                 self.assertEqual(blocked_decision.risk, "shell_blocked")
         self.assertTrue(unknown_decision.requires_approval)
         self.assertTrue(llm_read_decision.allowed)
+        self.assertTrue(llm_repo_search_decision.allowed)
+        self.assertTrue(llm_parallel_decision.allowed)
         self.assertTrue(llm_edit_decision.allowed)
         self.assertTrue(llm_plan_decision.allowed)
         self.assertTrue(llm_safe_shell_decision.allowed)
