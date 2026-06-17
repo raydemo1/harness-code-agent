@@ -40,6 +40,8 @@ BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 BASE_MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
 PROVIDER = os.environ.get("HARNESS_PROVIDER", "auto")
 STREAM = os.environ.get("HARNESS_STREAM", "auto")
+PROFILE_ROUTER_MODE = os.environ.get("HARNESS_PROFILE_ROUTER", "llm").strip().lower()
+PROFILE_ROUTER_TIMEOUT_SECONDS = float(os.environ.get("HARNESS_PROFILE_ROUTER_TIMEOUT_SECONDS", "8"))
 
 MODEL_INTENSITIES = ("fast", "normal", "hard", "max")
 MODEL_OVERRIDES = {

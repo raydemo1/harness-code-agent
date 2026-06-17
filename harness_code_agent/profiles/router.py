@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ class RouteDecision:
     reason: str
     fallback_used: bool = False
     fallback_reason: str = ""
+    elapsed_ms: float = 0.0
 
 
 def route_profile_for_task(
@@ -40,12 +42,15 @@ def route_profile_for_task(
     Invalid model output, low confidence, unknown profiles, and provider
     failures all fall back to the product default.
     """
+    started_at = time.perf_counter()
     if _is_explicit_review_intent(user_prompt):
-        return RouteDecision(
+        return _with_elapsed(started_at, RouteDecision(
             profile_name="review",
             confidence=0.99,
             reason="User explicitly requested a code review or review-style assessment.",
-        )
+        ))
+    if _router_llm_disabled():
+        return _with_elapsed(started_at, _fallback("profile router LLM disabled"))
     try:
         profiles = list_profiles()
         valid_profiles = {item["name"] for item in profiles}
@@ -59,16 +64,16 @@ def route_profile_for_task(
         confidence = float(data.get("confidence") or 0.0)
         reason = str(data.get("reason") or "").strip()
         if profile_name not in valid_profiles:
-            return _fallback(f"unknown profile: {profile_name or '<empty>'}")
+            return _with_elapsed(started_at, _fallback(f"unknown profile: {profile_name or '<empty>'}"))
         if confidence < confidence_threshold:
-            return _fallback(f"low confidence: {confidence:.2f}", router_reason=reason)
-        return RouteDecision(
+            return _with_elapsed(started_at, _fallback(f"low confidence: {confidence:.2f}", router_reason=reason))
+        return _with_elapsed(started_at, RouteDecision(
             profile_name=profile_name,
             confidence=confidence,
             reason=reason or "Router selected this profile for the first task.",
-        )
+        ))
     except Exception as exc:
-        return _fallback(f"router failed: {exc}")
+        return _with_elapsed(started_at, _fallback(f"router failed: {exc}"))
 
 
 def _call_router_llm(*, user_prompt: str, workspace: Path, profiles: list[dict[str, str]]) -> str:
@@ -102,7 +107,7 @@ def _call_router_llm(*, user_prompt: str, workspace: Path, profiles: list[dict[s
         profile=profile,
         messages=messages,
         max_tokens=512,
-    ))
+    ), timeout=config.PROFILE_ROUTER_TIMEOUT_SECONDS)
     return response.choices[0].message.content or ""
 
 
@@ -199,4 +204,19 @@ def _fallback(fallback_reason: str, *, router_reason: str = "") -> RouteDecision
         reason=explanation,
         fallback_used=True,
         fallback_reason=fallback_reason,
+    )
+
+
+def _router_llm_disabled() -> bool:
+    return config.PROFILE_ROUTER_MODE in {"0", "false", "off", "disabled", "none"}
+
+
+def _with_elapsed(started_at: float, decision: RouteDecision) -> RouteDecision:
+    return RouteDecision(
+        profile_name=decision.profile_name,
+        confidence=decision.confidence,
+        reason=decision.reason,
+        fallback_used=decision.fallback_used,
+        fallback_reason=decision.fallback_reason,
+        elapsed_ms=(time.perf_counter() - started_at) * 1000,
     )

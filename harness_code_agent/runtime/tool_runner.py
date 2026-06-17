@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import inspect
 import os
-from typing import Callable
+from typing import Any, Callable
 
 from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent, classify_tool_failure
 from .tool_context import ToolContext
@@ -336,9 +336,9 @@ def _event_safe_tool_output(tool_result: ToolResult) -> tuple[str, dict]:
     metadata = dict(tool_result.metadata)
     output = tool_result.output or ""
     metadata["output_length"] = len(output)
-    if tool_result.tool == "read_file" and output:
+    if tool_result.tool in {"read_file", "parallel"} and output:
         metadata["output_redacted"] = True
-        return f"[redacted read_file output: {len(output)} chars]", metadata
+        return f"[redacted {tool_result.tool} output: {len(output)} chars]", metadata
     if len(output) > TOOL_EVENT_OUTPUT_LIMIT:
         metadata["output_truncated"] = True
         metadata["output_preview_chars"] = TOOL_EVENT_OUTPUT_LIMIT
@@ -414,7 +414,19 @@ def _emit_file_change_events(
 
 
 def _redact_tool_args(arguments: dict) -> dict:
-    redacted = dict(arguments or {})
-    if "content" in redacted:
-        redacted["content"] = f"[{len(str(redacted['content']))} chars]"
-    return redacted
+    value = _redact_tool_arg_value(arguments or {})
+    return value if isinstance(value, dict) else {}
+
+
+def _redact_tool_arg_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "content":
+                redacted[key] = f"[{len(str(item))} chars]"
+            else:
+                redacted[key] = _redact_tool_arg_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_tool_arg_value(item) for item in value]
+    return value

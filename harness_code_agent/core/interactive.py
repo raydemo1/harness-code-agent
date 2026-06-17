@@ -348,6 +348,7 @@ class InteractiveSession:
                     "reason": route_decision.reason,
                     "fallback_used": route_decision.fallback_used,
                     "fallback_reason": route_decision.fallback_reason,
+                    "elapsed_ms": round(float(getattr(route_decision, "elapsed_ms", 0.0)), 1),
                 },
             )
         if self.resume_context:

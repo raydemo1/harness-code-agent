@@ -119,8 +119,8 @@ class TuiState:
             self.snapshot.running_tool = tool
             self.snapshot.status = "tool"
             self._pending_tools[tool] = time.time()
-            args_summary = _summarize_tool_args(payload.get("args"))
-            return TranscriptBlock("tool", f"{tool}({args_summary})", "", "running", turn=self.snapshot.turn, detail=True)
+            title = _tool_call_title(tool, payload.get("args"))
+            return TranscriptBlock("tool", title, "", "running", turn=self.snapshot.turn, detail=True)
         if event_type == "tool_result":
             tool = str(payload.get("tool", "tool"))
             if self.snapshot.running_tool == tool:
@@ -148,6 +148,9 @@ class TuiState:
             parts = []
             if summary.elapsed > 0:
                 parts.append(_format_elapsed(summary.elapsed))
+            parallel_summary = _parallel_result_summary(tool, payload.get("metadata"))
+            if parallel_summary:
+                parts.append(parallel_summary)
             if summary.output_chars > 0:
                 parts.append(_format_size(summary.output_chars))
             if summary.return_code is not None:
@@ -182,6 +185,15 @@ class TuiState:
             current = payload.get("profile", "")
             reason = payload.get("reason", "")
             return TranscriptBlock("profile", "profile switched", f"{previous} -> {current} ({reason})")
+        if event_type == "profile_route_decision":
+            return TranscriptBlock(
+                "profile",
+                "profile route",
+                _profile_route_summary(payload),
+                "success" if not payload.get("fallback_used") else "fallback",
+                turn=self.snapshot.turn,
+                detail=True,
+            )
         if event_type == "permission_mode_switched":
             self.snapshot.permission_mode = str(payload.get("permission_mode") or self.snapshot.permission_mode)
             return None
@@ -321,6 +333,29 @@ def _approval_summary(payload: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def _profile_route_summary(payload: dict[str, Any]) -> str:
+    parts = []
+    profile = payload.get("profile")
+    if profile:
+        parts.append(f"profile={profile}")
+    confidence = payload.get("confidence")
+    if confidence is not None:
+        try:
+            parts.append(f"confidence={float(confidence):.2f}")
+        except (TypeError, ValueError):
+            parts.append(f"confidence={confidence}")
+    elapsed_ms = _coerce_float(payload.get("elapsed_ms"))
+    if elapsed_ms is not None:
+        parts.append(f"elapsed={_format_elapsed(elapsed_ms / 1000)}")
+    if payload.get("fallback_used"):
+        fallback_reason = str(payload.get("fallback_reason") or "fallback")
+        parts.append(f"fallback={fallback_reason}")
+    reason = str(payload.get("reason") or "").strip()
+    if reason:
+        parts.append(f"reason={reason}")
+    return ", ".join(parts)
+
+
 def _summarize_tool_args(args: Any) -> str:
     if not isinstance(args, dict):
         return str(args or "")
@@ -331,6 +366,65 @@ def _summarize_tool_args(args: Any) -> str:
         else:
             clean[key] = value
     return _payload_summary(clean)
+
+
+def _tool_call_title(tool: str, args: Any) -> str:
+    if tool == "parallel":
+        count = _parallel_tool_count_from_args(args)
+        if count is not None:
+            return f"{tool}({_format_tool_count(count)})"
+    args_summary = _summarize_tool_args(args)
+    return f"{tool}({args_summary})"
+
+
+def _parallel_tool_count_from_args(args: Any) -> int | None:
+    if not isinstance(args, dict):
+        return None
+    tool_uses = args.get("tool_uses")
+    if not isinstance(tool_uses, list):
+        return None
+    return len(tool_uses)
+
+
+def _parallel_result_summary(tool: str, metadata: Any) -> str:
+    if tool != "parallel" or not isinstance(metadata, dict):
+        return ""
+    tool_uses = metadata.get("tool_uses")
+    count = _coerce_int(metadata.get("tool_use_count"))
+    success_count = _coerce_int(metadata.get("success_count"))
+    failed_count = _coerce_int(metadata.get("failed_count"))
+    if isinstance(tool_uses, list):
+        count = count if count is not None else len(tool_uses)
+        if success_count is None:
+            success_count = sum(1 for item in tool_uses if isinstance(item, dict) and item.get("status") == "success")
+        if failed_count is None:
+            failed_count = sum(1 for item in tool_uses if isinstance(item, dict) and item.get("status") == "failed")
+    if count is None:
+        return ""
+    parts = [_format_tool_count(count)]
+    if success_count is not None:
+        parts.append(f"success={success_count}")
+    if failed_count is not None:
+        parts.append(f"failed={failed_count}")
+    return " ".join(parts)
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_tool_count(count: int) -> str:
+    return f"同时执行了{count}个工具"
 
 
 def _tail(text: str, limit: int = 1200) -> str:

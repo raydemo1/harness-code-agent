@@ -79,6 +79,47 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "parallel",
+            "description": (
+                "Run up to 8 independent side-effect-safe tool calls concurrently. "
+                "Use this to gather related repository, web, memory, or consultation context efficiently. "
+                "Only read/network/subagent lanes are allowed; edits, shell commands, planning, user prompts, approvals, and long-running jobs are rejected."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["tool_uses"],
+                "properties": {
+                    "tool_uses": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "description": "Independent tool uses to execute in parallel.",
+                        "items": {
+                            "type": "object",
+                            "required": ["tool_name", "arguments"],
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Optional short label for this tool use.",
+                                },
+                                "tool_name": {
+                                    "type": "string",
+                                    "description": "Registered tool name, e.g. read_file, list_files, repo_search, web_search, consult_subagent.",
+                                },
+                                "arguments": {
+                                    "type": "object",
+                                    "description": "Arguments for the target tool.",
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
             "description": "Create or overwrite a file in the workspace.",
             "parameters": {

@@ -543,13 +543,32 @@ class ProductRuntimeTests(unittest.TestCase):
             with (
                 patch("harness_code_agent.profiles.router.get_client", return_value=fake_client),
                 patch.object(router.config, "BASE_URL", "https://api.deepseek.com"),
+                patch.object(router.config, "PROFILE_ROUTER_TIMEOUT_SECONDS", 1.25),
             ):
                 decision = router.route_profile_for_task("fix tests", workspace=Path(tmpdir))
 
         self.assertEqual(decision.profile_name, "coding-agent")
         self.assertEqual(completions.calls[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(completions.calls[0]["timeout"], 1.25)
         self.assertNotIn("reasoning_effort", completions.calls[0])
         self.assertEqual(completions.calls[0]["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertGreaterEqual(decision.elapsed_ms, 0.0)
+
+    def test_profile_router_can_disable_llm_for_fast_startup(self):
+        from harness_code_agent.profiles import router
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch.object(router.config, "PROFILE_ROUTER_MODE", "off"),
+                patch("harness_code_agent.profiles.router._call_router_llm") as call_router,
+            ):
+                decision = router.route_profile_for_task("fix tests", workspace=Path(tmpdir))
+
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertTrue(decision.fallback_used)
+        self.assertIn("disabled", decision.fallback_reason)
+        self.assertGreaterEqual(decision.elapsed_ms, 0.0)
+        call_router.assert_not_called()
 
     def test_profile_router_short_circuits_explicit_review_intent(self):
         from harness_code_agent.profiles import router

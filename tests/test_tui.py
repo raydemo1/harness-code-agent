@@ -544,6 +544,82 @@ class TuiNoiseReductionTests(unittest.TestCase):
         # Should not contain the full content
         self.assertNotIn("x" * 5000, block.title)
 
+    def test_parallel_tool_call_shows_nested_tool_count(self):
+        state = self._make_state()
+
+        call_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_call",
+                "payload": {
+                    "tool": "parallel",
+                    "args": {
+                        "tool_uses": [
+                            {"tool_name": "list_files", "arguments": {"directory": "."}},
+                            {"tool_name": "read_file", "arguments": {"path": "README.md"}},
+                            {"tool_name": "repo_search", "arguments": {"pattern": "parallel"}},
+                        ]
+                    },
+                },
+            },
+        )
+        block = state.apply_event(call_event)
+
+        self.assertEqual(block.title, "parallel(同时执行了3个工具)")
+
+    def test_parallel_tool_result_shows_nested_success_counts(self):
+        state = self._make_state()
+
+        call_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_call",
+                "payload": {
+                    "tool": "parallel",
+                    "args": {"tool_uses": [{"tool_name": "list_files"}, {"tool_name": "read_file"}]},
+                },
+            },
+        )
+        result_event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "tool_result",
+                "payload": {
+                    "tool": "parallel",
+                    "status": "success",
+                    "output": "[redacted parallel output: 4096 chars]",
+                    "metadata": {
+                        "tool_use_count": 2,
+                        "success_count": 1,
+                        "failed_count": 1,
+                    },
+                },
+            },
+        )
+
+        state.apply_event(call_event)
+        block = state.apply_event(result_event)
+
+        self.assertIn("同时执行了2个工具", block.body)
+        self.assertIn("success=1", block.body)
+        self.assertIn("failed=1", block.body)
+
+    def test_profile_route_decision_shows_elapsed_time(self):
+        state = self._make_state()
+
+        block = state.apply_event({
+            "type": "profile_route_decision",
+            "payload": {
+                "profile": "coding-agent",
+                "confidence": 0.91,
+                "reason": "coding task",
+                "fallback_used": False,
+                "elapsed_ms": 123.4,
+            },
+        })
+
+        self.assertEqual(block.title, "profile route")
+        self.assertIn("profile=coding-agent", block.body)
+        self.assertIn("confidence=0.91", block.body)
+        self.assertIn("elapsed=123ms", block.body)
+
     def test_tool_timing_from_call_to_result(self):
         """Tool summary should show elapsed time."""
         import time
