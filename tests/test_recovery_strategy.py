@@ -38,6 +38,8 @@ class RecoveryStrategyTests(unittest.TestCase):
         middleware.observe_verification_failure("pytest::task_x failed", state)
 
         self.assertEqual(state.recovery.mode, "SPEC_RECHECK")
+        self.assertTrue(state.task_board.replan_required)
+        self.assertIn("pytest::task_x failed", state.task_board.replan_reason)
 
     def test_repeated_edits_with_same_failure_switch_to_rethink(self):
         state = AgentRuntimeState()
@@ -50,6 +52,83 @@ class RecoveryStrategyTests(unittest.TestCase):
 
         self.assertEqual(state.recovery.mode, "RETHINK")
         self.assertTrue(state.task_board.requires_update)
+
+    def test_probe_mode_allows_only_one_read_only_verification_action(self):
+        state = AgentRuntimeState()
+        state.recovery.mode = "PROBE"
+        middleware = RecoveryStrategyMiddleware()
+
+        edit_block = middleware.before_tool(
+            "write_file",
+            {"path": "result.txt", "content": "retry"},
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        first_probe = middleware.before_tool(
+            "run_bash",
+            {"command": "pytest -q"},
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        middleware.on_tool_allowed(
+            "run_bash",
+            {"command": "pytest -q"},
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        second_probe = middleware.before_tool(
+            "run_bash",
+            {"command": "pytest -q"},
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIn("probe", edit_block.lower())
+        self.assertIsNone(first_probe)
+        self.assertIn("probe", second_probe.lower())
+
+    def test_successful_probe_returns_recovery_to_normal(self):
+        state = AgentRuntimeState()
+        state.recovery.mode = "PROBE"
+        state.recovery.probe_in_flight = True
+        middleware = RecoveryStrategyMiddleware()
+
+        guidance = middleware.post_tool(
+            "run_bash",
+            {"command": "pytest -q"},
+            "1 passed",
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(state.recovery.mode, "NORMAL")
+        self.assertFalse(state.recovery.probe_in_flight)
+        self.assertFalse(state.task_board.replan_required)
+        self.assertIn("probe passed", guidance.lower())
+
+    def test_failed_probe_requires_another_replan(self):
+        state = AgentRuntimeState()
+        state.recovery.mode = "PROBE"
+        state.recovery.probe_in_flight = True
+        middleware = RecoveryStrategyMiddleware()
+
+        guidance = middleware.post_tool(
+            "run_bash",
+            {"command": "pytest -q"},
+            "[error] pytest::task_x failed",
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(state.recovery.mode, "SPEC_RECHECK")
+        self.assertTrue(state.task_board.replan_required)
+        self.assertIn("probe failed", guidance.lower())
 
 
 class LoopDetectionMiddlewareTests(unittest.TestCase):

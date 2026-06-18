@@ -24,7 +24,7 @@ _install_fake_openai_module()
 
 from harness_code_agent.agent.loop import Agent, AgentConversation
 from harness_code_agent.runtime import tools
-from harness_code_agent.runtime.middlewares import AgentMiddleware
+from harness_code_agent.runtime.middlewares import AgentMiddleware, RecoveryStrategyMiddleware
 from harness_code_agent.runtime.permissions import PermissionPolicy
 from harness_code_agent.runtime.tool_context import ToolContext
 from harness_code_agent.runtime.tool_result import ToolResult
@@ -261,6 +261,88 @@ class ToolExecutorTests(unittest.TestCase):
         tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
         self.assertEqual([msg["tool_call_id"] for msg in tool_messages], ["tc_a", "tc_b"])
         self.assertIn("nudge after a", conversation.messages[-2]["content"])
+
+    def test_all_post_tool_middlewares_observe_result_when_earlier_one_injects(self):
+        registry = tools.ToolRegistry()
+
+        def read_tool():
+            return ToolResult(tool="observed_read", status="success", output="ok")
+
+        registry.register(_schema("observed_read"), read_tool, permission="read")
+
+        class FirstMiddleware(AgentMiddleware):
+            def post_tool(self, tool_name, tool_args, result, messages, runtime_state=None, agent_name=None):
+                return "[SYSTEM] first guidance"
+
+        class ObservingMiddleware(AgentMiddleware):
+            def __init__(self):
+                self.seen = []
+
+            def post_tool(self, tool_name, tool_args, result, messages, runtime_state=None, agent_name=None):
+                self.seen.append((tool_name, result))
+                return "[SYSTEM] second guidance"
+
+        observer = ObservingMiddleware()
+        tool_calls = [_tool_call("tc_observed", "observed_read")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation, _context = _conversation_with_registry(
+                Path(tmp),
+                registry,
+                tool_calls,
+                middlewares=[FirstMiddleware(), observer],
+            )
+            with (
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+            ):
+                conversation.run_until_idle()
+
+        self.assertEqual(observer.seen, [("observed_read", "ok")])
+        injected = [
+            msg["content"]
+            for msg in conversation.messages
+            if msg.get("role") == "user" and str(msg.get("content", "")).startswith("[SYSTEM]")
+        ]
+        self.assertIn("[SYSTEM] first guidance", injected)
+        self.assertIn("[SYSTEM] second guidance", injected)
+
+    def test_blocked_probe_is_not_left_in_flight(self):
+        registry = tools.ToolRegistry()
+
+        def run_bash(command):
+            return ToolResult(tool="run_bash", status="success", output="unexpected")
+
+        registry.register(
+            _schema("run_bash"),
+            run_bash,
+            permission="shell",
+            lane=tools.ToolExecutionLane.SHELL_VERIFY,
+        )
+
+        class LaterBlockMiddleware(AgentMiddleware):
+            def before_tool(self, tool_name, tool_args, messages, runtime_state=None, agent_name=None):
+                return "[blocked] synthetic later policy block"
+
+        tool_calls = [_tool_call("tc_probe", "run_bash", {"command": "pytest -q"})]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation, _context = _conversation_with_registry(
+                Path(tmp),
+                registry,
+                tool_calls,
+                middlewares=[RecoveryStrategyMiddleware(), LaterBlockMiddleware()],
+            )
+            conversation.runtime_state.recovery.mode = "PROBE"
+            with (
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+            ):
+                conversation.run_until_idle()
+
+        self.assertFalse(conversation.runtime_state.recovery.probe_in_flight)
+        tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
+        self.assertIn("synthetic later policy block", tool_messages[0]["content"])
 
     def test_tool_search_reveals_deferred_schema_for_next_iteration(self):
         registry = tools.BUILTIN_TOOL_REGISTRY.copy()

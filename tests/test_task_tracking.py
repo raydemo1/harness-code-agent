@@ -174,6 +174,54 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertFalse(state.task_board.requires_approval)
         self.assertFalse(state.task_board.replan_required)
 
+    def test_progress_cannot_clear_required_replan(self):
+        state = AgentRuntimeState(session_id="test-session")
+        state.task_board.planning_mode = "light"
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "same verification failed twice"
+
+        result = execute_tool(
+            "update_plan_state",
+            self._base_args(
+                update_kind="progress",
+                current_step="edit",
+                completed_steps=["inspect"],
+                next_action="retry the same edit",
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIn("[error]", result)
+        self.assertIn("replan", result.lower())
+        self.assertTrue(state.task_board.replan_required)
+        self.assertEqual(state.task_board.replan_reason, "same verification failed twice")
+        self.assertFalse(self._state_path().exists())
+
+    def test_required_replan_enters_probe_mode(self):
+        state = AgentRuntimeState(session_id="test-session")
+        state.recovery.mode = "SPEC_RECHECK"
+        state.task_board.planning_mode = "light"
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "same verification failed twice"
+
+        result = execute_tool(
+            "update_plan_state",
+            self._base_args(
+                update_kind="replan",
+                replan_reason="replace the faulty assumption with a targeted check",
+                current_step="verify",
+                completed_steps=["inspect", "edit"],
+                next_action="run the targeted regression test",
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIn("Updated plan state", result)
+        self.assertFalse(state.task_board.replan_required)
+        self.assertEqual(state.recovery.mode, "PROBE")
+
     def test_atomic_replace_failure_keeps_previous_state_json(self):
         state = AgentRuntimeState(session_id="test-session")
         state_path = self._state_path()

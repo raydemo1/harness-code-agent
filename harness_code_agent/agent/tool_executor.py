@@ -223,6 +223,14 @@ class ToolExecutor:
                     self._block_remaining_after_index = prepared.index + 1
                     break
                 continue
+            for mw in self.agent.middlewares:
+                mw.on_tool_allowed(
+                    prepared.name,
+                    prepared.args,
+                    self.conversation.messages,
+                    runtime_state=self.runtime_state,
+                    agent_name=self.agent.name,
+                )
             ready.append(prepared)
 
         if not ready:
@@ -381,7 +389,6 @@ class ToolExecutor:
             if inject:
                 self._deferred_user_messages.append(inject)
                 self.conversation.trace.middleware_inject(type(mw).__name__, "post_tool", inject)
-                break
 
     def _flush_deferred_user_messages(self) -> None:
         while self._deferred_user_messages:

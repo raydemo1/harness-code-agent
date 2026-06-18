@@ -48,6 +48,17 @@ class AgentMiddleware(ABC):
         """Called before each tool execution. Return a blocking message, or None."""
         return None
 
+    def on_tool_allowed(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        messages: list[dict],
+        runtime_state=None,
+        agent_name: str | None = None,
+    ) -> None:
+        """Called after every before_tool gate allows the tool, just before it is queued."""
+        return None
+
     def post_tool(self, tool_name: str, tool_args: dict, result: str,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:

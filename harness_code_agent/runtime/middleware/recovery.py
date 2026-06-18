@@ -32,11 +32,18 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
     def _set_mode(self, runtime_state, mode: str) -> None:
         runtime_state.recovery.mode = mode
         runtime_state.task_board.requires_update = True
+        if mode in {"SPEC_RECHECK", "RETHINK"}:
+            runtime_state.task_board.replan_required = True
+            runtime_state.task_board.replan_reason = (
+                runtime_state.recovery.failure_signature
+                or "Recovery strategy requires a new plan."
+            )
 
     def _clear_mode(self, runtime_state) -> None:
         runtime_state.recovery.mode = "NORMAL"
         runtime_state.recovery.failure_signature = ""
         runtime_state.recovery.repeat_count = 0
+        runtime_state.recovery.probe_in_flight = False
 
     def _register_failure(self, signature: str, runtime_state) -> None:
         recovery = runtime_state.recovery
@@ -107,6 +114,18 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         if tool_name == "update_plan_state":
             return None
 
+        if mode == "PROBE":
+            if tool_name not in self.ACTION_TOOLS:
+                return None
+            if runtime_state.recovery.probe_in_flight:
+                return "[blocked] Recovery probe is already in flight; wait for its result before another action."
+            if tool_name == "run_bash" and is_read_only_command(tool_args.get("command", "")):
+                return None
+            return (
+                "[blocked] Recovery mode PROBE allows one read-only verification command "
+                "before edits or other action tools resume."
+            )
+
         if mode == "ENV_FIX":
             if tool_name in {"write_file", "consult_subagent"}:
                 return "[blocked] Recovery mode ENV_FIX only allows diagnosis, installation, and environment repair actions."
@@ -131,11 +150,43 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
 
         return None
 
+    def on_tool_allowed(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        messages: list[dict],
+        runtime_state=None,
+        agent_name: str | None = None,
+    ) -> None:
+        if (
+            agent_name in MAIN_AGENT_NAMES
+            and runtime_state is not None
+            and runtime_state.recovery.mode == "PROBE"
+            and tool_name == "run_bash"
+            and is_read_only_command(tool_args.get("command", ""))
+        ):
+            runtime_state.recovery.probe_in_flight = True
+
     def post_tool(self, tool_name: str, tool_args: dict, result: str,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
         if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
+        if runtime_state.recovery.mode == "PROBE" and tool_name == "run_bash":
+            runtime_state.recovery.probe_in_flight = False
+            if result.startswith("[error]") or result.startswith("[blocked]") or self._looks_like_verification_failure(result):
+                self._register_failure(result, runtime_state)
+                self._set_mode(runtime_state, "SPEC_RECHECK")
+                return (
+                    "[SYSTEM] Recovery probe failed. Stop the resumed strategy, re-read the evidence, "
+                    "and submit another update_plan_state replan before more edits or commands."
+                )
+            self._clear_mode(runtime_state)
+            runtime_state.task_board.requires_update = False
+            runtime_state.task_board.replan_required = False
+            runtime_state.task_board.replan_reason = ""
+            return "[SYSTEM] Recovery probe passed. Resume the replanned work."
+
         self.observe_tool_result(tool_name, tool_args, result, runtime_state)
         if result.startswith("[error]") or result.startswith("[blocked]"):
             return None

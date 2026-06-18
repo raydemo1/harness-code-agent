@@ -55,6 +55,7 @@ def update_plan_state(
     completed_steps = [str(step).strip() for step in (completed_steps or []) if str(step).strip()]
     blockers = [str(item).strip() for item in (blockers or []) if str(item).strip()]
     remaining_issues = [str(item).strip() for item in (remaining_issues or []) if str(item).strip()]
+    board = runtime_state.task_board
 
     if mode not in {"light", "full"}:
         return ToolResult(
@@ -70,6 +71,14 @@ def update_plan_state(
             status="failed",
             output="[error] update_kind must be one of: start, progress, replan, final",
             error="update_kind must be one of: start, progress, replan, final",
+            metadata={"status_source": "validation"},
+        )
+    if board.replan_required and update_kind != "replan":
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] a required replan can only be cleared by update_kind=replan",
+            error="a required replan can only be cleared by update_kind=replan",
             metadata={"status_source": "validation"},
         )
     if not goal:
@@ -154,7 +163,6 @@ def update_plan_state(
         )
 
     workspace = tool_context.workspace.root if tool_context is not None else Path(config.WORKSPACE)
-    board = runtime_state.task_board
     previous_revision = int(getattr(board, "plan_revision", 0) or 0)
     will_write_plan = mode == "full" and bool(plan_markdown) and (
         update_kind == "start" or requires_approval
@@ -224,6 +232,9 @@ def update_plan_state(
     board.remaining_issues = remaining_issues
     board.actions_since_progress = 0
     board.planning_mode = mode
+    if update_kind == "replan":
+        runtime_state.recovery.mode = "PROBE"
+        runtime_state.recovery.probe_in_flight = False
 
     return ToolResult(
         tool="update_plan_state",
