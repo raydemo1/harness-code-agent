@@ -7,6 +7,7 @@ from pathlib import Path
 from harness_code_agent import config
 from harness_code_agent.agent.runtime_state import AgentRuntimeState
 from harness_code_agent.runtime.builtins.filesystem import list_files, read_file, repo_search
+from harness_code_agent.runtime.middleware.error_guidance import ErrorGuidanceMiddleware
 from harness_code_agent.runtime.middleware.tool_policy import ToolPolicyMiddleware
 
 
@@ -74,6 +75,82 @@ class ShellPolicyTests(unittest.TestCase):
         self.assertTrue(state.fallback.stop_requested)
         self.assertEqual(state.fallback.stop_reason, "repeated_tool_failure")
 
+    def test_recursive_grep_over_explicit_file_globs_is_allowed(self) -> None:
+        middleware = ToolPolicyMiddleware()
+        state = AgentRuntimeState()
+        args = {
+            "command": (
+                "cd /app/project && "
+                "grep -rn 'n\\.\\(int\\|bool\\|float\\)' "
+                "pkg/*.pyx pkg/submodule/*.pyx 2>/dev/null"
+            )
+        }
+
+        blocked = middleware.before_tool("run_bash", args, [], runtime_state=state)
+
+        self.assertIsNone(blocked)
+        self.assertFalse(state.fallback.stop_requested)
+
+    def test_bounded_recursive_grep_on_explicit_absolute_path_is_allowed(self) -> None:
+        middleware = ToolPolicyMiddleware()
+        state = AgentRuntimeState()
+        args = {
+            "command": (
+                "grep -rn '_Facet_Register_impl' "
+                "/build/gcc/libstdc++-v3/ 2>/dev/null | head -20"
+            )
+        }
+
+        blocked = middleware.before_tool("run_bash", args, [], runtime_state=state)
+
+        self.assertIsNone(blocked)
+        self.assertFalse(state.fallback.stop_requested)
+
+    def test_unbounded_recursive_grep_on_absolute_directory_remains_blocked(self) -> None:
+        middleware = ToolPolicyMiddleware()
+        state = AgentRuntimeState()
+        args = {"command": "grep -rn needle /build/gcc/libstdc++-v3/"}
+
+        blocked = middleware.before_tool("run_bash", args, [], runtime_state=state)
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("[blocked]", blocked.output)
+
+    def test_parallel_policy_failures_in_one_assistant_batch_count_once(self) -> None:
+        middleware = ToolPolicyMiddleware(repeated_failure_threshold=2)
+        state = AgentRuntimeState()
+        args = {"command": "grep -rn needle ."}
+        first_batch = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call-a", "function": {"name": "run_bash"}},
+                    {"id": "call-b", "function": {"name": "run_bash"}},
+                ],
+            }
+        ]
+
+        first = middleware.before_tool("run_bash", args, first_batch, runtime_state=state)
+        second = middleware.before_tool("run_bash", args, first_batch, runtime_state=state)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertFalse(state.fallback.stop_requested)
+
+        next_batch = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call-c", "function": {"name": "run_bash"}},
+                ],
+            }
+        ]
+        third = middleware.before_tool("run_bash", args, next_batch, runtime_state=state)
+
+        self.assertIsNotNone(third)
+        self.assertTrue(state.fallback.stop_requested)
+        self.assertEqual(state.fallback.stop_reason, "repeated_tool_failure")
+
     def test_whole_repo_search_budget_blocks_excessive_root_searches(self) -> None:
         middleware = ToolPolicyMiddleware()
         state = AgentRuntimeState()
@@ -98,6 +175,22 @@ class ShellPolicyTests(unittest.TestCase):
         self.assertIsNone(first)
         self.assertIsNone(second)
         self.assertFalse(state.fallback.stop_requested)
+
+
+class ErrorGuidanceTests(unittest.TestCase):
+    def test_matching_error_returns_guidance_without_runtime_exception(self) -> None:
+        middleware = ErrorGuidanceMiddleware()
+
+        guidance = middleware.post_tool(
+            "run_bash",
+            {"command": "python app.py"},
+            "[error] No such file or directory: missing.py",
+            [],
+            runtime_state=AgentRuntimeState(),
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertIn("file or directory", guidance.lower())
 
 
 if __name__ == "__main__":

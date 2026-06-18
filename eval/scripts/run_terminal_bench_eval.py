@@ -66,13 +66,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Ask Harbor to build task environments locally instead of pulling prebuilt images.",
     )
+    parser.add_argument(
+        "--task",
+        action="append",
+        default=[],
+        help="Optional task override. Repeat to run only selected tasks from the configured task set.",
+    )
     return parser.parse_args(argv)
 
 
 def run_tbench_suite(args: argparse.Namespace) -> Path:
     payload = load_tbench_task_config(args.tbench_task_set)
     metadata = load_tbench_metadata()
-    tasks = list(payload["tasks"])
+    configured_tasks = list(payload["tasks"])
+    tasks = list(args.task or configured_tasks)
+    unknown_tasks = [task for task in tasks if task not in configured_tasks]
+    if unknown_tasks:
+        raise SystemExit(
+            f"Unknown task(s) for {args.tbench_task_set}: {', '.join(unknown_tasks)}"
+        )
     run_dir = make_run_dir(args, "tbench")
     started = time.perf_counter()
     task_results: list[dict[str, Any]] = []
@@ -150,7 +162,7 @@ def _dry_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         "output_root": str(Path(args.output_root)),
         "terminal_bench_task_set": args.tbench_task_set,
         "terminal_bench_benchmark_name": payload.get("benchmark_name"),
-        "terminal_bench_tasks": payload["tasks"],
+        "terminal_bench_tasks": list(args.task or payload["tasks"]),
         "runner_env": args.runner_env,
         "force_build": args.force_build,
     }

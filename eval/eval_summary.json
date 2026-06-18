@@ -16,7 +16,7 @@
     "stable_last_hit_ratio": 0.9910661107802263
   },
   "claw": {},
-  "generated_at": "2026-06-17T18:27:00",
+  "generated_at": "2026-06-18T14:55:03",
   "latency": {
     "llm_first_token_ms": {
       "count": 30,
@@ -61,146 +61,66 @@
     "eval\\results\\2026-06-17_153336_tbench",
     "eval\\results\\2026-06-17_171758_deepseek_context_eval_cache",
     "eval\\results\\2026-06-17_171923_latency",
-    "eval\\results\\2026-06-17_174214_tbench_hca_8task_full_metrics"
+    "eval\\results\\2026-06-17_174214_tbench_hca_8task_full_metrics",
+    "eval\\results\\2026-06-18_002636_tbench_tbench_hca_8task_failed4_light_plan",
+    "eval\\results\\2026-06-18_011317_tbench_hca_8task_latest_merged",
+    "eval\\results\\2026-06-18_135415_tbench_tbench_hca_failed3_observable",
+    "eval\\results\\2026-06-18_141349_tbench_tbench_hca_failed3_full_trace",
+    "eval\\results\\2026-06-18_143322_tbench_hca_8task_latest_full_trace_merged",
+    "eval\\results\\2026-06-18_143946_tbench_tbench_hca_framework_fix2"
   ],
   "tbench": {
     "benchmark_name": "Terminal-Bench 2.0 8-task subset",
     "category_results": {
-      "data-processing": {
-        "pass_rate": 1.0,
-        "passed": 1,
-        "task_count": 1
-      },
-      "data-science": {
-        "pass_rate": 0.0,
-        "passed": 0,
-        "task_count": 1
-      },
       "debugging": {
         "pass_rate": 0.0,
         "passed": 0,
-        "task_count": 3
-      },
-      "file-operations": {
-        "pass_rate": 1.0,
-        "passed": 1,
-        "task_count": 1
-      },
-      "software-engineering": {
-        "pass_rate": 0.5,
-        "passed": 1,
         "task_count": 2
       }
     },
-    "estimated_cost_usd": 0.0537097064,
-    "pass_rate": 0.375,
-    "passed": 3,
-    "run": "2026-06-17_174214_tbench_hca_8task_full_metrics",
+    "estimated_cost_usd": 0.02673664,
+    "pass_rate": 0.0,
+    "passed": 0,
+    "run": "2026-06-18_143946_tbench_tbench_hca_framework_fix2",
     "status": "failed",
-    "task_count": 8,
+    "task_count": 2,
     "task_results": [
       {
-        "category": "software-engineering",
-        "difficulty": "easy",
-        "elapsed_seconds": 33.4437528999988,
-        "estimated_cost_usd": null,
-        "status": "failed",
-        "task": "fix-git",
-        "tool_calls": null,
-        "total_tokens": null,
-        "turns_finished": null
-      },
-      {
-        "category": "debugging",
-        "difficulty": "easy",
-        "elapsed_seconds": 573.0981661999976,
-        "estimated_cost_usd": 0.0106333024,
-        "status": "failed",
-        "task": "overfull-hbox",
-        "tool_calls": 37,
-        "total_tokens": 604109,
-        "turns_finished": 1
-      },
-      {
         "category": "debugging",
         "difficulty": "medium",
-        "elapsed_seconds": 276.23787430000084,
-        "estimated_cost_usd": 0.004588220000000001,
+        "elapsed_seconds": 458.245978299994,
+        "estimated_cost_usd": 0.0152649504,
         "status": "failed",
         "task": "build-cython-ext",
-        "tool_calls": 24,
-        "total_tokens": 162471,
-        "turns_finished": 0
+        "tool_calls": 88,
+        "total_tokens": 1272269,
+        "turns_finished": 1
       },
       {
         "category": "debugging",
         "difficulty": "medium",
-        "elapsed_seconds": 150.47116499999902,
-        "estimated_cost_usd": null,
+        "elapsed_seconds": 458.36481210000056,
+        "estimated_cost_usd": 0.011471689600000001,
         "status": "failed",
         "task": "custom-memory-heap-crash",
-        "tool_calls": null,
-        "total_tokens": null,
-        "turns_finished": null
-      },
-      {
-        "category": "software-engineering",
-        "difficulty": "medium",
-        "elapsed_seconds": 190.08744849999857,
-        "estimated_cost_usd": 0.0014219967999999999,
-        "status": "passed",
-        "task": "git-leak-recovery",
-        "tool_calls": 17,
-        "total_tokens": 80503,
-        "turns_finished": 1
-      },
-      {
-        "category": "data-processing",
-        "difficulty": "medium",
-        "elapsed_seconds": 128.646828500001,
-        "estimated_cost_usd": 0.0021867552000000004,
-        "status": "passed",
-        "task": "log-summary-date-ranges",
-        "tool_calls": 11,
-        "total_tokens": 100948,
-        "turns_finished": 1
-      },
-      {
-        "category": "file-operations",
-        "difficulty": "medium",
-        "elapsed_seconds": 534.2771986000007,
-        "estimated_cost_usd": 0.0071972096,
-        "status": "passed",
-        "task": "large-scale-text-editing",
-        "tool_calls": 26,
-        "total_tokens": 239590,
-        "turns_finished": 1
-      },
-      {
-        "category": "data-science",
-        "difficulty": "medium",
-        "elapsed_seconds": 799.3404261000032,
-        "estimated_cost_usd": 0.0276822224,
-        "status": "failed",
-        "task": "query-optimize",
-        "tool_calls": 73,
-        "total_tokens": 1756911,
+        "tool_calls": 34,
+        "total_tokens": 332933,
         "turns_finished": 1
       }
     ],
     "task_set": "8task",
     "token_totals": {
-      "cache_miss_tokens": 133509,
-      "cached_tokens": 2713088,
-      "completion_tokens": 97935,
-      "llm_calls": 139,
-      "prompt_tokens": 2846597,
-      "total_tokens": 2944532
+      "cache_miss_tokens": 79524,
+      "cached_tokens": 1484800,
+      "completion_tokens": 40878,
+      "llm_calls": 68,
+      "prompt_tokens": 1564324,
+      "total_tokens": 1605202
     },
-    "tool_calls": 188,
+    "tool_calls": 122,
     "turn_totals": {
-      "finished": 5,
-      "started": 6
+      "finished": 2,
+      "started": 2
     }
   }
 }

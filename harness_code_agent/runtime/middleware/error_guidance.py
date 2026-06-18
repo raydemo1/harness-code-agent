@@ -1,7 +1,12 @@
 """Error guidance middleware."""
 from __future__ import annotations
 
+import logging
+
 from .base import AgentMiddleware
+
+
+log = logging.getLogger("harness")
 
 
 class ErrorGuidanceMiddleware(AgentMiddleware):

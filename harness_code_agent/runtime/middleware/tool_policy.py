@@ -46,7 +46,25 @@ RG_OPTIONS_WITH_VALUE = {
     "--type-add",
     "--type-clear",
 }
+GREP_OPTIONS_WITH_VALUE = {
+    "-A",
+    "-B",
+    "-C",
+    "-e",
+    "-f",
+    "-m",
+    "--after-context",
+    "--before-context",
+    "--context",
+    "--exclude",
+    "--exclude-dir",
+    "--include",
+    "--max-count",
+    "--regexp",
+    "--file",
+}
 SHELL_CONTROL_OPERATORS = ("|", "&&", "||", ";", ">", "<", "`")
+SHELL_CONTROL_TOKENS = {"|", "&&", "||", ";"}
 
 
 class ToolPolicyMiddleware(AgentMiddleware):
@@ -56,6 +74,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
         self.repeated_failure_threshold = max(1, int(repeated_failure_threshold))
         self._last_failure_signature = ""
         self._last_failure_summary = ""
+        self._last_failure_batch_key = ""
         self._failure_count = 0
         self._broad_repo_search_count = 0
         self._deep_root_list_count = 0
@@ -64,6 +83,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
                    agent_name: str | None = None) -> None:
         self._last_failure_signature = ""
         self._last_failure_summary = ""
+        self._last_failure_batch_key = ""
         self._failure_count = 0
         self._broad_repo_search_count = 0
         self._deep_root_list_count = 0
@@ -76,12 +96,13 @@ class ToolPolicyMiddleware(AgentMiddleware):
         runtime_state=None,
         agent_name: str | None = None,
     ) -> ToolResult | None:
+        batch_key = _tool_batch_key(messages)
         if tool_name == "run_bash":
-            return self._guard_shell(tool_args, runtime_state)
+            return self._guard_shell(tool_args, runtime_state, batch_key=batch_key)
         if tool_name == "repo_search":
-            return self._guard_repo_search(tool_args, runtime_state)
+            return self._guard_repo_search(tool_args, runtime_state, batch_key=batch_key)
         if tool_name == "list_files":
-            return self._guard_list_files(tool_args, runtime_state)
+            return self._guard_list_files(tool_args, runtime_state, batch_key=batch_key)
         if tool_name == "read_file":
             path = str((tool_args or {}).get("path") or "")
             if _is_observation_path(path):
@@ -92,10 +113,17 @@ class ToolPolicyMiddleware(AgentMiddleware):
                     runtime_state,
                     category="internal_observation_read",
                     summary=f"read_file:{_shape_path(path)}",
+                    batch_key=batch_key,
                 )
         return None
 
-    def _guard_repo_search(self, tool_args: dict, runtime_state=None) -> ToolResult | None:
+    def _guard_repo_search(
+        self,
+        tool_args: dict,
+        runtime_state=None,
+        *,
+        batch_key: str = "",
+    ) -> ToolResult | None:
         path = str((tool_args or {}).get("path") or ".").strip() or "."
         if not _path_is_root(path):
             return None
@@ -108,9 +136,16 @@ class ToolPolicyMiddleware(AgentMiddleware):
             runtime_state,
             category="exploration_budget",
             summary="repo_search:root",
+            batch_key=batch_key,
         )
 
-    def _guard_list_files(self, tool_args: dict, runtime_state=None) -> ToolResult | None:
+    def _guard_list_files(
+        self,
+        tool_args: dict,
+        runtime_state=None,
+        *,
+        batch_key: str = "",
+    ) -> ToolResult | None:
         directory = str((tool_args or {}).get("directory") or ".").strip() or "."
         try:
             depth = int((tool_args or {}).get("depth") or 2)
@@ -127,6 +162,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
             runtime_state,
             category="exploration_budget",
             summary="list_files:deep_root",
+            batch_key=batch_key,
         )
 
     def post_tool(self, tool_name: str, tool_args: dict, result: str,
@@ -138,16 +174,28 @@ class ToolPolicyMiddleware(AgentMiddleware):
             return None
         signature = _failure_signature(tool_name, category, _args_shape(tool_name, tool_args))
         summary = f"{tool_name}:{category}:{_args_shape(tool_name, tool_args)}"
-        self._record_failure(signature, summary, runtime_state, tool_name)
+        self._record_failure(
+            signature,
+            summary,
+            runtime_state,
+            tool_name,
+            batch_key=_tool_batch_key(messages),
+        )
         return None
 
-    def _guard_shell(self, tool_args: dict, runtime_state=None) -> ToolResult | None:
+    def _guard_shell(
+        self,
+        tool_args: dict,
+        runtime_state=None,
+        *,
+        batch_key: str = "",
+    ) -> ToolResult | None:
         command = str((tool_args or {}).get("command") or "").strip()
         lowered = _collapse(command.lower())
         if not lowered:
             return None
 
-        if _is_broad_recursive_shell_listing(lowered):
+        if _is_broad_recursive_shell_listing(command):
             return self._blocked(
                 "run_bash",
                 "Recursive repository listing/search through shell is blocked. "
@@ -155,6 +203,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
                 runtime_state,
                 category="repo_browse_shell",
                 summary=f"run_bash:{_command_family(lowered)}",
+                batch_key=batch_key,
             )
 
         if _looks_like_rg(command):
@@ -176,6 +225,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
                 runtime_state,
                 category="bare_rg",
                 summary="run_bash:rg_without_path",
+                batch_key=batch_key,
             )
 
         if _looks_like_shell_search_without_path(command):
@@ -185,6 +235,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
                 runtime_state,
                 category="repo_browse_shell",
                 summary=f"run_bash:{_command_family(lowered)}",
+                batch_key=batch_key,
             )
 
         return None
@@ -197,9 +248,16 @@ class ToolPolicyMiddleware(AgentMiddleware):
         *,
         category: str,
         summary: str,
+        batch_key: str = "",
     ) -> ToolResult:
         signature = _failure_signature(tool_name, category, summary)
-        self._record_failure(signature, summary, runtime_state, tool_name)
+        self._record_failure(
+            signature,
+            summary,
+            runtime_state,
+            tool_name,
+            batch_key=batch_key,
+        )
         output = f"[blocked] {message}"
         return ToolResult(
             tool=tool_name,
@@ -212,13 +270,23 @@ class ToolPolicyMiddleware(AgentMiddleware):
             },
         )
 
-    def _record_failure(self, signature: str, summary: str, runtime_state, tool_name: str) -> None:
+    def _record_failure(
+        self,
+        signature: str,
+        summary: str,
+        runtime_state,
+        tool_name: str,
+        *,
+        batch_key: str = "",
+    ) -> None:
         if signature == self._last_failure_signature:
-            self._failure_count += 1
+            if not batch_key or batch_key != self._last_failure_batch_key:
+                self._failure_count += 1
         else:
             self._last_failure_signature = signature
             self._last_failure_summary = summary
             self._failure_count = 1
+        self._last_failure_batch_key = batch_key
 
         fallback = getattr(runtime_state, "fallback", None)
         if fallback is not None:
@@ -238,6 +306,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
     def _reset_failure_streak(self) -> None:
         self._last_failure_signature = ""
         self._last_failure_summary = ""
+        self._last_failure_batch_key = ""
         self._failure_count = 0
 
 
@@ -297,18 +366,138 @@ def _rg_has_explicit_path(command: str) -> bool:
     return len(positionals) >= needed_positionals
 
 
-def _is_broad_recursive_shell_listing(lowered: str) -> bool:
-    return any(
+def _is_broad_recursive_shell_listing(command: str) -> bool:
+    lowered = _collapse(command.lower())
+    if any(
         re.search(pattern, lowered)
         for pattern in (
             r"\b(get-childitem|gci|ls)\b.*\s-recurse\b",
             r"\bdir\b.*\s/s\b",
             r"\bfindstr\b.*\s/s\b",
-            r"\bgrep\b.*\s-[^\s]*r[^\s]*\b",
             r"\bfind\s+\.\s+.*-type\s+f\b",
             r"\btree\b.*\s/f\b",
         )
+    ):
+        return True
+    return _is_broad_recursive_grep(command)
+
+
+def _is_broad_recursive_grep(command: str) -> bool:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = command.split()
+
+    for index, token in enumerate(tokens):
+        executable = token.strip("\"'").lower()
+        if executable.endswith(".exe"):
+            executable = executable[:-4]
+        if executable != "grep":
+            continue
+
+        segment: list[str] = []
+        for candidate in tokens[index + 1:]:
+            if candidate in SHELL_CONTROL_TOKENS:
+                break
+            segment.append(candidate)
+        if not _grep_segment_is_recursive(segment):
+            continue
+        targets = _grep_targets(segment)
+        if targets and all(_is_bounded_file_target(target) for target in targets):
+            continue
+        if (
+            targets
+            and all(_is_explicit_absolute_target(target) for target in targets)
+            and _has_bounded_search_output(command)
+        ):
+            continue
+        return True
+    return False
+
+
+def _grep_segment_is_recursive(tokens: list[str]) -> bool:
+    for token in tokens:
+        if token in {"-r", "-R", "--recursive", "--dereference-recursive"}:
+            return True
+        if token.startswith("-") and not token.startswith("--"):
+            flags = token[1:]
+            if "r" in flags or "R" in flags:
+                return True
+    return False
+
+
+def _grep_targets(tokens: list[str]) -> list[str]:
+    positionals: list[str] = []
+    pattern_from_option = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if re.match(r"^\d?>", token):
+            index += 1
+            continue
+        if token in {"-e", "--regexp", "-f", "--file"}:
+            pattern_from_option = True
+        if token in GREP_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if any(token.startswith(option + "=") for option in GREP_OPTIONS_WITH_VALUE if option.startswith("--")):
+            if token.startswith(("--regexp=", "--file=")):
+                pattern_from_option = True
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        positionals.append(token)
+        index += 1
+    if pattern_from_option:
+        return positionals
+    return positionals[1:] if positionals else []
+
+
+def _is_bounded_file_target(target: str) -> bool:
+    normalized = target.strip("\"'").replace("\\", "/").rstrip("/")
+    if not normalized or normalized in {".", "..", "/", "*", "**", "./*", "./**"}:
+        return False
+    name = normalized.rsplit("/", 1)[-1]
+    return bool(re.search(r"\.[A-Za-z0-9_+-]+$", name))
+
+
+def _is_explicit_absolute_target(target: str) -> bool:
+    normalized = target.strip("\"'").replace("\\", "/").rstrip("/")
+    if normalized in {"", "/", "."} or any(char in normalized for char in "*?["):
+        return False
+    if normalized.startswith("/"):
+        return True
+    return bool(re.match(r"^[A-Za-z]:/", normalized))
+
+
+def _has_bounded_search_output(command: str) -> bool:
+    lowered = _collapse(command.lower())
+    return bool(
+        re.search(r"\|\s*head(?:\s+-n)?\s+-?\d+\b", lowered)
+        or re.search(r"(?:^|\s)-m\s*\d+\b", lowered)
+        or re.search(r"--max-count(?:=|\s+)\d+\b", lowered)
     )
+
+
+def _tool_batch_key(messages: list[dict]) -> str:
+    for message in reversed(messages or []):
+        if message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls:
+            continue
+        call_ids = [
+            str(call.get("id") or "")
+            for call in tool_calls
+            if isinstance(call, dict)
+        ]
+        stable_ids = [call_id for call_id in call_ids if call_id]
+        if stable_ids:
+            return "|".join(stable_ids)
+        return f"assistant-message:{id(message)}"
+    return ""
 
 
 def _looks_like_shell_search_without_path(command: str) -> bool:
