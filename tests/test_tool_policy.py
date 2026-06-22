@@ -9,6 +9,7 @@ from harness_code_agent.agent.runtime_state import AgentRuntimeState
 from harness_code_agent.runtime.builtins.filesystem import list_files, read_file, repo_search
 from harness_code_agent.runtime.middleware.error_guidance import ErrorGuidanceMiddleware
 from harness_code_agent.runtime.middleware.tool_policy import ToolPolicyMiddleware
+from harness_code_agent.runtime.middleware.terminal_shell_edit import TerminalShellEditPolicyMiddleware
 
 
 class RepositoryToolPolicyTests(unittest.TestCase):
@@ -191,6 +192,48 @@ class ErrorGuidanceTests(unittest.TestCase):
 
         self.assertIsNotNone(guidance)
         self.assertIn("file or directory", guidance.lower())
+
+
+class TerminalShellEditPolicyTests(unittest.TestCase):
+    def test_blocks_explicit_shell_file_edit(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "Set-Content -Path app.py -Value 'changed'"},
+            messages=[],
+            runtime_state=AgentRuntimeState(),
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("write_file/apply_patch", blocked)
+
+    def test_allows_build_command_that_generates_artifacts(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "python -m pip install -e . && python -m pytest"},
+            messages=[],
+            runtime_state=AgentRuntimeState(),
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(blocked)
+
+    def test_allows_stderr_to_stdout_redirection(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "python -m pytest 2>&1"},
+            messages=[],
+            runtime_state=AgentRuntimeState(),
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(blocked)
 
 
 if __name__ == "__main__":

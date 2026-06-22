@@ -17,7 +17,13 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent.agent.loop import Agent
-from harness_code_agent.runtime.middlewares import RecoveryStrategyMiddleware, TaskTrackingEnforcementMiddleware
+from harness_code_agent.runtime.middlewares import (
+    AcceptanceReviewMiddleware,
+    PreExitVerificationMiddleware,
+    RecoveryStrategyMiddleware,
+    TaskTrackingEnforcementMiddleware,
+    TerminalShellEditPolicyMiddleware,
+)
 from harness_code_agent.profiles.terminal import TerminalProfile
 
 
@@ -59,7 +65,7 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertIn("Planning Mode Self-Check", prompt)
         self.assertIn("replans enter PROBE mode", prompt)
         self.assertIn("starts each task in light planning mode", prompt)
-        self.assertIn("constraint checklist", prompt)
+        self.assertIn("acceptance_checks", prompt)
         self.assertIn("exact output", prompt)
         self.assertIn("switch strategy", prompt)
         self.assertIn("background services", prompt)
@@ -70,6 +76,9 @@ class AgentRuntimeStateTests(unittest.TestCase):
 
         self.assertTrue(any(isinstance(mw, TaskTrackingEnforcementMiddleware) for mw in middlewares))
         self.assertTrue(any(isinstance(mw, RecoveryStrategyMiddleware) for mw in middlewares))
+        self.assertTrue(any(isinstance(mw, AcceptanceReviewMiddleware) for mw in middlewares))
+        self.assertTrue(any(isinstance(mw, TerminalShellEditPolicyMiddleware) for mw in middlewares))
+        self.assertFalse(any(isinstance(mw, PreExitVerificationMiddleware) for mw in middlewares))
 
     def test_terminal_light_mode_blocks_first_action_until_plan_start(self):
         cfg = TerminalProfile().main_agent()

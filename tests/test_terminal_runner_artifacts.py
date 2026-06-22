@@ -84,6 +84,17 @@ class TerminalRunnerArtifactTests(unittest.TestCase):
                         },
                     },
                 },
+                {
+                    "sequence": 6,
+                    "type": "acceptance_review",
+                    "agent": "main_agent",
+                    "payload": {
+                        "status": "completed",
+                        "attempt": 1,
+                        "before_checks": [{"id": "check_1"}],
+                        "after_acceptance": {"revision": 2},
+                    },
+                },
             ]
             (session_root / "events.jsonl").write_text(
                 "".join(json.dumps(event) + "\n" for event in events),
@@ -136,13 +147,14 @@ class TerminalRunnerArtifactTests(unittest.TestCase):
                 json.loads(line)
                 for line in (export_root / "plan_history.jsonl").read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual([item["sequence"] for item in plan_history], [1, 2, 5])
+            self.assertEqual([item["sequence"] for item in plan_history], [1, 2, 5, 6])
             self.assertEqual(plan_history[0]["payload"]["args"]["update_kind"], "start")
             self.assertEqual(
                 plan_history[1]["payload"]["metadata"]["planning_state"]["next_action"],
                 "inspect files",
             )
             self.assertEqual(plan_history[2]["payload"]["args"]["update_kind"], "final")
+            self.assertEqual(plan_history[3]["payload"]["status"], "completed")
 
             trajectory = [
                 json.loads(line)
@@ -155,7 +167,7 @@ class TerminalRunnerArtifactTests(unittest.TestCase):
             manifest = json.loads((export_root / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["session_id"], session_id)
             self.assertEqual(manifest["event_count"], len(events))
-            self.assertEqual(manifest["plan_event_count"], 3)
+            self.assertEqual(manifest["plan_event_count"], 4)
             self.assertTrue(manifest["observations_exported"])
             self.assertTrue(manifest["traces_exported"])
             self.assertTrue(manifest["runner_error_exported"])

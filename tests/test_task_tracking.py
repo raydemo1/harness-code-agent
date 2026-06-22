@@ -310,7 +310,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIn("replan", blocked.lower())
         self.assertIn("update_plan_state", blocked)
 
-    def test_progress_is_soft_reminder_not_hard_block(self):
+    def test_progress_is_not_forced_by_action_count(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
         state.task_board.planning_mode = "light"
@@ -335,8 +335,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
                 agent_name="main_agent",
             )
 
-        self.assertIsNotNone(reminder)
-        self.assertIn("progress", reminder.lower())
+        self.assertIsNone(reminder)
 
     def test_light_mode_requires_final_planning_update_after_action(self):
         middleware = TaskTrackingEnforcementMiddleware()
@@ -350,6 +349,138 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIsNotNone(blocked)
         self.assertIn("update_plan_state", blocked)
         self.assertIn("final", blocked)
+
+    def test_terminal_start_requires_acceptance_checks(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "light"
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "start", "acceptance_checks": []},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("acceptance_checks", blocked)
+
+    def test_terminal_success_requires_latest_foreground_shell_to_succeed_after_edit(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Tests pass", "source": "Run the tests", "verification_command": "pytest"}]
+        )
+        state.execution_facts.record_result(
+            "write_file",
+            status="success",
+            return_code=None,
+            metadata={"file_changes": [{"path": "app.py"}]},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="failed",
+            return_code=1,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {
+                "update_kind": "final",
+                "result_status": "success",
+                "acceptance_revision": 1,
+                "check_results": [
+                    {"id": "check_1", "status": "passed", "summary": "pytest passed"}
+                ],
+            },
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("last foreground run_bash", blocked)
+
+    def test_terminal_success_requires_shell_after_last_edit(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Tests pass", "source": "Run the tests", "verification_command": "pytest"}]
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+        state.execution_facts.record_result(
+            "apply_patch",
+            status="success",
+            return_code=None,
+            metadata={"file_changes": [{"path": "app.py"}]},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {
+                "update_kind": "final",
+                "result_status": "success",
+                "acceptance_revision": 1,
+                "check_results": [
+                    {"id": "check_1", "status": "passed", "summary": "pytest passed"}
+                ],
+            },
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("after the last business file edit", blocked)
+
+    def test_terminal_timeout_counts_as_failed_last_foreground_shell(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Tests pass", "source": "Run the tests", "verification_command": "pytest"}]
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="failed",
+            return_code=None,
+            metadata={"status_source": "shell", "timed_out": True},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "final", "result_status": "success"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("last foreground run_bash", blocked)
 
 
 if __name__ == "__main__":

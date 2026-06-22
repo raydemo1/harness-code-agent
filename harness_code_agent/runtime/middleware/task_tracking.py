@@ -67,6 +67,9 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
 
     ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "consult_subagent", "browser_test"}
 
+    def __init__(self, *, enforce_acceptance: bool = False):
+        self.enforce_acceptance = bool(enforce_acceptance)
+
     def before_tool(
         self,
         tool_name: str,
@@ -78,6 +81,16 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         if tool_name == "update_plan_state":
+            if not self.enforce_acceptance:
+                return None
+            update_kind = str(tool_args.get("update_kind") or "").strip().lower()
+            if update_kind == "start" and not tool_args.get("acceptance_checks"):
+                return (
+                    "[blocked] Terminal planning start requires 1-10 acceptance_checks "
+                    "with text, source, and verification_command."
+                )
+            if update_kind == "final":
+                return self._validate_terminal_final(tool_args, runtime_state)
             return None
         if tool_name not in self.ACTION_TOOLS:
             return None
@@ -126,16 +139,33 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         if tool_name in self.ACTION_TOOLS:
             runtime_state.action_tool_count += 1
             board.action_count = runtime_state.action_tool_count
-            board.actions_since_progress += 1
             if board.planning_mode in {"light", "full"}:
                 board.needs_final_update = True
-                if board.actions_since_progress >= 3:
-                    board.actions_since_progress = 0
-                    return (
-                        "[SYSTEM] You have taken several tracked actions since the last planning update. "
-                        "If the current step, completed steps, blockers, validation state, or next action changed, "
-                        "write one consolidated update_plan_state progress update."
-                    )
+        return None
+
+    def _validate_terminal_final(self, tool_args: dict, runtime_state) -> str | None:
+        result_status = str(tool_args.get("result_status") or "").strip().lower()
+        if result_status != "success":
+            return None
+        acceptance = runtime_state.task_board.acceptance
+        if not acceptance.snapshot()["checks"]:
+            return "[blocked] success requires at least one active acceptance check."
+        facts = runtime_state.execution_facts
+        if facts.last_foreground_shell_sequence == 0:
+            return (
+                "[blocked] success requires at least one foreground run_bash command "
+                "with exit_code == 0."
+            )
+        if facts.last_business_edit_sequence >= facts.last_foreground_shell_sequence:
+            return (
+                "[blocked] success requires a foreground run_bash with exit_code == 0 "
+                "after the last business file edit."
+            )
+        if not facts.last_foreground_shell_success:
+            return (
+                "[blocked] success requires the last foreground run_bash command "
+                "to finish with exit_code == 0."
+            )
         return None
 
     def pre_exit(self, messages: list[dict], runtime_state=None,

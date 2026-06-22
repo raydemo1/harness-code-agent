@@ -7,6 +7,8 @@ from .loop_detection import LoopDetectionMiddleware
 from .memory import MemoryMiddleware
 from .recovery import RecoveryStrategyMiddleware
 from .task_tracking import TaskTrackingEnforcementMiddleware, TaskTrackingMiddleware
+from .acceptance_review import AcceptanceReviewMiddleware
+from .terminal_shell_edit import TerminalShellEditPolicyMiddleware
 from .time_budget import TimeBudgetMiddleware
 from .tool_policy import ToolPolicyMiddleware
 from .verification import (
@@ -31,6 +33,8 @@ __all__ = [
     "RecoveryStrategyMiddleware",
     "TaskTrackingEnforcementMiddleware",
     "TaskTrackingMiddleware",
+    "AcceptanceReviewMiddleware",
+    "TerminalShellEditPolicyMiddleware",
     "TimeBudgetMiddleware",
     "ToolPolicyMiddleware",
     "ExitIntentDecision",

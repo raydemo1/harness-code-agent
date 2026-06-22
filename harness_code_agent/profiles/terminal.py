@@ -25,11 +25,12 @@ from .base import BaseProfile, AgentConfig
 from ..planning_policy import PLANNING_MODE_POLICY
 from ..runtime.middleware import (
     LoopDetectionMiddleware,
-    PreExitVerificationMiddleware,
     TimeBudgetMiddleware,
     TaskTrackingEnforcementMiddleware,
     ErrorGuidanceMiddleware,
     RecoveryStrategyMiddleware,
+    AcceptanceReviewMiddleware,
+    TerminalShellEditPolicyMiddleware,
 )
 
 class TerminalProfile(BaseProfile):
@@ -42,6 +43,7 @@ class TerminalProfile(BaseProfile):
         "task_tracking_nudge_after": 8,
         "time_warn_threshold": 0.45,
         "time_critical_threshold": 0.75,
+        "acceptance_review_timeout": 10.0,
     }
 
     def _get(self, key: str):
@@ -66,13 +68,16 @@ NON-INTERACTIVE MODE:
 - Do not treat consultation output as completed work. Read it, decide what to adopt, and perform all changes yourself.
 
 CRITICAL RULES:
-- Your primary action is run_bash. Execute commands instead of describing them.
+- Execute commands instead of describing them. Use run_bash for inspection, builds, tests, and verification.
+- Never edit files through run_bash redirection or mutation commands. Use write_file/apply_patch for every intentional source, test, config, or documentation edit.
 - run_bash uses one persistent shell session for the whole run; preserve useful shell state such as cwd and exported variables intentionally.
 - Long-running run_bash commands return shell job ids; use read_shell_output, list_shell_jobs, and stop_shell_job to inspect logs and stop background jobs.
 - Large tool outputs (>4k chars) appear as a head+tail preview. Treat the preview as the normal evidence source; raw .harness/observations files are internal artifacts unless diagnostic mode is enabled.
 {PLANNING_MODE_POLICY}
-- This terminal profile starts each task in light planning mode. Before the first run_bash, write_file, consult_subagent, or other action tool, call update_plan_state(update_kind="start") with a concise constraint checklist.
-- The checklist must not be generic inspect/edit/test filler. Include hard constraints, editable paths, forbidden edits, required artifacts, verifier expectations, and final checks.
+- This terminal profile starts each task in light planning mode. Before the first action tool, call update_plan_state(update_kind="start") with 1-10 concrete acceptance_checks.
+- Each acceptance check needs text, a short source grounded in the original task, and a verification_command. Use "manual" only when command verification is impossible.
+- The framework assigns check IDs and returns acceptance_revision. A fast review may asynchronously improve the checks while you inspect the repository.
+- You may freely add, update, or remove checks through acceptance_operations in a progress update. Include the current acceptance_revision and a reason for every operation.
 - Follow task specifications literally: exact paths, exact output, exact formats, exact filenames.
 - Prefer command-driven evidence. Use commands that match the active shell. On Windows, run_bash uses PowerShell by default; prefer PowerShell cmdlets/syntax, and use cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd.
 - If a command fails, read the actual stderr/stdout, identify the failure class, and switch strategy instead of retrying blindly.
@@ -82,10 +87,11 @@ WORK LOOP:
 1. Inspect the repository and task requirements.
 2. Start light planning with update_plan_state and capture the constraint checklist before action tools.
 3. Use consult_subagent for read-only investigation, test ideas, broad search, or review when helpful.
-4. Make all code and test edits yourself with write_file.
+4. Make all code and test edits yourself with write_file/apply_patch.
 5. Run tests or concrete checks with run_bash.
 6. If checks fail, diagnose the evidence and fix.
-7. Before stopping, verify each requirement one by one against actual files or command output, including exact path/output checks. In light/full, final update_plan_state must include result_status, validation, and remaining_issues.
+7. Before stopping, verify every current acceptance check. Final update_plan_state must include the latest acceptance_revision and one check_result per active check with id, status, and summary.
+8. Declare success only when every active check passed, the last foreground run_bash succeeded, and a successful foreground run_bash occurred after the last structured file edit.
 
 AVAILABLE TOOLS:
 - run_bash: Execute shell commands.
@@ -102,15 +108,12 @@ AVAILABLE TOOLS:
                     command_repeat_threshold=self._get("loop_command_repeat_threshold"),
                 ),
                 ErrorGuidanceMiddleware(),
-                TaskTrackingEnforcementMiddleware(),
-                RecoveryStrategyMiddleware(),
-                PreExitVerificationMiddleware(
-                    verification_prompt=(
-                        "Switch to final verification. Verify what ACTUALLY exists on disk. "
-                        "Run concrete checks for every requirement. If any check fails, fix it before stopping."
-                    ),
-                    include_task_requirements=True,
+                TerminalShellEditPolicyMiddleware(),
+                AcceptanceReviewMiddleware(
+                    timeout_seconds=self._get("acceptance_review_timeout"),
                 ),
+                TaskTrackingEnforcementMiddleware(enforce_acceptance=True),
+                RecoveryStrategyMiddleware(),
                 TimeBudgetMiddleware(
                     budget_seconds=self._get("task_budget"),
                     warn_threshold=self._get("time_warn_threshold"),

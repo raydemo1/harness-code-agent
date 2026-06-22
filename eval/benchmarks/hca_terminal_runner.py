@@ -57,8 +57,11 @@ def export_session_artifacts(
     plan_events = [
         event
         for event in events
-        if event.get("type") in {"tool_call", "tool_result"}
-        and (event.get("payload") or {}).get("tool") == "update_plan_state"
+        if (
+            event.get("type") in {"tool_call", "tool_result"}
+            and (event.get("payload") or {}).get("tool") == "update_plan_state"
+        )
+        or event.get("type") == "acceptance_review"
     ]
     _write_jsonl(export_root / "plan_history.jsonl", plan_events)
 

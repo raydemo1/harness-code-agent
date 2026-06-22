@@ -352,6 +352,12 @@ class ToolExecutor:
             tool_context=self.agent.tool_context,
             agent_name=self.agent.name,
         )
+        self.runtime_state.execution_facts.record_result(
+            prepared.name,
+            status=tool_result.status,
+            return_code=tool_result.return_code,
+            metadata=tool_result.metadata,
+        )
         self._reveal_tool_schemas_from_result(tool_result)
         result = tool_result.to_text()
         log.debug("[%s] tool result: %s", self.agent.name, result[:200])

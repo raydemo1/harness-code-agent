@@ -1,9 +1,13 @@
 """Time budget middleware."""
 from __future__ import annotations
 
+import logging
 import time
 
 from .base import AgentMiddleware
+
+
+log = logging.getLogger("harness")
 
 
 class TimeBudgetMiddleware(AgentMiddleware):

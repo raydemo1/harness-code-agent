@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from .. import config
 from ..workspace.shell_jobs import ShellJobManager
 from ..workspace.shell_session import PersistentShellSession
+from .acceptance import AcceptanceState
 
 
 @dataclass
 class TaskBoard:
+    original_task: str = ""
     goal: str = ""
     steps: list[str] = field(default_factory=list)
     current_step: str = ""
@@ -30,6 +33,7 @@ class TaskBoard:
     validation: str = ""
     remaining_issues: list[str] = field(default_factory=list)
     actions_since_progress: int = 0
+    acceptance: AcceptanceState = field(default_factory=AcceptanceState)
 
 
 @dataclass
@@ -91,12 +95,51 @@ class AgentFallbackState:
 
 
 @dataclass
+class ExecutionFacts:
+    sequence: int = 0
+    last_business_edit_sequence: int = 0
+    last_foreground_shell_sequence: int = 0
+    last_foreground_shell_success: bool = False
+
+    def record_result(
+        self,
+        tool_name: str,
+        *,
+        status: str,
+        return_code: int | None,
+        metadata: dict | None,
+    ) -> None:
+        self.sequence += 1
+        metadata = dict(metadata or {})
+        if tool_name in {"write_file", "apply_patch"} and status == "success":
+            changes = metadata.get("file_changes")
+            if isinstance(changes, list) and any(
+                _is_business_path(change.get("path"))
+                for change in changes
+                if isinstance(change, dict)
+            ):
+                self.last_business_edit_sequence = self.sequence
+        if (
+            tool_name == "run_bash"
+            and metadata.get("status_source") != "shell_job"
+        ):
+            self.last_foreground_shell_sequence = self.sequence
+            self.last_foreground_shell_success = status == "success" and return_code == 0
+
+
+def _is_business_path(path) -> bool:
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    return bool(normalized) and not normalized.startswith((".harness/", "global_plan/"))
+
+
+@dataclass
 class AgentRuntimeState:
     shell_session: PersistentShellSession | None = None
     shell_job_manager: ShellJobManager = field(default_factory=lambda: ShellJobManager(config.WORKSPACE))
     task_board: TaskBoard = field(default_factory=TaskBoard)
     recovery: RecoveryState = field(default_factory=RecoveryState)
     fallback: AgentFallbackState = field(default_factory=AgentFallbackState)
+    execution_facts: ExecutionFacts = field(default_factory=ExecutionFacts)
     action_tool_count: int = 0
     current_turn_start_index: int = 0
     session_id: str = "default"
@@ -104,3 +147,4 @@ class AgentRuntimeState:
     auto_compaction_suspended: bool = False
     context_refill_streak: int = 0
     context_anxiety_turn_start_index: int = -1
+    event_bus: Any = None

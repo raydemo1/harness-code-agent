@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from ... import config
+from ...agent.acceptance import AcceptanceError
 from ..tool_context import ToolContext
 from ..tool_result import ToolResult
 
@@ -27,6 +28,10 @@ def update_plan_state(
     result_status: str | None = None,
     validation: str | None = None,
     remaining_issues: list[str] | None = None,
+    acceptance_checks: list[dict] | None = None,
+    acceptance_revision: int | None = None,
+    acceptance_operations: list[dict] | None = None,
+    check_results: list[dict] | None = None,
     runtime_state=None,
     agent_name: str | None = None,
     tool_context: ToolContext | None = None,
@@ -97,22 +102,6 @@ def update_plan_state(
             error="update_plan_state requires at least one step",
             metadata={"status_source": "validation"},
         )
-    if update_kind != "final" and current_step not in steps:
-        return ToolResult(
-            tool="update_plan_state",
-            status="failed",
-            output="[error] current_step must be one of the declared steps",
-            error="current_step must be one of the declared steps",
-            metadata={"status_source": "validation"},
-        )
-    if any(step not in steps for step in completed_steps):
-        return ToolResult(
-            tool="update_plan_state",
-            status="failed",
-            output="[error] completed_steps must be a subset of steps",
-            error="completed_steps must be a subset of steps",
-            metadata={"status_source": "validation"},
-        )
     if update_kind != "final" and not next_action:
         return ToolResult(
             tool="update_plan_state",
@@ -162,6 +151,46 @@ def update_plan_state(
             metadata={"status_source": "validation"},
         )
 
+    acceptance_checkpoint = board.acceptance.checkpoint()
+    try:
+        if update_kind == "start" and acceptance_checks is not None:
+            board.acceptance.initialize(acceptance_checks)
+        elif acceptance_operations:
+            board.acceptance.apply_operations(
+                acceptance_operations,
+                expected_revision=acceptance_revision,
+            )
+        if update_kind == "final" and board.acceptance.revision:
+            board.acceptance.validate_final(
+                result_status=result_status,
+                expected_revision=acceptance_revision,
+                raw_results=check_results,
+            )
+    except (AcceptanceError, TypeError, ValueError) as exc:
+        board.acceptance.rollback(
+            acceptance_checkpoint,
+            if_revision=acceptance_checkpoint["revision"],
+        )
+        acceptance_snapshot = board.acceptance.snapshot()
+        current_acceptance = {
+            "revision": acceptance_snapshot["revision"],
+            "checks": acceptance_snapshot["checks"],
+        }
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output=(
+                f"[error] {exc}\nCurrent acceptance state: "
+                + json.dumps(current_acceptance, ensure_ascii=False, sort_keys=True)
+            ),
+            error=str(exc),
+            metadata={
+                "status_source": "validation",
+                "acceptance": board.acceptance.snapshot(),
+            },
+        )
+
+    acceptance_revision_after_update = board.acceptance.revision
     workspace = tool_context.workspace.root if tool_context is not None else Path(config.WORKSPACE)
     previous_revision = int(getattr(board, "plan_revision", 0) or 0)
     will_write_plan = mode == "full" and bool(plan_markdown) and (
@@ -191,11 +220,16 @@ def update_plan_state(
         "result_status": result_status,
         "validation": validation,
         "remaining_issues": remaining_issues,
+        "acceptance": board.acceptance.snapshot(),
         "updated_at": _utc_timestamp(),
     }
     state_path = _planning_state_path(workspace, runtime_state, tool_context)
     ok, error = _atomic_write_json(state_path, payload)
     if not ok:
+        board.acceptance.rollback(
+            acceptance_checkpoint,
+            if_revision=acceptance_revision_after_update,
+        )
         return ToolResult(
             tool="update_plan_state",
             status="failed",
@@ -236,10 +270,26 @@ def update_plan_state(
         runtime_state.recovery.mode = "PROBE"
         runtime_state.recovery.probe_in_flight = False
 
+    acceptance_output = ""
+    if board.acceptance.revision:
+        acceptance_snapshot = board.acceptance.snapshot()
+        acceptance_view = {
+            "revision": acceptance_snapshot["revision"],
+            "checks": acceptance_snapshot["checks"],
+            "review_status": acceptance_snapshot["review_status"],
+            "review_warning": acceptance_snapshot["review_warning"],
+            "review_truncated": acceptance_snapshot["review_truncated"],
+        }
+        if update_kind == "final":
+            acceptance_view["check_results"] = acceptance_snapshot["check_results"]
+        acceptance_output = (
+            "\nAcceptance state: "
+            + json.dumps(acceptance_view, ensure_ascii=False, sort_keys=True)
+        )
     return ToolResult(
         tool="update_plan_state",
         status="success",
-        output="Updated plan state: " + ", ".join(written),
+        output="Updated plan state: " + ", ".join(written) + acceptance_output,
         metadata={
             "status_source": "native",
             "planning_state": payload,

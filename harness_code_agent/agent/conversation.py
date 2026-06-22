@@ -105,7 +105,7 @@ class Agent:
         return AgentRuntimeState(task_board=self._new_task_board(task))
 
     def _new_task_board(self, task: str) -> TaskBoard:
-        return TaskBoard(goal=task, planning_mode=self.initial_planning_mode)
+        return TaskBoard(original_task=task, goal=task, planning_mode=self.initial_planning_mode)
 
     def run(self, task: str) -> str:
         """
@@ -160,6 +160,7 @@ class AgentConversation:
         self._iteration_offset = 0
         self.compaction_gate = CompactionGate()
         self._event_bus = agent.tool_context.event_bus if agent.tool_context is not None else None
+        self.runtime_state.event_bus = self._event_bus
         self.fact_tracker = FactTracker()
         self.observation_store = ObservationStore(self._observation_dir())
         self._cached_prompt_cache_key: str | None = None

@@ -210,6 +210,57 @@ CORE_TOOL_SCHEMAS = [
                         "description": "Required for final updates. Empty list means no known remaining issues.",
                         "items": {"type": "string"},
                     },
+                    "acceptance_checks": {
+                        "type": "array",
+                        "maxItems": 10,
+                        "description": "Optional on start. Concrete acceptance checks; IDs and origins are assigned by the framework.",
+                        "items": {
+                            "type": "object",
+                            "required": ["text", "source", "verification_command"],
+                            "properties": {
+                                "text": {"type": "string"},
+                                "source": {"type": "string", "maxLength": 300},
+                                "verification_command": {"type": "string"},
+                            },
+                        },
+                    },
+                    "acceptance_revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Required when changing acceptance checks and on final updates.",
+                    },
+                    "acceptance_operations": {
+                        "type": "array",
+                        "description": "Atomic ordered add/update/remove operations. Every operation requires a reason.",
+                        "items": {
+                            "type": "object",
+                            "required": ["operation", "reason"],
+                            "properties": {
+                                "operation": {"type": "string", "enum": ["add", "update", "remove"]},
+                                "id": {"type": "string"},
+                                "text": {"type": "string"},
+                                "source": {"type": "string", "maxLength": 300},
+                                "verification_command": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                        },
+                    },
+                    "check_results": {
+                        "type": "array",
+                        "description": "Final per-check results. Success requires every current check exactly once with status passed.",
+                        "items": {
+                            "type": "object",
+                            "required": ["id", "status", "summary"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["passed", "failed", "not_run"],
+                                },
+                                "summary": {"type": "string"},
+                            },
+                        },
+                    },
                 },
             },
         },
