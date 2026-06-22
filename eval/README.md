@@ -26,7 +26,7 @@ eval/
 - `benchmarks/run_terminal_bench.py` launches the fixed Terminal-Bench subset through Harbor.
 - `benchmarks/run_claw_swe_bench.py` launches Claw-SWE-Bench through the upstream orchestrator with the local harness adapter.
 - `benchmarks/harbor_agent.py` is Harbor's installed-agent adapter for running `hca --profile terminal` inside task containers.
-- `benchmarks/harness_claw_adapter.py` runs `hca` with the `swe-bench` profile inside each Claw-SWE-Bench container and lets the upstream runner collect patches.
+- `benchmarks/harness_claw_adapter.py` runs `hca` with the `coding-agent` profile inside each Claw-SWE-Bench container and lets the upstream runner collect patches. Claw remains an external evaluation scenario rather than a separate product profile.
 - `benchmarks/tb2_tasks.json` stores Terminal-Bench task metadata used by the terminal profile and launcher.
 
 ## Common Commands

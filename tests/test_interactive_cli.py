@@ -671,7 +671,8 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertIn("## HARNESS.md", prompt)
                 self.assertIn("Always prefer focused tests.", prompt)
                 self.assertIn("## Profile Acceptance Criteria", prompt)
-                self.assertIn("## Main-Agent Ownership Rules", prompt)
+                self.assertIn("## Agent Identity and Judgment", prompt)
+                self.assertIn("## Profile Contract", prompt)
                 self.assertEqual(session.format_task("hello"), "Task:\nhello")
             finally:
                 session.close()
@@ -781,7 +782,6 @@ class InteractiveCliTests(unittest.TestCase):
                     ("/plan", "plan"),
                     ("/code", "coding-agent"),
                     ("/terminal", "terminal"),
-                    ("/swe", "swe-bench"),
                     ("/app", "app-builder"),
                     ("/review", "review"),
                 ]

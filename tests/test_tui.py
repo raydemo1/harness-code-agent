@@ -40,6 +40,7 @@ class TuiTests(unittest.TestCase):
         review_result = registry.execute("/review", session)
 
         self.assertIn("Profiles:", help_text)
+        self.assertNotIn("/swe", help_text)
         self.assertIn("/review", help_text)
         self.assertIn("/checkpoint", help_text)
         self.assertEqual(result.text, "switched coding-agent")

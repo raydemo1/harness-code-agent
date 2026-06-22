@@ -62,9 +62,9 @@ class AgentRuntimeStateTests(unittest.TestCase):
 
         self.assertIn("persistent shell", prompt.lower())
         self.assertIn("update_plan_state", prompt)
-        self.assertIn("Planning Mode Self-Check", prompt)
-        self.assertIn("replans enter PROBE mode", prompt)
-        self.assertIn("starts each task in light planning mode", prompt)
+        self.assertIn("## Planning Mode", prompt)
+        self.assertIn("PROBE", prompt)
+        self.assertIn("light planning mode", prompt)
         self.assertIn("acceptance_checks", prompt)
         self.assertIn("exact output", prompt)
         self.assertIn("switch strategy", prompt)

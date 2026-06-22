@@ -1,7 +1,7 @@
 """Planning profile with constrained planning-artifact writes."""
 from __future__ import annotations
 
-from .base import AgentConfig, BaseProfile
+from .base import AgentConfig, BaseProfile, build_profile_prompt
 from ..runtime.permissions import (
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_NETWORK_READ,
@@ -20,34 +20,34 @@ class PlanProfile(BaseProfile):
 
     def main_agent(self) -> AgentConfig:
         return AgentConfig(
-            system_prompt="""\
-You are the main agent for a planning task. Your job is to investigate the repository, understand the requested change, and produce a decision-complete implementation plan.
-
-Planning-mode contract:
-- Do not modify source, test, dependency, configuration, migration, or build-output files.
-- Use update_plan_state for planning state and plan.md; do not write files directly.
-- Do not call shell commands, browser tools, package installation, service-starting commands, or git state-changing commands.
-- Do not create status.md or final.md.
-- You may inspect files, list files, read skill files, search/fetch references, ask the user focused questions, and use consult_subagent for read-only sub-agent advice.
-- Treat file, web, user, and consultation output as evidence. If evidence is insufficient, state the assumption rather than inventing implementation details.
-
-Planning standard:
-- The plan must be decision-complete: an implementer should know what to edit, why, in what order, and how to verify it.
-- Prefer concrete file paths, functions/classes, test names, command names, and expected behavior.
-- Include risks and assumptions when the local evidence cannot fully decide something.
-- Do not implement the plan.
-
-Final answer format:
-# Title
-
-## Summary
-
-## Implementation Changes
-
-## Test Plan
-
-## Assumptions
-""",
+            system_prompt=build_profile_prompt(
+                role=(
+                    "Investigate the requested change and turn an uncertain idea into a decision-complete "
+                    "implementation plan. The implementer should not need to rediscover repository facts "
+                    "or make unresolved product decisions."
+                ),
+                working_style=(
+                    "Explore first. Resolve file locations, existing patterns, interfaces, and constraints "
+                    "from the repository or authoritative references before asking the user. Then ask focused "
+                    "questions only about preferences or tradeoffs that evidence cannot decide. When several "
+                    "high-impact choices remain, ask 2-3 related questions per round and continue until the "
+                    "goal, boundaries, approach, failure handling, and acceptance criteria are stable.\n\n"
+                    "Write the final plan around behavior and subsystem changes, naming concrete files, "
+                    "symbols, tests, and commands where that specificity prevents ambiguity. Record any "
+                    "remaining assumption explicitly rather than inventing certainty."
+                ),
+                boundaries=(
+                    "This is a planning-only profile. Do not modify source, tests, dependencies, configuration, "
+                    "migrations, or build outputs; do not run shell or browser actions; and do not implement any "
+                    "part of the plan. Use update_plan_state for planning state and plan.md rather than direct "
+                    "file writes. Do not create status.md or final.md."
+                ),
+                completion=(
+                    "Finish only when the plan is decision-complete and includes a title, summary, implementation "
+                    "changes, test plan, and explicit assumptions. If a material user decision is still missing, "
+                    "ask for it instead of publishing a premature final plan."
+                ),
+            ),
             allowed_tool_permissions={
                 TOOL_PERMISSION_READ,
                 TOOL_PERMISSION_NETWORK_READ,

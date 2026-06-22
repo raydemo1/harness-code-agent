@@ -37,6 +37,22 @@ DEFAULT_PROFILE_TOOL_PERMISSIONS = {
 DEFAULT_PROFILE_BLOCKED_TOOLS = {"browser_test", "stop_dev_server"}
 
 
+def build_profile_prompt(
+    *,
+    role: str,
+    working_style: str,
+    boundaries: str,
+    completion: str,
+) -> str:
+    """Render profile-local behavior in one predictable, readable shape."""
+    return (
+        f"## Role\n{role.strip()}\n\n"
+        f"## Working Style\n{working_style.strip()}\n\n"
+        f"## Boundaries\n{boundaries.strip()}\n\n"
+        f"## Completion\n{completion.strip()}"
+    )
+
+
 @dataclass
 class AgentConfig:
     """Configuration for the main agent."""
@@ -103,8 +119,8 @@ class BaseProfile(ABC):
     """
     Abstract base for task profiles.
 
-    Subclass this to create a new scenario (app building, SWE-Bench,
-    terminal tasks, etc.). The harness calls these methods to get
+    Subclass this to create a new scenario (app building, terminal tasks,
+    review, etc.). The harness calls these methods to get
     scenario-specific configuration.
 
     Accepts an optional ProfileConfig for tunable parameters.
@@ -116,7 +132,7 @@ class BaseProfile(ABC):
 
     @abstractmethod
     def name(self) -> str:
-        """Short identifier for this profile (e.g. 'app-builder', 'swe-bench')."""
+        """Short identifier for this profile (e.g. 'app-builder', 'terminal')."""
         ...
 
     @abstractmethod
@@ -126,24 +142,31 @@ class BaseProfile(ABC):
 
     def main_agent(self) -> AgentConfig:
         """Config for the single owner agent that runs the full task loop."""
-        prompt = (
-            "You are the main agent for this task. You own the complete execution loop: "
-            "understand the task, maintain progress, inspect the workspace, modify files, "
-            "run verification, integrate all feedback, and decide when to stop.\n\n"
-            "Sub-agents are consultation tools only. Use consult_subagent for local investigation, "
-            "parallel search, test design, or review. They must not modify files, merge work, "
-            "or decide whether the task is complete. Only you may modify files, create tests, "
-            "perform final integration, and make the final stop decision.\n\n"
-            "Required loop:\n"
-            "1. Read the task and repository state.\n"
-            f"2. {PLANNING_MODE_POLICY}\n"
-            "3. Consult sub-agents only when their read-only findings would reduce context load or risk.\n"
-            "4. Apply all code and test changes yourself.\n"
-            "5. Run concrete verification commands.\n"
-            "6. If verification fails, diagnose and continue. If it passes, update planning state when in light/full and perform final verification before stopping. "
-            "Final light/full updates must include result_status, validation, and remaining_issues.\n"
-            "Use read_shell_output, list_shell_jobs, and stop_shell_job to inspect and clean up any background shell jobs returned by long-running run_bash commands.\n\n"
-            "Use the task text and profile acceptance criteria as the source of truth."
+        prompt = build_profile_prompt(
+            role=(
+                "Own the complete task loop: understand the request, inspect the workspace, "
+                "make the required changes, integrate useful consultation, verify the result, "
+                "and decide when the work is complete."
+            ),
+            working_style=(
+                "Begin from the task and current repository state. Use the planning policy below "
+                "to match coordination overhead to risk, then follow existing project patterns and "
+                "keep the implementation focused.\n\n"
+                f"{PLANNING_MODE_POLICY}\n\n"
+                "Use consultation only when read-only investigation, test design, or review would "
+                "reduce risk or context load. Apply every code and test change yourself. Long-running "
+                "shell commands return job IDs; inspect and clean them up through the shell-job tools."
+            ),
+            boundaries=(
+                "The task text and profile acceptance criteria are the source of truth. Consultation "
+                "is advice, not completed work. Do not delegate file modification, integration, final "
+                "verification, or the stop decision."
+            ),
+            completion=(
+                "Run concrete verification and read its output. If it fails, diagnose the evidence "
+                "and continue. In light or full planning mode, finish with a final planning update "
+                "that records result_status, validation, and remaining_issues."
+            ),
         )
         return AgentConfig(system_prompt=prompt)
 

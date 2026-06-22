@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
 
         session = InteractiveSession(
             cwd=workspace,
-            profile_name="swe-bench",
+            profile_name="coding-agent",
             profile_explicit=True,
             stream_sink=None,
         )

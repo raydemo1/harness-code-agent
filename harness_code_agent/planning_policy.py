@@ -1,15 +1,16 @@
 """Shared planning mode policy for runtime profiles and skill routing."""
 
 PLANNING_MODE_POLICY = """\
-Planning Mode Self-Check:
-- Run this self-check before substantive action tools.
-- skip: use for <=2 low-risk actions and <=1 changed file. It writes no artifact and does not call update_plan_state.
-- light: use for 3-5 actions or 2-3 changed files. Call update_plan_state(update_kind="start") before tracked actions.
-- full: use for >5 actions, >3 changed files, cross-module work, state/middleware/tool schema/TUI/persistence/permission/rollback risk, or plans needing user confirmation. Call update_plan_state(update_kind="start", requires_approval=true) with plan_markdown, tell the user the plan was written to global_plan/current/plan.md, and wait for confirmation before tracked actions.
-- In light/full, call update_plan_state(update_kind="replan") when assumptions break, repeated failures occur, requirements change, or the actual scope exceeds the initial mode.
-- Recovery replans enter PROBE mode: make next_action one low-cost read-only verification command. Edits resume only after that probe passes.
-- In light/full, write consolidated progress updates only at key milestones, not after every action.
-- Before stopping in light/full, call update_plan_state(update_kind="final") with result_status, validation, and remaining_issues.
+## Planning Mode
+Choose the lightest planning mode that still makes the work reliable before using substantive action tools.
+
+- Use skip for at most 2 low-risk actions affecting at most 1 file. Skip creates no planning artifact and does not call update_plan_state.
+- Use light for 3-5 actions or 2-3 changed files. Call update_plan_state(update_kind="start") before tracked actions.
+- Use full for more than 5 actions, more than 3 changed files, cross-module work, or changes involving state, middleware, tool schemas, TUI behavior, persistence, permissions, rollback risk, or a plan that needs user confirmation. Start with requires_approval=true and plan_markdown, tell the user that global_plan/current/plan.md was written, and wait for confirmation before tracked actions.
+
+Light and full plans are working models, not promises. Replan when an assumption breaks, failures repeat, requirements change, or the real scope outgrows the selected mode. Recovery replans enter PROBE mode: next_action is one low-cost read-only verification command, and edits resume only after that probe succeeds.
+
+Update progress at meaningful milestones rather than after every action. Before stopping in light or full mode, call update_plan_state(update_kind="final") with result_status, validation, and remaining_issues.
 """
 
 PLANNING_MODE_CATALOG_POLICY = (

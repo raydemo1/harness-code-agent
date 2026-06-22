@@ -446,7 +446,7 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("MAX_AGENT_ITERATIONS=12", joined)
 
         command = _agent_command(timeout=120, max_turns=12)
-        self.assertIn("PROFILE_SWE_BENCH_TASK_BUDGET=120", command)
+        self.assertIn("PROFILE_CODING_AGENT_TASK_BUDGET=120", command)
         self.assertIn("hca_claw_runner.py", command)
 
     def test_eval_scripts_self_test(self):

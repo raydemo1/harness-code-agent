@@ -11,7 +11,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 
 ## 功能特点
 
-- **Profile 驱动**：内置 `general`、`coding-agent`、`app-builder`、`terminal`、`swe-bench`、`plan`、`review` 七种任务模式；默认先进入轻量 `general`，再按任务语义自动切到专用 profile。
+- **Profile 驱动**：内置 `general`、`coding-agent`、`app-builder`、`terminal`、`plan`、`review` 六种任务模式；它们共享同一套 Agent 判断原则，再按场景切换工作节奏、权限边界和完成标准。默认先进入轻量 `general`，再按任务语义自动切到专用 profile。
 - **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
 - **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
 - **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
@@ -19,7 +19,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 - **会话与事件记录**：每次运行会写入 `.harness/` 元数据、事件和文件快照。
 - **工具系统**：支持 `repo_search` / `list_files` / `read_file` 仓库检查、受控 `parallel` 并行只读调用、文件写入、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
 - **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
-- **评估与 Benchmark 适配**：`eval/` 下提供轻量评估脚本、任务集、结果汇总，以及 Terminal-Bench 2.0 / Harbor 运行入口。
+- **评估与 Benchmark 适配**：`eval/` 下提供轻量评估脚本、任务集、结果汇总，以及 Terminal-Bench 2.0 / Harbor 和 Claw-SWE-Bench 运行入口。
 - **项目规则文件**：交互式 session 启动时会读取当前工作区根目录的 `HARNESS.md`，并作为稳定系统提示的一部分注入。
 - **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。当前 DeepSeek context cache 评估中，stable warmup 从 `29.2%` 提升到 `99.1%`，compaction 后命中率为 `83.2%`。
 
@@ -162,7 +162,7 @@ echo "Fix the failing tests" | hca
 
 ```bash
 hca --profile terminal "Fix the broken symlinks in /tmp"
-hca --profile swe-bench "Fix the TypeError in parse_config()"
+hca --profile coding-agent "Fix the TypeError in parse_config()"
 hca --profile plan "Design the fix for the failing parser tests"
 ```
 
@@ -180,7 +180,6 @@ hca --resume <session-id> "Continue the previous parser work"
 /general   # general，轻量问答和只读检查
 /plan      # 受限方案模式（只允许计划/状态工件写入）
 /terminal  # CLI / shell 任务
-/swe       # swe-bench issue 修复
 /app       # app-builder Web 应用构建
 /review    # 只读代码评审
 ```
@@ -197,12 +196,15 @@ Skill 同样分成两种调用方式：
 | Profile | 用途 |
 | --- | --- |
 | `general` | 默认入口，用于普通问答、讨论和轻量只读仓库检查；不会改文件或运行 shell |
-| `coding-agent` | 本地仓库代码任务，用于修复、实现、重构、测试和验证 |
-| `app-builder` | 从 prompt 构建完整 Web 应用，可使用浏览器测试工具 |
-| `terminal` | 面向 Terminal-Bench 2.0 风格的 CLI / shell 任务 |
-| `swe-bench` | 面向真实仓库 issue 修复任务 |
-| `plan` | 调查和方案设计，输出结构化 Markdown 计划；只允许写计划 Markdown 和 planning state |
-| `review` | 只读代码评审模式，按 findings-first 结构输出，不修改工作区 |
+| `coding-agent` | 本地仓库的主要实施模式；先理解现有设计，再完成窄而完整的修改、测试和验证 |
+| `app-builder` | 根据产品需求选择最小合适技术栈，构建完整 Web 应用并完成浏览器验证 |
+| `terminal` | 面向 Terminal-Bench 2.0 风格的非交互 CLI / shell 任务，强调字面规格和命令证据 |
+| `plan` | 先调查仓库，再分轮澄清高影响偏好，输出 decision-complete Markdown 计划 |
+| `review` | 独立只读代码评审，按 findings-first 结构输出，不修改工作区 |
+
+最终 system prompt 由稳定的共享层与 profile-local 合同组合而成。共享层负责证据意识、诚实表达、工具节制和主 Agent 所有权；各 profile 只描述本场景的 Role、Working Style、Boundaries 与 Completion。工具 schema、权限过滤、规划门禁和退出验证仍由运行时代码强制执行，不依赖 prompt 重复喊规则。
+
+Claw-SWE-Bench 仍作为外部评测保留，但直接使用 `coding-agent`，不再维护一个与日常代码任务高度重叠的产品 profile。
 
 `plan` profile 在交互模式下会进入显式 handoff：计划输出后不会自动改代码，而是提示用户选择下一步。
 

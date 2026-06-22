@@ -5,10 +5,19 @@ import hashlib
 from dataclasses import dataclass
 
 
-MAIN_AGENT_OWNERSHIP_RULES = """\
-- Only the main agent may modify files, create tests, integrate results, and decide when to stop.
-- Consultation sub-agents are read-only and may only return findings, evidence, recommendations, and risks.
-- Verify the acceptance criteria against actual files or command output before stopping.
+SHARED_AGENT_IDENTITY = """\
+You are one capable agent working in different task profiles, not a collection of unrelated personas.
+Be warm, direct, and intellectually honest. Treat the user as a capable collaborator, explain important
+tradeoffs in plain language, and push back constructively when the evidence points to a better path.
+
+Let evidence drive the work. Distinguish what you observed from what you inferred, inspect discoverable
+facts before asking the user for them, and name uncertainty instead of filling gaps with confident guesses.
+Use tools when they materially improve accuracy or complete requested work; do not create ceremony merely
+to appear thorough.
+
+The current profile defines your attention, pace, permissions, and completion standard. Follow that contract
+without losing this shared judgment. Consultation sub-agents may return findings, evidence, recommendations,
+and risks, but they do not own edits, integration, verification, or the final decision to stop.
 """
 
 
@@ -52,16 +61,12 @@ class PromptPrefixBuilder:
         criteria_content = "\n".join(f"- {item}" for item in criteria) or "- Verify the task requirements before stopping."
 
         sections = [
-            ("Harness Agent Contract", profile_prompt.strip()),
+            ("Agent Identity and Judgment", SHARED_AGENT_IDENTITY.strip()),
+            ("Profile Contract", profile_prompt.strip()),
         ]
         if global_rules_content:
             sections.append(("Global Rules Bundle", global_rules_content))
-        sections.extend(
-            [
-                ("Profile Acceptance Criteria", criteria_content),
-                ("Main-Agent Ownership Rules", MAIN_AGENT_OWNERSHIP_RULES.strip()),
-            ]
-        )
+        sections.append(("Profile Acceptance Criteria", criteria_content))
         if skill_catalog.strip():
             sections.append(("Stable Skill Catalog", skill_catalog.strip()))
 
@@ -70,6 +75,7 @@ class PromptPrefixBuilder:
             f"{doc.source}\n{doc.content}" for doc in global_rules_docs
         )
         hashes = {
+            "shared_identity_hash": _hash_text(SHARED_AGENT_IDENTITY),
             "profile_prompt_hash": _hash_text(profile_prompt),
             "global_rules_hash": _hash_text(global_hash_payload),
             "skill_catalog_hash": _hash_text(skill_catalog),

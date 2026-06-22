@@ -54,7 +54,7 @@ FORWARDED_ENV_PREFIXES = (
     "HARNESS_",
     "OPENAI_",
     "DEEPSEEK_",
-    "PROFILE_SWE_BENCH_",
+    "PROFILE_CODING_AGENT_",
     "MAX_AGENT_",
     "COMPRESS_THRESHOLD",
 )
@@ -223,7 +223,7 @@ def _agent_command(*, timeout: int, max_turns: int | None) -> str:
         "HARNESS_MEMORY_DISABLED": "1",
         "HARNESS_MENTION_MODE": "off",
         "MAX_AGENT_TOTAL_TOKENS": "900000",
-        "PROFILE_SWE_BENCH_TASK_BUDGET": str(timeout),
+        "PROFILE_CODING_AGENT_TASK_BUDGET": str(timeout),
     }
     if max_turns:
         env["MAX_AGENT_ITERATIONS"] = str(max_turns)

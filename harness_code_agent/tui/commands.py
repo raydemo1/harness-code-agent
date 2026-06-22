@@ -91,7 +91,6 @@ def default_command_registry(skill_registry=None) -> SlashCommandRegistry:
         CommandSpec("/code", "Profiles", "/code", "Switch to coding-agent profile.", _profile("coding-agent", "/code")),
         CommandSpec("/plan", "Profiles", "/plan", "Switch to constrained planning profile.", _profile("plan", "/plan")),
         CommandSpec("/terminal", "Profiles", "/terminal", "Switch to terminal task profile.", _profile("terminal", "/terminal")),
-        CommandSpec("/swe", "Profiles", "/swe", "Switch to swe-bench profile.", _profile("swe-bench", "/swe")),
         CommandSpec("/app", "Profiles", "/app", "Switch to app-builder profile.", _profile("app-builder", "/app")),
         CommandSpec("/review", "Profiles", "/review", "Switch to read-only review profile.", _profile("review", "/review")),
         CommandSpec("/sessions", "Sessions", "/sessions", "List local Harness sessions.", _sessions),

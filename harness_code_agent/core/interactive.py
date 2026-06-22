@@ -58,7 +58,6 @@ PROFILE_SLASH_ALIASES = {
     "/code": "coding-agent",
     "/app": "app-builder",
     "/terminal": "terminal",
-    "/swe": "swe-bench",
     "/plan": "plan",
     "/review": "review",
 }

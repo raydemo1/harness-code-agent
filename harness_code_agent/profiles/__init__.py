@@ -7,14 +7,12 @@ from .general import GeneralProfile
 from .plan import PlanProfile
 from .review import ReviewProfile
 from .terminal import TerminalProfile
-from .swe_bench import SWEBenchProfile
 
 PROFILES: dict[str, type[BaseProfile]] = {
     "general": GeneralProfile,
     "coding-agent": CodingAgentProfile,
     "app-builder": AppBuilderProfile,
     "terminal": TerminalProfile,
-    "swe-bench": SWEBenchProfile,
     "plan": PlanProfile,
     "review": ReviewProfile,
 }
