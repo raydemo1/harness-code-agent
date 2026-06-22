@@ -102,6 +102,22 @@ def update_plan_state(
             error="update_plan_state requires at least one step",
             metadata={"status_source": "validation"},
         )
+    if update_kind != "final" and current_step not in steps:
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] current_step must be one of the declared steps",
+            error="current_step must be one of the declared steps",
+            metadata={"status_source": "validation"},
+        )
+    if any(step not in steps for step in completed_steps):
+        return ToolResult(
+            tool="update_plan_state",
+            status="failed",
+            output="[error] completed_steps must be a subset of steps",
+            error="completed_steps must be a subset of steps",
+            metadata={"status_source": "validation"},
+        )
     if update_kind != "final" and not next_action:
         return ToolResult(
             tool="update_plan_state",
@@ -152,6 +168,7 @@ def update_plan_state(
         )
 
     acceptance_checkpoint = board.acceptance.checkpoint()
+    acceptance_revision_after_update = acceptance_checkpoint["revision"]
     try:
         if update_kind == "start" and acceptance_checks is not None:
             board.acceptance.initialize(acceptance_checks)
@@ -160,16 +177,21 @@ def update_plan_state(
                 acceptance_operations,
                 expected_revision=acceptance_revision,
             )
+        acceptance_revision_after_update = board.acceptance.revision
         if update_kind == "final" and board.acceptance.revision:
             board.acceptance.validate_final(
                 result_status=result_status,
-                expected_revision=acceptance_revision,
+                expected_revision=(
+                    acceptance_revision_after_update
+                    if acceptance_operations
+                    else acceptance_revision
+                ),
                 raw_results=check_results,
             )
     except (AcceptanceError, TypeError, ValueError) as exc:
         board.acceptance.rollback(
             acceptance_checkpoint,
-            if_revision=acceptance_checkpoint["revision"],
+            if_revision=acceptance_revision_after_update,
         )
         acceptance_snapshot = board.acceptance.snapshot()
         current_acceptance = {
@@ -190,7 +212,6 @@ def update_plan_state(
             },
         )
 
-    acceptance_revision_after_update = board.acceptance.revision
     workspace = tool_context.workspace.root if tool_context is not None else Path(config.WORKSPACE)
     previous_revision = int(getattr(board, "plan_revision", 0) or 0)
     will_write_plan = mode == "full" and bool(plan_markdown) and (

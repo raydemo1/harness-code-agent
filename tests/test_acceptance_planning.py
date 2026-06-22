@@ -431,6 +431,50 @@ class AcceptancePlanningTests(unittest.TestCase):
         self.assertEqual(state.task_board.acceptance.snapshot()["revision"], 0)
         self.assertEqual(state.task_board.acceptance.snapshot()["checks"], [])
 
+    def test_failed_final_rolls_back_acceptance_operations(self):
+        state = AgentRuntimeState(session_id="acceptance-final-rollback")
+        execute_tool_result(
+            "update_plan_state",
+            self._args(),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        result = execute_tool_result(
+            "update_plan_state",
+            self._args(
+                update_kind="final",
+                next_action="none",
+                result_status="success",
+                validation="targeted test passed",
+                remaining_issues=[],
+                acceptance_revision=1,
+                acceptance_operations=[
+                    {
+                        "operation": "add",
+                        "text": "No regression",
+                        "source": "Avoid regressions",
+                        "verification_command": "pytest",
+                        "reason": "Added during final review",
+                    }
+                ],
+                check_results=[
+                    {
+                        "id": "check_1",
+                        "status": "passed",
+                        "summary": "The original targeted check passed",
+                    }
+                ],
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(result.status, "failed")
+        snapshot = state.task_board.acceptance.snapshot()
+        self.assertEqual(snapshot["revision"], 1)
+        self.assertEqual([item["id"] for item in snapshot["checks"]], ["check_1"])
+
 
 if __name__ == "__main__":
     unittest.main()

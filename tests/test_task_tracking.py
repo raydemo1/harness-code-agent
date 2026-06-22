@@ -147,6 +147,34 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertIn("final update requires result_status", result)
         self.assertFalse(self._state_path().exists())
 
+    def test_current_step_must_be_declared(self):
+        state = AgentRuntimeState(session_id="test-session")
+
+        result = execute_tool(
+            "update_plan_state",
+            self._base_args(current_step="invented"),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIn("[error]", result)
+        self.assertIn("current_step must be one of the declared steps", result)
+        self.assertFalse(self._state_path().exists())
+
+    def test_completed_steps_must_be_declared(self):
+        state = AgentRuntimeState(session_id="test-session")
+
+        result = execute_tool(
+            "update_plan_state",
+            self._base_args(completed_steps=["invented"]),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIn("[error]", result)
+        self.assertIn("completed_steps must be a subset of steps", result)
+        self.assertFalse(self._state_path().exists())
+
     def test_requires_approval_false_replan_does_not_overwrite_plan(self):
         state = AgentRuntimeState(session_id="test-session")
         plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
