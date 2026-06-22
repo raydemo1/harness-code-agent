@@ -185,6 +185,13 @@ hca --resume <session-id> "Continue the previous parser work"
 /review    # 只读代码评审
 ```
 
+Skill 同样分成两种调用方式：
+
+- 面向用户的工作流不会进入模型的常驻 catalog，而是动态注册为 `/name`，例如 `/workflows`、`/triage`、`/implement`、`/handoff`。
+- 面向 Agent 的工程纪律只把精简 description 放入 system prompt；Agent 判断相关时再通过 `read_skill_file` 加载正文，例如 `diagnosing-bugs`、`tdd`、`domain-modeling`。
+
+`/help` 会同时列出固定系统命令和当前可用的用户 skill。文件与会话仍使用 `@file:`、`@session:` 显式引用；skill 不再使用 `@skill:`。
+
 ## Profile 说明
 
 | Profile | 用途 |

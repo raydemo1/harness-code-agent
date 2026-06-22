@@ -23,6 +23,7 @@ class CommandSpec:
     description: str
     handler: CommandHandler
     aliases: tuple[str, ...] = ()
+    agent_command: bool = False
 
     def names(self) -> tuple[str, ...]:
         return (self.name, *self.aliases)
@@ -56,6 +57,16 @@ class SlashCommandRegistry:
     def command_names(self) -> list[str]:
         return [spec.name for spec in self.specs]
 
+    def is_agent_command(self, line: str) -> bool:
+        try:
+            parts = shlex.split(line)
+        except ValueError:
+            return False
+        if not parts:
+            return False
+        spec = self._by_name.get(parts[0])
+        return bool(spec and spec.agent_command)
+
     def candidates(self) -> list[CommandSpec]:
         return list(self.specs)
 
@@ -71,8 +82,8 @@ class SlashCommandRegistry:
         return "\n".join(lines)
 
 
-def default_command_registry() -> SlashCommandRegistry:
-    return SlashCommandRegistry([
+def default_command_registry(skill_registry=None) -> SlashCommandRegistry:
+    specs = [
         CommandSpec("/help", "General", "/help", "Show commands grouped by workflow.", _help),
         CommandSpec("/exit", "General", "/exit", "Close the current TUI session.", _exit, aliases=("/quit",)),
         CommandSpec("/profiles", "Profiles", "/profiles", "List available profiles.", _profiles),
@@ -94,7 +105,49 @@ def default_command_registry() -> SlashCommandRegistry:
         CommandSpec("/config", "Diagnostics", "/config show", "Show effective Harness configuration.", _config),
         CommandSpec("/observe", "Diagnostics", "/observe [current|project|export current|export project]", "Show or export observability metrics.", _observe),
         CommandSpec("/compact", "Workflow", "/compact show", "View the latest compacted summary.", _compact),
-    ])
+    ]
+    if skill_registry is None:
+        from ..skills import SkillRegistry
+
+        skill_registry = SkillRegistry()
+    occupied = {
+        name
+        for spec in specs
+        for name in spec.names()
+    }
+    for item in getattr(skill_registry, "user_commands", []):
+        skill_name = str(item.get("name", "")).strip()
+        if not skill_name:
+            continue
+        command_name = f"/{skill_name}"
+        if command_name in occupied:
+            raise ValueError(
+                f"User skill command {command_name} conflicts with built-in command"
+            )
+        hint = str(item.get("argument_hint", "")).strip()
+        description = str(item.get("description", "")).strip()
+        usage = f"{command_name} {hint}".rstrip()
+        specs.append(
+            CommandSpec(
+                command_name,
+                "Skills",
+                usage,
+                description,
+                _user_skill(command_name),
+                agent_command=True,
+            )
+        )
+        occupied.add(command_name)
+    return SlashCommandRegistry(specs)
+
+
+def _user_skill(command_name: str) -> CommandHandler:
+    def handler(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
+        line = " ".join([command_name, *args])
+        result = session.submit_skill_command(line)
+        return CommandResult(result.text)
+
+    return handler
 
 
 def _help(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:

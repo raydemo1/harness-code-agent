@@ -1,125 +1,54 @@
 ---
 name: vibe-execution-guard
-description: "Use this skill only for high-risk or tightly bounded execution in Vibe Coding: user-specified 'only change this' constraints, auth/permissions/secrets/payment/privacy, destructive data changes, migrations, production incidents, rollback, or bugs that survived repeated fixes. It locks scope, identifies risk and rollback points, requires fact-based debugging, and verifies the smallest safe patch. Do not use for ordinary implementation when scope is already clear, PRD work, code review without edits, simple explanations, or status checks."
+description: Guarded execution. Use for explicit only-change-this boundaries, auth/secrets/payment/privacy, destructive data, migrations, production incidents, rollback, or bugs that survived repeated fixes.
 ---
 
-# Vibe Execution Guard
+# Guarded Execution
 
-Use this skill only when execution needs a stricter boundary than normal implementation.
+Lock the boundary, prove the cause, make the smallest reversible change.
 
-Most coding tasks do not need this skill. A good PRD plus normal verification is enough. Use this when the cost of accidental scope expansion, guessing, or unsafe edits is high.
-
-## Core Principle
-
-Lock scope, inspect facts, make the smallest safe change, verify before claiming success.
-
-## When To Use
-
-Use this skill when:
-- The user says "only change this", "do not touch UI", "do not change unrelated logic", or similar.
-- The task touches auth, authorization, secrets, payment, privacy, tenant boundaries, or user data.
-- The task involves migrations, destructive writes, rollback, production incidents, or irreversible changes.
-- A bug survived one or two attempted fixes and needs systematic debugging.
-- The requested change is small but sits in a risky part of the system.
-
-## When Not To Use
-
-Do not use this skill for:
-- Ordinary implementation with clear scope and low risk.
-- New project planning or PRD work.
-- Pure code review without edits.
-- Simple command execution, summaries, or explanations.
-- UI polish, copy edits, or documentation-only changes with no behavior risk.
-
-## Procedure
-
-### 1. Lock The Scope
+## 1. Lock
 
 State:
-- Target behavior.
-- Files or modules likely in scope.
-- Explicitly excluded areas.
-- Acceptance criteria.
-- Smallest useful verification.
 
-If the user already gave boundaries, preserve them. Ask only if the missing answer changes safety, data, or user-visible behavior.
+- target behavior;
+- explicit exclusions;
+- affected data or users;
+- rollback point;
+- minimum meaningful verification.
 
-### 2. Identify Risk And Rollback
+Ask only when a missing answer changes safety or user-visible behavior.
 
-Before editing, name:
-- What can break.
-- What data or users could be affected.
-- The safest rollback point.
-- Whether temporary diagnostics are acceptable.
+Done when an out-of-scope edit can be recognized before it happens.
 
-### 3. Inspect Before Editing
+## 2. Inspect
 
-Read nearby code, tests, and conventions. Search for existing constants, config, helpers, and similar behavior before introducing new ones.
+Read the real call path, nearby tests, configuration, and existing safety controls. Search before introducing helpers or policies.
 
-Do not refactor unrelated code. Do not broaden the change just because nearby code looks messy.
+For a bug, load `diagnosing-bugs` and establish a tight red-capable reproduction before theorizing.
 
-### 4. Debug With Facts
+Done when the evidence identifies the boundary and the failure mechanism, or the missing evidence is reported as a blocker.
 
-For unstable bugs:
-- Reproduce the failure.
-- Compare input, intermediate state, and actual output.
-- Add temporary logging only to answer a concrete question.
-- Prefer a regression test when practical.
-- Stop guessing after repeated failed fixes.
+## 3. Patch
 
-### 5. Patch The Smallest Cause
+Change only the smallest cause supported by evidence. Do not combine cleanup or architecture work with the guarded patch.
 
-Change only what explains the observed problem or requested boundary.
+If the necessary scope expands, stop and obtain approval for the new boundary.
 
-If the fix requires a wider change than expected, pause and restate the new scope before continuing.
+Done when every changed line supports the target behavior, its regression check, or required rollback safety.
 
-### 6. Verify
+## 4. Verify
 
-Run the smallest meaningful check:
-- Focused test.
-- Relevant integration or regression test.
-- Typecheck or lint when useful.
-- Manual repro if no automated check exists.
+Run the focused regression or integration check, then the strongest cheap check for the affected boundary. Remove temporary diagnostics.
 
-Remove temporary diagnostics unless the user asked to keep them.
-
-## Response Shape
-
-Use a compact structure:
+Report:
 
 ```md
 Target:
 Locked scope:
-Out of scope:
-Risk / rollback:
+Risk and rollback:
 Verification:
+Remaining risk:
 ```
 
-For very small boundary checks, keep it shorter.
-
-## Done Criteria
-
-The guarded execution is done when:
-- The target behavior is implemented.
-- Explicit boundaries were respected.
-- No unrelated refactor was introduced.
-- Verification ran, or the missing verification is reported.
-- Remaining risk is stated plainly.
-
-## Examples
-
-**Strict boundary**
-Input: "Only change the backend permission check. Do not touch UI."
-Behavior: Restrict edits to the permission path unless tests or shared fixtures must change.
-
-**Sensitive code**
-Input: "The tenant isolation bug leaks another customer's records."
-Behavior: Reproduce, inspect authorization/data boundaries, patch the smallest cause, and add a regression check.
-
-**Repeated bug**
-Input: "This form 500 has survived two fixes already."
-Behavior: Stop guessing, create a minimal repro, inspect facts, then patch.
-
-**Rollback**
-Input: "Roll back the experimental caching change but keep any valid tests."
-Behavior: Identify rollback point, remove the risky behavior, preserve useful checks, and verify.
+Guarded execution is complete only when the target passes, exclusions remain untouched, rollback is still available, and unverified risk is explicit.

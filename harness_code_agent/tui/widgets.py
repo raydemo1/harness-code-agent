@@ -535,6 +535,11 @@ class InputArea(Vertical):
 
         # Handle slash commands
         if text.startswith("/"):
+            if self._registry is not None and self._registry.is_agent_command(text):
+                if app._submit_async(text):
+                    text_area.text = ""
+                    self.query_one("#cmd-palette", CommandPalette).update_candidates([])
+                return
             try:
                 should_continue = app.session.handle_slash_command(text)
             except Exception:
@@ -571,14 +576,12 @@ class InputArea(Vertical):
         mention = current_mention_query(text)
         if mention is not None and self._session:
             prefix, _start = mention
-            skill_registry = getattr(self._session, "skill_registry", None)
             candidates = [
                 (c.display, c.description)
                 for c in mention_candidates(
                     self._session.cwd,
                     prefix,
                     self._session.session_store,
-                    skill_catalog=getattr(skill_registry, "catalog", None),
                 )
             ]
             palette.update_candidates(candidates)

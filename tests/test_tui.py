@@ -53,6 +53,45 @@ class TuiTests(unittest.TestCase):
         self.assertIn("Usage: /config show", result.text)
         self.assertTrue(result.should_continue)
 
+    def test_user_skills_are_dynamic_agent_commands(self):
+        skill_registry = SimpleNamespace(
+            user_commands=[
+                {
+                    "name": "triage",
+                    "description": "Triage an issue.",
+                    "argument_hint": "<issue>",
+                    "path": "skills/triage/SKILL.md",
+                }
+            ]
+        )
+        registry = default_command_registry(skill_registry=skill_registry)
+        calls = []
+        session = SimpleNamespace(
+            submit_skill_command=lambda line: calls.append(line) or SimpleNamespace(text="triaged")
+        )
+
+        result = registry.execute("/triage 42", session)
+
+        self.assertTrue(registry.is_agent_command("/triage"))
+        self.assertEqual(result.text, "triaged")
+        self.assertEqual(calls, ["/triage 42"])
+        self.assertIn("/triage <issue>", registry.format_help())
+
+    def test_skill_command_collision_fails_fast(self):
+        skill_registry = SimpleNamespace(
+            user_commands=[
+                {
+                    "name": "help",
+                    "description": "Conflicts with a built-in.",
+                    "argument_hint": "",
+                    "path": "skills/help/SKILL.md",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "conflicts with built-in command"):
+            default_command_registry(skill_registry=skill_registry)
+
     def test_resume_command_can_run_before_session_is_bound(self):
         registry = default_command_registry()
         calls = []
@@ -160,24 +199,13 @@ class TuiTests(unittest.TestCase):
         file_candidates = mention_candidates(self.root, "space", store)
         readme_candidates = mention_candidates(self.root, "rea", store)
         session_candidates = mention_candidates(self.root, "session:" + session.id[:8], store)
-        skill_candidates = mention_candidates(
-            self.root,
-            "skill:dia",
-            store,
-            skill_catalog=[
-                {
-                    "name": "diagnose",
-                    "description": "Debug hard failures.",
-                    "path": "skills/diagnose/SKILL.md",
-                }
-            ],
-        )
+        skill_candidates = mention_candidates(self.root, "skill:dia", store)
 
         self.assertIn('file:"space name.md"', [item.insert_text for item in file_candidates])
         self.assertIn("file:README.md", [item.insert_text for item in readme_candidates])
         self.assertNotIn("node_modules/ignored.js", [item.insert_text for item in file_candidates])
         self.assertIn("session:" + session.id, [item.insert_text for item in session_candidates])
-        self.assertIn("skill:diagnose", [item.insert_text for item in skill_candidates])
+        self.assertEqual(skill_candidates, [])
 
     def test_current_mention_query_handles_plain_and_quoted_mentions(self):
         self.assertEqual(current_mention_query("fix @READ"), ("READ", -5))
@@ -190,8 +218,8 @@ class TuiTests(unittest.TestCase):
             "please inspect @file:README.md before editing",
         )
         self.assertEqual(
-            replace_mention_fragment("use @skill:dia", "skill:diagnose"),
-            "use @skill:diagnose ",
+            replace_mention_fragment("use @ses", "session:abc"),
+            "use @session:abc ",
         )
 
     def test_event_bus_listener_updates_tui_state(self):

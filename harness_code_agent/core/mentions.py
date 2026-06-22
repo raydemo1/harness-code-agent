@@ -7,7 +7,6 @@ from typing import Any
 
 from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
-from ..skills import SkillRegistry
 
 
 FILE_CONTEXT_LIMIT = 60_000
@@ -51,9 +50,6 @@ def parse_mentions(text: str) -> list[Mention]:
         elif token.startswith("file:"):
             target = token.removeprefix("file:")
             kind = "file"
-        elif token.startswith("skill:"):
-            target = token.removeprefix("skill:")
-            kind = "skill"
         else:
             continue
         key = (kind, target)
@@ -74,7 +70,7 @@ def _iter_mention_tokens(text: str):
         start = i
         i += 1
         typed_prefix = None
-        for prefix in ("file:", "skill:", "session:"):
+        for prefix in ("file:", "session:"):
             if text.startswith(prefix, i):
                 typed_prefix = prefix
                 break
@@ -123,14 +119,11 @@ def resolve_mentions(
     *,
     workspace_root: str | Path,
     session_store: SessionStore,
-    skill_catalog: list[dict[str, str]] | None = None,
 ) -> list[ResolvedMention]:
     root = Path(workspace_root).resolve()
     return [
         _resolve_file_mention(item, root)
         if item.kind == "file"
-        else _resolve_skill_mention(item, skill_catalog)
-        if item.kind == "skill"
         else _resolve_session_mention(item, session_store)
         for item in parse_mentions(text)
     ]
@@ -190,38 +183,6 @@ def _resolve_file_mention(mention: Mention, root: Path) -> ResolvedMention:
         resolved=str(candidate),
         content=content,
         metadata={"path": str(candidate), "is_dir": is_dir},
-    )
-
-
-def _resolve_skill_mention(
-    mention: Mention,
-    skill_catalog: list[dict[str, str]] | None,
-) -> ResolvedMention:
-    if not mention.target:
-        raise MentionResolutionError(f"Empty skill mention: {mention.raw}")
-    catalog = skill_catalog if skill_catalog is not None else SkillRegistry().catalog
-    target = mention.target.strip().lower()
-    skill = next((item for item in catalog if str(item.get("name", "")).lower() == target), None)
-    if skill is None:
-        raise MentionResolutionError(f"Skill mention not found: {mention.raw}")
-    name = str(skill.get("name", mention.target))
-    description = str(skill.get("description", ""))
-    path = str(skill.get("path", ""))
-    content = "\n".join(
-        [
-            f"name: {name}",
-            f"description: {description}",
-            f"path: {path}",
-            "Use read_skill_file to load this skill if relevant.",
-        ]
-    )
-    return ResolvedMention(
-        raw=mention.raw,
-        kind="skill",
-        target=mention.target,
-        resolved=path,
-        content=content,
-        metadata={"name": name, "description": description, "path": path},
     )
 
 

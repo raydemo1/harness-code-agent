@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Iterable
 
 from .commands import SlashCommandRegistry
-from ..skills import SkillRegistry
 
 
 EXCLUDED_DIRS = {
@@ -72,23 +71,18 @@ def mention_candidates(
     session_store,
     *,
     limit: int = 50,
-    skill_catalog: list[dict[str, str]] | None = None,
 ) -> list[MentionCandidate]:
     """Return file/session candidates matching the @mention prefix."""
     prefix = prefix.strip()
     if prefix.startswith("session:"):
         session_prefix = prefix.removeprefix("session:")
         return _session_candidates(session_store, session_prefix, limit=limit)
-    if prefix.startswith("skill:"):
-        skill_prefix = prefix.removeprefix("skill:")
-        return _skill_candidates(skill_prefix, skill_catalog, limit=limit)
     if prefix.startswith("file:"):
         file_prefix = prefix.removeprefix("file:")
         return _file_candidates(root, file_prefix, limit=limit)
 
     candidates: list[tuple[int, MentionCandidate]] = []
     candidates.extend((score, candidate) for score, candidate in _scored_file_candidates(root, prefix))
-    candidates.extend((score, candidate) for score, candidate in _scored_skill_candidates(prefix, skill_catalog))
     candidates.extend((score, candidate) for score, candidate in _scored_session_candidates(session_store, prefix))
     candidates.sort(key=lambda item: (-item[0], item[1].display.lower()))
     return [candidate for _score, candidate in candidates[:limit]]
@@ -117,45 +111,6 @@ def _scored_file_candidates(root: Path, prefix: str) -> list[tuple[int, MentionC
             ),
         ))
     return file_candidates
-
-
-def _skill_candidates(
-    prefix: str,
-    skill_catalog: list[dict[str, str]] | None,
-    *,
-    limit: int,
-) -> list[MentionCandidate]:
-    candidates = _scored_skill_candidates(prefix, skill_catalog)
-    candidates.sort(key=lambda item: (-item[0], item[1].display.lower()))
-    return [candidate for _score, candidate in candidates[:limit]]
-
-
-def _scored_skill_candidates(
-    prefix: str,
-    skill_catalog: list[dict[str, str]] | None,
-) -> list[tuple[int, MentionCandidate]]:
-    catalog = skill_catalog if skill_catalog is not None else SkillRegistry().catalog
-    candidates: list[tuple[int, MentionCandidate]] = []
-    for item in catalog:
-        name = str(item.get("name", "")).strip()
-        if not name:
-            continue
-        description = str(item.get("description", "")).strip()
-        score = fuzzy_score(prefix, name)
-        if score <= 0 and prefix:
-            score = fuzzy_score(prefix, description)
-        if score <= 0 and prefix:
-            continue
-        insert = f"skill:{name}"
-        candidates.append((
-            score or 1,
-            MentionCandidate(
-                insert_text=insert,
-                display="@" + insert,
-                description="skill" + (f" - {description}" if description else ""),
-            ),
-        ))
-    return candidates
 
 
 def _session_candidates(session_store, prefix: str, *, limit: int) -> list[MentionCandidate]:
@@ -191,7 +146,7 @@ def replace_mention_fragment(text: str, insert_text: str) -> str:
     end = start + 1
     if text.startswith('@"', start):
         end = _quoted_mention_end(text, start + 2)
-    elif any(text.startswith(prefix + '"', start + 1) for prefix in ("file:", "skill:", "session:")):
+    elif any(text.startswith(prefix + '"', start + 1) for prefix in ("file:", "session:")):
         quote_start = text.find('"', start + 1)
         end = _quoted_mention_end(text, quote_start + 1)
     else:

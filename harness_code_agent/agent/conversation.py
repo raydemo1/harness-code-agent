@@ -72,10 +72,9 @@ class Agent:
     - context lifecycle (lightweight compaction / handoff reset)
 
     Skills are handled via progressive disclosure:
-    - Level 1: skill catalog (name + description) is baked into system_prompt
-    - Level 2: agent decides to read_skill_file("skills/.../SKILL.md") on its own
-    - Level 3: SKILL.md references sub-files, agent reads those too
-    No external code decides which skills to load — the agent does.
+    - Model-invoked descriptions are baked into the system prompt.
+    - The agent loads relevant SKILL.md files and disclosed references on demand.
+    - User-invoked skills stay out of the catalog and enter only through `/name`.
     """
 
     def __init__(self, name: str, system_prompt: str, use_tools: bool = True,

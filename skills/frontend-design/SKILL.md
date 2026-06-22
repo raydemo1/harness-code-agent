@@ -1,42 +1,52 @@
 ---
 name: frontend-design
-description: Create distinctive, production-grade frontend interfaces with high design quality. Use this skill when the user asks to build web components, pages, artifacts, posters, or applications (examples include websites, landing pages, dashboards, React components, HTML/CSS layouts, or when styling/beautifying any web UI). Generates creative, polished code and UI design that avoids generic AI aesthetics.
+description: Frontend design and implementation. Use when creating or substantially restyling a web page, application, component, dashboard, landing page, or visual artifact.
 license: Complete terms in LICENSE.txt
 ---
 
-This skill guides creation of distinctive, production-grade frontend interfaces that avoid generic "AI slop" aesthetics. Implement real working code with exceptional attention to aesthetic details and creative choices.
+# Frontend Design
 
-The user provides frontend requirements: a component, page, application, or interface to build. They may include context about the purpose, audience, or technical constraints.
+Create a working interface with one deliberate visual thesis, not a collection of familiar AI defaults.
 
-## Design Thinking
+## 1. Read the product
 
-Before coding, understand the context and commit to a BOLD aesthetic direction:
-- **Purpose**: What problem does this interface solve? Who uses it?
-- **Tone**: Pick an extreme: brutally minimal, maximalist chaos, retro-futuristic, organic/natural, luxury/refined, playful/toy-like, editorial/magazine, brutalist/raw, art deco/geometric, soft/pastel, industrial/utilitarian, etc. There are so many flavors to choose from. Use these for inspiration but design one that is true to the aesthetic direction.
-- **Constraints**: Technical requirements (framework, performance, accessibility).
-- **Differentiation**: What makes this UNFORGETTABLE? What's the one thing someone will remember?
+Establish:
 
-**CRITICAL**: Choose a clear conceptual direction and execute it with precision. Bold maximalism and refined minimalism both work - the key is intentionality, not intensity.
+- audience and task;
+- required states and interactions;
+- framework and repository constraints;
+- accessibility and responsive expectations;
+- existing visual language worth preserving.
 
-Then implement working code (HTML/CSS/JS, React, Vue, etc.) that is:
-- Production-grade and functional
-- Visually striking and memorable
-- Cohesive with a clear aesthetic point-of-view
-- Meticulously refined in every detail
+Inspect the application before asking discoverable questions.
 
-## Frontend Aesthetics Guidelines
+Done when the interface purpose and non-negotiable behavior are explicit.
 
-Focus on:
-- **Typography**: Choose fonts that are beautiful, unique, and interesting. Avoid generic fonts like Arial and Inter; opt instead for distinctive choices that elevate the frontend's aesthetics; unexpected, characterful font choices. Pair a distinctive display font with a refined body font.
-- **Color & Theme**: Commit to a cohesive aesthetic. Use CSS variables for consistency. Dominant colors with sharp accents outperform timid, evenly-distributed palettes.
-- **Motion**: Use animations for effects and micro-interactions. Prioritize CSS-only solutions for HTML. Use Motion library for React when available. Focus on high-impact moments: one well-orchestrated page load with staggered reveals (animation-delay) creates more delight than scattered micro-interactions. Use scroll-triggering and hover states that surprise.
-- **Spatial Composition**: Unexpected layouts. Asymmetry. Overlap. Diagonal flow. Grid-breaking elements. Generous negative space OR controlled density.
-- **Backgrounds & Visual Details**: Create atmosphere and depth rather than defaulting to solid colors. Add contextual effects and textures that match the overall aesthetic. Apply creative forms like gradient meshes, noise textures, geometric patterns, layered transparencies, dramatic shadows, decorative borders, custom cursors, and grain overlays.
+## 2. Choose a thesis
 
-NEVER use generic AI-generated aesthetics like overused font families (Inter, Roboto, Arial, system fonts), cliched color schemes (particularly purple gradients on white backgrounds), predictable layouts and component patterns, and cookie-cutter design that lacks context-specific character.
+Select one coherent direction—editorial, utilitarian, playful, austere, tactile, archival, cinematic, or another justified concept. Define the memorable device that expresses it.
 
-Interpret creatively and make unexpected choices that feel genuinely designed for the context. No design should be the same. Vary between light and dark themes, different fonts, different aesthetics. NEVER converge on common choices (Space Grotesk, for example) across generations.
+Avoid default gradients, interchangeable card grids, excessive pills, generic hero layouts, and decoration without product meaning.
 
-**IMPORTANT**: Match implementation complexity to the aesthetic vision. Maximalist designs need elaborate code with extensive animations and effects. Minimalist or refined designs need restraint, precision, and careful attention to spacing, typography, and subtle details. Elegance comes from executing the vision well.
+Done when typography, color, spacing, motion, and composition can all be judged against the same thesis.
 
-Remember: Claude is capable of extraordinary creative work. Don't hold back, show what can truly be created when thinking outside the box and committing fully to a distinctive vision.
+## 3. Build the real interface
+
+- Use the existing design system and dependencies when they fit.
+- Preserve the product's information hierarchy.
+- Implement real states and interactions, including loading, empty, error, focus, and disabled states where applicable.
+- Use semantic controls, labels, keyboard access, visible focus, readable contrast, and reduced-motion behavior.
+- Make responsive behavior intentional rather than merely stacked.
+- Keep visual complexity proportional to the thesis: expressive designs need disciplined implementation; restrained designs need exact spacing and typography.
+
+Do not add dependencies unless the chosen behavior cannot reasonably be built with the existing stack.
+
+Done when the primary workflow is functional at desktop and mobile widths.
+
+## 4. Verify the experience
+
+Run the build/static checks and inspect the rendered page in a browser. Exercise representative clicks, typing, keyboard navigation, responsive widths, console output, and network failures.
+
+Fix visible regressions rather than describing them away.
+
+Done when the interface works, the thesis is visible without explanation, and browser verification covers its primary workflow.

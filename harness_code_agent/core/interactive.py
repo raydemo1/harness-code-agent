@@ -283,6 +283,13 @@ class InteractiveSession:
 
     def submit(self, user_prompt: str, cancellation_token=None) -> TurnResult:
         self.ensure_profile_bound_for_first_task(user_prompt)
+        skill_invocation = self.skill_registry.build_user_invocation(user_prompt)
+        if skill_invocation is not None:
+            return self._submit_to_current_agent(
+                user_prompt,
+                cancellation_token=cancellation_token,
+                turn_instruction=skill_invocation.prompt,
+            )
         if self.pending_plan_markdown and self.profile.name() == "plan":
             if _is_plan_execution_confirmation(user_prompt):
                 return self.execute_pending_plan()
@@ -452,7 +459,6 @@ class InteractiveSession:
             user_prompt,
             workspace_root=self.cwd,
             session_store=self.session_store,
-            skill_catalog=self.skill_registry.catalog,
         )
         prompt_for_model = self._externalize_large_turn_text(
             "prompt",
@@ -720,10 +726,15 @@ class InteractiveSession:
     def handle_slash_command(self, line: str) -> bool:
         from ..tui.commands import default_command_registry
 
-        result = default_command_registry().execute(line, self)
+        result = default_command_registry(skill_registry=self.skill_registry).execute(line, self)
         if result.text:
             self.output_sink(result.text)
         return result.should_continue
+
+    def submit_skill_command(self, line: str) -> TurnResult:
+        if self.skill_registry.build_user_invocation(line) is None:
+            raise ValueError(f"Unknown user skill command: {line}")
+        return self.submit(line)
 
     def switch_profile(self, profile_name: str) -> str:
         previous = self.profile.name()

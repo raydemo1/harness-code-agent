@@ -12,6 +12,7 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from unittest.mock import Mock
 
 
 def _install_fake_openai_module() -> None:
@@ -41,6 +42,7 @@ from harness_code_agent.core.mentions import (
 from harness_code_agent.sessions.events import FileChangeEvent, ToolResultEvent
 from harness_code_agent.sessions.store import SessionStore
 from harness_code_agent.profiles.base import AgentConfig
+from harness_code_agent.skills import SkillRegistry
 
 
 class FakeConversation:
@@ -889,28 +891,44 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertIn("resolved as directory", formatted)
         self.assertIn("Use list_files to inspect this directory if needed.", formatted)
 
-    def test_skill_mention_injects_catalog_reference_not_body(self):
+    def test_skill_mention_is_not_a_supported_mention(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
-        skill_catalog = [
-            {
-                "name": "diagnose",
-                "description": "Debug hard failures.",
-                "path": "skills/diagnose/SKILL.md",
-            }
-        ]
 
         resolved = resolve_mentions(
             "use @skill:diagnose",
             workspace_root=self.temp_dir,
             session_store=store,
-            skill_catalog=skill_catalog,
         )
-        formatted = format_turn_with_mentions("use @skill:diagnose", resolved)
 
-        self.assertEqual(resolved[0].kind, "skill")
-        self.assertIn("Debug hard failures.", formatted)
-        self.assertIn("skills/diagnose/SKILL.md", formatted)
-        self.assertIn("Use read_skill_file to load this skill if relevant.", formatted)
+        self.assertEqual(resolved, [])
+
+    def test_user_skill_command_becomes_an_agent_turn(self):
+        skills_dir = Path(self.temp_dir) / "skills"
+        skill_dir = skills_dir / "triage"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: triage\n"
+            "description: Triage an issue.\n"
+            "disable-model-invocation: true\n"
+            "---\n\n"
+            "Inspect the issue before deciding.\n",
+            encoding="utf-8",
+        )
+        session = InteractiveSession.__new__(InteractiveSession)
+        session.skill_registry = SkillRegistry(skills_dir)
+        session.ensure_profile_bound_for_first_task = Mock()
+        expected = SimpleNamespace(text="done")
+        session._submit_to_current_agent = Mock(return_value=expected)
+
+        result = session.submit("/triage 42")
+
+        self.assertIs(result, expected)
+        session._submit_to_current_agent.assert_called_once()
+        call = session._submit_to_current_agent.call_args
+        self.assertEqual(call.args[0], "/triage 42")
+        self.assertIn("Inspect the issue before deciding.", call.kwargs["turn_instruction"])
+        self.assertIn("Arguments: 42", call.kwargs["turn_instruction"])
 
     def test_missing_file_mention_fails_fast(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
