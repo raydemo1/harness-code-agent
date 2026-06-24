@@ -392,15 +392,12 @@ class TuiInteractiveTests(unittest.TestCase):
                 from harness_code_agent.tui.app import StreamDelta
 
                 app.post_message(StreamDelta("Hello "))
+                await pilot.pause(0.02)
                 app.post_message(StreamDelta("world"))
+                await pilot.pause(0.05)
 
                 transcript = app.query_one("#transcript")
-                rendered = ""
-                for _ in range(20):
-                    await pilot.pause(0.01)
-                    rendered = "\n".join(str(line) for line in transcript.lines)
-                    if "Hello" in rendered and "world" in rendered:
-                        break
+                rendered = "\n".join(str(line) for line in transcript.lines)
                 self.assertIn("Hello", rendered)
                 self.assertIn("world", rendered)
         _run(_test())

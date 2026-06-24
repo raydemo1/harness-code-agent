@@ -158,7 +158,12 @@ class AcceptanceState:
             )
             return self.snapshot()
 
-    def apply_review_changes(self, raw_changes: list[dict] | None) -> dict:
+    def apply_review_changes(
+        self,
+        raw_changes: list[dict] | None,
+        *,
+        expected_revision: int | None = None,
+    ) -> dict:
         changes = list(raw_changes or [])
         with self._lock:
             normalized: list[dict] = []
@@ -182,9 +187,12 @@ class AcceptanceState:
             if not normalized:
                 self.review_truncated = self.review_truncated or truncated
                 return self.snapshot()
+            resolved_revision = (
+                expected_revision if expected_revision is not None else self.revision
+            )
             snapshot = self.apply_operations(
                 normalized,
-                expected_revision=self.revision,
+                expected_revision=resolved_revision,
                 actor="fast_review",
             )
             self.review_truncated = self.review_truncated or truncated

@@ -97,13 +97,13 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
         task = runtime_state.task_board.original_task or runtime_state.task_board.goal
         thread = threading.Thread(
             target=self._run_review,
-            args=(runtime_state, task, initial["checks"]),
+            args=(runtime_state, task, initial["checks"], initial["revision"]),
             name=f"acceptance-review-{runtime_state.session_id}",
             daemon=True,
         )
         thread.start()
 
-    def _run_review(self, runtime_state, task: str, initial_checks: list[dict]) -> None:
+    def _run_review(self, runtime_state, task: str, initial_checks: list[dict], initial_revision: int) -> None:
         acceptance = runtime_state.task_board.acceptance
         started = time.monotonic()
         last_error = ""
@@ -123,7 +123,10 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
                     payload = outcome
                 changes = _validate_review_payload(payload)
                 before_revision = acceptance.revision
-                acceptance.apply_review_changes(changes)
+                acceptance.apply_review_changes(
+                    changes,
+                    expected_revision=initial_revision,
+                )
                 snapshot = acceptance.snapshot()
                 changed = snapshot["revision"] != before_revision
                 notification = ""

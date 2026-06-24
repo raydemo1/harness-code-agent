@@ -61,7 +61,7 @@ def _contains_output_redirection(command: str) -> bool:
             quote = char
         elif char == ">":
             remainder = command[index + 1 :].lstrip()
-            if remainder.startswith("&") and remainder[1:2].isdigit():
+            if remainder.startswith("&") and re.match(r"&\d+(?:\s|[;&|]|$)", remainder):
                 index += 1
                 continue
             return True

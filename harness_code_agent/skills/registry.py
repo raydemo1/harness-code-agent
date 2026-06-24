@@ -177,13 +177,29 @@ def _parse_frontmatter(path: Path) -> dict[str, str] | None:
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
-        meta[key.strip()] = _strip_scalar_quotes(value.strip())
+        meta[key.strip()] = _strip_scalar_quotes(_strip_yaml_comment(value.strip()))
     return meta
 
 
 def _strip_scalar_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
+    return value
+
+
+def _strip_yaml_comment(value: str) -> str:
+    """Strip a trailing YAML inline comment, respecting quoted strings."""
+    in_quote = False
+    quote_char: str | None = None
+    for i, ch in enumerate(value):
+        if ch in ("'", '"') and (i == 0 or value[i - 1] != "\\"):
+            if not in_quote:
+                in_quote = True
+                quote_char = ch
+            elif ch == quote_char:
+                in_quote = False
+        elif ch == "#" and not in_quote:
+            return value[:i].rstrip()
     return value
 
 

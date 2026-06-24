@@ -12,6 +12,15 @@ from ..runtime.permissions import (
 class PlanProfile(BaseProfile):
     _DEFAULT_TASK_BUDGET = 1800
 
+    def acceptance_criteria(self) -> list[str]:
+        return [
+            "The plan is decision-complete: it names concrete files, symbols, tests, "
+            "and commands where specificity prevents ambiguity.",
+            "Any remaining assumptions are explicitly recorded rather than invented.",
+            "The plan stayed read-only and did not modify source, tests, dependencies, "
+            "configuration, migrations, or build outputs.",
+        ]
+
     def name(self) -> str:
         return "plan"
 
