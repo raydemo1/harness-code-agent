@@ -168,7 +168,8 @@ def update_plan_state(
         )
 
     acceptance_checkpoint = board.acceptance.checkpoint()
-    acceptance_revision_after_update = acceptance_checkpoint["revision"]
+    acceptance_revision_before_update = acceptance_checkpoint["revision"]
+    acceptance_revision_after_update = acceptance_revision_before_update
     try:
         if update_kind == "start" and acceptance_checks is not None:
             board.acceptance.initialize(acceptance_checks)
@@ -204,6 +205,7 @@ def update_plan_state(
             output=(
                 f"[error] {exc}\nCurrent acceptance state: "
                 + json.dumps(current_acceptance, ensure_ascii=False, sort_keys=True)
+                + _acceptance_recovery_hint(str(exc), acceptance_snapshot)
             ),
             error=str(exc),
             metadata={
@@ -291,6 +293,21 @@ def update_plan_state(
         runtime_state.recovery.mode = "PROBE"
         runtime_state.recovery.probe_in_flight = False
 
+    plan_update_count = payload["update_count"]
+    revision_status = ""
+    if board.acceptance.revision:
+        revision_word = (
+            "changed"
+            if acceptance_revision_after_update != acceptance_revision_before_update
+            else "unchanged"
+        )
+        revision_status = (
+            f"\nAcceptance revision {revision_word}: "
+            f"{acceptance_revision_before_update} -> {acceptance_revision_after_update}. "
+            f"Use acceptance_revision={acceptance_revision_after_update} for future "
+            "acceptance_operations or final check_results."
+        )
+    status_output = f"\nPlan update count: {plan_update_count}." + revision_status
     acceptance_output = ""
     if board.acceptance.revision:
         acceptance_snapshot = board.acceptance.snapshot()
@@ -310,7 +327,7 @@ def update_plan_state(
     return ToolResult(
         tool="update_plan_state",
         status="success",
-        output="Updated plan state: " + ", ".join(written) + acceptance_output,
+        output="Updated plan state: " + ", ".join(written) + status_output + acceptance_output,
         metadata={
             "status_source": "native",
             "planning_state": payload,
@@ -324,6 +341,17 @@ def update_plan_state(
 
 def _utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _acceptance_recovery_hint(error: str, acceptance_snapshot: dict) -> str:
+    if "stale acceptance_revision" not in str(error):
+        return ""
+    revision = acceptance_snapshot.get("revision")
+    return (
+        f"\nRetry with acceptance_revision={revision}. If you still want to modify "
+        "acceptance checks, include the same corrected acceptance_operations again; "
+        "a failed update did not apply them."
+    )
 
 
 def _planning_state_path(workspace: Path, runtime_state, tool_context: ToolContext | None) -> Path:

@@ -38,6 +38,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from eval.benchmarks.harbor_env import runner_env_vars
 from eval.benchmarks.usage_metrics import parse_eval_metrics_from_text
 
 
@@ -182,21 +183,7 @@ class HarnessAgent(BaseInstalledAgent):
 
         # Pass secrets through Harbor's env channel instead of embedding them
         # in the logged shell command.
-        env_vars = {}
-        for key in (
-            "OPENAI_API_KEY",
-            "OPENAI_BASE_URL",
-            "HARNESS_PROVIDER",
-            "HARNESS_MODEL",
-            "HARNESS_MODEL_INTENSITY",
-            "HARNESS_MODEL_FAST",
-            "HARNESS_MODEL_NORMAL",
-            "HARNESS_MODEL_HARD",
-            "HARNESS_MODEL_MAX",
-        ):
-            val = os.environ.get(key)
-            if val:
-                env_vars[key] = val
+        env_vars = runner_env_vars()
 
         # Run hca from the task workspace while importing the cloned agent code.
         result = await self.exec_as_agent(

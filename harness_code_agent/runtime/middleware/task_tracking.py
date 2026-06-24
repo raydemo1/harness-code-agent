@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 
@@ -148,8 +149,16 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         if result_status != "success":
             return None
         acceptance = runtime_state.task_board.acceptance
-        if not acceptance.snapshot()["checks"]:
+        acceptance_snapshot = acceptance.snapshot()
+        if not acceptance_snapshot["checks"]:
             return "[blocked] success requires at least one active acceptance check."
+        weak_command = _weak_acceptance_command(acceptance_snapshot["checks"])
+        if weak_command:
+            return (
+                "[blocked] success requires each acceptance check to have a real verification command. "
+                f"Replace weak verification_command for {weak_command['id']!s}: "
+                f"{weak_command['verification_command']!r}."
+            )
         facts = runtime_state.execution_facts
         if facts.last_foreground_shell_sequence == 0:
             return (
@@ -179,3 +188,27 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
                 "Include result_status, validation, and remaining_issues."
             )
         return None
+
+
+_WEAK_VERIFICATION_PATTERNS = (
+    r"^\s*manual\s*$",
+    r"(?:^|[;&|]\s*)echo\s+['\"]?(?:checked|verified|ok|done)\b",
+    r"(?:^|[;&|]\s*)echo\s+['\"]?(?:check(?:ed)?\s+manually|manual(?:ly)?)\b",
+    r"\bcheck(?:ed)?\s+manually\b",
+    r">\s*/dev/null(?:\s+2>&1)?\s*[;&|]+\s*echo\b",
+    r"\bchecked by design\b",
+    r"\bverified by design\b",
+    r"\bby inspection\b",
+    r"\bno command\b",
+    r"\bnot applicable\b",
+)
+
+
+def _weak_acceptance_command(checks: list[dict]) -> dict | None:
+    for check in checks:
+        command = str(check.get("verification_command") or "").strip()
+        if not command:
+            return check
+        if any(re.search(pattern, command, flags=re.IGNORECASE) for pattern in _WEAK_VERIFICATION_PATTERNS):
+            return check
+    return None

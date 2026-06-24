@@ -115,6 +115,7 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
                     task=task,
                     checks=initial_checks,
                     timeout_seconds=self._timeout_seconds,
+                    previous_error=last_error or None,
                 )
                 if isinstance(outcome, ReviewOutcome):
                     self._queue_usage(runtime_state, outcome)
@@ -225,24 +226,46 @@ def _validate_review_payload(payload: dict) -> list[dict]:
     changes = payload["changes"]
     if not isinstance(changes, list):
         raise AcceptanceError("review changes must be an array")
+    normalized: list[dict] = []
     for change in changes:
         if not isinstance(change, dict):
             raise AcceptanceError("each review change must be an object")
         kind = str(change.get("operation") or "").strip().lower()
+        if kind in {"remove", "delete"}:
+            continue
         if kind not in {"add", "update"}:
-            raise AcceptanceError("review operations must be add or update")
+            raise AcceptanceError(
+                f"review operation {kind!r} is invalid; use only add or update"
+            )
         if not str(change.get("reason") or "").strip():
             raise AcceptanceError("review changes require a reason")
+        normalized_change = dict(change)
+        normalized_change["operation"] = kind
         if kind == "add":
             required = {"text", "source", "verification_command"}
             if any(not str(change.get(field) or "").strip() for field in required):
                 raise AcceptanceError("review add requires text, source, and verification_command")
-        if kind == "update" and not str(change.get("id") or "").strip():
-            raise AcceptanceError("review update requires an id")
-    return changes
+        if kind == "update":
+            if not str(change.get("id") or "").strip():
+                raise AcceptanceError("review update requires an id")
+            if not any(
+                str(change.get(field) or "").strip()
+                for field in ("text", "source", "verification_command")
+            ):
+                raise AcceptanceError(
+                    "review update must change text, source, or verification_command"
+                )
+        normalized.append(normalized_change)
+    return normalized
 
 
-def _call_fast_reviewer(*, task: str, checks: list[dict], timeout_seconds: float) -> ReviewOutcome:
+def _call_fast_reviewer(
+    *,
+    task: str,
+    checks: list[dict],
+    timeout_seconds: float,
+    previous_error: str | None = None,
+) -> ReviewOutcome:
     from ... import config
     from ...agent.providers import ProviderAdapter, get_client
     from ...agent.utils import _usage_to_dict
@@ -250,6 +273,9 @@ def _call_fast_reviewer(*, task: str, checks: list[dict], timeout_seconds: float
     profile = config.resolve_model_profile("fast")
     adapter = ProviderAdapter(profile.provider)
     client = get_client().with_options(timeout=timeout_seconds, max_retries=0)
+    review_request = {"original_task": task, "acceptance_checks": checks}
+    if previous_error:
+        review_request["previous_invalid_response_error"] = previous_error
     response = client.chat.completions.create(
         **adapter.chat_kwargs(
             profile=profile,
@@ -258,20 +284,26 @@ def _call_fast_reviewer(*, task: str, checks: list[dict], timeout_seconds: float
                     "role": "system",
                     "content": (
                         "Review a terminal coding agent's acceptance checklist against the original task. "
-                        "Return JSON only: {\"changes\": [...]}. Changes may add missing checks or update "
-                        "text, source, or verification_command of an existing check. Never delete checks. "
-                        "Every change needs a concise reason. Added source must quote or closely paraphrase "
-                        "the original task and be at most 300 characters. Suggest concrete, reasonable "
-                        "verification commands; use \"manual\" only when command verification is impossible. "
+                        "Return JSON only with this exact top-level shape: {\"changes\": [...]}. "
+                        "Every change object must use operation exactly \"add\" or \"update\". "
+                        "Never use remove, delete, replace, edit, modify, append, insert, or any other "
+                        "operation name. If an existing check is weak, do not delete or replace it; return "
+                        "operation=\"update\" with that same check id and the improved text, source, or "
+                        "verification_command. For add, include text, source, verification_command, and "
+                        "reason. For update, include id, reason, and at least one of text, source, or "
+                        "verification_command. Every change needs a concise reason. Added source must quote "
+                        "or closely paraphrase the original task and be at most 300 characters. Suggest "
+                        "concrete verification commands that can fail; do not use echo/no-op commands, "
+                        "\"checked by design\", or \"manual\" unless command verification is truly impossible. "
+                        "Example for a weak check: {\"operation\":\"update\",\"id\":\"check_3\","
+                        "\"verification_command\":\"python verify_constraints.py\","
+                        "\"reason\":\"Replace manual assertion with a command-backed constraint check\"}. "
                         "Return {\"changes\": []} when the checklist is complete."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {"original_task": task, "acceptance_checks": checks},
-                        ensure_ascii=False,
-                    ),
+                    "content": json.dumps(review_request, ensure_ascii=False),
                 },
             ],
             max_tokens=1200,

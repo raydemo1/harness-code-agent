@@ -14,6 +14,7 @@ from eval.benchmarks.run_terminal_bench import (
     repair_task_images,
     resolve_harbor_executable,
 )
+from eval.benchmarks.harbor_env import runner_env_vars
 
 
 class TerminalBenchLauncherTests(unittest.TestCase):
@@ -118,6 +119,27 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             self.assertEqual(env["HARNESS_MODEL"], "existing-model")
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_harbor_agent_forwards_agent_budget_environment(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "secret",
+                "HARNESS_MODEL": "deepseek-v4-flash",
+                "MAX_AGENT_ITERATIONS": "100",
+                "MAX_AGENT_TOTAL_TOKENS": "900000",
+                "MAX_AGENT_TOOL_CALLS": "400",
+                "AGENT_BUDGET_WARN_FRACTION": "0.9",
+            },
+            clear=True,
+        ):
+            env = runner_env_vars()
+
+        self.assertEqual(env["MAX_AGENT_ITERATIONS"], "100")
+        self.assertEqual(env["MAX_AGENT_TOTAL_TOKENS"], "900000")
+        self.assertEqual(env["MAX_AGENT_TOOL_CALLS"], "400")
+        self.assertEqual(env["AGENT_BUDGET_WARN_FRACTION"], "0.9")
+        self.assertEqual(env["HARNESS_MODEL"], "deepseek-v4-flash")
 
     def test_resolve_harbor_executable_falls_back_to_user_scripts(self):
         repo_root = self._workspace_path("test-terminal-bench-launcher-bin")

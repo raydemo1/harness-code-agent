@@ -510,6 +510,96 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIsNotNone(blocked)
         self.assertIn("last foreground run_bash", blocked)
 
+    def test_terminal_success_rejects_design_assertion_verification_commands(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [
+                {
+                    "text": "Only semantic-preserving edits were made",
+                    "source": "Task constraint",
+                    "verification_command": "echo 'checked by design - only write_file used'",
+                }
+            ]
+        )
+        state.execution_facts.record_result(
+            "write_file",
+            status="success",
+            return_code=None,
+            metadata={"file_changes": [{"path": "input.tex"}]},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {
+                "update_kind": "final",
+                "result_status": "success",
+                "acceptance_revision": 1,
+                "check_results": [
+                    {"id": "check_1", "status": "passed", "summary": "Checked by design"}
+                ],
+            },
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("real verification command", blocked)
+
+    def test_terminal_success_rejects_echo_check_manually_after_noop_command(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [
+                {
+                    "text": "Only input.tex was edited",
+                    "source": "Task constraint",
+                    "verification_command": "grep -c '' main.tex synonyms.txt > /dev/null; echo 'check manually'",
+                }
+            ]
+        )
+        state.execution_facts.record_result(
+            "write_file",
+            status="success",
+            return_code=None,
+            metadata={"file_changes": [{"path": "input.tex"}]},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {
+                "update_kind": "final",
+                "result_status": "success",
+                "acceptance_revision": 1,
+                "check_results": [
+                    {"id": "check_1", "status": "passed", "summary": "Checked manually"}
+                ],
+            },
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("real verification command", blocked)
+
 
 if __name__ == "__main__":
     unittest.main()
