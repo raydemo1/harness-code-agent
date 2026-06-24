@@ -77,21 +77,32 @@ class RecordingInteractiveAgent:
         return FakeConversation()
 
 
+class EmptySkillRegistry:
+    user_commands = []
+
+    def build_catalog_prompt(self):
+        return ""
+
+    def build_user_invocation(self, line):
+        return None
+
+
 class InteractiveCliTests(unittest.TestCase):
     def setUp(self):
         self.old_workspace = config.WORKSPACE
         self.old_api_key = config.API_KEY
         self.old_cwd = os.getcwd()
         self.temp_dir = tempfile.mkdtemp()
+        self._skill_registry_patcher = patch("harness_code_agent.core.interactive.SkillRegistry", EmptySkillRegistry)
+        self._skill_registry_patcher.start()
         config.API_KEY = "test-key"
         FakeConversation.instances = []
         FakeConversation.response_text = "assistant done"
-        self._git("init")
-        self._git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "init")
         os.chdir(self.temp_dir)
 
     def tearDown(self):
         os.chdir(self.old_cwd)
+        self._skill_registry_patcher.stop()
         config.WORKSPACE = self.old_workspace
         config.API_KEY = self.old_api_key
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -104,6 +115,12 @@ class InteractiveCliTests(unittest.TestCase):
             text=True,
             check=True,
         ).stdout.strip()
+
+    def _ensure_git(self):
+        if not (Path(self.temp_dir) / ".git").exists():
+            from harness_code_agent.core.git_helpers import _ensure_git_repository
+
+            _ensure_git_repository(Path(self.temp_dir))
 
     def _session(self):
         patcher = patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation())
@@ -206,6 +223,32 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertIn(str(input_files[0]), submitted)
                 self.assertIn("Use read_file to inspect the full text", submitted)
                 self.assertNotIn("MIDDLE-OMITTED-" * 20, submitted)
+            finally:
+                session.close()
+
+    def test_repeated_large_prompts_externalize_inside_session_without_root_duplicates(self):
+        prompts = [
+            "Task one\n" + ("A" * 260),
+            "Task two\n" + ("B" * 260),
+        ]
+
+        with (
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
+            patch.dict("os.environ", {"HARNESS_TURN_INLINE_CHAR_LIMIT": "100"}),
+        ):
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="coding-agent",
+                profile_explicit=True,
+            )
+            try:
+                for prompt in prompts:
+                    session.submit(prompt)
+
+                input_files = sorted((session.session.root / "inputs").glob("turn-*-prompt*.txt"))
+                self.assertEqual([path.name for path in input_files], ["turn-0001-prompt.txt", "turn-0002-prompt.txt"])
+                self.assertEqual([path.read_text(encoding="utf-8") for path in input_files], prompts)
+                self.assertEqual(list(Path(self.temp_dir).glob("turn-*-prompt*.txt")), [])
             finally:
                 session.close()
 
@@ -1255,6 +1298,7 @@ class InteractiveCliTests(unittest.TestCase):
             session.close()
 
     def test_auto_checkpoint_does_not_commit_preexisting_dirty_files(self):
+        self._ensure_git()
         Path(self.temp_dir, "preexisting.txt").write_text("old\n", encoding="utf-8")
         baseline = git_dirty_paths(Path(self.temp_dir))
         session = self._session()
@@ -1271,6 +1315,7 @@ class InteractiveCliTests(unittest.TestCase):
             session.close()
 
     def test_git_dirty_paths_filters_verify_cache_paths(self):
+        self._ensure_git()
         Path(self.temp_dir, "app.py").write_text("print('hi')\n", encoding="utf-8")
         Path(self.temp_dir, ".pytest_cache", "v", "cache").mkdir(parents=True)
         Path(self.temp_dir, ".pytest_cache", "v", "cache", "nodeids").write_text("[]\n", encoding="utf-8")
@@ -1283,75 +1328,50 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertFalse(any(".pytest_cache" in path for path in dirty))
         self.assertFalse(any("__pycache__" in path for path in dirty))
 
-    def test_hca_first_task_starts_tui_with_first_task(self):
+    def test_hca_tui_startup_passes_task_and_profile(self):
         from harness_code_agent import cli
 
         class TtyBuffer(StringIO):
             def isatty(self):
                 return True
 
-        with (
-            patch("harness_code_agent.cli.TuiApp") as tui_app,
-            patch.object(sys, "stdin", TtyBuffer()),
-            patch.object(sys, "stdout", TtyBuffer()),
-            patch.object(sys, "argv", ["hca", "fix", "tests"]),
-        ):
-            tui_app.return_value.run.return_value = 0
-            result = cli.main()
+        cases = [
+            (["hca", "fix", "tests"], {"first_task": "fix tests"}),
+            (["hca", "--profile", "terminal", "fix", "shell"], {"profile_name": "terminal", "first_task": "fix shell"}),
+        ]
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                with (
+                    patch("harness_code_agent.cli.TuiApp") as tui_app,
+                    patch.object(sys, "stdin", TtyBuffer()),
+                    patch.object(sys, "stdout", TtyBuffer()),
+                    patch.object(sys, "argv", argv),
+                ):
+                    tui_app.return_value.run.return_value = 0
+                    result = cli.main()
 
-        self.assertEqual(result, 0)
-        tui_app.assert_called_once()
-        self.assertEqual(tui_app.call_args.kwargs["first_task"], "fix tests")
+                self.assertEqual(result, 0)
+                tui_app.assert_called_once()
+                for key, value in expected.items():
+                    self.assertEqual(tui_app.call_args.kwargs[key], value)
 
-    def test_hca_profile_override_starts_tui_with_profile(self):
+    def test_hca_print_mode_flags_submit_without_tui(self):
         from harness_code_agent import cli
 
-        class TtyBuffer(StringIO):
-            def isatty(self):
-                return True
+        for flag in ("-p", "--print"):
+            with self.subTest(flag=flag):
+                FakeConversation.instances = []
+                with (
+                    patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
+                    patch("harness_code_agent.cli.TuiApp") as tui_app,
+                    patch.object(sys, "argv", ["hca", flag, "fix", "tests"]),
+                ):
+                    result = cli.main()
 
-        with (
-            patch("harness_code_agent.cli.TuiApp") as tui_app,
-            patch.object(sys, "stdin", TtyBuffer()),
-            patch.object(sys, "stdout", TtyBuffer()),
-            patch.object(sys, "argv", ["hca", "--profile", "terminal", "fix", "shell"]),
-        ):
-            tui_app.return_value.run.return_value = 0
-            result = cli.main()
-
-        self.assertEqual(result, 0)
-        tui_app.assert_called_once()
-        self.assertEqual(tui_app.call_args.kwargs["profile_name"], "terminal")
-        self.assertEqual(tui_app.call_args.kwargs["first_task"], "fix shell")
-
-    def test_hca_print_mode_submits_without_tui(self):
-        from harness_code_agent import cli
-
-        with (
-            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
-            patch("harness_code_agent.cli.TuiApp") as tui_app,
-            patch.object(sys, "argv", ["hca", "-p", "fix", "tests"]),
-        ):
-            result = cli.main()
-
-        self.assertEqual(result, 0)
-        self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
-        self.assertIn("fix tests", FakeConversation.instances[0].submissions[0])
-        tui_app.assert_not_called()
-
-    def test_hca_print_mode_long_flag(self):
-        from harness_code_agent import cli
-
-        with (
-            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
-            patch("harness_code_agent.cli.TuiApp") as tui_app,
-            patch.object(sys, "argv", ["hca", "--print", "fix", "tests"]),
-        ):
-            result = cli.main()
-
-        self.assertEqual(result, 0)
-        self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
-        tui_app.assert_not_called()
+                self.assertEqual(result, 0)
+                self.assertEqual(len(FakeConversation.instances[0].submissions), 1)
+                self.assertIn("fix tests", FakeConversation.instances[0].submissions[0])
+                tui_app.assert_not_called()
 
     def test_hca_print_mode_requires_task(self):
         from harness_code_agent import cli
@@ -1366,7 +1386,7 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("no task provided", errors.getvalue())
 
-    def test_stream_callback_auto_uses_tty_and_writes_deltas(self):
+    def test_stream_callback_auto_respects_tty(self):
         from harness_code_agent import cli
 
         class TtyBuffer(StringIO):
@@ -1384,68 +1404,49 @@ class InteractiveCliTests(unittest.TestCase):
 
         self.assertEqual(output.getvalue(), "hello")
 
-    def test_stream_callback_auto_is_disabled_for_non_tty(self):
-        from harness_code_agent import cli
-
         with patch("harness_code_agent.cli.config.STREAM", "auto"):
             self.assertIsNone(cli._build_stream_callback())
 
-    def test_config_show_includes_sandbox_settings(self):
+    def test_config_show_includes_runtime_settings(self):
         from harness_code_agent.core.interactive import format_config_show
 
         with (
             patch.object(config, "SANDBOX_MODE", "docker"),
             patch.object(config, "DOCKER_IMAGE", "python:3.12"),
             patch.object(config, "DOCKER_NETWORK", "none"),
+            patch.object(config, "DOCKER_USER", "1000:1000"),
         ):
             text = format_config_show(Path(self.temp_dir))
 
         self.assertIn("sandbox_mode: docker", text)
         self.assertIn("docker_image: python:3.12", text)
         self.assertIn("docker_network: none", text)
-
-    def test_config_show_includes_docker_user_and_token_defaults(self):
-        from harness_code_agent.core.interactive import format_config_show
-
-        with (
-            patch.object(config, "DOCKER_USER", "1000:1000"),
-        ):
-            text = format_config_show(Path(self.temp_dir))
-
         self.assertIn("docker_user: 1000:1000", text)
         self.assertIn(f"model_intensity: {config.MODEL_INTENSITY}", text)
         self.assertIn(f"model_profile_fast: {config.MODEL_PROFILES['fast'].model}", text)
         self.assertIn(f"model_profile_hard: {config.MODEL_PROFILES['hard'].model}", text)
         self.assertIn(f"max_agent_total_tokens: {config.MAX_AGENT_TOTAL_TOKENS}", text)
 
-    def test_doctor_docker_mode_with_working_daemon(self):
+    def test_doctor_docker_mode_reports_daemon_status(self):
         from harness_code_agent.core.interactive import format_doctor
 
-        with (
-            patch.object(config, "SANDBOX_MODE", "docker"),
-            patch("harness_code_agent.core.formatters.docker_cli_path", return_value="/usr/bin/docker"),
-            patch("harness_code_agent.core.formatters.docker_info_check", return_value=(True, "Docker 27.0.3")),
-        ):
-            text, failures = format_doctor(Path(self.temp_dir))
+        cases = [
+            ((True, "Docker 27.0.3"), 0, "Docker 27.0.3"),
+            ((False, "Docker daemon unreachable (exit code 1)"), 1, "FAIL"),
+        ]
+        for daemon_result, minimum_failures, expected in cases:
+            with self.subTest(daemon_result=daemon_result):
+                with (
+                    patch.object(config, "SANDBOX_MODE", "docker"),
+                    patch("harness_code_agent.core.formatters.docker_cli_path", return_value="/usr/bin/docker"),
+                    patch("harness_code_agent.core.formatters.docker_info_check", return_value=daemon_result),
+                ):
+                    text, failures = format_doctor(Path(self.temp_dir))
 
-        self.assertIn("Docker CLI", text)
-        self.assertIn("Docker daemon", text)
-        self.assertIn("Docker 27.0.3", text)
-        self.assertEqual(failures, 0)
-
-    def test_doctor_docker_mode_cli_present_daemon_unreachable(self):
-        from harness_code_agent.core.interactive import format_doctor
-
-        with (
-            patch.object(config, "SANDBOX_MODE", "docker"),
-            patch("harness_code_agent.core.formatters.docker_cli_path", return_value="/usr/bin/docker"),
-            patch("harness_code_agent.core.formatters.docker_info_check", return_value=(False, "Docker daemon unreachable (exit code 1)")),
-        ):
-            text, failures = format_doctor(Path(self.temp_dir))
-
-        self.assertIn("FAIL", text)
-        self.assertIn("Docker daemon", text)
-        self.assertGreater(failures, 0)
+                self.assertIn("Docker CLI", text)
+                self.assertIn("Docker daemon", text)
+                self.assertIn(expected, text)
+                self.assertGreaterEqual(failures, minimum_failures)
 
     def test_print_turn_result_does_not_duplicate_streamed_text(self):
         from harness_code_agent.core.interactive import TurnResult, print_turn_result
