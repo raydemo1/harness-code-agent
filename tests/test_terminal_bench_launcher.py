@@ -117,6 +117,25 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             self.assertEqual(env["TMP"], expected_temp)
             self.assertEqual(env["OPENAI_API_KEY"], "test-key")
             self.assertEqual(env["HARNESS_MODEL"], "existing-model")
+            self.assertEqual(env["MAX_AGENT_ITERATIONS"], "100")
+            self.assertEqual(env["MAX_AGENT_TOOL_CALLS"], "400")
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_build_environment_preserves_explicit_agent_budget(self):
+        repo_root = self._workspace_path("test-terminal-bench-launcher-budget")
+        try:
+            env = build_launch_environment(
+                repo_root,
+                base_env={
+                    "PATH": "base-path",
+                    "MAX_AGENT_ITERATIONS": "120",
+                    "MAX_AGENT_TOOL_CALLS": "500",
+                },
+            )
+
+            self.assertEqual(env["MAX_AGENT_ITERATIONS"], "120")
+            self.assertEqual(env["MAX_AGENT_TOOL_CALLS"], "500")
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 

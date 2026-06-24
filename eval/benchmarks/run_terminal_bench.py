@@ -54,6 +54,8 @@ def build_launch_environment(
     temp_dir.mkdir(parents=True, exist_ok=True)
     env["TEMP"] = str(temp_dir)
     env["TMP"] = str(temp_dir)
+    env.setdefault("MAX_AGENT_ITERATIONS", "100")
+    env.setdefault("MAX_AGENT_TOOL_CALLS", "400")
 
     dotenv_file = dotenv_path or (repo_root / ".env")
     if dotenv_file.exists():

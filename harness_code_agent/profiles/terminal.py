@@ -81,7 +81,10 @@ class TerminalProfile(BaseProfile):
                     "switch strategy rather than retrying blindly. For compatibility/debugging tasks, add an "
                     "early whole-workspace convergence check for the class of bug you found, such as rg for "
                     "deprecated APIs, crash signatures, remaining TODO markers, or invalid replacements, and "
-                    "repeat that check before final success."
+                    "repeat that check before final success. When a failure class has many matches, prefer a "
+                    "small deterministic migration script or parser-backed rewrite plus one convergence check "
+                    "over many individual patches; keep iterating until the repository-wide search reports no "
+                    "remaining active occurrences."
                 ),
                 boundaries=(
                     "NEVER ask clarifying questions in this non-interactive profile; choose the most reasonable "
