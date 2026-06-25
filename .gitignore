@@ -44,6 +44,9 @@ outputs/
 results/
 eval/results/
 eval/local_results/
+eval/eval_summary.json
+eval/report_internal.md
+eval/report_resume.md
 tmp/
 temp/
 docs/

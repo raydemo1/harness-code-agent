@@ -69,8 +69,10 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertIn("exact output", prompt)
         self.assertIn("switch strategy", prompt)
         self.assertIn("background services", prompt)
-        self.assertIn("deterministic migration script", prompt)
+        self.assertIn("shell-driven batch workflow", prompt)
         self.assertIn("repository-wide search", prompt)
+        self.assertIn("same-pattern mechanical edits", prompt)
+        self.assertIn("dry-running the intended file set", prompt)
         self.assertEqual(cfg.initial_planning_mode, "light")
 
     def test_terminal_main_agent_uses_enforcement_middlewares(self):
