@@ -186,19 +186,13 @@ class AcceptancePlanningTests(unittest.TestCase):
             ["check_1"],
         )
 
-    def test_async_review_is_merged_before_first_edit_and_notified_once(self):
+    def test_async_review_surfaces_plain_text_audit_once_without_mutating_checks(self):
         reviewer = Mock(
-            return_value={
-                "changes": [
-                    {
-                        "operation": "add",
-                        "text": "The exact output format is preserved",
-                        "source": "Preserve the exact output format",
-                        "verification_command": "python -m unittest tests.test_format",
-                        "reason": "The initial checks missed an explicit output constraint",
-                    }
-                ]
-            }
+            return_value=(
+                "The plan is not yet verification-first.\n"
+                "- It does not mention exact output preservation.\n"
+                "Consider replanning or adding a command-backed check before editing."
+            )
         )
         middleware = AcceptanceReviewMiddleware(reviewer=reviewer, timeout_seconds=0.5)
         state = AgentRuntimeState(session_id="acceptance-review")
@@ -218,7 +212,7 @@ class AcceptancePlanningTests(unittest.TestCase):
             runtime_state=state,
             agent_name="main_agent",
         )
-        blocked = middleware.before_tool(
+        notice = middleware.before_tool(
             "write_file",
             {"path": "target.py", "content": "fixed"},
             messages=[],
@@ -226,21 +220,14 @@ class AcceptancePlanningTests(unittest.TestCase):
             agent_name="main_agent",
         )
 
-        self.assertIsNone(blocked)
+        self.assertIsNotNone(notice)
+        self.assertIn("Fast plan audit", notice)
+        self.assertIn("exact output preservation", notice)
+        self.assertIn("You own the final plan", notice)
         snapshot = state.task_board.acceptance.snapshot()
         self.assertEqual(snapshot["review_status"], "completed")
-        self.assertEqual(snapshot["revision"], 2)
-        self.assertEqual(len(snapshot["checks"]), 2)
-        notice = middleware.post_tool(
-            "read_file",
-            {"path": "target.py"},
-            "contents",
-            messages=[],
-            runtime_state=state,
-            agent_name="main_agent",
-        )
-        self.assertIn("Fast acceptance review updated", notice)
-        self.assertIn("check_2", notice)
+        self.assertEqual(snapshot["revision"], 1)
+        self.assertEqual(len(snapshot["checks"]), 1)
         self.assertIsNone(
             middleware.post_tool(
                 "read_file",
@@ -251,6 +238,37 @@ class AcceptancePlanningTests(unittest.TestCase):
                 agent_name="main_agent",
             )
         )
+
+    def test_empty_review_audit_does_not_notify(self):
+        reviewer = Mock(return_value="")
+        middleware = AcceptanceReviewMiddleware(reviewer=reviewer, timeout_seconds=0.5)
+        state = AgentRuntimeState(session_id="acceptance-review-empty")
+        state.task_board.original_task = "Fix the task"
+        execute_tool_result(
+            "update_plan_state",
+            self._args(),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        middleware.post_tool(
+            "update_plan_state",
+            self._args(),
+            "Updated plan state",
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        notice = middleware.before_tool(
+            "write_file",
+            {"path": "target.py", "content": "fixed"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(notice)
+        self.assertEqual(state.task_board.acceptance.snapshot()["review_status"], "completed")
 
     def test_review_failure_retries_once_then_fails_open(self):
         reviewer = Mock(side_effect=TimeoutError("slow"))
@@ -287,122 +305,8 @@ class AcceptancePlanningTests(unittest.TestCase):
         self.assertEqual(snapshot["review_status"], "failed_open")
         self.assertIn("slow", snapshot["review_warning"])
 
-    def test_review_ignores_invalid_remove_operations_instead_of_failing_open(self):
-        reviewer = Mock(
-            return_value={
-                "changes": [
-                    {
-                        "operation": "remove",
-                        "id": "check_1",
-                        "reason": "Reviewer attempted to delete a weak check",
-                    },
-                    {
-                        "operation": "add",
-                        "text": "Semantic constraints are verified by command",
-                        "source": "Only valid task-preserving edits are allowed",
-                        "verification_command": "python verify_semantics.py",
-                        "reason": "The original checklist accepted a design assertion",
-                    },
-                ]
-            }
-        )
-        middleware = AcceptanceReviewMiddleware(reviewer=reviewer, timeout_seconds=0.5)
-        state = AgentRuntimeState(session_id="acceptance-review-invalid-remove")
-        state.task_board.original_task = "Fix the task without violating semantic constraints"
-        execute_tool_result(
-            "update_plan_state",
-            self._args(),
-            runtime_state=state,
-            agent_name="main_agent",
-        )
-
-        middleware.post_tool(
-            "update_plan_state",
-            self._args(),
-            "Updated plan state",
-            messages=[],
-            runtime_state=state,
-            agent_name="main_agent",
-        )
-        self.assertIsNone(
-            middleware.before_tool(
-                "write_file",
-                {"path": "target.py", "content": "fixed"},
-                messages=[],
-                runtime_state=state,
-                agent_name="main_agent",
-            )
-        )
-
-        snapshot = state.task_board.acceptance.snapshot()
-        self.assertEqual(snapshot["review_status"], "completed")
-        self.assertEqual(snapshot["revision"], 2)
-        self.assertEqual([item["id"] for item in snapshot["checks"]], ["check_1", "check_2"])
-        self.assertFalse(snapshot["review_truncated"])
-
-    def test_review_retries_with_schema_error_feedback(self):
-        reviewer = Mock(
-            side_effect=[
-                {
-                    "changes": [
-                        {
-                            "operation": "replace",
-                            "id": "check_1",
-                            "text": "The targeted unittest command passes",
-                            "reason": "Clarify the command-backed check",
-                        }
-                    ]
-                },
-                {
-                    "changes": [
-                        {
-                            "operation": "update",
-                            "id": "check_1",
-                            "text": "The targeted unittest command passes",
-                            "reason": "Retry with the allowed update operation",
-                        }
-                    ]
-                },
-            ]
-        )
-        middleware = AcceptanceReviewMiddleware(reviewer=reviewer, timeout_seconds=0.5)
-        state = AgentRuntimeState(session_id="acceptance-review-schema-feedback")
-        state.task_board.original_task = "Fix the failing targeted test"
-        execute_tool_result(
-            "update_plan_state",
-            self._args(),
-            runtime_state=state,
-            agent_name="main_agent",
-        )
-
-        middleware.post_tool(
-            "update_plan_state",
-            self._args(),
-            "Updated plan state",
-            messages=[],
-            runtime_state=state,
-            agent_name="main_agent",
-        )
-        self.assertIsNone(
-            middleware.before_tool(
-                "apply_patch",
-                {"path": "target.py", "search": "bad", "replace": "good"},
-                messages=[],
-                runtime_state=state,
-                agent_name="main_agent",
-            )
-        )
-
-        snapshot = state.task_board.acceptance.snapshot()
-        self.assertEqual(snapshot["review_status"], "completed")
-        self.assertEqual(snapshot["revision"], 2)
-        self.assertEqual(snapshot["checks"][0]["text"], "The targeted unittest command passes")
-        self.assertEqual(reviewer.call_count, 2)
-        self.assertIsNone(reviewer.call_args_list[0].kwargs["previous_error"])
-        self.assertIn("replace", reviewer.call_args_list[1].kwargs["previous_error"])
-
     def test_review_receives_start_plan_context(self):
-        reviewer = Mock(return_value={"changes": []})
+        reviewer = Mock(return_value="Plan is good enough.")
         middleware = AcceptanceReviewMiddleware(reviewer=reviewer, timeout_seconds=0.5)
         state = AgentRuntimeState(session_id="acceptance-review-plan-context")
         state.task_board.original_task = "Fix the task and verify exact output"
@@ -442,7 +346,7 @@ class AcceptancePlanningTests(unittest.TestCase):
     def test_review_usage_is_emitted_for_eval_cost_accounting(self):
         reviewer = Mock(
             return_value=ReviewOutcome(
-                raw='{"changes": []}',
+                raw="Plan is good enough.",
                 usage={"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25},
                 provider="test-provider",
                 model="test-fast",

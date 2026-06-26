@@ -1,13 +1,11 @@
-"""Asynchronous fast-model review for Terminal acceptance checks."""
+"""Asynchronous fast-model audit for Terminal acceptance checks."""
 from __future__ import annotations
 
-import json
 import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
 
-from ...agent.acceptance import AcceptanceError
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 
 
@@ -19,11 +17,11 @@ class ReviewOutcome:
     model: str
 
 
-Reviewer = Callable[..., dict | ReviewOutcome]
+Reviewer = Callable[..., str | ReviewOutcome]
 
 
 class AcceptanceReviewMiddleware(AgentMiddleware):
-    """Start review after planning and join it only before edits or finalization."""
+    """Start a plain-text plan audit and surface it before edits/finalization."""
 
     EDIT_TOOLS = {"write_file", "apply_patch"}
 
@@ -60,11 +58,9 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
             return None
         acceptance.wait_for_review()
         self._flush_events(runtime_state)
-        if is_final:
-            notification = acceptance.take_notification()
-            result_status = str(tool_args.get("result_status") or "").strip().lower()
-            if notification and result_status == "success":
-                return "[blocked] " + notification.removeprefix("[SYSTEM] ").strip()
+        notification = acceptance.take_notification()
+        if notification:
+            return notification
         return None
 
     def post_tool(
@@ -128,23 +124,17 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
                 )
                 if isinstance(outcome, ReviewOutcome):
                     self._queue_usage(runtime_state, outcome)
-                    payload = _parse_json_object(outcome.raw)
+                    audit = outcome.raw
                 else:
-                    payload = outcome
-                changes = _validate_review_payload(payload)
-                before_revision = acceptance.revision
-                acceptance.apply_review_changes(
-                    changes,
-                    expected_revision=initial_revision,
-                )
+                    audit = outcome
                 snapshot = acceptance.snapshot()
-                changed = snapshot["revision"] != before_revision
-                notification = ""
-                if changed:
+                notification = _audit_notification(audit)
+                if notification:
                     notification = (
-                        "[SYSTEM] Fast acceptance review updated the checklist. "
-                        f"Use acceptance_revision={snapshot['revision']}. Latest checks: "
-                        + json.dumps(snapshot["checks"], ensure_ascii=False, sort_keys=True)
+                        "[SYSTEM] Fast plan audit:\n"
+                        + notification
+                        + "\n\nDecide whether to replan or update acceptance checks before continuing. "
+                        "You own the final plan; do not blindly follow the audit."
                     )
                 acceptance.finish_review(status="completed", notification=notification)
                 final_snapshot = acceptance.snapshot()
@@ -157,6 +147,7 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
                         "elapsed_seconds": time.monotonic() - started,
                         "before_checks": initial_checks,
                         "after_acceptance": final_snapshot,
+                        "audit": _truncate_audit(audit),
                     },
                 )
                 return
@@ -172,7 +163,7 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
                     },
                 )
 
-        warning = f"Fast acceptance review failed open after {self._max_attempts} attempts: {last_error}"
+        warning = f"Fast plan audit failed open after {self._max_attempts} attempts: {last_error}"
         acceptance.finish_review(
             status="failed_open",
             warning=warning,
@@ -229,45 +220,6 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
         )
 
 
-def _validate_review_payload(payload: dict) -> list[dict]:
-    if not isinstance(payload, dict) or set(payload) != {"changes"}:
-        raise AcceptanceError("review response must be an object containing only changes")
-    changes = payload["changes"]
-    if not isinstance(changes, list):
-        raise AcceptanceError("review changes must be an array")
-    normalized: list[dict] = []
-    for change in changes:
-        if not isinstance(change, dict):
-            raise AcceptanceError("each review change must be an object")
-        kind = str(change.get("operation") or "").strip().lower()
-        if kind in {"remove", "delete"}:
-            continue
-        if kind not in {"add", "update"}:
-            raise AcceptanceError(
-                f"review operation {kind!r} is invalid; use only add or update"
-            )
-        if not str(change.get("reason") or "").strip():
-            raise AcceptanceError("review changes require a reason")
-        normalized_change = dict(change)
-        normalized_change["operation"] = kind
-        if kind == "add":
-            required = {"text", "source", "verification_command"}
-            if any(not str(change.get(field) or "").strip() for field in required):
-                raise AcceptanceError("review add requires text, source, and verification_command")
-        if kind == "update":
-            if not str(change.get("id") or "").strip():
-                raise AcceptanceError("review update requires an id")
-            if not any(
-                str(change.get(field) or "").strip()
-                for field in ("text", "source", "verification_command")
-            ):
-                raise AcceptanceError(
-                    "review update must change text, source, or verification_command"
-                )
-        normalized.append(normalized_change)
-    return normalized
-
-
 def _plan_context(runtime_state) -> dict:
     board = runtime_state.task_board
     return {
@@ -281,6 +233,22 @@ def _plan_context(runtime_state) -> dict:
     }
 
 
+def _audit_notification(raw: object) -> str:
+    text = _truncate_audit(raw)
+    if not text:
+        return ""
+    return text
+
+
+def _truncate_audit(raw: object, *, max_chars: int = 1500) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 24].rstrip() + "\n...[audit truncated]"
+
+
 def _call_fast_reviewer(
     *,
     task: str,
@@ -292,6 +260,7 @@ def _call_fast_reviewer(
     from ... import config
     from ...agent.providers import ProviderAdapter, get_client
     from ...agent.utils import _usage_to_dict
+    import json
 
     profile = config.resolve_model_profile("fast")
     adapter = ProviderAdapter(profile.provider)
@@ -310,18 +279,9 @@ def _call_fast_reviewer(
                 {
                     "role": "system",
                     "content": (
-                        "Review a terminal coding agent's start plan and acceptance checklist against the original task. "
-                        "Return JSON only with this exact top-level shape: {\"changes\": [...]}. "
-                        "Every change object must use operation exactly \"add\" or \"update\". "
-                        "Never use remove, delete, replace, edit, modify, append, insert, or any other "
-                        "operation name. If an existing check is weak, do not delete or replace it; return "
-                        "operation=\"update\" with that same check id and the improved text, source, or "
-                        "verification_command. For add, include text, source, verification_command, and "
-                        "reason. For update, include id, reason, and at least one of text, source, or "
-                        "verification_command. Every change needs a concise reason. Added source must quote "
-                        "or closely paraphrase the original task and be at most 300 characters. Suggest "
-                        "concrete verification commands that can fail; do not use echo/no-op commands, "
-                        "\"checked by design\", or \"manual\" unless command verification is truly impossible. "
+                        "You are a fast plan auditor for a terminal coding agent. Review the original task, "
+                        "the agent's start plan, and its acceptance checks. Return concise plain text for the "
+                        "main agent, not JSON. Do not rewrite the whole plan and do not claim you ran commands. "
                         "Review whether the plan is verification-first: it should account for exact deliverables, "
                         "task constraints, likely hidden-verifier risks, and a credible validation approach before "
                         "implementation. Look for broad quality gaps, not task-specific tricks: checks that only "
@@ -330,11 +290,9 @@ def _call_fast_reviewer(
                         "or plans that leave important constraints without command-backed evidence. Prefer simple "
                         "commands or small assertion scripts that use files/tools actually named or discoverable in "
                         "the task environment; do not invent hidden oracle commands or assume private ground-truth "
-                        "files exist. "
-                        "Example for a weak check: {\"operation\":\"update\",\"id\":\"check_3\","
-                        "\"verification_command\":\"python verify_constraints.py\","
-                        "\"reason\":\"Replace manual assertion with a command-backed constraint check\"}. "
-                        "Return {\"changes\": []} when the checklist is complete."
+                        "files exist. If the plan is good enough, say that briefly. Otherwise, point to the "
+                        "highest-risk omissions and suggest whether the next action should be replan, inspect, "
+                        "implement, or verify. Keep the audit under 12 lines."
                     ),
                 },
                 {
@@ -352,18 +310,3 @@ def _call_fast_reviewer(
         provider=profile.provider,
         model=profile.model,
     )
-
-
-def _parse_json_object(raw: str) -> dict:
-    text = str(raw or "").strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise AcceptanceError("review response must be a JSON object")
-    return parsed
