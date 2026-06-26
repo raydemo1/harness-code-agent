@@ -95,15 +95,23 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
             return
         initial = acceptance.snapshot()
         task = runtime_state.task_board.original_task or runtime_state.task_board.goal
+        plan_context = _plan_context(runtime_state)
         thread = threading.Thread(
             target=self._run_review,
-            args=(runtime_state, task, initial["checks"], initial["revision"]),
+            args=(runtime_state, task, plan_context, initial["checks"], initial["revision"]),
             name=f"acceptance-review-{runtime_state.session_id}",
             daemon=True,
         )
         thread.start()
 
-    def _run_review(self, runtime_state, task: str, initial_checks: list[dict], initial_revision: int) -> None:
+    def _run_review(
+        self,
+        runtime_state,
+        task: str,
+        plan_context: dict,
+        initial_checks: list[dict],
+        initial_revision: int,
+    ) -> None:
         acceptance = runtime_state.task_board.acceptance
         started = time.monotonic()
         last_error = ""
@@ -113,6 +121,7 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
             try:
                 outcome = self._reviewer(
                     task=task,
+                    plan_context=plan_context,
                     checks=initial_checks,
                     timeout_seconds=self._timeout_seconds,
                     previous_error=last_error or None,
@@ -259,9 +268,23 @@ def _validate_review_payload(payload: dict) -> list[dict]:
     return normalized
 
 
+def _plan_context(runtime_state) -> dict:
+    board = runtime_state.task_board
+    return {
+        "mode": getattr(board, "planning_mode", ""),
+        "goal": getattr(board, "goal", ""),
+        "steps": list(getattr(board, "steps", []) or []),
+        "current_step": getattr(board, "current_step", ""),
+        "completed_steps": list(getattr(board, "completed_steps", []) or []),
+        "next_action": getattr(board, "next_action", ""),
+        "replan_reason": getattr(board, "replan_reason", ""),
+    }
+
+
 def _call_fast_reviewer(
     *,
     task: str,
+    plan_context: dict | None = None,
     checks: list[dict],
     timeout_seconds: float,
     previous_error: str | None = None,
@@ -273,7 +296,11 @@ def _call_fast_reviewer(
     profile = config.resolve_model_profile("fast")
     adapter = ProviderAdapter(profile.provider)
     client = get_client().with_options(timeout=timeout_seconds, max_retries=0)
-    review_request = {"original_task": task, "acceptance_checks": checks}
+    review_request = {
+        "original_task": task,
+        "start_plan": plan_context or {},
+        "acceptance_checks": checks,
+    }
     if previous_error:
         review_request["previous_invalid_response_error"] = previous_error
     response = client.chat.completions.create(
@@ -283,7 +310,7 @@ def _call_fast_reviewer(
                 {
                     "role": "system",
                     "content": (
-                        "Review a terminal coding agent's acceptance checklist against the original task. "
+                        "Review a terminal coding agent's start plan and acceptance checklist against the original task. "
                         "Return JSON only with this exact top-level shape: {\"changes\": [...]}. "
                         "Every change object must use operation exactly \"add\" or \"update\". "
                         "Never use remove, delete, replace, edit, modify, append, insert, or any other "
@@ -295,18 +322,15 @@ def _call_fast_reviewer(
                         "or closely paraphrase the original task and be at most 300 characters. Suggest "
                         "concrete verification commands that can fail; do not use echo/no-op commands, "
                         "\"checked by design\", or \"manual\" unless command verification is truly impossible. "
-                        "Look for general checklist gaps, not task-specific tricks: sample-only verification "
-                        "that does not exercise a fresh input; visible-helper overfit that only checks an "
-                        "internal helper instead of the requested external artifact; cleanup gaps where build "
-                        "artifacts or extra files may remain; literal spec drift where the command verifies a "
-                        "different path, filename, branch, port, URL, protocol, or service than the task names; "
-                        "and missing constraint checks for only/allowed/preserve/do-not-modify requirements. "
-                        "When a task says only, single file, exactly, no extra files, or directory contains, "
-                        "ensure a check verifies the final directory/file shape. When a task restricts what may "
-                        "change, ensure a check uses diff/hash/cmp or a custom assertion script. When a task "
-                        "defines endpoints, ports, protocols, URLs, or services, ensure a check exercises those "
-                        "literal values. When a script generates an artifact, ensure a check reruns the script "
-                        "and validates the artifact's existence, format, and key invariants. "
+                        "Review whether the plan is verification-first: it should account for exact deliverables, "
+                        "task constraints, likely hidden-verifier risks, and a credible validation approach before "
+                        "implementation. Look for broad quality gaps, not task-specific tricks: checks that only "
+                        "exercise one sample, checks that prove a visible helper instead of the requested external "
+                        "behavior, checks that cannot fail, checks that drift from literal task paths/names/formats, "
+                        "or plans that leave important constraints without command-backed evidence. Prefer simple "
+                        "commands or small assertion scripts that use files/tools actually named or discoverable in "
+                        "the task environment; do not invent hidden oracle commands or assume private ground-truth "
+                        "files exist. "
                         "Example for a weak check: {\"operation\":\"update\",\"id\":\"check_3\","
                         "\"verification_command\":\"python verify_constraints.py\","
                         "\"reason\":\"Replace manual assertion with a command-backed constraint check\"}. "

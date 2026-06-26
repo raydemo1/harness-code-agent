@@ -401,6 +401,44 @@ class AcceptancePlanningTests(unittest.TestCase):
         self.assertIsNone(reviewer.call_args_list[0].kwargs["previous_error"])
         self.assertIn("replace", reviewer.call_args_list[1].kwargs["previous_error"])
 
+    def test_review_receives_start_plan_context(self):
+        reviewer = Mock(return_value={"changes": []})
+        middleware = AcceptanceReviewMiddleware(reviewer=reviewer, timeout_seconds=0.5)
+        state = AgentRuntimeState(session_id="acceptance-review-plan-context")
+        state.task_board.original_task = "Fix the task and verify exact output"
+        start_args = self._args(
+            steps=["Restate constraints", "Design validation", "Implement"],
+            current_step="Restate constraints",
+            next_action="Design validation commands",
+        )
+        execute_tool_result(
+            "update_plan_state",
+            start_args,
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        middleware.post_tool(
+            "update_plan_state",
+            start_args,
+            "Updated plan state",
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        middleware.before_tool(
+            "write_file",
+            {"path": "target.py", "content": "fixed"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        context = reviewer.call_args.kwargs["plan_context"]
+        self.assertEqual(context["steps"], ["Restate constraints", "Design validation", "Implement"])
+        self.assertEqual(context["current_step"], "Restate constraints")
+        self.assertEqual(context["next_action"], "Design validation commands")
+
     def test_review_usage_is_emitted_for_eval_cost_accounting(self):
         reviewer = Mock(
             return_value=ReviewOutcome(
