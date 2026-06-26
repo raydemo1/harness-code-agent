@@ -164,7 +164,14 @@ class EvalSuiteTests(unittest.TestCase):
             "unit",
         ])
 
+        call_count = 0
+
         def fake_run(command, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                for path in (self.root / "results").glob("*/task_outputs"):
+                    shutil.rmtree(path, ignore_errors=True)
             task = command[-1]
             returncode = 1 if task == "overfull-hbox" else 0
             stdout = f"stdout {task}"
@@ -218,6 +225,8 @@ class EvalSuiteTests(unittest.TestCase):
         cython = next(item for item in summary["task_results"] if item["task"] == "build-cython-ext")
         self.assertEqual(cython["status"], "failed")
         self.assertEqual(cython["reward"], 0.0)
+        self.assertTrue(Path(cython["stdout_path"]).exists())
+        self.assertTrue(Path(cython["stderr_path"]).exists())
 
     def test_harbor_usage_collects_metrics_from_result_text_fallback(self):
         from eval.benchmarks.usage_metrics import collect_harbor_job_usage

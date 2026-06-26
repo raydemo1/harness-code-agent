@@ -113,6 +113,7 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
         task_elapsed = time.perf_counter() - task_started
         stdout_path = outputs_dir / f"{safe_name(task)}.stdout.txt"
         stderr_path = outputs_dir / f"{safe_name(task)}.stderr.txt"
+        outputs_dir.mkdir(parents=True, exist_ok=True)
         stdout_path.write_text(completed.stdout, encoding="utf-8", newline="\n")
         stderr_path.write_text(completed.stderr, encoding="utf-8", newline="\n")
         task_meta = metadata.get(task) or {}
