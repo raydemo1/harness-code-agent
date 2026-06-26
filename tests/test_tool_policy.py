@@ -235,6 +235,50 @@ class TerminalShellEditPolicyTests(unittest.TestCase):
 
         self.assertIsNone(blocked)
 
+    def test_allows_output_redirection_to_dev_null(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+
+        commands = [
+            "ls /app/polyglot 2>/dev/null || echo missing",
+            "find /app -name '*.js' 2>/dev/null",
+            "command -v rg >/dev/null && rg foo",
+            "curl -sf http://localhost:8080/index.html &>/dev/null",
+        ]
+
+        for command in commands:
+            with self.subTest(command=command):
+                blocked = middleware.before_tool(
+                    "run_bash",
+                    {"command": command},
+                    messages=[],
+                    runtime_state=AgentRuntimeState(),
+                    agent_name="main_agent",
+                )
+                self.assertIsNone(blocked)
+
+    def test_blocks_output_redirection_to_files(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+
+        commands = [
+            "echo x > file.txt",
+            "python test.py 2> error.log",
+            "cat > file.txt <<'EOF'\nhello\nEOF",
+            "printf x &> combined.log",
+            "rg foo . | tee out.txt",
+            "python -c \"open('out.txt','w').write('x')\"",
+        ]
+
+        for command in commands:
+            with self.subTest(command=command):
+                blocked = middleware.before_tool(
+                    "run_bash",
+                    {"command": command},
+                    messages=[],
+                    runtime_state=AgentRuntimeState(),
+                    agent_name="main_agent",
+                )
+                self.assertIsNotNone(blocked)
+
 
 if __name__ == "__main__":
     unittest.main()

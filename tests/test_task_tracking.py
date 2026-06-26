@@ -600,6 +600,223 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIsNotNone(blocked)
         self.assertIn("real verification command", blocked)
 
+    def test_terminal_success_requires_file_shape_coverage_when_task_demands_single_file(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.original_task = "Create a single file in /app/out and no extra files."
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Program runs", "source": "Task", "verification_command": "python /app/out/main.py"}]
+        )
+        state.execution_facts.record_result(
+            "write_file",
+            status="success",
+            return_code=None,
+            metadata={"file_changes": [{"path": "out/main.py"}]},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "final", "result_status": "success"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("file or directory shape", blocked)
+
+    def test_terminal_success_allows_file_shape_coverage(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.original_task = "Create a single file in /app/out and no extra files."
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [
+                {
+                    "text": "Directory contains only main.py",
+                    "source": "Task",
+                    "verification_command": "python -c \"import os; assert os.listdir('/app/out') == ['main.py']\"",
+                }
+            ]
+        )
+        state.execution_facts.record_result(
+            "write_file",
+            status="success",
+            return_code=None,
+            metadata={"file_changes": [{"path": "out/main.py"}]},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "final", "result_status": "success"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(blocked)
+
+    def test_terminal_success_requires_allowed_change_coverage(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.original_task = "Only allowed substitutions may change input.txt; preserve config.txt."
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Output compiles", "source": "Task", "verification_command": "pytest"}]
+        )
+        state.execution_facts.record_result(
+            "write_file",
+            status="success",
+            return_code=None,
+            metadata={"file_changes": [{"path": "input.txt"}]},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "final", "result_status": "success"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("allowed-change", blocked)
+
+    def test_terminal_success_requires_literal_endpoint_coverage(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.original_task = "Serve HTTPS at https://localhost:8443/index.html."
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Server started", "source": "Task", "verification_command": "python -m http.server 8080"}]
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "final", "result_status": "success"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("literal endpoint", blocked)
+
+    def test_terminal_success_rejects_endpoint_spec_drift(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.original_task = "Serve HTTPS at https://localhost:8443/index.html."
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Server responds", "source": "Task", "verification_command": "curl -sf http://localhost:8080/"}]
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "final", "result_status": "success"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("literal endpoint", blocked)
+
+    def test_terminal_success_allows_literal_endpoint_coverage(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.original_task = "Serve HTTPS at https://localhost:8443/index.html."
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Server responds", "source": "Task", "verification_command": "curl -ksf https://localhost:8443/index.html"}]
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "final", "result_status": "success"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(blocked)
+
+    def test_terminal_success_requires_generated_artifact_coverage(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.original_task = "Write a script that generates /app/recovered.json."
+        state.task_board.planning_mode = "light"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Script exists", "source": "Task", "verification_command": "test -f /app/recover.py"}]
+        )
+        state.execution_facts.record_result(
+            "write_file",
+            status="success",
+            return_code=None,
+            metadata={"file_changes": [{"path": "recover.py"}]},
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {"update_kind": "final", "result_status": "success"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("script-generated artifacts", blocked)
+
 
 if __name__ == "__main__":
     unittest.main()

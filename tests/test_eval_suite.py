@@ -413,8 +413,8 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("tokens=4567", resume)
         self.assertIn("est. cost=$0.1234", resume)
         self.assertIn("Terminal-Bench Per-Task Telemetry", resume)
-        self.assertIn("| fix-git | passed | software-engineering | easy | 12.3s | 1234 | 1 | 7 | $0.0012 |", resume)
-        self.assertIn("| overfull-hbox | passed | debugging | easy | 5.7s | not captured | not captured | not captured | not captured |", resume)
+        self.assertIn("| fix-git | passed | passed | software-engineering | easy | 12.3s | 1234 | 1 | 7 | $0.0012 |", resume)
+        self.assertIn("| overfull-hbox | passed | passed | debugging | easy | 5.7s | not captured | not captured | not captured | not captured |", resume)
         self.assertIn("Claw-SWE-Bench Lite80", resume)
         self.assertIn("64/80 patches", resume)
 
@@ -472,6 +472,94 @@ class EvalSuiteTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+
+    def test_terminal_bench_task_diagnostics_classifies_timeout(self):
+        from eval.scripts.run_terminal_bench_eval import _task_diagnostics
+
+        diagnostic = _task_diagnostics(
+            task="example",
+            status="failed",
+            returncode=0,
+            stdout="harbor.trial.errors.AgentTimeoutError: Agent execution timed out after 900.0 seconds",
+            stderr="",
+            launcher_result={"trial_name": "example__abc", "metrics": {}},
+        )
+
+        self.assertEqual(diagnostic["failure_kind"], "agent_timeout")
+        self.assertTrue(diagnostic["missing_metrics"])
+
+    def test_terminal_bench_task_diagnostics_classifies_verifier_failure(self):
+        from eval.scripts.run_terminal_bench_eval import _task_diagnostics
+
+        diagnostic = _task_diagnostics(
+            task="example",
+            status="failed",
+            returncode=0,
+            stdout="FAILED ../tests/test_outputs.py::test_x - AssertionError: bad output",
+            stderr="",
+            launcher_result={"trial_name": "example__abc", "metrics": {"tokens": {}}},
+        )
+
+        self.assertEqual(diagnostic["failure_kind"], "failed_verifier")
+        self.assertFalse(diagnostic["missing_metrics"])
+        self.assertIn("FAILED", diagnostic["verifier_failure_headline"])
+
+    def test_terminal_bench_task_diagnostics_extracts_final_report_summary(self):
+        from eval.scripts.run_terminal_bench_eval import _task_diagnostics
+
+        job_dir = self.root / "jobs" / "job-final"
+        artifact_dir = job_dir / "trial-a" / "artifacts" / "hca" / "session-final"
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (artifact_dir / "trajectory.jsonl").write_text(
+            json.dumps({
+                "type": "final_report",
+                "payload": {"summary": "Verifier failed after final validation."},
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        diagnostic = _task_diagnostics(
+            task="example",
+            status="failed",
+            returncode=0,
+            stdout="FAILED ../tests/test_outputs.py::test_x - AssertionError: bad output",
+            stderr="",
+            launcher_result={
+                "trial_name": "example__abc",
+                "session_id": "session-final",
+                "job_dir": str(job_dir),
+                "metrics": {"tokens": {}},
+            },
+        )
+
+        self.assertTrue(diagnostic["has_hca_artifacts"])
+        self.assertEqual(diagnostic["final_report_summary"], "Verifier failed after final validation.")
+        self.assertEqual(
+            diagnostic["diagnostic"]["final_report_summary"],
+            "Verifier failed after final validation.",
+        )
+
+    def test_tbench_task_rows_include_failure_diagnostics(self):
+        from eval.scripts.summarize_eval import _tbench_task_rows
+
+        rows = _tbench_task_rows([
+            {
+                "task": "example",
+                "status": "failed",
+                "failure_kind": "agent_timeout",
+                "missing_metrics": True,
+                "has_hca_artifacts": False,
+                "verifier_failure_headline": "AgentTimeoutError",
+                "final_report_summary": "Stopped before final check.",
+            }
+        ])
+
+        self.assertEqual(rows[0]["failure_kind"], "agent_timeout")
+        self.assertTrue(rows[0]["missing_metrics"])
+        self.assertFalse(rows[0]["has_hca_artifacts"])
+        self.assertEqual(rows[0]["verifier_failure_headline"], "AgentTimeoutError")
+        self.assertEqual(rows[0]["final_report_summary"], "Stopped before final check.")
 
 
 if __name__ == "__main__":

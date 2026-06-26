@@ -359,10 +359,12 @@ def _tbench_task_rows(task_results: list[Any]) -> list[dict[str, Any]]:
         tools = metrics.get("tools") if isinstance(metrics.get("tools"), dict) else {}
         usage_cost = metrics.get("usage_cost") if isinstance(metrics.get("usage_cost"), dict) else {}
         cost = usage_cost.get("estimated_cost_usd") if usage_cost else item.get("cost_usd")
+        status = str(item.get("status") or "unknown")
+        failure_kind = str(item.get("failure_kind") or ("passed" if status == "passed" else ""))
         rows.append(
             {
                 "task": str(item.get("task") or ""),
-                "status": str(item.get("status") or "unknown"),
+                "status": status,
                 "category": str(item.get("category") or "unknown"),
                 "difficulty": str(item.get("difficulty") or "unknown"),
                 "elapsed_seconds": _number(item.get("elapsed_seconds")),
@@ -370,6 +372,11 @@ def _tbench_task_rows(task_results: list[Any]) -> list[dict[str, Any]]:
                 "turns_finished": _optional_int(turns.get("finished")),
                 "tool_calls": _optional_int(tools.get("tool_calls")),
                 "estimated_cost_usd": _optional_number(cost),
+                "failure_kind": failure_kind,
+                "missing_metrics": bool(item.get("missing_metrics")),
+                "has_hca_artifacts": bool(item.get("has_hca_artifacts")),
+                "verifier_failure_headline": str(item.get("verifier_failure_headline") or ""),
+                "final_report_summary": str(item.get("final_report_summary") or ""),
             }
         )
     return rows
@@ -382,8 +389,8 @@ def _tbench_task_table(data: dict[str, Any]) -> list[str]:
     lines = [
         "## Terminal-Bench Per-Task Telemetry",
         "",
-        "| Task | Status | Category | Difficulty | Elapsed | Tokens | Turns | Tools | Est. Cost |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Task | Status | Failure Kind | Category | Difficulty | Elapsed | Tokens | Turns | Tools | Est. Cost |",
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
@@ -392,6 +399,7 @@ def _tbench_task_table(data: dict[str, Any]) -> list[str]:
                 [
                     _table_cell(row.get("task")),
                     _table_cell(row.get("status")),
+                    _table_cell(row.get("failure_kind")),
                     _table_cell(row.get("category")),
                     _table_cell(row.get("difficulty")),
                     _elapsed_cell(row.get("elapsed_seconds")),
@@ -403,7 +411,29 @@ def _tbench_task_table(data: dict[str, Any]) -> list[str]:
             )
             + " |"
         )
-    lines.extend(["", "_`not captured` means the task passed, but no complete HCA session metrics were available for that task._", ""])
+    failed_headlines = [
+        row for row in rows
+        if str(row.get("status") or "") != "passed" and str(row.get("verifier_failure_headline") or "")
+    ]
+    if failed_headlines:
+        lines.extend(["", "### Failure Headlines", ""])
+        for row in failed_headlines:
+            lines.append(
+                f"- `{_table_cell(row.get('task'))}` [{_table_cell(row.get('failure_kind'))}]: "
+                f"{_table_cell(row.get('verifier_failure_headline'))}"
+            )
+    final_summaries = [
+        row for row in rows
+        if str(row.get("status") or "") != "passed" and str(row.get("final_report_summary") or "")
+    ]
+    if final_summaries:
+        lines.extend(["", "### Final Report Summaries", ""])
+        for row in final_summaries:
+            lines.append(
+                f"- `{_table_cell(row.get('task'))}`: "
+                f"{_table_cell(row.get('final_report_summary'))}"
+            )
+    lines.extend(["", "_`not captured` means no complete HCA session metrics were available for that task._", ""])
     return lines
 
 

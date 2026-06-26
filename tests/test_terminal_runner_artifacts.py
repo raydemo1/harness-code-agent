@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from eval.benchmarks.hca_terminal_runner import export_session_artifacts
+from eval.benchmarks.hca_terminal_runner import export_session_artifacts, write_session_manifest
 
 
 class TerminalRunnerArtifactTests(unittest.TestCase):
@@ -171,6 +171,52 @@ class TerminalRunnerArtifactTests(unittest.TestCase):
             self.assertTrue(manifest["observations_exported"])
             self.assertTrue(manifest["traces_exported"])
             self.assertTrue(manifest["runner_error_exported"])
+
+    def test_writes_early_session_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            exported = write_session_manifest(
+                session_id="session-early",
+                workspace="/app",
+                harness_root=root / ".harness",
+                artifacts_root=root / "artifacts",
+                status="started",
+            )
+
+            manifest = json.loads((exported / "early_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["session_id"], "session-early")
+            self.assertEqual(manifest["workspace"], "/app")
+            self.assertEqual(manifest["status"], "started")
+            self.assertIn(".harness", manifest["harness_root"])
+
+    def test_export_session_artifacts_is_repeatable_for_partial_sessions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            harness_root = root / ".harness"
+            session_id = "session-repeat"
+            session_root = harness_root / "sessions" / session_id
+            session_root.mkdir(parents=True)
+            (session_root / "events.jsonl").write_text("", encoding="utf-8")
+            (session_root / "session.json").write_text("{}", encoding="utf-8")
+            artifacts_root = root / "artifacts"
+
+            first = export_session_artifacts(
+                harness_root=harness_root,
+                session_id=session_id,
+                artifacts_root=artifacts_root,
+                runner_error="first",
+            )
+            second = export_session_artifacts(
+                harness_root=harness_root,
+                session_id=session_id,
+                artifacts_root=artifacts_root,
+                runner_error="second",
+            )
+
+            self.assertEqual(first, second)
+            self.assertEqual((second / "runner_error.txt").read_text(encoding="utf-8"), "second\n")
+            manifest = json.loads((second / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["event_count"], 0)
 
 
 if __name__ == "__main__":

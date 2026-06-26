@@ -64,6 +64,15 @@ def _contains_output_redirection(command: str) -> bool:
             if remainder.startswith("&") and re.match(r"&\d+(?:\s|[;&|]|$)", remainder):
                 index += 1
                 continue
+            if re.match(r"/dev/null(?:\s|[;&|]|$)", remainder):
+                index += 1
+                continue
+            return True
+        elif char == "&" and index + 1 < len(command) and command[index + 1] == ">":
+            remainder = command[index + 2 :].lstrip()
+            if re.match(r"/dev/null(?:\s|[;&|]|$)", remainder):
+                index += 2
+                continue
             return True
         index += 1
     return False

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -120,6 +121,14 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
         launcher_result = _launcher_task_result(completed.stdout, task)
         launcher_passed = launcher_result.get("passed") if launcher_result else None
         status = _task_status(completed.returncode, launcher_passed)
+        diagnostics = _task_diagnostics(
+            task=task,
+            status=status,
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            launcher_result=launcher_result,
+        )
         task_results.append({
             "task": task,
             "category": str(task_meta.get("category") or "unknown"),
@@ -135,6 +144,7 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
             "trial_name": launcher_result.get("trial_name") if launcher_result else "",
             "session_id": launcher_result.get("session_id") if launcher_result else "",
             "metrics": (launcher_result.get("metrics") or {}) if launcher_result else {},
+            **diagnostics,
         })
     elapsed = time.perf_counter() - started
     passed = sum(1 for item in task_results if item["status"] == "passed")
@@ -190,6 +200,131 @@ def _task_status(returncode: int, launcher_passed: Any) -> str:
     if launcher_passed is False:
         return "failed"
     return "passed" if returncode == 0 else "failed"
+
+
+def _task_diagnostics(
+    *,
+    task: str,
+    status: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    launcher_result: dict[str, Any],
+) -> dict[str, Any]:
+    metrics = launcher_result.get("metrics") if isinstance(launcher_result, dict) else {}
+    trial_name = str(launcher_result.get("trial_name") or "") if launcher_result else ""
+    session_id = str(launcher_result.get("session_id") or "") if launcher_result else ""
+    job_dir = str((launcher_result or {}).get("job_dir") or _extract_job_dir(stdout) or "")
+    verifier_headline = _extract_verifier_headline(stdout)
+    final_report_summary = _extract_final_report_summary(
+        stdout=stdout,
+        job_dir=job_dir,
+        session_id=session_id,
+    )
+    failure_kind = "passed"
+    if status != "passed":
+        if "AgentTimeoutError" in stdout or "AgentTimeoutError" in stderr:
+            failure_kind = "agent_timeout"
+        elif returncode != 0 and not launcher_result:
+            failure_kind = "infra_or_setup_failure"
+        else:
+            failure_kind = "failed_verifier"
+    missing_metrics = status != "passed" and not bool(metrics)
+    return {
+        "failure_kind": failure_kind,
+        "missing_metrics": missing_metrics,
+        "has_hca_artifacts": bool(session_id and job_dir and _has_hca_artifacts(job_dir, session_id)),
+        "verifier_failure_headline": verifier_headline,
+        "final_report_summary": final_report_summary,
+        "diagnostic": {
+            "task": task,
+            "trial_name": trial_name,
+            "session_id": session_id,
+            "job_dir": job_dir,
+            "failure_kind": failure_kind,
+            "missing_metrics": missing_metrics,
+            "verifier_failure_headline": verifier_headline,
+            "final_report_summary": final_report_summary,
+        },
+    }
+
+
+def _extract_job_dir(stdout: str) -> str:
+    match = re.search(r"Results written to ([^\r\n]+)", stdout or "")
+    if not match:
+        return ""
+    path = match.group(1).strip()
+    if path.endswith("result.json"):
+        return str(Path(path).parent)
+    return path
+
+
+def _has_hca_artifacts(job_dir: str, session_id: str) -> bool:
+    if not job_dir or not session_id:
+        return False
+    path = PROJECT_ROOT / job_dir if not Path(job_dir).is_absolute() else Path(job_dir)
+    return any(path.glob(f"*/artifacts/hca/{session_id}/manifest.json"))
+
+
+def _extract_final_report_summary(*, stdout: str, job_dir: str, session_id: str) -> str:
+    for event in _read_hca_trajectory_events(job_dir=job_dir, session_id=session_id):
+        if event.get("type") == "final_report":
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            summary = str(payload.get("summary") or "").strip()
+            if summary:
+                return summary[:500]
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if (
+            event.get("type") == "tool_call"
+            and payload.get("tool") == "update_plan_state"
+            and isinstance(payload.get("args"), dict)
+            and payload["args"].get("update_kind") == "final"
+        ):
+            validation = str(payload["args"].get("validation") or "").strip()
+            if validation:
+                return validation[:500]
+    for line in (stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("final report:"):
+            return stripped.split(":", 1)[1].strip()[:500]
+    return ""
+
+
+def _read_hca_trajectory_events(*, job_dir: str, session_id: str) -> list[dict[str, Any]]:
+    if not job_dir or not session_id:
+        return []
+    job_path = PROJECT_ROOT / job_dir if not Path(job_dir).is_absolute() else Path(job_dir)
+    events: list[dict[str, Any]] = []
+    for path in job_path.glob(f"*/artifacts/hca/{session_id}/trajectory.jsonl"):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def _extract_verifier_headline(stdout: str) -> str:
+    lines = (stdout or "").splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("FAILED "):
+            return stripped[:500]
+    for line in lines:
+        stripped = line.strip()
+        if "AssertionError:" in stripped or "ValueError:" in stripped or "FileNotFoundError:" in stripped:
+            return stripped[:500]
+    for line in lines:
+        stripped = line.strip()
+        if "AgentTimeoutError" in stripped:
+            return stripped[:500]
+    return ""
 
 
 def run_self_test() -> None:
