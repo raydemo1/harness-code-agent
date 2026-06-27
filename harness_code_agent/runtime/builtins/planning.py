@@ -36,7 +36,7 @@ def update_plan_state(
     agent_name: str | None = None,
     tool_context: ToolContext | None = None,
 ) -> ToolResult:
-    """Update light/full planning state and write the required artifacts."""
+    """Update tracked todo and acceptance state."""
     if runtime_state is None:
         return ToolResult(
             tool="update_plan_state",
@@ -62,12 +62,12 @@ def update_plan_state(
     remaining_issues = [str(item).strip() for item in (remaining_issues or []) if str(item).strip()]
     board = runtime_state.task_board
 
-    if mode not in {"light", "full"}:
+    if mode != "tracked":
         return ToolResult(
             tool="update_plan_state",
             status="failed",
-            output="[error] mode must be one of: light, full",
-            error="mode must be one of: light, full",
+            output="[error] mode must be: tracked",
+            error="mode must be: tracked",
             metadata={"status_source": "validation"},
         )
     if update_kind not in {"start", "progress", "replan", "final"}:
@@ -142,31 +142,6 @@ def update_plan_state(
             error="replan update requires replan_reason",
             metadata={"status_source": "validation"},
         )
-    if mode == "full" and update_kind == "start" and not plan_markdown:
-        return ToolResult(
-            tool="update_plan_state",
-            status="failed",
-            output="[error] full start requires plan_markdown",
-            error="full start requires plan_markdown",
-            metadata={"status_source": "validation"},
-        )
-    if requires_approval and not plan_markdown:
-        return ToolResult(
-            tool="update_plan_state",
-            status="failed",
-            output="[error] requires_approval=true requires plan_markdown",
-            error="requires_approval=true requires plan_markdown",
-            metadata={"status_source": "validation"},
-        )
-    if requires_approval and mode != "full":
-        return ToolResult(
-            tool="update_plan_state",
-            status="failed",
-            output="[error] requires_approval=true is only valid in full mode",
-            error="requires_approval=true is only valid in full mode",
-            metadata={"status_source": "validation"},
-        )
-
     acceptance_checkpoint = board.acceptance.checkpoint()
     acceptance_revision_before_update = acceptance_checkpoint["revision"]
     acceptance_revision_after_update = acceptance_revision_before_update
@@ -216,10 +191,7 @@ def update_plan_state(
 
     workspace = tool_context.workspace.root if tool_context is not None else Path(config.WORKSPACE)
     previous_revision = int(getattr(board, "plan_revision", 0) or 0)
-    will_write_plan = mode == "full" and bool(plan_markdown) and (
-        update_kind == "start" or requires_approval
-    )
-    plan_revision = previous_revision + 1 if will_write_plan else previous_revision
+    plan_revision = previous_revision
     changed_files = _planning_changed_files(runtime_state, tool_context)
 
     payload = {
@@ -234,7 +206,7 @@ def update_plan_state(
         "update_count": board.update_count + 1,
         "action_count": int(getattr(board, "action_count", runtime_state.action_tool_count) or 0),
         "changed_file_count": len(changed_files),
-        "requires_approval": bool(requires_approval),
+        "requires_approval": False,
         "requires_update": False,
         "needs_final_update": update_kind != "final" and bool(getattr(board, "needs_final_update", False)),
         "replan_required": False,
@@ -262,12 +234,6 @@ def update_plan_state(
         )
 
     written = [str(state_path.relative_to(workspace))]
-    if will_write_plan:
-        plan_path = workspace / "global_plan" / "current" / "plan.md"
-        plan_path.parent.mkdir(parents=True, exist_ok=True)
-        plan_content = plan_markdown.rstrip() + "\n"
-        plan_path.write_text(plan_content, encoding="utf-8")
-        written.append(str(plan_path.relative_to(workspace)))
 
     board.goal = goal
     board.steps = steps
@@ -278,7 +244,7 @@ def update_plan_state(
     board.update_count = payload["update_count"]
     board.action_count = payload["action_count"]
     board.changed_files = changed_files
-    board.requires_approval = bool(requires_approval)
+    board.requires_approval = False
     board.requires_update = False
     board.needs_final_update = False if update_kind == "final" else bool(getattr(board, "needs_final_update", False))
     board.replan_required = False

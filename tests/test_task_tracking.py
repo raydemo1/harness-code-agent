@@ -44,7 +44,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
 
     def _base_args(self, **overrides):
         args = {
-            "mode": "light",
+            "mode": "tracked",
             "update_kind": "start",
             "goal": "fix task",
             "steps": ["inspect", "edit", "verify"],
@@ -57,7 +57,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         args.update(overrides)
         return args
 
-    def test_light_mode_writes_only_session_state_json(self):
+    def test_tracked_mode_writes_only_session_state_json(self):
         state = AgentRuntimeState(session_id="test-session")
         result = execute_tool(
             "update_plan_state",
@@ -67,13 +67,13 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         )
 
         self.assertIn("Updated plan state", result)
-        self.assertEqual(state.task_board.planning_mode, "light")
+        self.assertEqual(state.task_board.planning_mode, "tracked")
         self.assertEqual(state.task_board.current_step, "inspect")
         self.assertEqual(state.task_board.update_count, 1)
         state_path = self._state_path()
         self.assertTrue(state_path.exists())
         data = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["mode"], "light")
+        self.assertEqual(data["mode"], "tracked")
         self.assertEqual(data["update_kind"], "start")
         self.assertFalse(data["requires_approval"])
         self.assertFalse(Path(self.temp_dir, "global_plan", "current", "plan.md").exists())
@@ -98,7 +98,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertEqual(planning_state["current_step"], "edit")
         self.assertEqual(planning_state["completed_steps"], ["inspect"])
 
-    def test_full_start_writes_state_and_plan_with_approval_required(self):
+    def test_legacy_full_mode_is_rejected(self):
         state = AgentRuntimeState(session_id="test-session")
         result = execute_tool(
             "update_plan_state",
@@ -111,14 +111,10 @@ class UpdatePlanStateToolTests(unittest.TestCase):
             agent_name="main_agent",
         )
 
-        self.assertIn("global_plan/current/plan.md", result.replace("\\", "/"))
-        self.assertTrue(self._state_path().exists())
-        plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
-        self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Plan\n\n- inspect\n")
-        self.assertTrue(state.task_board.requires_approval)
-        self.assertEqual(state.task_board.plan_revision, 1)
-        self.assertFalse(Path(self.temp_dir, "global_plan", "current", "status.md").exists())
-        self.assertFalse(Path(self.temp_dir, "global_plan", "current", "final.md").exists())
+        self.assertIn("[error]", result)
+        self.assertIn("mode must be: tracked", result)
+        self.assertFalse(self._state_path().exists())
+        self.assertFalse(Path(self.temp_dir, "global_plan").exists())
 
     def test_skip_mode_is_not_a_tool_mode_and_writes_nothing(self):
         state = AgentRuntimeState(session_id="test-session")
@@ -130,7 +126,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         )
 
         self.assertIn("[error]", result)
-        self.assertIn("mode must be one of: light, full", result)
+        self.assertIn("mode must be: tracked", result)
         self.assertFalse(self._state_path().exists())
         self.assertFalse(Path(self.temp_dir, "global_plan").exists())
 
@@ -175,7 +171,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertIn("completed_steps must be a subset of steps", result)
         self.assertFalse(self._state_path().exists())
 
-    def test_requires_approval_false_replan_does_not_overwrite_plan(self):
+    def test_plan_markdown_is_ignored_and_does_not_overwrite_formal_plan(self):
         state = AgentRuntimeState(session_id="test-session")
         plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
         plan_path.parent.mkdir(parents=True)
@@ -184,13 +180,12 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         result = execute_tool(
             "update_plan_state",
             self._base_args(
-                mode="full",
                 update_kind="replan",
                 replan_reason="technical test order changed",
                 current_step="edit",
                 completed_steps=["inspect"],
                 next_action="run targeted test",
-                requires_approval=False,
+                requires_approval=True,
                 plan_markdown="# Should not be written\n",
             ),
             runtime_state=state,
@@ -204,7 +199,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
 
     def test_progress_cannot_clear_required_replan(self):
         state = AgentRuntimeState(session_id="test-session")
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.replan_required = True
         state.task_board.replan_reason = "same verification failed twice"
 
@@ -229,7 +224,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
     def test_required_replan_enters_probe_mode(self):
         state = AgentRuntimeState(session_id="test-session")
         state.recovery.mode = "SPEC_RECHECK"
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.replan_required = True
         state.task_board.replan_reason = "same verification failed twice"
 
@@ -283,10 +278,10 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
 
         self.assertIsNone(blocked)
 
-    def test_light_mode_blocks_when_start_missing(self):
+    def test_tracked_mode_blocks_when_start_missing(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
 
         blocked = middleware.before_tool(
             "run_bash",
@@ -300,10 +295,10 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIn("update_plan_state", blocked)
         self.assertIn("start", blocked)
 
-    def test_requires_approval_blocks_action_until_cleared(self):
+    def test_requires_approval_flag_does_not_block_tracked_actions(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "full"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
         state.task_board.requires_approval = True
 
@@ -315,13 +310,12 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             agent_name="main_agent",
         )
 
-        self.assertIsNotNone(blocked)
-        self.assertIn("requires approval", blocked.lower())
+        self.assertIsNone(blocked)
 
     def test_replan_required_blocks_until_replan_update(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
         state.task_board.replan_required = True
         state.task_board.replan_reason = "same failure repeated"
@@ -341,7 +335,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
     def test_progress_is_not_forced_by_action_count(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
 
         for _ in range(3):
@@ -365,10 +359,10 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
 
         self.assertIsNone(reminder)
 
-    def test_light_mode_requires_final_planning_update_after_action(self):
+    def test_tracked_mode_requires_final_planning_update_after_action(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
         state.task_board.needs_final_update = True
 
@@ -381,7 +375,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
     def test_terminal_start_requires_acceptance_checks(self):
         middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
 
         blocked = middleware.before_tool(
             "update_plan_state",
@@ -397,7 +391,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
     def test_terminal_success_requires_latest_foreground_shell_to_succeed_after_edit(self):
         middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
         state.task_board.acceptance.initialize(
             [{"text": "Tests pass", "source": "Run the tests", "verification_command": "pytest"}]
@@ -442,7 +436,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
     def test_terminal_success_requires_shell_after_last_edit(self):
         middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
         state.task_board.acceptance.initialize(
             [{"text": "Tests pass", "source": "Run the tests", "verification_command": "pytest"}]
@@ -481,7 +475,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
     def test_terminal_timeout_counts_as_failed_last_foreground_shell(self):
         middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
         state.task_board.acceptance.initialize(
             [{"text": "Tests pass", "source": "Run the tests", "verification_command": "pytest"}]
@@ -513,7 +507,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
     def test_terminal_success_rejects_design_assertion_verification_commands(self):
         middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
         state.task_board.acceptance.initialize(
             [
@@ -558,7 +552,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
     def test_terminal_success_rejects_echo_check_manually_after_noop_command(self):
         middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
         state = AgentRuntimeState()
-        state.task_board.planning_mode = "light"
+        state.task_board.planning_mode = "tracked"
         state.task_board.update_count = 1
         state.task_board.acceptance.initialize(
             [

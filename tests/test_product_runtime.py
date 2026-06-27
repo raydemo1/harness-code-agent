@@ -2271,7 +2271,7 @@ class ProductRuntimeTests(unittest.TestCase):
         repo_search_decision = workspace_policy.decide_tool_call("repo_search", {"pattern": "needle"})
         parallel_decision = workspace_policy.decide_tool_call("parallel", {"tool_uses": []})
         edit_decision = workspace_policy.decide_tool_call("write_file", {"path": "x.txt"})
-        plan_decision = workspace_policy.decide_tool_call("update_plan_state", {"mode": "light"})
+        plan_decision = workspace_policy.decide_tool_call("update_plan_state", {"mode": "tracked"})
         safe_shell_decision = workspace_policy.decide_tool_call(
             "run_bash",
             {"command": "git status --short"},
@@ -2303,7 +2303,7 @@ class ProductRuntimeTests(unittest.TestCase):
         llm_repo_search_decision = llm_auto_policy.decide_tool_call("repo_search", {"pattern": "needle"})
         llm_parallel_decision = llm_auto_policy.decide_tool_call("parallel", {"tool_uses": []})
         llm_edit_decision = llm_auto_policy.decide_tool_call("write_file", {"path": "x.txt"})
-        llm_plan_decision = llm_auto_policy.decide_tool_call("update_plan_state", {"mode": "light"})
+        llm_plan_decision = llm_auto_policy.decide_tool_call("update_plan_state", {"mode": "tracked"})
         llm_safe_shell_decision = llm_auto_policy.decide_tool_call(
             "run_bash",
             {"command": "git status --short"},

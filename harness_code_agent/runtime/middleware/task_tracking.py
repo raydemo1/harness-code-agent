@@ -64,7 +64,7 @@ class TaskTrackingMiddleware(AgentMiddleware):
 
 
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
-    """Hard-require planning updates for light/full planning modes."""
+    """Hard-require planning updates for tracked mode."""
 
     ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "consult_subagent", "browser_test"}
 
@@ -98,15 +98,10 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         board = runtime_state.task_board
         if board.planning_mode in {"unset", "skip"}:
             return None
-        if board.planning_mode in {"light", "full"} and board.update_count == 0:
+        if board.planning_mode == "tracked" and board.update_count == 0:
             return (
-                "[blocked] Planning mode is light/full but start state is missing. "
+                "[blocked] Planning mode is tracked but start state is missing. "
                 "Call update_plan_state with update_kind=\"start\" before tracked action tools."
-            )
-        if board.requires_approval:
-            return (
-                "[blocked] The current full plan requires approval before more tracked actions. "
-                "Wait for user confirmation, then call update_plan_state with requires_approval=false before continuing."
             )
         if board.replan_required:
             reason = f" Reason: {board.replan_reason}" if board.replan_reason else ""
@@ -140,7 +135,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         if tool_name in self.ACTION_TOOLS:
             runtime_state.action_tool_count += 1
             board.action_count = runtime_state.action_tool_count
-            if board.planning_mode in {"light", "full"}:
+            if board.planning_mode == "tracked":
                 board.needs_final_update = True
         return None
 
@@ -182,7 +177,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         board = runtime_state.task_board
-        if board.planning_mode in {"light", "full"} and board.needs_final_update:
+        if board.planning_mode == "tracked" and board.needs_final_update:
             return (
                 "[SYSTEM] Before finishing, call update_plan_state with update_kind=\"final\". "
                 "Include result_status, validation, and remaining_issues."

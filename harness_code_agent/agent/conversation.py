@@ -1162,7 +1162,7 @@ def _tool_names_from_schemas(tool_schemas: list[dict] | None) -> set[str]:
 
 def _normalize_initial_planning_mode(value: str) -> str:
     mode = (value or "unset").strip().lower()
-    if mode not in {"unset", "skip", "light", "full"}:
+    if mode not in {"unset", "skip", "tracked"}:
         raise ValueError(f"Unsupported initial planning mode: {value!r}")
     return mode
 

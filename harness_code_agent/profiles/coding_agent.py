@@ -66,7 +66,7 @@ class CodingAgentProfile(BaseProfile):
                 completion=(
                     "Check the original request against actual files and fresh command output. Run focused "
                     "verification in proportion to risk, fix failures that are in scope, and report exactly "
-                    "what changed, what ran, and what remains unverified. In light or full mode, record the "
+                    "what changed, what ran, and what remains unverified. In tracked mode, record the "
                     "same facts in the final planning update."
                 ),
             ),

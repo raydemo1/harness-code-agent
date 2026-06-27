@@ -122,7 +122,7 @@ class SkillRegistry:
             "- If PRD.md exists in the workspace, read it first and use it as the product requirements source of truth.",
             "- If the task starts a new or fuzzy project/major feature, read `skills/prd/SKILL.md` before implementation and create or update PRD.md as the requirements artifact.",
             "- If the task is already scoped by PRD.md or the user request, do not re-run PRD planning; execute directly from the existing context.",
-            "- Treat `prd` and runtime planning state as collaborators: PRD.md defines goal, scope, non-goals, acceptance criteria, first slice, and risks; update_plan_state tracks light/full execution.",
+            "- Treat `prd` and runtime tracking state as collaborators: PRD.md defines goal, scope, non-goals, acceptance criteria, first slice, and risks; update_plan_state tracks todo execution and acceptance evidence.",
             f"- {PLANNING_MODE_CATALOG_POLICY}",
             "- If execution touches high-risk or tightly bounded areas, read `skills/vibe-execution-guard/SKILL.md` before editing.",
             "- Keep PRD.md current when scope, requirements, acceptance criteria, risks, or major product decisions change.\n",

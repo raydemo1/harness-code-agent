@@ -164,7 +164,7 @@ class BaseProfile(ABC):
             ),
             completion=(
                 "Run concrete verification and read its output. If it fails, diagnose the evidence "
-                "and continue. In light or full planning mode, finish with a final planning update "
+                "and continue. In tracked mode, finish with a final planning update "
                 "that records result_status, validation, and remaining_issues."
             ),
         )

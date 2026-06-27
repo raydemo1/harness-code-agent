@@ -28,7 +28,7 @@ class AcceptancePlanningTests(unittest.TestCase):
 
     def _args(self, **overrides):
         args = {
-            "mode": "light",
+            "mode": "tracked",
             "update_kind": "start",
             "goal": "fix task",
             "steps": ["inspect", "edit", "verify"],

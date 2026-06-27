@@ -65,8 +65,8 @@ class TerminalProfile(BaseProfile):
                     "and close the loop with command evidence."
                 ),
                 working_style=(
-                    "This profile starts every task in light planning mode. Before the first action tool, "
-                    "call update_plan_state(update_kind=\"start\") with 1-10 concrete acceptance_checks. "
+                    "This profile starts every non-trivial task in tracked mode. Before the first action tool, "
+                    "call update_plan_state(mode=\"tracked\", update_kind=\"start\") with 1-10 concrete acceptance_checks. "
                     "Each check needs text, a short source grounded in the task, and a verification_command; "
                     "use manual only when command verification is impossible. Do not use echo/no-op commands "
                     "or 'checked by design' as verification; semantic constraints need scripts, diffs, greps, "
@@ -130,7 +130,7 @@ class TerminalProfile(BaseProfile):
                 ),
             ],
             time_budget=self._get("task_budget"),
-            initial_planning_mode="light",
+            initial_planning_mode="tracked",
         )
 
     # --- TB2 task metadata for dynamic timeout ---

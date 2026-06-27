@@ -152,15 +152,15 @@ CORE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan_state",
-            "description": "Update light/full planning state. skip mode does not call this tool. light writes only session state.json; full also writes global_plan/current/plan.md when approval is required.",
+            "description": "Update tracked todo and acceptance state. skip mode does not call this tool. This tool does not create formal plan.md files or approval gates.",
             "parameters": {
                 "type": "object",
                 "required": ["mode", "update_kind", "goal", "steps", "current_step", "completed_steps", "blockers", "next_action", "requires_approval"],
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "description": "Planning mode selected by the agent self-check. skip is the direct execution path and must not call this tool.",
-                        "enum": ["light", "full"],
+                        "description": "Use tracked for non-trivial work that needs todo/acceptance tracking. skip is the direct execution path and must not call this tool.",
+                        "enum": ["tracked"],
                     },
                     "update_kind": {
                         "type": "string",
@@ -187,7 +187,7 @@ CORE_TOOL_SCHEMAS = [
                     "next_action": {"type": "string", "description": "The exact next action to take. May be empty or 'none' for final updates."},
                     "plan_markdown": {
                         "type": "string",
-                        "description": "Full plan.md content. Required for full start and for requires_approval=true replan.",
+                        "description": "Ignored by update_plan_state. Formal plan.md files belong to interactive planning flows, not tracked task execution.",
                     },
                     "replan_reason": {
                         "type": "string",
@@ -195,7 +195,7 @@ CORE_TOOL_SCHEMAS = [
                     },
                     "requires_approval": {
                         "type": "boolean",
-                        "description": "true writes plan.md and waits for user confirmation; false only updates state.json and continues.",
+                        "description": "Ignored by update_plan_state. Tracked execution never waits for approval through this tool.",
                     },
                     "result_status": {
                         "type": "string",

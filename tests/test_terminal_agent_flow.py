@@ -37,22 +37,22 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertEqual(state.recovery.mode, "NORMAL")
         self.assertIsNone(state.shell_session)
 
-    def test_agent_can_start_in_light_planning_mode(self):
+    def test_agent_can_start_in_tracked_mode(self):
         agent = Agent(
             name="main_agent",
             system_prompt="x",
             use_tools=False,
-            initial_planning_mode="light",
+            initial_planning_mode="tracked",
         )
         conversation = agent.start_conversation("goal text")
         try:
             self.assertEqual(conversation.runtime_state.task_board.goal, "goal text")
-            self.assertEqual(conversation.runtime_state.task_board.planning_mode, "light")
+            self.assertEqual(conversation.runtime_state.task_board.planning_mode, "tracked")
 
             conversation.add_user_turn("next goal")
 
             self.assertEqual(conversation.runtime_state.task_board.goal, "next goal")
-            self.assertEqual(conversation.runtime_state.task_board.planning_mode, "light")
+            self.assertEqual(conversation.runtime_state.task_board.planning_mode, "tracked")
         finally:
             conversation.close()
 
@@ -62,9 +62,9 @@ class AgentRuntimeStateTests(unittest.TestCase):
 
         self.assertIn("persistent shell", prompt.lower())
         self.assertIn("update_plan_state", prompt)
-        self.assertIn("## Planning Mode", prompt)
+        self.assertIn("## Task Tracking", prompt)
         self.assertIn("PROBE", prompt)
-        self.assertIn("light planning mode", prompt)
+        self.assertIn("tracked mode", prompt)
         self.assertIn("acceptance_checks", prompt)
         self.assertIn("exact output", prompt)
         self.assertIn("switch strategy", prompt)
@@ -77,7 +77,7 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertIn("Shell-driven file writes are allowed", prompt)
         self.assertIn("inside the task workspace", prompt)
         self.assertIn("preview or explain broad edits", prompt)
-        self.assertEqual(cfg.initial_planning_mode, "light")
+        self.assertEqual(cfg.initial_planning_mode, "tracked")
 
     def test_terminal_main_agent_uses_enforcement_middlewares(self):
         middlewares = TerminalProfile().main_agent().middlewares
@@ -88,7 +88,7 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertTrue(any(isinstance(mw, TerminalShellEditPolicyMiddleware) for mw in middlewares))
         self.assertFalse(any(isinstance(mw, PreExitVerificationMiddleware) for mw in middlewares))
 
-    def test_terminal_light_mode_blocks_first_action_until_plan_start(self):
+    def test_terminal_tracked_mode_blocks_first_action_until_plan_start(self):
         cfg = TerminalProfile().main_agent()
         state = Agent(
             name="main_agent",
