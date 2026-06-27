@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import logging
 import subprocess
@@ -107,6 +108,7 @@ class InteractiveSession:
         stream_callback=None,
         profile_explicit: bool | None = None,
         enable_turn_summary: bool = True,
+        allow_checkpoint_init_failure: bool = False,
     ):
         self.cwd = Path(cwd).resolve()
         config.WORKSPACE = str(self.cwd)
@@ -119,6 +121,7 @@ class InteractiveSession:
         self.question_provider = question_provider or ConsoleQuestionProvider()
         self.output_sink = output_sink or print
         self.enable_turn_summary = enable_turn_summary
+        self.checkpoint_init_error: str = ""
         self.skill_registry = SkillRegistry()
         self.session_store = SessionStore(self.cwd / ".harness")
         self.session_store.root.mkdir(parents=True, exist_ok=True)
@@ -139,7 +142,12 @@ class InteractiveSession:
             self.resume_context = _build_resume_context(self.session_store, resume_session_id)
 
         self.profile = get_profile(self._pending_profile_name)
-        _ensure_git_repository(self.cwd)
+        try:
+            _ensure_git_repository(self.cwd)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            if not allow_checkpoint_init_failure:
+                raise
+            self.checkpoint_init_error = f"{type(exc).__name__}: {exc}"
         self.session: Session | None = None
         self.event_bus = None
         self.tool_context: ToolContext | None = None
@@ -356,6 +364,22 @@ class InteractiveSession:
             profile_source=source,
         )
         self.event_bus = self.session_store.event_bus(self.session, listener=self.event_listener)
+        if self.checkpoint_init_error:
+            metadata = self.session_store.read_metadata(self.session.id)
+            metadata["checkpoint_status"] = "disabled"
+            metadata["checkpoint_init_error"] = self.checkpoint_init_error
+            self.session.metadata_path.write_text(
+                json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            self.event_bus.emit(
+                "checkpoint_disabled",
+                agent="main_agent",
+                payload={
+                    "reason": "git repository initialization failed",
+                    "error": self.checkpoint_init_error,
+                },
+            )
         self._ensure_mcp_tools_loaded()
         self.tool_context = ToolContext(
             workspace=WorkspaceService(
@@ -965,6 +989,8 @@ class InteractiveSession:
     ) -> str:
         if self.session is None:
             return "checkpoint skipped: no active session"
+        if self.checkpoint_init_error:
+            return "checkpoint skipped: git repository unavailable"
         if not git_has_committable_changes(self.cwd):
             return "no changes to checkpoint"
         paths_to_add = None

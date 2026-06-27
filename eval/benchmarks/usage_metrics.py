@@ -119,13 +119,22 @@ def collect_harbor_job_usage(job_dir: Path) -> dict[str, Any]:
         metrics = metadata.get("hca_eval_metrics") if isinstance(metadata, dict) else None
         if not isinstance(metrics, dict) or not metrics:
             metrics = _metrics_from_trial_outputs(result_path.parent, result_text, payload)
+        artifact_session_id = _artifact_session_id(result_path.parent)
+        session_id = (
+            (metrics or {}).get("session_id")
+            if isinstance(metrics, dict)
+            else ""
+        ) or artifact_session_id
         rewards = ((payload.get("verifier_result") or {}).get("rewards") or {})
         task_results.append({
             "task": _task_name(payload),
             "trial_name": payload.get("trial_name") or result_path.parent.name,
+            "job_dir": str(job_dir),
+            "trial_dir": str(result_path.parent),
             "passed": rewards.get("reward") == 1.0,
             "reward": rewards.get("reward"),
-            "session_id": (metrics or {}).get("session_id") if isinstance(metrics, dict) else "",
+            "session_id": session_id,
+            "has_hca_artifacts": bool(artifact_session_id),
             "metrics": metrics or {},
             "n_input_tokens": agent_result.get("n_input_tokens"),
             "n_cache_tokens": agent_result.get("n_cache_tokens"),
@@ -156,6 +165,21 @@ def _metrics_from_trial_outputs(trial_dir: Path, result_text: str, payload: dict
         if metrics:
             return metrics
     return {}
+
+
+def _artifact_session_id(trial_dir: Path) -> str:
+    hca_root = trial_dir / "artifacts" / "hca"
+    if not hca_root.is_dir():
+        return ""
+    sessions = sorted(
+        (path for path in hca_root.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for session_dir in sessions:
+        if (session_dir / "manifest.json").exists() or (session_dir / "early_manifest.json").exists():
+            return session_dir.name
+    return sessions[0].name if sessions else ""
 
 
 def _payload_text_fields(payload: dict[str, Any]) -> list[str]:

@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any
@@ -28,9 +29,21 @@ def export_session_artifacts(
         raise FileNotFoundError(f"Session directory not found: {session_root}")
 
     export_root = artifacts_root / "hca" / session_id
-    if export_root.exists():
-        shutil.rmtree(export_root)
     export_root.mkdir(parents=True, exist_ok=True)
+    for child_name in (
+        "session",
+        "observations",
+        "traces",
+        "trajectory.jsonl",
+        "plan_history.jsonl",
+        "manifest.json",
+        "runner_error.txt",
+    ):
+        child = export_root / child_name
+        if child.is_dir():
+            shutil.rmtree(child)
+        elif child.exists():
+            child.unlink()
 
     shutil.copytree(session_root, export_root / "session")
 
@@ -161,6 +174,47 @@ def install_artifact_export_hooks(state: dict[str, Any]) -> None:
                 pass
 
 
+def start_periodic_artifact_export(
+    state: dict[str, Any],
+    *,
+    interval_seconds: float | None = None,
+) -> threading.Event:
+    """Periodically refresh partial artifacts for timeout diagnostics."""
+    try:
+        interval = float(
+            interval_seconds
+            if interval_seconds is not None
+            else os.environ.get("HCA_ARTIFACT_EXPORT_INTERVAL_SECONDS", "30")
+        )
+    except ValueError:
+        interval = 30.0
+    stop_event = threading.Event()
+    if interval <= 0:
+        return stop_event
+
+    def loop() -> None:
+        while not stop_event.wait(interval):
+            session_id = str(state.get("session_id") or "")
+            session_store = state.get("session_store")
+            root = getattr(session_store, "root", None) if session_store is not None else None
+            if not session_id or not root:
+                continue
+            try:
+                export_session_artifacts(
+                    harness_root=root,
+                    session_id=session_id,
+                    artifacts_root=os.environ.get("HCA_ARTIFACTS_ROOT", "/logs/artifacts"),
+                    runner_error=str(state.get("runner_error") or "periodic partial artifact export"),
+                )
+            except BaseException:
+                print("Failed periodic HCA artifact export:", file=sys.stderr)
+                traceback.print_exc()
+
+    thread = threading.Thread(target=loop, name="hca-artifact-export", daemon=True)
+    thread.start()
+    return stop_event
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     if not path.exists():
@@ -201,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         "runner_error": "",
     }
     install_artifact_export_hooks(hook_state)
+    periodic_export_stop = start_periodic_artifact_export(hook_state)
     try:
         from harness_code_agent.core.interactive import InteractiveSession, print_turn_result
         from eval.benchmarks.usage_metrics import build_session_eval_metrics, print_eval_metrics
@@ -210,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
             profile_name="terminal",
             profile_explicit=True,
             stream_sink=None,
+            allow_checkpoint_init_failure=True,
         )
         session_started = True
         session.checkpoint.auto = False
@@ -217,6 +273,16 @@ def main(argv: list[str] | None = None) -> int:
         session_store = session.session_store
         hook_state["session_id"] = session_id
         hook_state["session_store"] = session_store
+        if session.checkpoint_init_error:
+            runner_error = "\n".join(
+                part
+                for part in (
+                    runner_error.strip(),
+                    f"checkpoint disabled: {session.checkpoint_init_error}",
+                )
+                if part
+            )
+            hook_state["runner_error"] = runner_error
         print(f"hca session: {session_id}", flush=True)
         print(f"workspace: {session.cwd}", flush=True)
         try:
@@ -268,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception:
                     print("Failed to export HCA session artifacts:", file=sys.stderr)
                     traceback.print_exc()
+            periodic_export_stop.set()
         if session_store is not None and session_id:
             metrics = build_session_eval_metrics(
                 session_store,
@@ -276,8 +343,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             print_eval_metrics(metrics)
     except Exception:
+        periodic_export_stop.set()
         traceback.print_exc()
         return 1
+    finally:
+        periodic_export_stop.set()
     if session_started:
         return 0
     return 0

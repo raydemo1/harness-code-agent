@@ -1259,6 +1259,41 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_git_init_failure_raises_by_default(self):
+        from harness_code_agent.core.git_helpers import _ensure_git_repository
+
+        with patch("harness_code_agent.core.git_helpers.subprocess.run", side_effect=subprocess.CalledProcessError(1, ["git", "init"])):
+            with self.assertRaises(subprocess.CalledProcessError):
+                _ensure_git_repository(Path(self.temp_dir))
+
+        self.assertFalse((Path(self.temp_dir) / ".git").exists())
+
+    def test_terminal_session_can_disable_checkpoint_when_git_init_fails(self):
+        with (
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
+            patch("harness_code_agent.core.interactive._ensure_git_repository", side_effect=subprocess.CalledProcessError(1, ["git", "init"])),
+        ):
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="terminal",
+                profile_explicit=True,
+                allow_checkpoint_init_failure=True,
+            )
+            try:
+                session.ensure_profile_bound_for_first_task("noop")
+
+                metadata = session.session_store.read_metadata(session.session.id)
+                self.assertEqual(metadata["checkpoint_status"], "disabled")
+                self.assertIn("CalledProcessError", metadata["checkpoint_init_error"])
+                events = session.session_store.read_events(session.session.id)
+                self.assertEqual(events[0]["type"], "checkpoint_disabled")
+                self.assertEqual(
+                    session.create_checkpoint(manual=True),
+                    "checkpoint skipped: git repository unavailable",
+                )
+            finally:
+                session.close()
+
     def test_handle_checkpoint_every_cadence(self):
         session = self._session()
         try:

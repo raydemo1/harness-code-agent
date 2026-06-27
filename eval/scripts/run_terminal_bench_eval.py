@@ -215,6 +215,14 @@ def _task_diagnostics(
     trial_name = str(launcher_result.get("trial_name") or "") if launcher_result else ""
     session_id = str(launcher_result.get("session_id") or "") if launcher_result else ""
     job_dir = str((launcher_result or {}).get("job_dir") or _extract_job_dir(stdout) or "")
+    artifact_info = _resolve_hca_artifacts(
+        trial_name=trial_name,
+        session_id=session_id,
+        job_dir=job_dir,
+    )
+    if artifact_info:
+        job_dir = str(artifact_info.get("job_dir") or job_dir)
+        session_id = str(artifact_info.get("session_id") or session_id)
     verifier_headline = _extract_verifier_headline(stdout)
     final_report_summary = _extract_final_report_summary(
         stdout=stdout,
@@ -233,7 +241,9 @@ def _task_diagnostics(
     return {
         "failure_kind": failure_kind,
         "missing_metrics": missing_metrics,
-        "has_hca_artifacts": bool(session_id and job_dir and _has_hca_artifacts(job_dir, session_id)),
+        "has_hca_artifacts": bool(artifact_info),
+        "resolved_session_id": session_id,
+        "resolved_job_dir": job_dir,
         "verifier_failure_headline": verifier_headline,
         "final_report_summary": final_report_summary,
         "diagnostic": {
@@ -259,11 +269,56 @@ def _extract_job_dir(stdout: str) -> str:
     return path
 
 
-def _has_hca_artifacts(job_dir: str, session_id: str) -> bool:
-    if not job_dir or not session_id:
-        return False
-    path = PROJECT_ROOT / job_dir if not Path(job_dir).is_absolute() else Path(job_dir)
-    return any(path.glob(f"*/artifacts/hca/{session_id}/manifest.json"))
+def _resolve_hca_artifacts(
+    *,
+    trial_name: str,
+    session_id: str,
+    job_dir: str,
+) -> dict[str, str]:
+    for trial_dir in _candidate_trial_dirs(trial_name=trial_name, job_dir=job_dir):
+        hca_root = trial_dir / "artifacts" / "hca"
+        if not hca_root.is_dir():
+            continue
+        session_dirs = []
+        if session_id:
+            session_dirs.append(hca_root / session_id)
+        session_dirs.extend(
+            sorted(
+                (path for path in hca_root.iterdir() if path.is_dir() and path.name != session_id),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        )
+        for path in session_dirs:
+            if (path / "manifest.json").exists() or (path / "early_manifest.json").exists():
+                return {
+                    "job_dir": str(trial_dir.parent),
+                    "trial_dir": str(trial_dir),
+                    "session_id": path.name,
+                    "artifact_dir": str(path),
+                }
+    return {}
+
+
+def _candidate_trial_dirs(*, trial_name: str, job_dir: str) -> list[Path]:
+    candidates: list[Path] = []
+    if job_dir:
+        base = PROJECT_ROOT / job_dir if not Path(job_dir).is_absolute() else Path(job_dir)
+        if trial_name and (base / trial_name).is_dir():
+            candidates.append(base / trial_name)
+        candidates.extend(path for path in base.iterdir() if path.is_dir()) if base.is_dir() else None
+    if trial_name:
+        jobs_root = PROJECT_ROOT / "jobs"
+        if jobs_root.is_dir():
+            candidates.extend(path for path in jobs_root.glob(f"*/{trial_name}") if path.is_dir())
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(path)
+    return unique
 
 
 def _extract_final_report_summary(*, stdout: str, job_dir: str, session_id: str) -> str:

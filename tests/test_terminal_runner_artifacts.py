@@ -218,6 +218,32 @@ class TerminalRunnerArtifactTests(unittest.TestCase):
             manifest = json.loads((second / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["event_count"], 0)
 
+    def test_export_session_artifacts_preserves_early_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            harness_root = root / ".harness"
+            session_id = "session-early-preserve"
+            session_root = harness_root / "sessions" / session_id
+            session_root.mkdir(parents=True)
+            (session_root / "events.jsonl").write_text("", encoding="utf-8")
+            (session_root / "session.json").write_text("{}", encoding="utf-8")
+            artifacts_root = root / "artifacts"
+            early_dir = write_session_manifest(
+                session_id=session_id,
+                workspace="/app",
+                harness_root=harness_root,
+                artifacts_root=artifacts_root,
+            )
+
+            export_session_artifacts(
+                harness_root=harness_root,
+                session_id=session_id,
+                artifacts_root=artifacts_root,
+            )
+
+            self.assertTrue((early_dir / "early_manifest.json").exists())
+            self.assertTrue((early_dir / "manifest.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,8 @@ def _ensure_git_repository(workspace: Path) -> None:
 
 def _git_add_runtime_exclude(workspace: Path) -> None:
     info_exclude = workspace / ".git" / "info" / "exclude"
+    if not (workspace / ".git").exists():
+        return
     info_exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = info_exclude.read_text(encoding="utf-8", errors="replace") if info_exclude.exists() else ""
     lines = set(existing.splitlines())
@@ -36,6 +38,8 @@ def _git_add_runtime_exclude(workspace: Path) -> None:
 
 
 def git_add_runtime_excluded(workspace: Path) -> None:
+    if not _is_git_repository(workspace):
+        return
     subprocess.run(
         ["git", "add", "-A", "--", "."],
         cwd=workspace,
@@ -53,6 +57,8 @@ def git_add_runtime_excluded(workspace: Path) -> None:
 
 
 def git_add_paths(workspace: Path, paths: list[str]) -> None:
+    if not paths or not _is_git_repository(workspace):
+        return
     subprocess.run(
         ["git", "add", "--", *paths],
         cwd=workspace,
@@ -63,24 +69,16 @@ def git_add_paths(workspace: Path, paths: list[str]) -> None:
 
 
 def git_has_committable_changes(workspace: Path) -> bool:
-    result = subprocess.run(
-        runtime_excluded_git_command("status", "--porcelain"),
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _run_git_status(workspace)
+    if result is None:
+        return False
     return bool(result.stdout.strip())
 
 
 def git_dirty_paths(workspace: Path) -> set[str]:
-    result = subprocess.run(
-        runtime_excluded_git_command("status", "--porcelain"),
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _run_git_status(workspace)
+    if result is None:
+        return set()
     paths: set[str] = set()
     for line in result.stdout.splitlines():
         if not line:
@@ -94,17 +92,24 @@ def git_dirty_paths(workspace: Path) -> set[str]:
 
 
 def git_staged_paths(workspace: Path) -> set[str]:
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    if not _is_git_repository(workspace):
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return set()
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
 def git_has_staged_changes(workspace: Path) -> bool:
+    if not _is_git_repository(workspace):
+        return False
     result = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
         cwd=workspace,
@@ -112,6 +117,25 @@ def git_has_staged_changes(workspace: Path) -> bool:
         stderr=subprocess.DEVNULL,
     )
     return result.returncode == 1
+
+
+def _is_git_repository(workspace: Path) -> bool:
+    return (workspace / ".git").exists()
+
+
+def _run_git_status(workspace: Path) -> subprocess.CompletedProcess[str] | None:
+    if not _is_git_repository(workspace):
+        return None
+    try:
+        return subprocess.run(
+            runtime_excluded_git_command("status", "--porcelain"),
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
 
 def runtime_excluded_git_command(*args: str) -> list[str]:
