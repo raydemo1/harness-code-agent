@@ -22,7 +22,7 @@ them without touching this file:
 from __future__ import annotations
 
 from .base import BaseProfile, AgentConfig, build_profile_prompt
-from ..planning_policy import PLANNING_MODE_POLICY
+from ..tracking_policy import TASK_TRACKING_POLICY
 from ..runtime.middleware import (
     LoopDetectionMiddleware,
     TimeBudgetMiddleware,
@@ -78,7 +78,7 @@ class TerminalProfile(BaseProfile):
                     "implementation detail. Track the framework-assigned acceptance_revision and give a reason "
                     "for every later add, update, or removal. On every replan, decide whether the current "
                     "acceptance checks still validate the new strategy; if not, update them in the same replan.\n\n"
-                    f"{PLANNING_MODE_POLICY}\n\n"
+                    f"{TASK_TRACKING_POLICY}\n\n"
                     "Follow the task's exact external contract: preserve literal field/function names, hosts, "
                     "ports, URLs, protocols, branches, paths, filenames, shapes, signals/process behavior, "
                     "formats, and exact output. "

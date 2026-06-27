@@ -17,7 +17,7 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-from ..planning_policy import PLANNING_MODE_POLICY
+from ..tracking_policy import TASK_TRACKING_POLICY
 from ..runtime.permissions import (
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_EDIT,
@@ -152,7 +152,7 @@ class BaseProfile(ABC):
                 "Begin from the task and current repository state. Use the planning policy below "
                 "to match coordination overhead to risk, then follow existing project patterns and "
                 "keep the implementation focused.\n\n"
-                f"{PLANNING_MODE_POLICY}\n\n"
+                f"{TASK_TRACKING_POLICY}\n\n"
                 "Use consultation only when read-only investigation, test design, or review would "
                 "reduce risk or context load. Apply every code and test change yourself. Long-running "
                 "shell commands return job IDs; inspect and clean them up through the shell-job tools."

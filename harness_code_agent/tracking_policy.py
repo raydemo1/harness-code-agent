@@ -1,6 +1,6 @@
-"""Shared planning mode policy for runtime profiles and skill routing."""
+"""Shared task tracking policy for runtime profiles and skill routing."""
 
-PLANNING_MODE_POLICY = """\
+TASK_TRACKING_POLICY = """\
 ## Task Tracking
 Choose the lightest tracking path that still makes the work reliable before using substantive action tools.
 
@@ -12,7 +12,7 @@ Tracked steps are execution todos plus acceptance state, not a formal plan or ap
 Update progress at meaningful milestones rather than after every action. Before stopping in tracked mode, call update_plan_state(update_kind="final") with result_status, validation, and remaining_issues.
 """
 
-PLANNING_MODE_CATALOG_POLICY = (
+TASK_TRACKING_CATALOG_POLICY = (
     "Use the built-in Task Tracking Self-Check before substantive work: skip writes no "
     "artifact for tiny low-risk tasks, and tracked writes session state.json through "
     "update_plan_state. Formal plan.md files and approval belong to interactive planning "

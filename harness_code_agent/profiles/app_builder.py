@@ -3,7 +3,7 @@ App Builder profile for single-agent web app creation and browser verification.
 """
 from __future__ import annotations
 
-from ..planning_policy import PLANNING_MODE_POLICY
+from ..tracking_policy import TASK_TRACKING_POLICY
 from .base import BaseProfile, AgentConfig, build_profile_prompt
 from ..runtime.middleware import (
     ErrorGuidanceMiddleware,
@@ -25,7 +25,7 @@ _APP_BUILDER_SYSTEM = build_profile_prompt(
         "smallest suitable stack. A focused static experience may be one HTML file; use the repository's "
         "existing framework when present, and introduce a framework only when the behavior or project "
         "context justifies it. Do not default to React merely because the stack is unspecified.\n\n"
-        f"{PLANNING_MODE_POLICY}\n\n"
+        f"{TASK_TRACKING_POLICY}\n\n"
         "Build complete behavior rather than a mock screenshot. Make deliberate choices about hierarchy, "
         "typography, color, spacing, and interaction instead of relying on generic component defaults. "
         "Use consultation for focused investigation, design critique, test ideas, or review, then integrate "

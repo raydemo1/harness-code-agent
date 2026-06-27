@@ -9,7 +9,7 @@ benchmark profiles.
 from __future__ import annotations
 
 from .base import BaseProfile, AgentConfig, build_profile_prompt
-from ..planning_policy import PLANNING_MODE_POLICY
+from ..tracking_policy import TASK_TRACKING_POLICY
 from ..runtime.middleware import (
     ErrorGuidanceMiddleware,
     LoopDetectionMiddleware,
@@ -51,7 +51,7 @@ class CodingAgentProfile(BaseProfile):
                     "project's current abstractions and helper APIs, and make the narrowest complete "
                     "change that satisfies the request. Tests should reproduce bugs before fixes and "
                     "protect behavior changes when the repository has a suitable test seam.\n\n"
-                    f"{PLANNING_MODE_POLICY}\n\n"
+                    f"{TASK_TRACKING_POLICY}\n\n"
                     "Use repository tools for inspection and the shell for reproduction, tests, builds, "
                     "and other execution. Treat command output as evidence: classify failures and change "
                     "strategy instead of repeating hopeful variants. Consultation can sharpen investigation "
