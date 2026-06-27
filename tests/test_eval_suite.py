@@ -20,7 +20,7 @@ class EvalSuiteTests(unittest.TestCase):
         payload = json.loads(Path("eval/tasks/terminal_bench_8task.json").read_text(encoding="utf-8"))
         self.assertEqual(payload["suite"], "terminal_bench_8task")
         self.assertEqual(payload["task_set"], "8task")
-        self.assertEqual(payload["benchmark_name"], "Terminal-Bench 2.0 8-task subset")
+        self.assertEqual(payload["benchmark_name"], "Terminal-Bench 2.1 8-task subset")
         self.assertEqual(
             payload["tasks"],
             [
@@ -41,7 +41,7 @@ class EvalSuiteTests(unittest.TestCase):
 
         self.assertEqual(payload["suite"], "terminal_bench_24task")
         self.assertEqual(payload["task_set"], "24task")
-        self.assertEqual(payload["benchmark_name"], "Terminal-Bench 2.0 24-task subset")
+        self.assertEqual(payload["benchmark_name"], "Terminal-Bench 2.1 24-task subset")
         self.assertEqual(
             payload["tasks"],
             [
@@ -372,7 +372,7 @@ class EvalSuiteTests(unittest.TestCase):
         }), encoding="utf-8")
         (tbench_dir / "summary.json").write_text(json.dumps({
             "suite": "tbench",
-            "benchmark_name": "Terminal-Bench 2.0 24-task subset",
+            "benchmark_name": "Terminal-Bench 2.1 24-task subset",
             "task_set": "24task",
             "task_count": 24,
             "passed": 18,
@@ -426,7 +426,7 @@ class EvalSuiteTests(unittest.TestCase):
         write_reports(summary, output_dir=out_dir)
 
         resume = (out_dir / "report_resume.md").read_text(encoding="utf-8")
-        self.assertIn("Terminal-Bench 2.0 24-task subset", resume)
+        self.assertIn("Terminal-Bench 2.1 24-task subset", resume)
         self.assertIn("18/24", resume)
         self.assertIn("75.0%", resume)
         self.assertIn("99.0%", resume)

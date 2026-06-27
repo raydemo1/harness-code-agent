@@ -40,7 +40,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                 "harbor",
                 "run",
                 "-d",
-                "terminal-bench@2.0",
+                "terminal-bench@2.1",
                 "--agent-import-path",
                 "eval.benchmarks.harbor_agent:HarnessAgent",
                 "--include-task-name",
@@ -55,7 +55,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             harbor_executable="harbor",
             tasks=["fix-git"],
             runner_env="daytona",
-            dataset_path=Path("E:/tmp/terminal-bench-2"),
+            dataset_path=Path("E:/tmp/terminal-bench-2-1"),
             force_build=False,
         )
 
@@ -65,7 +65,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                 "harbor",
                 "run",
                 "--path",
-                "E:\\tmp\\terminal-bench-2",
+                "E:\\tmp\\terminal-bench-2-1",
                 "--agent-import-path",
                 "eval.benchmarks.harbor_agent:HarnessAgent",
                 "--env",
@@ -80,7 +80,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             harbor_executable="harbor",
             tasks=["fix-git"],
             runner_env=None,
-            dataset_path=Path("E:/tmp/terminal-bench-2"),
+            dataset_path=Path("E:/tmp/terminal-bench-2-1"),
             force_build=True,
         )
 
@@ -90,7 +90,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                 "harbor",
                 "run",
                 "--path",
-                "E:\\tmp\\terminal-bench-2",
+                "E:\\tmp\\terminal-bench-2-1",
                 "--agent-import-path",
                 "eval.benchmarks.harbor_agent:HarnessAgent",
                 "--force-build",
@@ -222,13 +222,13 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
         self.assertEqual(
             resolved,
-            (repo_root / ".harbor" / "datasets" / "terminal-bench-2").resolve(),
+            (repo_root / ".harbor" / "datasets" / "terminal-bench-2-1").resolve(),
         )
 
     def test_is_valid_harbor_dataset_requires_task_toml(self):
         repo_root = self._workspace_path("test-terminal-bench-validity")
         try:
-            invalid_dataset = repo_root / "terminal-bench-2"
+            invalid_dataset = repo_root / "terminal-bench-2-1"
             invalid_dataset.mkdir(parents=True, exist_ok=True)
             (invalid_dataset / ".git").mkdir(exist_ok=True)
 
@@ -244,7 +244,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
     def test_ensure_local_dataset_reclones_invalid_partial_checkout(self):
         repo_root = self._workspace_path("test-terminal-bench-reclone")
-        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2"
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
         dataset_path.mkdir(parents=True, exist_ok=True)
         downloaded_paths = []
 
@@ -271,7 +271,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
     def test_repair_task_images_rewrites_unavailable_image_to_dockerhub_fallback(self):
         repo_root = self._workspace_path("test-terminal-bench-image-repair")
-        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2"
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
         try:
             task_dir = dataset_path / "overfull-hbox"
             task_dir.mkdir(parents=True, exist_ok=True)
@@ -304,7 +304,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
     def test_repair_task_images_preserves_available_image(self):
         repo_root = self._workspace_path("test-terminal-bench-image-preserve")
-        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2"
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
         try:
             task_dir = dataset_path / "fix-git"
             task_dir.mkdir(parents=True, exist_ok=True)
@@ -332,7 +332,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
     def test_repair_task_images_can_limit_to_selected_tasks(self):
         repo_root = self._workspace_path("test-terminal-bench-image-filter")
-        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2"
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
         try:
             for task in ("overfull-hbox", "custom-memory-heap-crash"):
                 task_dir = dataset_path / task

@@ -253,7 +253,7 @@ def _latency_summary(payload: dict[str, Any], run_name: str) -> dict[str, Any]:
 def _tbench_summary(payload: dict[str, Any], run_name: str) -> dict[str, Any]:
     return {
         "run": run_name,
-        "benchmark_name": str(payload.get("benchmark_name") or "Terminal-Bench 2.0 subset"),
+        "benchmark_name": str(payload.get("benchmark_name") or "Terminal-Bench 2.1 subset"),
         "task_set": str(payload.get("task_set") or "subset"),
         "task_count": _int(payload.get("task_count")),
         "passed": _int(payload.get("passed")),
@@ -344,8 +344,8 @@ def _tbench_line(data: dict[str, Any]) -> str:
 
 def _tbench_label(data: dict[str, Any]) -> str:
     if not data:
-        return "Terminal-Bench 2.0 subset"
-    return str(data.get("benchmark_name") or "Terminal-Bench 2.0 subset")
+        return "Terminal-Bench 2.1 subset"
+    return str(data.get("benchmark_name") or "Terminal-Bench 2.1 subset")
 
 
 def _tbench_task_rows(task_results: list[Any]) -> list[dict[str, Any]]:
@@ -576,7 +576,7 @@ def run_self_test() -> None:
         }), encoding="utf-8")
         (tbench_dir / "summary.json").write_text(json.dumps({
             "suite": "tbench",
-            "benchmark_name": "Terminal-Bench 2.0 8-task subset",
+            "benchmark_name": "Terminal-Bench 2.1 8-task subset",
             "task_set": "8task",
             "task_count": 8,
             "passed": 6,
@@ -599,7 +599,7 @@ def run_self_test() -> None:
         write_reports(summary, output_dir=out)
         assert (out / "report_resume.md").exists()
         report = (out / "report_resume.md").read_text(encoding="utf-8")
-        assert "Terminal-Bench 2.0 8-task subset" in report
+        assert "Terminal-Bench 2.1 8-task subset" in report
         assert "debugging 2/3" in report
         assert "Claw-SWE-Bench Lite80" in report
     finally:

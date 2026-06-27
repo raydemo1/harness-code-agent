@@ -150,7 +150,7 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
     passed = sum(1 for item in task_results if item["status"] == "passed")
     summary = {
         "suite": "tbench",
-        "benchmark_name": str(payload.get("benchmark_name") or "Terminal-Bench 2.0 subset"),
+        "benchmark_name": str(payload.get("benchmark_name") or "Terminal-Bench 2.1 subset"),
         "task_set": str(payload.get("task_set") or args.tbench_task_set),
         "status": "passed" if passed == len(tasks) else "failed",
         "task_count": len(tasks),

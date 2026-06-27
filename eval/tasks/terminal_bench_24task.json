@@ -1,13 +1,13 @@
 {
   "suite": "terminal_bench_24task",
   "task_set": "24task",
-  "benchmark_name": "Terminal-Bench 2.0 24-task subset",
-  "description": "Fixed larger Terminal-Bench 2.0 24-task subset for interview-project reporting. All tasks use agent_timeout_sec <= 1800 in eval/benchmarks/tb2_tasks.json.",
+  "benchmark_name": "Terminal-Bench 2.1 24-task subset",
+  "description": "Fixed larger Terminal-Bench 2.1 24-task subset for interview-project reporting. All tasks use agent_timeout_sec <= 1800 in eval/benchmarks/tb2_tasks.json.",
   "selection_policy": {
     "source": "eval/benchmarks/tb2_tasks.json",
     "max_agent_timeout_sec": 1800,
     "method": "Stratified selection across difficulty and category metadata; frozen before running the benchmark.",
-    "non_goal": "This is not a full Terminal-Bench 2.0 run and should not be reported as one."
+    "non_goal": "This is not a full Terminal-Bench 2.1 run and should not be reported as one."
   },
   "tasks": [
     "fix-git",

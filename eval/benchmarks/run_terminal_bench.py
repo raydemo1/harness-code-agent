@@ -20,8 +20,11 @@ from eval.benchmarks.usage_metrics import collect_harbor_job_usage
 
 
 DATASET_ARCHIVE_URL = (
-    "https://github.com/laude-institute/terminal-bench-2/archive/refs/heads/main.zip"
+    "https://github.com/harbor-framework/terminal-bench-2-1/archive/refs/heads/main.zip"
 )
+HARBOR_DATASET_ID = "terminal-bench@2.1"
+LOCAL_DATASET_DIR_NAME = "terminal-bench-2-1"
+TERMINAL_BENCH_LABEL = "Terminal-Bench 2.1"
 DOCKERHUB_IMAGE_NAMESPACE = "alexgshaw"
 DOCKERHUB_IMAGE_TAG = "20251031"
 
@@ -78,7 +81,7 @@ def build_launch_environment(
 
 
 def default_local_dataset_path(repo_root: Path) -> Path:
-    return (repo_root / ".harbor" / "datasets" / "terminal-bench-2").resolve()
+    return (repo_root / ".harbor" / "datasets" / LOCAL_DATASET_DIR_NAME).resolve()
 
 
 def is_valid_harbor_dataset(dataset_path: Path) -> bool:
@@ -89,7 +92,7 @@ def _download_and_extract_dataset_archive(dataset_path: Path) -> None:
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=str(dataset_path.parent)) as temp_dir_str:
         temp_dir = Path(temp_dir_str)
-        archive_path = temp_dir / "terminal-bench-2.zip"
+        archive_path = temp_dir / f"{LOCAL_DATASET_DIR_NAME}.zip"
         urllib.request.urlretrieve(DATASET_ARCHIVE_URL, archive_path)
         extract_dir = temp_dir / "extract"
         extract_dir.mkdir(parents=True, exist_ok=True)
@@ -152,7 +155,7 @@ def rewrite_task_images_to_ghcr(dataset_path: Path) -> int:
     """Backward-compatible name for older tests/integrations.
 
     The old implementation rewrote every task to a guessed GHCR image. Some
-    Terminal-Bench 2.0 tasks do not have a public GHCR package, so the safe
+    Some Terminal-Bench tasks do not have a public GHCR package, so the safe
     behavior is now to repair only broken image references.
     """
     return repair_task_images(dataset_path)
@@ -200,7 +203,7 @@ def build_harbor_run_command(
 ) -> list[str]:
     command = [harbor_executable, "run"]
     if dataset_path is None:
-        command.extend(["-d", "terminal-bench@2.0"])
+        command.extend(["-d", HARBOR_DATASET_ID])
     else:
         command.extend(["--path", str(dataset_path)])
 
@@ -218,7 +221,7 @@ def build_harbor_run_command(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Terminal-Bench 2.0 from a local dataset with repaired prebuilt image references."
+        description=f"Run {TERMINAL_BENCH_LABEL} from a local dataset with repaired prebuilt image references."
     )
     parser.add_argument(
         "--task",
@@ -235,7 +238,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset-path",
         type=Path,
         default=None,
-        help="Local dataset directory. Defaults to repo-local .harbor/datasets/terminal-bench-2",
+        help=f"Local dataset directory. Defaults to repo-local .harbor/datasets/{LOCAL_DATASET_DIR_NAME}",
     )
     parser.add_argument(
         "--env",

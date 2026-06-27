@@ -1,5 +1,5 @@
 """
-Harbor adapter — runs our harness agent on Terminal-Bench 2.0 via Harbor framework.
+Harbor adapter — runs our harness agent on Terminal-Bench 2.1 via Harbor framework.
 
 Harbor has two agent types:
   - External (BaseAgent): agent runs outside container, sends commands via environment.exec()
@@ -13,16 +13,16 @@ Usage:
   pip install harbor
 
   # Test on hello-world task
-  harbor run -d "terminal-bench@2.0" \
+  harbor run -d "terminal-bench@2.1" \
     --agent-import-path eval.benchmarks.harbor_agent:HarnessAgent \
     --task-names hello-world
 
   # Full benchmark
-  harbor run -d "terminal-bench@2.0" \
+  harbor run -d "terminal-bench@2.1" \
     --agent-import-path eval.benchmarks.harbor_agent:HarnessAgent
 
   # With Daytona (no Docker needed locally)
-  harbor run -d "terminal-bench@2.0" \
+  harbor run -d "terminal-bench@2.1" \
     --agent-import-path eval.benchmarks.harbor_agent:HarnessAgent \
     --env daytona
 """

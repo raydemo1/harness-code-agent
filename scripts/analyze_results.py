@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Analyze Terminal-Bench 2.0 job results.
+Analyze Terminal-Bench 2.1 job results.
 
 Usage:
   python scripts/analyze_results.py jobs/2026-04-02__13-52-59
@@ -140,7 +140,7 @@ def generate_retry_cmd(trials: list, job_dir: Path):
 
     task_args = " \\\n  ".join(f"--task-name {t['name']}" for t in retryable)
     print(f"RETRY COMMAND ({len(retryable)} tasks, excluding timeouts):\n")
-    print(f"harbor run -d \"terminal-bench@2.0\" \\")
+    print(f"harbor run -d \"terminal-bench@2.1\" \\")
     print(f"  --agent-import-path benchmarks.harbor_agent:HarnessAgent \\")
     print(f"  -k 1 \\")
     print(f"  --n-concurrent 1 \\")

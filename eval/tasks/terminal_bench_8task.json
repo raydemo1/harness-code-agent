@@ -1,8 +1,8 @@
 {
   "suite": "terminal_bench_8task",
   "task_set": "8task",
-  "benchmark_name": "Terminal-Bench 2.0 8-task subset",
-  "description": "Fixed lightweight Terminal-Bench 2.0 8-task subset for the default interview-project benchmark run.",
+  "benchmark_name": "Terminal-Bench 2.1 8-task subset",
+  "description": "Fixed lightweight Terminal-Bench 2.1 8-task subset for the default interview-project benchmark run.",
   "tasks": [
     "fix-git",
     "overfull-hbox",
