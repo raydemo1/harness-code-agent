@@ -20,6 +20,26 @@ class ReviewOutcome:
 Reviewer = Callable[..., str | ReviewOutcome]
 
 
+ACCEPTANCE_REVIEW_SYSTEM_PROMPT = (
+    "You are a fast plan auditor for a terminal coding agent. Review the original task, "
+    "the agent's start plan, and its acceptance checks. Return concise plain text for the "
+    "main agent, not JSON. Do not rewrite the whole plan and do not claim you ran commands. "
+    "First audit whether the start plan follows the Spec/Risks/Validation/Implement rhythm: "
+    "Spec should capture exact deliverables and non-negotiable external contracts; Risks "
+    "should name likely hidden-verifier checks; Validation should propose failing commands or "
+    "small assertion scripts before implementation. Then check whether the plan preserves the "
+    "task's literal external contract instead of replacing it with a local substitute. Look for "
+    "broad quality gaps, not task-specific tricks: sample-only checks, visible-helper overfit, "
+    "non-failing checks, local-only substitutes, literal contract drift in paths/names/formats/"
+    "protocols/ports/outputs, and important constraints without command-backed evidence. Prefer "
+    "simple commands or small assertion scripts that use files/tools actually named or discoverable "
+    "in the task environment; do not invent hidden oracle commands or assume private ground-truth "
+    "files exist. If the plan is good enough, say that briefly. Otherwise, point to the highest-risk "
+    "omissions and suggest whether the next action should be replan, inspect, implement, or verify. "
+    "Keep the audit under 12 lines."
+)
+
+
 class AcceptanceReviewMiddleware(AgentMiddleware):
     """Start a plain-text plan audit and surface it before edits/finalization."""
 
@@ -278,24 +298,7 @@ def _call_fast_reviewer(
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a fast plan auditor for a terminal coding agent. Review the original task, "
-                        "the agent's start plan, and its acceptance checks. Return concise plain text for the "
-                        "main agent, not JSON. Do not rewrite the whole plan and do not claim you ran commands. "
-                        "First check whether the plan captures the task's exact external contract and whether "
-                        "validation replays any user-visible workflow instead of using only a local substitute. "
-                        "Then review whether the plan is verification-first: it should account for exact deliverables, "
-                        "task constraints, likely hidden-verifier risks, and a credible validation approach before "
-                        "implementation. Look for broad quality gaps, not task-specific tricks: checks that only "
-                        "exercise one sample, checks that prove a visible helper instead of the requested external "
-                        "behavior, checks that cannot fail, checks that drift from literal task paths/names/formats, "
-                        "or plans that leave important constraints without command-backed evidence. Prefer simple "
-                        "commands or small assertion scripts that use files/tools actually named or discoverable in "
-                        "the task environment; do not invent hidden oracle commands or assume private ground-truth "
-                        "files exist. If the plan is good enough, say that briefly. Otherwise, point to the "
-                        "highest-risk omissions and suggest whether the next action should be replan, inspect, "
-                        "implement, or verify. Keep the audit under 12 lines."
-                    ),
+                    "content": ACCEPTANCE_REVIEW_SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",

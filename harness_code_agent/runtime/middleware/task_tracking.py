@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 
+from ..shell_classification import classify_safe_shell_command
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 
 
@@ -99,6 +100,8 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         if board.planning_mode in {"unset", "skip"}:
             return None
         if board.planning_mode == "tracked" and board.update_count == 0:
+            if tool_name == "run_bash" and _is_read_only_probe(tool_args.get("command", "")):
+                return None
             return (
                 "[blocked] Planning mode is tracked but start state is missing. "
                 "Call update_plan_state with update_kind=\"start\" before tracked action tools."
@@ -133,6 +136,13 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             return None
 
         if tool_name in self.ACTION_TOOLS:
+            if (
+                board.planning_mode == "tracked"
+                and board.update_count == 0
+                and tool_name == "run_bash"
+                and _is_read_only_probe(tool_args.get("command", ""))
+            ):
+                return None
             runtime_state.action_tool_count += 1
             board.action_count = runtime_state.action_tool_count
             if board.planning_mode == "tracked":
@@ -207,3 +217,7 @@ def _weak_acceptance_command(checks: list[dict]) -> dict | None:
         if any(re.search(pattern, command, flags=re.IGNORECASE) for pattern in _WEAK_VERIFICATION_PATTERNS):
             return check
     return None
+
+
+def _is_read_only_probe(command: str) -> bool:
+    return classify_safe_shell_command(command) == "read"

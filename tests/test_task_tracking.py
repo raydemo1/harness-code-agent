@@ -295,6 +295,50 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIn("update_plan_state", blocked)
         self.assertIn("start", blocked)
 
+    def test_tracked_mode_allows_read_only_probe_before_start(self):
+        middleware = TaskTrackingEnforcementMiddleware()
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "tracked"
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "ls -la /app 2>/dev/null; which python3"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        reminder = middleware.post_tool(
+            "run_bash",
+            {"command": "ls -la /app 2>/dev/null; which python3"},
+            "ok",
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(blocked)
+        self.assertIsNone(reminder)
+        self.assertEqual(state.action_tool_count, 0)
+        self.assertEqual(state.task_board.action_count, 0)
+        self.assertFalse(state.task_board.needs_final_update)
+
+    def test_tracked_mode_still_blocks_verification_command_before_start(self):
+        middleware = TaskTrackingEnforcementMiddleware()
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "tracked"
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "pytest"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("update_plan_state", blocked)
+        self.assertIn("start", blocked)
+
     def test_requires_approval_flag_does_not_block_tracked_actions(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from harness_code_agent import config
 from harness_code_agent.agent.runtime_state import AgentRuntimeState
 from harness_code_agent.runtime.middleware.acceptance_review import (
+    ACCEPTANCE_REVIEW_SYSTEM_PROMPT,
     AcceptanceReviewMiddleware,
     ReviewOutcome,
 )
@@ -382,6 +383,24 @@ class AcceptancePlanningTests(unittest.TestCase):
         self.assertEqual(len(usage_events), 1)
         self.assertEqual(usage_events[0].payload["purpose"], "acceptance_review")
         self.assertEqual(usage_events[0].payload["total_tokens"], 25)
+
+    def test_fast_review_prompt_audits_plan_rhythm_without_task_specific_rules(self):
+        prompt = ACCEPTANCE_REVIEW_SYSTEM_PROMPT
+
+        for term in (
+            "Spec/Risks/Validation/Implement",
+            "literal external contract",
+            "local substitute",
+            "sample-only",
+            "non-failing checks",
+            "literal contract drift",
+            "not JSON",
+            "do not invent hidden oracle commands",
+        ):
+            self.assertIn(term, prompt)
+
+        for task_name in ("polyglot", "overfull", "configure-git-webserver"):
+            self.assertNotIn(task_name, prompt.lower())
 
     def test_success_requires_current_revision_and_all_checks_passed(self):
         state = AgentRuntimeState(session_id="acceptance-final-success")
