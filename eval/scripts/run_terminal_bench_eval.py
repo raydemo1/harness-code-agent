@@ -231,9 +231,18 @@ def _task_diagnostics(
     )
     failure_kind = "passed"
     if status != "passed":
-        if "AgentTimeoutError" in stdout or "AgentTimeoutError" in stderr:
+        exception_type = str((launcher_result or {}).get("exception_type") or "")
+        exception_message = str((launcher_result or {}).get("exception_message") or "")
+        combined_error_text = "\n".join([exception_type, exception_message, stdout or "", stderr or ""])
+        if "AgentTimeoutError" in combined_error_text:
             failure_kind = "agent_timeout"
-        elif returncode != 0 and not launcher_result:
+        elif (
+            "AgentSetupTimeoutError" in combined_error_text
+            or "NonZeroAgentExitCodeError" in combined_error_text
+            or "FATAL: failed to install harness dependencies" in combined_error_text
+            or "Docker daemon is not running" in combined_error_text
+            or (returncode != 0 and not launcher_result)
+        ):
             failure_kind = "infra_or_setup_failure"
         else:
             failure_kind = "failed_verifier"

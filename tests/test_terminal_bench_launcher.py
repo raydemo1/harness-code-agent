@@ -9,8 +9,10 @@ from eval.benchmarks.run_terminal_bench import (
     build_harbor_run_command,
     build_launch_environment,
     default_local_dataset_path,
+    docker_daemon_running,
     ensure_local_dataset,
     is_valid_harbor_dataset,
+    main,
     repair_task_images,
     resolve_harbor_executable,
 )
@@ -119,6 +121,11 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             self.assertEqual(env["HARNESS_MODEL"], "existing-model")
             self.assertEqual(env["MAX_AGENT_ITERATIONS"], "100")
             self.assertEqual(env["MAX_AGENT_TOOL_CALLS"], "400")
+            self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
+            self.assertEqual(env["PYTHONUTF8"], "1")
+            self.assertEqual(env["NO_COLOR"], "1")
+            self.assertEqual(env["TERM"], "dumb")
+            self.assertEqual(env["RICH_FORCE_TERMINAL"], "0")
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 
@@ -159,6 +166,33 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         self.assertEqual(env["MAX_AGENT_TOOL_CALLS"], "400")
         self.assertEqual(env["AGENT_BUDGET_WARN_FRACTION"], "0.9")
         self.assertEqual(env["HARNESS_MODEL"], "deepseek-v4-flash")
+
+    def test_docker_daemon_running_returns_false_on_cli_failure(self):
+        with patch("eval.benchmarks.run_terminal_bench.subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 1
+
+            self.assertFalse(docker_daemon_running())
+
+    def test_main_fails_fast_when_docker_daemon_is_unavailable(self):
+        repo_root = self._workspace_path("test-terminal-bench-docker-preflight")
+        dataset_path = repo_root / "dataset"
+        task_dir = dataset_path / "overfull-hbox"
+        task_dir.mkdir(parents=True)
+        (task_dir / "task.toml").write_text("name='overfull-hbox'\n", encoding="utf-8")
+        try:
+            with (
+                patch("eval.benchmarks.run_terminal_bench.resolve_harbor_executable", return_value="harbor"),
+                patch("eval.benchmarks.run_terminal_bench.repair_task_images", return_value=0),
+                patch("eval.benchmarks.run_terminal_bench.docker_daemon_running", return_value=False),
+                patch("eval.benchmarks.run_terminal_bench.subprocess.run") as run_mock,
+                patch("sys.argv", ["run_terminal_bench.py", "--task", "overfull-hbox", "--dataset-path", str(dataset_path)]),
+            ):
+                result = main()
+
+            self.assertEqual(result, 125)
+            run_mock.assert_not_called()
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
 
     def test_resolve_harbor_executable_falls_back_to_user_scripts(self):
         repo_root = self._workspace_path("test-terminal-bench-launcher-bin")

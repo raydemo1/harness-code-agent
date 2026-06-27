@@ -126,6 +126,7 @@ def collect_harbor_job_usage(job_dir: Path) -> dict[str, Any]:
             else ""
         ) or artifact_session_id
         rewards = ((payload.get("verifier_result") or {}).get("rewards") or {})
+        exception_info = payload.get("exception_info") if isinstance(payload.get("exception_info"), dict) else {}
         task_results.append({
             "task": _task_name(payload),
             "trial_name": payload.get("trial_name") or result_path.parent.name,
@@ -140,6 +141,8 @@ def collect_harbor_job_usage(job_dir: Path) -> dict[str, Any]:
             "n_cache_tokens": agent_result.get("n_cache_tokens"),
             "n_output_tokens": agent_result.get("n_output_tokens"),
             "cost_usd": agent_result.get("cost_usd"),
+            "exception_type": str(exception_info.get("exception_type") or ""),
+            "exception_message": str(exception_info.get("exception_message") or "")[:1000],
         })
     return {
         "job_dir": str(job_dir),

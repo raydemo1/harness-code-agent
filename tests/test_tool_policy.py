@@ -195,7 +195,7 @@ class ErrorGuidanceTests(unittest.TestCase):
 
 
 class TerminalShellEditPolicyTests(unittest.TestCase):
-    def test_blocks_explicit_shell_file_edit(self):
+    def test_allows_explicit_shell_file_edit_inside_workspace(self):
         middleware = TerminalShellEditPolicyMiddleware()
 
         blocked = middleware.before_tool(
@@ -206,8 +206,7 @@ class TerminalShellEditPolicyTests(unittest.TestCase):
             agent_name="main_agent",
         )
 
-        self.assertIsNotNone(blocked)
-        self.assertIn("write_file/apply_patch", blocked)
+        self.assertIsNone(blocked)
 
     def test_allows_build_command_that_generates_artifacts(self):
         middleware = TerminalShellEditPolicyMiddleware()
@@ -256,7 +255,7 @@ class TerminalShellEditPolicyTests(unittest.TestCase):
                 )
                 self.assertIsNone(blocked)
 
-    def test_blocks_output_redirection_to_files(self):
+    def test_allows_shell_file_writes_inside_workspace(self):
         middleware = TerminalShellEditPolicyMiddleware()
 
         commands = [
@@ -266,6 +265,59 @@ class TerminalShellEditPolicyTests(unittest.TestCase):
             "printf x &> combined.log",
             "rg foo . | tee out.txt",
             "python -c \"open('out.txt','w').write('x')\"",
+        ]
+
+        for command in commands:
+            with self.subTest(command=command):
+                blocked = middleware.before_tool(
+                    "run_bash",
+                    {"command": command},
+                    messages=[],
+                    runtime_state=AgentRuntimeState(),
+                    agent_name="main_agent",
+                )
+                self.assertIsNone(blocked)
+
+    def test_allows_formatter_and_patch_style_workspace_edits(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+
+        commands = [
+            "sed -i 's/foo/bar/g' app.py",
+            "python -m ruff check --fix .",
+            "gofmt -w main.go",
+            "git apply fix.patch",
+        ]
+
+        for command in commands:
+            with self.subTest(command=command):
+                blocked = middleware.before_tool(
+                    "run_bash",
+                    {"command": command},
+                    messages=[],
+                    runtime_state=AgentRuntimeState(),
+                    agent_name="main_agent",
+                )
+                self.assertIsNone(blocked)
+
+    def test_blocks_destructive_or_outside_workspace_shell_commands(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+
+        commands = [
+            "rm -rf /",
+            "rm -r -f /",
+            "rm -rf -- /",
+            "rm --recursive --force /",
+            "rm -rf ~",
+            'rm -rf "$HOME"',
+            "rm -rf C:\\",
+            "Remove-Item -Force -Recurse C:\\",
+            "Remove-Item -LiteralPath C:\\ -Recurse -Force",
+            "git reset --hard HEAD",
+            "git clean -fd",
+            "git clean -xdf",
+            "git restore --source HEAD -- .",
+            "echo x > /etc/profile",
+            "python -c \"open('/etc/passwd','w').write('x')\"",
         ]
 
         for command in commands:

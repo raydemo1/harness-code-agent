@@ -96,13 +96,13 @@ class TerminalProfile(BaseProfile):
                 ),
                 boundaries=(
                     "NEVER ask clarifying questions in this non-interactive profile; choose the most reasonable "
-                    "interpretation supported by the task and repository. Use write_file or apply_patch for "
-                    "normal intentional source, test, configuration, or documentation edits. Do not edit through "
-                    "ad-hoc shell redirection or opaque mutation commands. Exception: for many same-pattern "
-                    "mechanical edits, you may use run_bash to execute a visible, deterministic migration script "
-                    "inside the workspace after first printing or dry-running the intended file set; constrain it "
-                    "to the task workspace and follow it with a repository-wide convergence check. Consultation "
-                    "is read-only advice, not completed work."
+                    "interpretation supported by the task and repository. Use the editing path that is clearest "
+                    "and easiest to verify: write_file/apply_patch for small direct edits, and run_bash for "
+                    "generated files, formatter commands, scripted rewrites, and deterministic batch edits. "
+                    "Shell-driven file writes are allowed inside the task workspace. Avoid opaque broad "
+                    "mutations; constrain shell writes to the task workspace, preview or explain broad edits "
+                    "before applying them, and follow mutations with verification or a convergence check. "
+                    "Consultation is read-only advice, not completed work."
                 ),
                 completion=(
                     "Verify every active acceptance check and include the latest acceptance_revision plus one "

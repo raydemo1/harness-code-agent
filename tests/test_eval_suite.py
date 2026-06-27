@@ -511,6 +511,26 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertEqual(diagnostic["failure_kind"], "agent_timeout")
         self.assertTrue(diagnostic["missing_metrics"])
 
+    def test_terminal_bench_task_diagnostics_classifies_agent_setup_failure(self):
+        from eval.scripts.run_terminal_bench_eval import _task_diagnostics
+
+        diagnostic = _task_diagnostics(
+            task="example",
+            status="failed",
+            returncode=1,
+            stdout="",
+            stderr="",
+            launcher_result={
+                "trial_name": "example__abc",
+                "exception_type": "NonZeroAgentExitCodeError",
+                "exception_message": "FATAL: failed to install harness dependencies",
+                "metrics": {},
+            },
+        )
+
+        self.assertEqual(diagnostic["failure_kind"], "infra_or_setup_failure")
+        self.assertTrue(diagnostic["missing_metrics"])
+
     def test_terminal_bench_task_diagnostics_classifies_verifier_failure(self):
         from eval.scripts.run_terminal_bench_eval import _task_diagnostics
 

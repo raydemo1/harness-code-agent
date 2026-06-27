@@ -56,6 +56,11 @@ def build_launch_environment(
     env["TMP"] = str(temp_dir)
     env.setdefault("MAX_AGENT_ITERATIONS", "100")
     env.setdefault("MAX_AGENT_TOOL_CALLS", "400")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("NO_COLOR", "1")
+    env.setdefault("TERM", "dumb")
+    env.setdefault("RICH_FORCE_TERMINAL", "0")
 
     dotenv_file = dotenv_path or (repo_root / ".env")
     if dotenv_file.exists():
@@ -254,6 +259,9 @@ def main() -> int:
 
     tasks = [] if args.full else args.task
     dataset_path = ensure_local_dataset(args.dataset_path or default_local_dataset_path(repo_root))
+    if args.runner_env != "daytona" and not docker_daemon_running():
+        print("Docker daemon is not running. Please start Docker and try again.", file=sys.stderr)
+        return 125
     repaired_count = repair_task_images(dataset_path, None if args.full else tasks)
     command = build_harbor_run_command(
         harbor_executable=harbor_executable,
@@ -275,6 +283,19 @@ def main() -> int:
         summary = collect_harbor_job_usage(job_dir)
         print("HCA_TERMINAL_BENCH_RESULT:" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return completed.returncode
+
+
+def docker_daemon_running() -> bool:
+    try:
+        completed = subprocess.run(
+            ["docker", "info", "--format", "{{json .ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
 
 
 def _job_names(jobs_root: Path) -> set[str]:

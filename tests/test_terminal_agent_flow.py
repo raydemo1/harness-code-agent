@@ -74,8 +74,9 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertIn("On every replan", prompt)
         self.assertIn("shell-driven batch workflow", prompt)
         self.assertIn("repository-wide search", prompt)
-        self.assertIn("same-pattern mechanical edits", prompt)
-        self.assertIn("dry-running the intended file set", prompt)
+        self.assertIn("Shell-driven file writes are allowed", prompt)
+        self.assertIn("inside the task workspace", prompt)
+        self.assertIn("preview or explain broad edits", prompt)
         self.assertEqual(cfg.initial_planning_mode, "light")
 
     def test_terminal_main_agent_uses_enforcement_middlewares(self):
