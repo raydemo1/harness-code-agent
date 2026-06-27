@@ -13,20 +13,35 @@ _READ_COMMAND_PREFIXES = (
     "ls",
     "dir",
     "pwd",
+    "whoami",
+    "id",
+    "uname",
     "grep",
     "rg",
     "head",
     "tail",
+    "curl -i",
+    "curl -I",
+    "curl --head",
+    "echo",
     "git status",
     "git diff",
     "git log",
     "git show",
     "git branch",
+    "git rev-parse",
+    "git --version",
     "test",
     "diff",
     "wc",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "shasum",
     "which",
     "where",
+    "python --version",
+    "python3 --version",
     "get-content",
     "gc",
     "select-string",
@@ -49,6 +64,8 @@ _VERIFY_COMMAND_PREFIXES = (
     "go test",
     "cargo test",
     "tsc --noemit",
+    "pdflatex",
+    "latexmk",
 )
 
 _WRITE_PIPELINE_COMMAND_PREFIXES = (
@@ -101,28 +118,28 @@ def _contains_stateful_shell_operation(command: str) -> bool:
 def classify_safe_shell_command(command: str) -> SafeShellCommandKind:
     """Classify shell commands allowed in read-only contexts.
 
-    This intentionally recognizes only simple commands and pipelines. Anything
-    with shell redirection, compound control flow, mutation commands, or syntax
-    we cannot cheaply reason about stays unsafe.
+    This intentionally recognizes simple read/verify commands, pipelines, and
+    compound probes made from read-only commands. Anything with write
+    redirection, mutation commands, command substitution, or syntax we cannot
+    cheaply reason about stays unsafe.
     """
     lowered = _normalize_command(command)
     if not lowered:
         return "unsafe"
+    lowered = _strip_scoped_cd_prefix(lowered)
     if contains_stateful_shell_operation(lowered):
         return "unsafe"
     if _has_unsafe_shell_syntax(lowered):
         return "unsafe"
 
-    segments = _split_pipeline(lowered)
-    if not segments:
+    commands = _split_compound_commands(lowered)
+    if not commands:
         return "unsafe"
 
-    segment_kinds = [_classify_pipeline_segment(segment) for segment in segments]
-    if any(kind == "unsafe" for kind in segment_kinds):
+    command_kinds = [_classify_simple_or_pipeline(command) for command in commands]
+    if any(kind == "unsafe" for kind in command_kinds):
         return "unsafe"
-    if any(kind == "verify" for kind in segment_kinds[1:]):
-        return "unsafe"
-    if segment_kinds[0] == "verify":
+    if any(kind == "verify" for kind in command_kinds):
         return "verify"
     return "read"
 
@@ -131,7 +148,16 @@ def _normalize_command(command: str) -> str:
     return " ".join(str(command or "").strip().lower().split())
 
 
+def _strip_scoped_cd_prefix(command: str) -> str:
+    match = re.match(r"^cd\s+[^;&|<>`$]+\s+&&\s*(?P<rest>.+)$", command)
+    if match:
+        return match.group("rest").strip()
+    return command
+
+
 def _classify_pipeline_segment(segment: str) -> SafeShellCommandKind:
+    segment = _strip_safe_redirections(segment)
+    segment = _normalize_git_global_options(segment)
     if not segment or _starts_with_assignment(segment):
         return "unsafe"
     if _has_write_output_option(segment):
@@ -151,6 +177,16 @@ def _matches_command_prefix(command: str, prefixes: tuple[str, ...]) -> bool:
 
 def _starts_with_assignment(command: str) -> bool:
     return bool(re.match(r"^[a-z_][a-z0-9_]*=", command))
+
+
+def _normalize_git_global_options(command: str) -> str:
+    match = re.match(r"^git\s+-c\s+\S+\s+(?P<rest>.+)$", command, flags=re.IGNORECASE)
+    if match:
+        return "git " + match.group("rest").strip()
+    match = re.match(r"^git\s+-C\s+\S+\s+(?P<rest>.+)$", command, flags=re.IGNORECASE)
+    if match:
+        return "git " + match.group("rest").strip()
+    return command
 
 
 def _has_write_output_option(command: str) -> bool:
@@ -181,10 +217,85 @@ def _has_unsafe_shell_syntax(command: str) -> bool:
             return True
         elif char == "$" and index + 1 < len(command) and command[index + 1] == "(":
             return True
-        elif char in {";", "&", "<", ">"}:
+        elif char == ";":
+            pass
+        elif char == "&":
+            next_char = command[index + 1] if index + 1 < len(command) else ""
+            if next_char != "&":
+                return True
+            index += 1
+        elif char == "|":
+            next_char = command[index + 1] if index + 1 < len(command) else ""
+            if next_char == "|":
+                index += 1
+        elif char == "<":
             return True
+        elif char == ">":
+            if not _redirection_at_is_safe(command, index):
+                return True
+            index = _redirection_end_index(command, index)
         index += 1
     return quote is not None
+
+
+def _classify_simple_or_pipeline(command: str) -> SafeShellCommandKind:
+    segments = _split_pipeline(command)
+    if not segments:
+        return "unsafe"
+    segment_kinds = [_classify_pipeline_segment(segment) for segment in segments]
+    if any(kind == "unsafe" for kind in segment_kinds):
+        return "unsafe"
+    if any(kind == "verify" for kind in segment_kinds[1:]):
+        return "unsafe"
+    if segment_kinds[0] == "verify":
+        return "verify"
+    return "read"
+
+
+def _split_compound_commands(command: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = None
+            elif char == "\\" and quote == '"' and index + 1 < len(command):
+                index += 1
+                current.append(command[index])
+            index += 1
+            continue
+
+        if char in {"'", '"'}:
+            quote = char
+            current.append(char)
+        elif char == ";":
+            part = "".join(current).strip()
+            if not part:
+                return []
+            parts.append(part)
+            current = []
+        elif char in {"&", "|"} and index + 1 < len(command) and command[index + 1] == char:
+            part = "".join(current).strip()
+            if not part:
+                return []
+            parts.append(part)
+            current = []
+            index += 1
+        else:
+            current.append(char)
+        index += 1
+
+    if quote is not None:
+        return []
+    part = "".join(current).strip()
+    if not part:
+        return []
+    parts.append(part)
+    return parts
 
 
 def _split_pipeline(command: str) -> list[str]:
@@ -227,6 +338,36 @@ def _split_pipeline(command: str) -> list[str]:
         return []
     segments.append(segment)
     return segments
+
+
+def _strip_safe_redirections(segment: str) -> str:
+    previous = None
+    current = segment.strip()
+    while previous != current:
+        previous = current
+        current = re.sub(r"\s+\d?>\s*/dev/null(?:\s|$)", " ", current).strip()
+        current = re.sub(r"\s+\d?>&\d(?:\s|$)", " ", current).strip()
+    return current
+
+
+def _redirection_at_is_safe(command: str, index: int) -> bool:
+    prefix_start = index
+    if index > 0 and command[index - 1].isdigit():
+        prefix_start = index - 1
+    operator = command[prefix_start : index + 1]
+    remainder = command[index + 1 :].lstrip()
+    if remainder.startswith("&"):
+        return bool(re.match(r"&\d(?:\s|[;&|]|$)", remainder)) and operator in {"1>", "2>", ">"}
+    return bool(re.match(r"/dev/null(?:\s|[;&|]|$)", remainder))
+
+
+def _redirection_end_index(command: str, index: int) -> int:
+    remainder = command[index + 1 :].lstrip()
+    skipped_spaces = len(command[index + 1 :]) - len(remainder)
+    match = re.match(r"(?:&\d|/dev/null)", remainder)
+    if not match:
+        return index
+    return index + skipped_spaces + match.end()
 
 
 def _is_direct_long_running_command(command: str) -> bool:

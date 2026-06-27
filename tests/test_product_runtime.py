@@ -558,6 +558,14 @@ class ProductRuntimeTests(unittest.TestCase):
             "go test ./...",
             "cargo test",
             "git log --format=%s -1",
+            "whoami",
+            "id",
+            "uname -a",
+            "git --version",
+            "git rev-parse --is-bare-repository",
+            "python3 --version",
+            "curl -I http://localhost:8080",
+            "cd /app && pdflatex -interaction=nonstopmode -halt-on-error main.tex 2>&1",
         ]:
             with self.subTest(command=command):
                 self.assertTrue(is_read_only_command(command))
@@ -568,6 +576,11 @@ class ProductRuntimeTests(unittest.TestCase):
         allowed = [
             "rg foo . | head -n 5",
             "Get-Content a.txt | Select-String foo",
+            "whoami && git --version && which python3",
+            "ls /git 2>/dev/null || echo no-git",
+            "test -d /git/server && git -C /git/server rev-parse --is-bare-repository 2>&1",
+            "pwd; git status --short",
+            "cd /app && md5sum main.tex synonyms.txt | grep -q '^abc.*main.tex$' || echo modified",
         ]
         blocked = [
             "cat > file.txt",
@@ -577,6 +590,11 @@ class ProductRuntimeTests(unittest.TestCase):
             "git diff --output=out.patch",
             "git show HEAD --output out.txt",
             "sort -o out.txt input.txt",
+            "mkdir -p /git && git init --bare /git/server",
+            "echo probe > /var/www/deploy/_probe.txt && curl -s http://localhost:8080/_probe.txt",
+            "rm -rf /tmp/test-clone && git clone /git/server /tmp/test-clone",
+            "cd /app",
+            "cd /app && echo probe > out.txt",
         ]
 
         for command in allowed:

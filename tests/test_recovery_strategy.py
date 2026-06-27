@@ -67,21 +67,21 @@ class RecoveryStrategyTests(unittest.TestCase):
         )
         first_probe = middleware.before_tool(
             "run_bash",
-            {"command": "pytest -q"},
+            {"command": "whoami && git --version && which python3"},
             [],
             runtime_state=state,
             agent_name="main_agent",
         )
         middleware.on_tool_allowed(
             "run_bash",
-            {"command": "pytest -q"},
+            {"command": "whoami && git --version && which python3"},
             [],
             runtime_state=state,
             agent_name="main_agent",
         )
         second_probe = middleware.before_tool(
             "run_bash",
-            {"command": "pytest -q"},
+            {"command": "ls /git 2>/dev/null || echo no-git"},
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -90,6 +90,22 @@ class RecoveryStrategyTests(unittest.TestCase):
         self.assertIn("probe", edit_block.lower())
         self.assertIsNone(first_probe)
         self.assertIn("probe", second_probe.lower())
+
+    def test_probe_mode_blocks_mutating_compound_commands(self):
+        state = AgentRuntimeState()
+        state.recovery.mode = "PROBE"
+        middleware = RecoveryStrategyMiddleware()
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "mkdir -p /git && git init --bare /git/server"},
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("read-only", blocked)
 
     def test_successful_probe_returns_recovery_to_normal(self):
         state = AgentRuntimeState()
