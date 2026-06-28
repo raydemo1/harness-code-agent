@@ -43,6 +43,8 @@ from eval.benchmarks.usage_metrics import parse_eval_metrics_from_text
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_STANDALONE_TARBALL = "python-3.12.13-x86_64-unknown-linux-gnu.tar.gz"
+CONTAINER_PYTHON_TARBALL = f"/tmp/{PYTHON_STANDALONE_TARBALL}"
 
 
 class HarnessAgent(BaseInstalledAgent):
@@ -64,8 +66,9 @@ class HarnessAgent(BaseInstalledAgent):
 
         Strategy: never use apt-get for python (too slow/unreliable on Daytona).
         1. Ensure git exists (apt-get only for git, which is tiny and fast)
-        2. Clone repo (includes vendor_wheels/)
-        3. If no python3 → download standalone python from GitHub (~30MB)
+        2. Upload a lightweight repo snapshot (wheel deps, no runtime logs)
+        3. If no python3 → install standalone python from an uploaded tarball
+           or download it from GitHub (~34MB)
         4. Install only the lightweight runtime deps needed by the headless
            terminal runner. Avoid full requirements.txt because eval/UI deps
            make per-task container setup slow.
@@ -77,6 +80,9 @@ class HarnessAgent(BaseInstalledAgent):
             snapshot = Path(temp_dir) / "harness-agent"
             _copy_repo_snapshot(PROJECT_ROOT, snapshot)
             await environment.upload_dir(snapshot, "/home/user/harness-agent")
+        python_tarball = PROJECT_ROOT / "vendor_wheels" / PYTHON_STANDALONE_TARBALL
+        if python_tarball.exists():
+            await environment.upload_file(python_tarball, CONTAINER_PYTHON_TARBALL)
 
         # Step 2: Ensure git exists. Some minimal Terminal-Bench images omit it,
         # but the session store uses git for lightweight workspace snapshots.
@@ -114,15 +120,22 @@ class HarnessAgent(BaseInstalledAgent):
                 "  NEED_INSTALL=1; "
                 "fi; "
                 "if [ \"$NEED_INSTALL\" = \"1\" ]; then "
-                "  echo 'Installing standalone Python 3.12 from GitHub...' && "
+                f"  VENDOR_TGZ={shlex.quote(CONTAINER_PYTHON_TARBALL)} && "
+                "  if [ -f \"$VENDOR_TGZ\" ]; then "
+                "    echo 'Installing standalone Python 3.12 from vendored tarball...' && "
+                "    cp \"$VENDOR_TGZ\" /tmp/python.tar.gz; "
+                "  else "
+                # Fallback: download from GitHub when vendor tarball is absent.
                 # Stripped build (~34MB) vs full build (~111MB): agent runtime needs no debug symbols.
-                "  URL='https://github.com/astral-sh/python-build-standalone/releases/"
+                "    echo 'Installing standalone Python 3.12 from GitHub...' && "
+                "    URL='https://github.com/astral-sh/python-build-standalone/releases/"
                 "download/20260623/cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz' && "
-                "  ( curl -fsSL -o /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
-                "    wget -q -O /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
-                "    ( apt-get update -qq 2>/dev/null && apt-get install -y -qq curl 2>/dev/null && "
-                "      curl -fsSL -o /tmp/python.tar.gz \"$URL\" ) "
-                "  ) && "
+                "    ( curl -fsSL -o /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
+                "      wget -q -O /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
+                "      ( apt-get update -qq 2>/dev/null && apt-get install -y -qq curl 2>/dev/null && "
+                "        curl -fsSL -o /tmp/python.tar.gz \"$URL\" ) "
+                "    ); "
+                "  fi && "
                 "  mkdir -p /opt/python && "
                 "  tar -xzf /tmp/python.tar.gz -C /opt/python --strip-components=1 && "
                 # Symlink to /usr/local/bin so it shadows the old system python3
@@ -130,7 +143,7 @@ class HarnessAgent(BaseInstalledAgent):
                 "  ln -sf /opt/python/bin/pip3 /usr/local/bin/pip3 && "
                 # Also update the bare 'python' command if it exists
                 "  ln -sf /opt/python/bin/python3 /usr/local/bin/python && "
-                "  rm -f /tmp/python.tar.gz && "
+                "  rm -f /tmp/python.tar.gz \"$VENDOR_TGZ\" && "
                 # Force hash table refresh so bash picks up the new binary.
                 # IMPORTANT: keep `&&` (not `;`) so a failed download breaks the chain
                 # instead of being masked by the echo below. The trailing
@@ -229,11 +242,15 @@ def _copy_repo_snapshot(source: Path, dest: Path) -> None:
                 ignored.add(name)
             elif name == ".harbor" and current == source:
                 ignored.add(name)
+            elif name == ".harness" and current == source:
+                ignored.add(name)
             elif name == "jobs" and current == source:
                 ignored.add(name)
             elif name == "workspace" and current == source:
                 ignored.add(name)
             elif rel == "eval/results":
+                ignored.add(name)
+            elif _is_vendored_python_tarball(rel):
                 ignored.add(name)
             elif name == ".env" or name.startswith(".env."):
                 ignored.add(name)
@@ -242,6 +259,10 @@ def _copy_repo_snapshot(source: Path, dest: Path) -> None:
         return ignored
 
     shutil.copytree(source, dest, ignore=ignore)
+
+
+def _is_vendored_python_tarball(rel_path: str) -> bool:
+    return rel_path.startswith("vendor_wheels/python-") and rel_path.endswith(".tar.gz")
 
 
 def _task_name_from_context(context: AgentContext) -> str:

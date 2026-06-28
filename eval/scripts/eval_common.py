@@ -22,8 +22,7 @@ TBENCH_METADATA_PATH = PROJECT_ROOT / "eval" / "benchmarks" / "tb2_tasks.json"
 TBENCH_TASK_FILES = {
     "8task": "terminal_bench_8task.json",
     "24task": "terminal_bench_24task.json",
-    "remaining_medium": "terminal_bench_remaining_medium.json",
-    "p0_retry": "terminal_bench_p0_retry.json",
+    "full": "terminal_bench_full.json",
 }
 CLAW_TASK_FILES = {
     "lite80": "claw_swe_bench_lite80.json",

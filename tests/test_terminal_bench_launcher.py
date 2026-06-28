@@ -1,5 +1,7 @@
 import os
 import shutil
+import sys
+import types
 import unittest
 import uuid
 from pathlib import Path
@@ -167,6 +169,73 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         self.assertEqual(env["MAX_AGENT_TOOL_CALLS"], "400")
         self.assertEqual(env["AGENT_BUDGET_WARN_FRACTION"], "0.9")
         self.assertEqual(env["HARNESS_MODEL"], "deepseek-v4-flash")
+
+    def test_harbor_agent_snapshot_excludes_runtime_artifacts_and_large_python_tarball(self):
+        harbor_agent = self._import_harbor_agent_with_fakes()
+        repo_root = self._workspace_path("test-harbor-agent-snapshot-source")
+        dest_parent = self._workspace_path("test-harbor-agent-snapshot-dest")
+        snapshot = dest_parent / "snapshot"
+        try:
+            (repo_root / "harness_code_agent").mkdir()
+            (repo_root / "harness_code_agent" / "__init__.py").write_text("", encoding="utf-8")
+            (repo_root / "vendor_wheels").mkdir()
+            (repo_root / "vendor_wheels" / "openai-1.0.0-py3-none-any.whl").write_text("wheel", encoding="utf-8")
+            (repo_root / "vendor_wheels" / "python-3.12.13-x86_64-unknown-linux-gnu.tar.gz").write_text(
+                "large runtime archive",
+                encoding="utf-8",
+            )
+            (repo_root / ".harness" / "traces").mkdir(parents=True)
+            (repo_root / ".harness" / "traces" / "trace.jsonl").write_text("trace", encoding="utf-8")
+            (repo_root / ".harbor" / "tmp").mkdir(parents=True)
+            (repo_root / ".harbor" / "tmp" / "leftover.txt").write_text("tmp", encoding="utf-8")
+            (repo_root / "eval" / "results" / "old-run").mkdir(parents=True)
+            (repo_root / "eval" / "results" / "old-run" / "summary.json").write_text("{}", encoding="utf-8")
+            (repo_root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+            harbor_agent._copy_repo_snapshot(repo_root, snapshot)
+
+            self.assertTrue((snapshot / "harness_code_agent" / "__init__.py").exists())
+            self.assertTrue((snapshot / "vendor_wheels" / "openai-1.0.0-py3-none-any.whl").exists())
+            self.assertFalse((snapshot / "vendor_wheels" / "python-3.12.13-x86_64-unknown-linux-gnu.tar.gz").exists())
+            self.assertFalse((snapshot / ".harness").exists())
+            self.assertFalse((snapshot / ".harbor").exists())
+            self.assertFalse((snapshot / "eval" / "results").exists())
+            self.assertFalse((snapshot / ".env").exists())
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+            shutil.rmtree(dest_parent, ignore_errors=True)
+
+    def _import_harbor_agent_with_fakes(self):
+        fake_base = types.ModuleType("harbor.agents.installed.base")
+        fake_base.BaseInstalledAgent = object
+        fake_base.with_prompt_template = lambda fn: fn
+
+        fake_environment_base = types.ModuleType("harbor.environments.base")
+        fake_environment_base.BaseEnvironment = object
+
+        fake_context = types.ModuleType("harbor.models.agent.context")
+        fake_context.AgentContext = object
+
+        fake_modules = {
+            "harbor": types.ModuleType("harbor"),
+            "harbor.agents": types.ModuleType("harbor.agents"),
+            "harbor.agents.installed": types.ModuleType("harbor.agents.installed"),
+            "harbor.agents.installed.base": fake_base,
+            "harbor.environments": types.ModuleType("harbor.environments"),
+            "harbor.environments.base": fake_environment_base,
+            "harbor.models": types.ModuleType("harbor.models"),
+            "harbor.models.agent": types.ModuleType("harbor.models.agent"),
+            "harbor.models.agent.context": fake_context,
+        }
+
+        previous = sys.modules.pop("eval.benchmarks.harbor_agent", None)
+        with patch.dict(sys.modules, fake_modules):
+            import eval.benchmarks.harbor_agent as harbor_agent
+
+        sys.modules.pop("eval.benchmarks.harbor_agent", None)
+        if previous is not None:
+            sys.modules["eval.benchmarks.harbor_agent"] = previous
+        return harbor_agent
 
     def test_docker_daemon_running_returns_false_on_cli_failure(self):
         with patch("eval.benchmarks.run_terminal_bench.subprocess.run") as run_mock:
