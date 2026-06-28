@@ -225,8 +225,28 @@ class EvalSuiteTests(unittest.TestCase):
         cython = next(item for item in summary["task_results"] if item["task"] == "build-cython-ext")
         self.assertEqual(cython["status"], "failed")
         self.assertEqual(cython["reward"], 0.0)
+        self.assertIn("--jobs-dir", cython["command"])
         self.assertTrue(Path(cython["stdout_path"]).exists())
         self.assertTrue(Path(cython["stderr_path"]).exists())
+
+    def test_tbench_dry_run_includes_parallelism(self):
+        from eval.scripts.run_terminal_bench_eval import _dry_run_plan, parse_args
+
+        args = parse_args([
+            "--tbench-task-set",
+            "24task",
+            "--task",
+            "fix-git",
+            "--tbench-parallelism",
+            "3",
+            "--dry-run",
+        ])
+
+        plan = _dry_run_plan(args)
+
+        self.assertEqual(plan["terminal_bench_task_set"], "24task")
+        self.assertEqual(plan["terminal_bench_tasks"], ["fix-git"])
+        self.assertEqual(plan["tbench_parallelism"], 3)
 
     def test_harbor_usage_collects_metrics_from_result_text_fallback(self):
         from eval.benchmarks.usage_metrics import collect_harbor_job_usage
@@ -436,8 +456,8 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("tokens=4567", resume)
         self.assertIn("est. cost=$0.1234", resume)
         self.assertIn("Terminal-Bench Per-Task Telemetry", resume)
-        self.assertIn("| fix-git | passed | passed | software-engineering | easy | 12.3s | 1234 | 1 | 7 | $0.0012 |", resume)
-        self.assertIn("| overfull-hbox | passed | passed | debugging | easy | 5.7s | not captured | not captured | not captured | not captured |", resume)
+        self.assertIn("| fix-git | passed | not captured | passed | software-engineering | easy | 12.3s | 1234 | 1 | 7 | $0.0012 |", resume)
+        self.assertIn("| overfull-hbox | passed | not captured | passed | debugging | easy | 5.7s | not captured | not captured | not captured | not captured |", resume)
         self.assertIn("Claw-SWE-Bench Lite80", resume)
         self.assertIn("64/80 patches", resume)
 

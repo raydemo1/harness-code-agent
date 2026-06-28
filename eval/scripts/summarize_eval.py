@@ -316,6 +316,8 @@ def _combined_tbench_24_summary(root: Path) -> dict[str, Any]:
             candidates[task] = (path, payload, enriched)
     if not candidates:
         return {}
+    if any(task not in candidates for task in tasks):
+        return {}
     task_results: list[dict[str, Any]] = []
     for task in tasks:
         if task in candidates:

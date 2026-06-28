@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import re
 import shutil
@@ -73,6 +74,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Optional task override. Repeat to run only selected tasks from the configured task set.",
     )
+    parser.add_argument(
+        "--tbench-parallelism",
+        type=int,
+        default=1,
+        help="Number of Terminal-Bench tasks to run concurrently. Each task gets an isolated Harbor jobs dir.",
+    )
     return parser.parse_args(argv)
 
 
@@ -91,61 +98,30 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
     task_results: list[dict[str, Any]] = []
     outputs_dir = run_dir / "task_outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    for task in tasks:
-        command = [
-            sys.executable,
-            str(PROJECT_ROOT / "eval" / "benchmarks" / "run_terminal_bench.py"),
-            "--task",
-            task,
+    parallelism = max(1, int(args.tbench_parallelism or 1))
+    if parallelism == 1 or len(tasks) <= 1:
+        task_results = [
+            _run_tbench_task(args, run_dir=run_dir, outputs_dir=outputs_dir, metadata=metadata, task=task)
+            for task in tasks
         ]
-        if args.runner_env:
-            command.extend(["--env", args.runner_env])
-        if args.force_build:
-            command.append("--force-build")
-        task_started = time.perf_counter()
-        completed = subprocess.run(
-            command,
-            cwd=PROJECT_ROOT,
-            env=base_env(),
-            capture_output=True,
-            text=True,
-            timeout=args.tbench_timeout,
-        )
-        task_elapsed = time.perf_counter() - task_started
-        stdout_path = outputs_dir / f"{safe_name(task)}.stdout.txt"
-        stderr_path = outputs_dir / f"{safe_name(task)}.stderr.txt"
-        outputs_dir.mkdir(parents=True, exist_ok=True)
-        stdout_path.write_text(completed.stdout, encoding="utf-8", newline="\n")
-        stderr_path.write_text(completed.stderr, encoding="utf-8", newline="\n")
-        task_meta = metadata.get(task) or {}
-        launcher_result = _launcher_task_result(completed.stdout, task)
-        launcher_passed = launcher_result.get("passed") if launcher_result else None
-        status = _task_status(completed.returncode, launcher_passed)
-        diagnostics = _task_diagnostics(
-            task=task,
-            status=status,
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            launcher_result=launcher_result,
-        )
-        task_results.append({
-            "task": task,
-            "category": str(task_meta.get("category") or "unknown"),
-            "difficulty": str(task_meta.get("difficulty") or "unknown"),
-            "agent_timeout_sec": number(task_meta.get("agent_timeout_sec")),
-            "returncode": completed.returncode,
-            "status": status,
-            "elapsed_seconds": task_elapsed,
-            "stdout_path": str(stdout_path),
-            "stderr_path": str(stderr_path),
-            "command": command,
-            "reward": launcher_result.get("reward") if launcher_result else None,
-            "trial_name": launcher_result.get("trial_name") if launcher_result else "",
-            "session_id": launcher_result.get("session_id") if launcher_result else "",
-            "metrics": (launcher_result.get("metrics") or {}) if launcher_result else {},
-            **diagnostics,
-        })
+    else:
+        results_by_task: dict[str, dict[str, Any]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
+            futures = {
+                executor.submit(
+                    _run_tbench_task,
+                    args,
+                    run_dir=run_dir,
+                    outputs_dir=outputs_dir,
+                    metadata=metadata,
+                    task=task,
+                ): task
+                for task in tasks
+            }
+            for future in concurrent.futures.as_completed(futures):
+                task = futures[future]
+                results_by_task[task] = future.result()
+        task_results = [results_by_task[task] for task in tasks]
     elapsed = time.perf_counter() - started
     passed = sum(1 for item in task_results if item["status"] == "passed")
     summary = {
@@ -166,6 +142,73 @@ def run_tbench_suite(args: argparse.Namespace) -> Path:
     return run_dir
 
 
+def _run_tbench_task(
+    args: argparse.Namespace,
+    *,
+    run_dir: Path,
+    outputs_dir: Path,
+    metadata: dict[str, Any],
+    task: str,
+) -> dict[str, Any]:
+    task_jobs_dir = run_dir / "harbor_jobs" / safe_name(task)
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "eval" / "benchmarks" / "run_terminal_bench.py"),
+        "--jobs-dir",
+        str(task_jobs_dir),
+        "--task",
+        task,
+    ]
+    if args.runner_env:
+        command.extend(["--env", args.runner_env])
+    if args.force_build:
+        command.append("--force-build")
+    task_started = time.perf_counter()
+    completed = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        env=base_env(),
+        capture_output=True,
+        text=True,
+        timeout=args.tbench_timeout,
+    )
+    task_elapsed = time.perf_counter() - task_started
+    stdout_path = outputs_dir / f"{safe_name(task)}.stdout.txt"
+    stderr_path = outputs_dir / f"{safe_name(task)}.stderr.txt"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_text(completed.stdout, encoding="utf-8", newline="\n")
+    stderr_path.write_text(completed.stderr, encoding="utf-8", newline="\n")
+    task_meta = metadata.get(task) or {}
+    launcher_result = _launcher_task_result(completed.stdout, task)
+    launcher_passed = launcher_result.get("passed") if launcher_result else None
+    status = _task_status(completed.returncode, launcher_passed)
+    diagnostics = _task_diagnostics(
+        task=task,
+        status=status,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        launcher_result=launcher_result,
+    )
+    return {
+        "task": task,
+        "category": str(task_meta.get("category") or "unknown"),
+        "difficulty": str(task_meta.get("difficulty") or "unknown"),
+        "agent_timeout_sec": number(task_meta.get("agent_timeout_sec")),
+        "returncode": completed.returncode,
+        "status": status,
+        "elapsed_seconds": task_elapsed,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "command": command,
+        "reward": launcher_result.get("reward") if launcher_result else None,
+        "trial_name": launcher_result.get("trial_name") if launcher_result else "",
+        "session_id": launcher_result.get("session_id") if launcher_result else "",
+        "metrics": (launcher_result.get("metrics") or {}) if launcher_result else {},
+        **diagnostics,
+    }
+
+
 def _dry_run_plan(args: argparse.Namespace) -> dict[str, Any]:
     payload = load_tbench_task_config(args.tbench_task_set)
     return {
@@ -176,6 +219,7 @@ def _dry_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         "terminal_bench_tasks": list(args.task or payload["tasks"]),
         "runner_env": args.runner_env,
         "force_build": args.force_build,
+        "tbench_parallelism": max(1, int(args.tbench_parallelism or 1)),
     }
 
 

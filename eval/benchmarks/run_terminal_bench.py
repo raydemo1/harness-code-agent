@@ -214,8 +214,11 @@ def build_harbor_run_command(
     runner_env: str | None,
     dataset_path: Path | None,
     force_build: bool,
+    jobs_dir: Path | None = None,
 ) -> list[str]:
     command = [harbor_executable, "run"]
+    if jobs_dir is not None:
+        command.extend(["--jobs-dir", str(jobs_dir)])
     if dataset_path is None:
         command.extend(["-d", HARBOR_DATASET_ID])
     else:
@@ -265,6 +268,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force Harbor to build environments locally instead of using task docker_image.",
     )
+    parser.add_argument(
+        "--jobs-dir",
+        type=Path,
+        default=None,
+        help="Optional Harbor jobs directory. Useful for isolating parallel task runs.",
+    )
     return parser.parse_args()
 
 
@@ -286,6 +295,7 @@ def main() -> int:
         runner_env=args.runner_env,
         dataset_path=resolve_harbor_dataset_path(dataset_path),
         force_build=args.force_build,
+        jobs_dir=args.jobs_dir,
     )
 
     print(f"Using TEMP/TMP: {env['TEMP']}")
@@ -293,7 +303,8 @@ def main() -> int:
     print(f"Repaired {repaired_count} broken task docker_image entries")
     print(f"Running: {' '.join(command)}")
 
-    jobs_root = repo_root / "jobs"
+    jobs_root = (args.jobs_dir or (repo_root / "jobs")).resolve()
+    jobs_root.mkdir(parents=True, exist_ok=True)
     before_jobs = _job_names(jobs_root)
     completed = subprocess.run(command, cwd=repo_root, env=env)
     for job_dir in _new_job_dirs(jobs_root, before_jobs):
