@@ -27,7 +27,8 @@ CORE_TOOL_SCHEMAS = [
                         "type": "integer",
                         "minimum": 1,
                         "maximum": READ_FILE_MAX_LINES,
-                        "description": "Maximum lines to return for a bounded read. Must be <= 500.",
+                        "description": f"Maximum lines to return for a bounded read. Must be <= {READ_FILE_MAX_LINES}. "
+                        "The per-call output is also capped by a token limit (whichever is smaller).",
                     },
                     "include_line_numbers": {
                         "type": "boolean",

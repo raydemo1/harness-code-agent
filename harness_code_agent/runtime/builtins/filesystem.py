@@ -6,12 +6,15 @@ import subprocess
 from pathlib import Path
 
 from ... import config
+from ...agent.context import count_text_tokens
 from ..tool_context import ToolContext
 from ..tool_result import ToolResult
 
 
-READ_FILE_MAX_LINES = 500
-READ_FILE_MAX_OUTPUT_CHARS = 100_000
+# Dual limit: lines and tokens, whichever is smaller wins.
+# Aligned with Claude Code (2000 lines / 100K tokens per tool result).
+READ_FILE_MAX_LINES = 2000
+READ_FILE_MAX_OUTPUT_TOKENS = 100_000
 REPO_SEARCH_TIMEOUT_SECONDS = 15
 REPO_SEARCH_MAX_RESULTS = 500
 LIST_FILES_MAX_RESULTS = 1000
@@ -314,22 +317,24 @@ def read_file(
     if include_line_numbers:
         selected = [f"{line_no}: {line}" for line_no, line in enumerate(selected, start=start)]
     output = "\n".join(selected)
-    if len(output) > READ_FILE_MAX_OUTPUT_CHARS:
+    output_tokens = count_text_tokens(output)
+    if output_tokens > READ_FILE_MAX_OUTPUT_TOKENS:
         return ToolResult(
             tool="read_file",
             status="failed",
             output=(
-                f"[error] read_file output window is too large ({len(output)} chars). "
+                f"[error] read_file output window is too large ({output_tokens} tokens). "
                 f"Use a smaller max_lines value or a narrower start_line range. "
-                f"The per-call output limit is {READ_FILE_MAX_OUTPUT_CHARS} chars."
+                f"The per-call output limit is {READ_FILE_MAX_OUTPUT_TOKENS} tokens "
+                f"(or {READ_FILE_MAX_LINES} lines, whichever is smaller)."
             ),
-            error=f"read_file output window is too large: {len(output)} chars",
+            error=f"read_file output window is too large: {output_tokens} tokens",
             metadata={
                 "path": path,
                 "start_line": start,
                 "max_lines": max_lines,
                 "total_lines": total_lines,
-                "output_chars": len(output),
+                "output_tokens": output_tokens,
                 "status_source": "validation",
             },
         )

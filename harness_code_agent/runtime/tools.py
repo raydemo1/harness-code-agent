@@ -19,7 +19,7 @@ from .builtins.browser import browser_test, stop_dev_server
 from .builtins.discovery import tool_search
 from .builtins.filesystem import (
     READ_FILE_MAX_LINES,
-    READ_FILE_MAX_OUTPUT_CHARS,
+    READ_FILE_MAX_OUTPUT_TOKENS,
     _resolve,
     apply_patch,
     list_files,

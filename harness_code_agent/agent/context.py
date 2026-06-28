@@ -78,6 +78,17 @@ def count_tokens(messages: list[dict]) -> int:
     return total
 
 
+def count_text_tokens(text: str) -> int:
+    """Token count for a single text string.
+    Uses tiktoken if available, otherwise estimates ~4 chars per token.
+    Shared by context accounting and tool-output size limits."""
+    enc = _get_encoder()
+    if enc:
+        return len(enc.encode(text))
+    # ~4 chars per token is a reasonable approximation
+    return len(text) // 4
+
+
 def count_request_tokens(messages: list[dict], *, tool_schemas: list[dict] | None = None) -> int:
     """Estimate the full request size, including tool schema overhead."""
     total = count_tokens(messages)

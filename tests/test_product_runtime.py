@@ -1695,7 +1695,8 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIn("[error]", max_output)
         self.assertIn("max_lines must be an integer", max_output)
 
-    def test_read_file_requires_bounded_ranges_for_files_over_500_lines(self):
+    def test_read_file_requires_bounded_ranges_for_files_over_limit_lines(self):
+        from harness_code_agent.runtime.builtins.filesystem import READ_FILE_MAX_LINES
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
         from harness_code_agent.sessions.events import EventBus
@@ -1705,7 +1706,7 @@ class ProductRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "big.txt").write_text(
-                "\n".join(f"line {i}" for i in range(1, 502)),
+                "\n".join(f"line {i}" for i in range(1, READ_FILE_MAX_LINES + 2)),
                 encoding="utf-8",
             )
             context = ToolContext(
@@ -1722,11 +1723,12 @@ class ProductRuntimeTests(unittest.TestCase):
             )
 
         self.assertIn("[error]", output)
-        self.assertIn("500 lines", output)
+        self.assertIn(f"{READ_FILE_MAX_LINES} lines", output)
         self.assertIn("start_line", output)
         self.assertIn("max_lines", output)
 
-    def test_read_file_rejects_ranges_over_500_lines(self):
+    def test_read_file_rejects_ranges_over_limit_lines(self):
+        from harness_code_agent.runtime.builtins.filesystem import READ_FILE_MAX_LINES
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
         from harness_code_agent.sessions.events import EventBus
@@ -1736,7 +1738,7 @@ class ProductRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "big.txt").write_text(
-                "\n".join(f"line {i}" for i in range(1, 700)),
+                "\n".join(f"line {i}" for i in range(1, READ_FILE_MAX_LINES + 200)),
                 encoding="utf-8",
             )
             context = ToolContext(
@@ -1747,15 +1749,16 @@ class ProductRuntimeTests(unittest.TestCase):
 
             output = tools.execute_tool(
                 "read_file",
-                {"path": "big.txt", "start_line": 1, "max_lines": 501},
+                {"path": "big.txt", "start_line": 1, "max_lines": READ_FILE_MAX_LINES + 1},
                 tool_context=context,
                 agent_name="main_agent",
             )
 
         self.assertIn("[error]", output)
-        self.assertIn("max_lines must be <= 500", output)
+        self.assertIn(f"max_lines must be <= {READ_FILE_MAX_LINES}", output)
 
     def test_read_file_rejects_windows_with_too_much_output(self):
+        from harness_code_agent.runtime.builtins.filesystem import READ_FILE_MAX_OUTPUT_TOKENS
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
         from harness_code_agent.sessions.events import EventBus
@@ -1764,7 +1767,12 @@ class ProductRuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "wide.txt").write_text("x" * 100_001, encoding="utf-8")
+            # Use diverse text so BPE cannot merge tokens as aggressively as a
+            # single repeated character (~6 tokens per 26-char fragment after
+            # cl100k encoding; ~4 chars/token for the char-based fallback).
+            fragment = "the quick brown fox jumps "
+            repeats = (READ_FILE_MAX_OUTPUT_TOKENS // 5) + 10
+            (root / "wide.txt").write_text(fragment * repeats, encoding="utf-8")
             context = ToolContext(
                 workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
                 permission_policy=PermissionPolicy(mode="workspace-write"),
@@ -1780,6 +1788,7 @@ class ProductRuntimeTests(unittest.TestCase):
 
         self.assertIn("[error]", output)
         self.assertIn("too large", output)
+        self.assertIn("tokens", output)
         self.assertNotIn("[TRUNCATED]", output)
 
     def test_tool_result_does_not_infer_status_from_raw_tool_text(self):
