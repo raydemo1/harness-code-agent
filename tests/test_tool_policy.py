@@ -168,7 +168,7 @@ class ShellPolicyTests(unittest.TestCase):
         middleware = ToolPolicyMiddleware(repeated_failure_threshold=2)
         state = AgentRuntimeState()
         args = {"path": "eval/benchmarks/run_terminal_bench.py", "max_lines": 40}
-        result = "parser.add_argument('--tbench-timeout', type=int, default=7200)\n"
+        result = "parser.add_argument('--task-wall-timeout', type=int, default=7200)\n"
 
         first = middleware.post_tool("read_file", args, result, [], runtime_state=state)
         second = middleware.post_tool("read_file", args, result, [], runtime_state=state)

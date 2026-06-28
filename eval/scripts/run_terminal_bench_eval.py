@@ -51,7 +51,17 @@ def main(argv: list[str] | None = None) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Terminal-Bench eval tasks.")
     add_common_args(parser)
-    parser.add_argument("--tbench-timeout", type=int, default=7200)
+    parser.add_argument(
+        "--task-wall-timeout",
+        dest="task_wall_timeout",
+        type=int,
+        default=7200,
+        help=(
+            "Wall-clock timeout, in seconds, for each Terminal-Bench launcher "
+            "subprocess. This is an outer watchdog, separate from a task's "
+            "agent_timeout_sec budget."
+        ),
+    )
     parser.add_argument(
         "--tbench-task-set",
         choices=sorted(TBENCH_TASK_FILES),
@@ -172,7 +182,7 @@ def _run_tbench_task(
             env=base_env(),
             capture_output=True,
             text=True,
-            timeout=args.tbench_timeout,
+            timeout=args.task_wall_timeout,
         )
         returncode = completed.returncode
         stdout = completed.stdout
@@ -182,7 +192,7 @@ def _run_tbench_task(
         returncode = 124
         stdout = _output_text(exc.stdout or exc.output)
         stderr = _output_text(exc.stderr)
-        timeout_message = f"Terminal-Bench launcher timed out after {args.tbench_timeout} seconds."
+        timeout_message = f"Terminal-Bench launcher timed out after {args.task_wall_timeout} seconds."
         stderr = f"{stderr.rstrip()}\n{timeout_message}\n" if stderr else f"{timeout_message}\n"
     task_elapsed = time.perf_counter() - task_started
     stdout_path = outputs_dir / f"{safe_name(task)}.stdout.txt"
