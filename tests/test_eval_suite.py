@@ -229,6 +229,64 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertTrue(Path(cython["stdout_path"]).exists())
         self.assertTrue(Path(cython["stderr_path"]).exists())
 
+    def test_run_tbench_suite_records_timeout_and_continues(self):
+        from eval.scripts.run_terminal_bench_eval import parse_args, run_tbench_suite
+
+        args = parse_args([
+            "--tbench-task-set",
+            "8task",
+            "--task",
+            "fix-git",
+            "--task",
+            "overfull-hbox",
+            "--output-root",
+            str(self.root / "results"),
+            "--run-name",
+            "unit-timeout",
+            "--tbench-timeout",
+            "1",
+        ])
+
+        def fake_run(command, **kwargs):
+            task = command[-1]
+            if task == "fix-git":
+                raise subprocess.TimeoutExpired(
+                    command,
+                    timeout=kwargs["timeout"],
+                    output=b"partial stdout",
+                    stderr=b"partial stderr",
+                )
+            stdout = "\nHCA_TERMINAL_BENCH_RESULT:" + json.dumps({
+                "task_results": [{
+                    "task": task,
+                    "passed": True,
+                    "reward": 1.0,
+                    "metrics": {},
+                }]
+            })
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with patch("eval.scripts.run_terminal_bench_eval.subprocess.run", side_effect=fake_run) as run_mock:
+            run_dir = run_tbench_suite(args)
+
+        self.assertEqual(run_mock.call_count, 2)
+        summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["task_count"], 2)
+        self.assertEqual(summary["passed"], 1)
+
+        timed_out = next(item for item in summary["task_results"] if item["task"] == "fix-git")
+        self.assertEqual(timed_out["status"], "failed")
+        self.assertTrue(timed_out["timed_out"])
+        self.assertEqual(timed_out["returncode"], 124)
+        self.assertEqual(timed_out["failure_kind"], "launcher_timeout")
+        self.assertIn("partial stdout", Path(timed_out["stdout_path"]).read_text(encoding="utf-8"))
+        timeout_stderr = Path(timed_out["stderr_path"]).read_text(encoding="utf-8")
+        self.assertIn("partial stderr", timeout_stderr)
+        self.assertIn("Terminal-Bench launcher timed out after 1 seconds.", timeout_stderr)
+
+        continued = next(item for item in summary["task_results"] if item["task"] == "overfull-hbox")
+        self.assertEqual(continued["status"], "passed")
+
     def test_tbench_dry_run_includes_parallelism(self):
         from eval.scripts.run_terminal_bench_eval import _dry_run_plan, parse_args
 

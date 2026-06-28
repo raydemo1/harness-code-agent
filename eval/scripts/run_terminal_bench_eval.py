@@ -164,30 +164,42 @@ def _run_tbench_task(
     if args.force_build:
         command.append("--force-build")
     task_started = time.perf_counter()
-    completed = subprocess.run(
-        command,
-        cwd=PROJECT_ROOT,
-        env=base_env(),
-        capture_output=True,
-        text=True,
-        timeout=args.tbench_timeout,
-    )
+    timed_out = False
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            env=base_env(),
+            capture_output=True,
+            text=True,
+            timeout=args.tbench_timeout,
+        )
+        returncode = completed.returncode
+        stdout = completed.stdout
+        stderr = completed.stderr
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        returncode = 124
+        stdout = _output_text(exc.stdout or exc.output)
+        stderr = _output_text(exc.stderr)
+        timeout_message = f"Terminal-Bench launcher timed out after {args.tbench_timeout} seconds."
+        stderr = f"{stderr.rstrip()}\n{timeout_message}\n" if stderr else f"{timeout_message}\n"
     task_elapsed = time.perf_counter() - task_started
     stdout_path = outputs_dir / f"{safe_name(task)}.stdout.txt"
     stderr_path = outputs_dir / f"{safe_name(task)}.stderr.txt"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path.write_text(completed.stdout, encoding="utf-8", newline="\n")
-    stderr_path.write_text(completed.stderr, encoding="utf-8", newline="\n")
+    stdout_path.write_text(stdout, encoding="utf-8", newline="\n")
+    stderr_path.write_text(stderr, encoding="utf-8", newline="\n")
     task_meta = metadata.get(task) or {}
-    launcher_result = _launcher_task_result(completed.stdout, task)
+    launcher_result = _launcher_task_result(stdout, task)
     launcher_passed = launcher_result.get("passed") if launcher_result else None
-    status = _task_status(completed.returncode, launcher_passed)
+    status = "failed" if timed_out else _task_status(returncode, launcher_passed)
     diagnostics = _task_diagnostics(
         task=task,
         status=status,
-        returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
         launcher_result=launcher_result,
     )
     return {
@@ -195,8 +207,9 @@ def _run_tbench_task(
         "category": str(task_meta.get("category") or "unknown"),
         "difficulty": str(task_meta.get("difficulty") or "unknown"),
         "agent_timeout_sec": number(task_meta.get("agent_timeout_sec")),
-        "returncode": completed.returncode,
+        "returncode": returncode,
         "status": status,
+        "timed_out": timed_out,
         "elapsed_seconds": task_elapsed,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
@@ -221,6 +234,14 @@ def _dry_run_plan(args: argparse.Namespace) -> dict[str, Any]:
         "force_build": args.force_build,
         "tbench_parallelism": max(1, int(args.tbench_parallelism or 1)),
     }
+
+
+def _output_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _launcher_task_result(stdout: str, task: str) -> dict[str, Any]:
@@ -280,6 +301,8 @@ def _task_diagnostics(
         combined_error_text = "\n".join([exception_type, exception_message, stdout or "", stderr or ""])
         if "AgentTimeoutError" in combined_error_text:
             failure_kind = "agent_timeout"
+        elif returncode == 124 or "Terminal-Bench launcher timed out" in combined_error_text:
+            failure_kind = "launcher_timeout"
         elif (
             "AgentSetupTimeoutError" in combined_error_text
             or "NonZeroAgentExitCodeError" in combined_error_text
