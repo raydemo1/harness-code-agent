@@ -14,6 +14,7 @@ from eval.benchmarks.run_terminal_bench import (
     is_valid_harbor_dataset,
     main,
     repair_task_images,
+    resolve_harbor_dataset_path,
     resolve_harbor_executable,
 )
 from eval.benchmarks.harbor_env import runner_env_vars
@@ -176,7 +177,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
     def test_main_fails_fast_when_docker_daemon_is_unavailable(self):
         repo_root = self._workspace_path("test-terminal-bench-docker-preflight")
         dataset_path = repo_root / "dataset"
-        task_dir = dataset_path / "overfull-hbox"
+        task_dir = dataset_path / "tasks" / "overfull-hbox"
         task_dir.mkdir(parents=True)
         (task_dir / "task.toml").write_text("name='overfull-hbox'\n", encoding="utf-8")
         try:
@@ -225,7 +226,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             (repo_root / ".harbor" / "datasets" / "terminal-bench-2-1").resolve(),
         )
 
-    def test_is_valid_harbor_dataset_requires_task_toml(self):
+    def test_is_valid_harbor_dataset_requires_2_1_tasks_layout(self):
         repo_root = self._workspace_path("test-terminal-bench-validity")
         try:
             invalid_dataset = repo_root / "terminal-bench-2-1"
@@ -238,7 +239,37 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             valid_task_dir.mkdir(parents=True, exist_ok=True)
             (valid_task_dir / "task.toml").write_text("name='fix-git'\n", encoding="utf-8")
 
+            self.assertFalse(is_valid_harbor_dataset(invalid_dataset))
+
+            task_dir = invalid_dataset / "tasks" / "fix-git"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "task.toml").write_text("name='fix-git'\n", encoding="utf-8")
             self.assertTrue(is_valid_harbor_dataset(invalid_dataset))
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_resolve_harbor_dataset_path_returns_2_1_tasks_directory(self):
+        repo_root = self._workspace_path("test-terminal-bench-harbor-path")
+        try:
+            dataset_path = repo_root / "terminal-bench-2-1"
+            task_dir = dataset_path / "tasks" / "fix-git"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "task.toml").write_text("name='fix-git'\n", encoding="utf-8")
+
+            self.assertEqual(resolve_harbor_dataset_path(dataset_path), dataset_path / "tasks")
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_resolve_harbor_dataset_path_rejects_legacy_root_task_layout(self):
+        repo_root = self._workspace_path("test-terminal-bench-harbor-path-legacy")
+        try:
+            dataset_path = repo_root / "terminal-bench-2-1"
+            task_dir = dataset_path / "fix-git"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "task.toml").write_text("name='fix-git'\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "tasks/\\*/task.toml"):
+                resolve_harbor_dataset_path(dataset_path)
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 
@@ -250,7 +281,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
         def fake_download(path):
             downloaded_paths.append(path)
-            task_dir = dataset_path / "fix-git"
+            task_dir = dataset_path / "tasks" / "fix-git"
             task_dir.mkdir(parents=True, exist_ok=True)
             (task_dir / "task.toml").write_text("name='fix-git'\n", encoding="utf-8")
 
@@ -273,7 +304,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         repo_root = self._workspace_path("test-terminal-bench-image-repair")
         dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
         try:
-            task_dir = dataset_path / "overfull-hbox"
+            task_dir = dataset_path / "tasks" / "overfull-hbox"
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
@@ -306,7 +337,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         repo_root = self._workspace_path("test-terminal-bench-image-preserve")
         dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
         try:
-            task_dir = dataset_path / "fix-git"
+            task_dir = dataset_path / "tasks" / "fix-git"
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
@@ -335,7 +366,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
         try:
             for task in ("overfull-hbox", "custom-memory-heap-crash"):
-                task_dir = dataset_path / task
+                task_dir = dataset_path / "tasks" / task
                 task_dir.mkdir(parents=True, exist_ok=True)
                 (task_dir / "task.toml").write_text(
                     "\n".join(
@@ -359,6 +390,37 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             self.assertEqual(repaired, 1)
             self.assertIn("overfull-hbox", "\n".join(seen))
             self.assertNotIn("custom-memory-heap-crash", "\n".join(seen))
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_repair_task_images_uses_2_1_tasks_layout(self):
+        repo_root = self._workspace_path("test-terminal-bench-image-tasks-dir")
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
+        try:
+            task_dir = dataset_path / "tasks" / "overfull-hbox"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            task_file = task_dir / "task.toml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "[environment]",
+                        'docker_image = "ghcr.io/laude-institute/terminal-bench/overfull-hbox:2.1"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_exists(image: str) -> bool:
+                return image == "alexgshaw/overfull-hbox:20251031"
+
+            with patch("eval.benchmarks.run_terminal_bench._docker_image_exists", side_effect=fake_exists):
+                repaired = repair_task_images(dataset_path, ["overfull-hbox"])
+
+            self.assertEqual(repaired, 1)
+            self.assertIn(
+                'docker_image = "alexgshaw/overfull-hbox:20251031"',
+                task_file.read_text(encoding="utf-8"),
+            )
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 

@@ -98,13 +98,19 @@ class Agent:
         self.stream_callback = stream_callback
         self.prompt_cache_identity = prompt_cache_identity
         self.initial_planning_mode = _normalize_initial_planning_mode(initial_planning_mode)
+        self.current_task_metadata: dict = {}
         self._conversations: weakref.WeakSet[AgentConversation] = weakref.WeakSet()
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
         return AgentRuntimeState(task_board=self._new_task_board(task))
 
     def _new_task_board(self, task: str) -> TaskBoard:
-        return TaskBoard(original_task=task, goal=task, planning_mode=self.initial_planning_mode)
+        return TaskBoard(
+            original_task=task,
+            goal=task,
+            task_metadata=dict(self.current_task_metadata or {}),
+            planning_mode=self.initial_planning_mode,
+        )
 
     def run(self, task: str) -> str:
         """
@@ -149,6 +155,8 @@ class AgentConversation:
         self.runtime_state = agent._create_runtime_state(initial_task or "")
         if agent.tool_context is not None and agent.tool_context.session_id:
             self.runtime_state.session_id = agent.tool_context.session_id
+        if agent.tool_context is not None and agent.tool_context.permission_policy is not None:
+            self.runtime_state.permission_mode = agent.tool_context.permission_policy.mode
         self.messages: list[dict] = [{"role": "system", "content": agent.system_prompt}]
         self.client = get_client()
         self.provider: ProviderAdapter = current_adapter()

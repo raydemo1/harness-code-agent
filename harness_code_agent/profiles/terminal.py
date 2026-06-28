@@ -21,6 +21,8 @@ them without touching this file:
 """
 from __future__ import annotations
 
+import os
+
 from .base import BaseProfile, AgentConfig, build_profile_prompt
 from ..tracking_policy import TASK_TRACKING_POLICY
 from ..runtime.middleware import (
@@ -157,6 +159,11 @@ class TerminalProfile(BaseProfile):
         meta = self._lookup_task_meta(user_prompt)
         return meta.get("agent_timeout_sec") if meta else None
 
+    def resolve_task_metadata(self, user_prompt: str) -> dict | None:
+        """Look up TB2 task metadata for runtime policy and reporting."""
+        meta = self._lookup_task_meta(user_prompt)
+        return dict(meta) if meta else None
+
     def _lookup_task_meta(self, user_prompt: str) -> dict | None:
         """Look up full TB2 task metadata (timeout, difficulty, category)."""
         from .. import config as _cfg
@@ -164,11 +171,16 @@ class TerminalProfile(BaseProfile):
         if not tasks:
             return None
 
+        for env_key in ("HARNESS_TERMINAL_TASK_NAME", "HCA_TERMINAL_TASK_NAME", "TERMINAL_BENCH_TASK_NAME"):
+            meta = _task_meta_by_name(tasks, os.environ.get(env_key, ""))
+            if meta:
+                return meta
+
         # Check workspace path first (most reliable)
         ws_lower = _cfg.WORKSPACE.lower()
         for task_name, meta in tasks.items():
             if task_name in ws_lower:
-                return meta
+                return _with_task_name(task_name, meta)
 
         # Check user prompt
         prompt_lower = user_prompt.lower()
@@ -178,6 +190,26 @@ class TerminalProfile(BaseProfile):
                 task_name.replace("-", " ") in prompt_lower or
                 task_name.replace("-", "_") in prompt_lower
             ):
-                return meta
+                return _with_task_name(task_name, meta)
 
         return None
+
+
+def _task_meta_by_name(tasks: dict, raw_task_name: str) -> dict | None:
+    task_name = str(raw_task_name or "").strip().lower()
+    if not task_name:
+        return None
+    candidates = [task_name.replace("_", "-")]
+    if "/" in task_name:
+        candidates.append(task_name.rsplit("/", 1)[-1].replace("_", "-"))
+    for candidate in candidates:
+        meta = tasks.get(candidate)
+        if meta:
+            return _with_task_name(candidate, meta)
+    return None
+
+
+def _with_task_name(task_name: str, meta: dict) -> dict:
+    resolved = dict(meta)
+    resolved.setdefault("task_name", task_name)
+    return resolved

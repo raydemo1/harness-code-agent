@@ -14,6 +14,7 @@ from .acceptance import AcceptanceState
 class TaskBoard:
     original_task: str = ""
     goal: str = ""
+    task_metadata: dict[str, Any] = field(default_factory=dict)
     steps: list[str] = field(default_factory=list)
     current_step: str = ""
     completed_steps: list[str] = field(default_factory=list)
@@ -143,6 +144,7 @@ class AgentRuntimeState:
     action_tool_count: int = 0
     current_turn_start_index: int = 0
     session_id: str = "default"
+    permission_mode: str = ""
     auto_compaction_turn_start_index: int = -1
     auto_compaction_suspended: bool = False
     context_refill_streak: int = 0

@@ -238,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path(args.workspace).resolve()
 
     os.environ.setdefault("HARNESS_WORKSPACE", str(workspace))
+    if args.task_name:
+        os.environ["HARNESS_TERMINAL_TASK_NAME"] = args.task_name
     os.environ.setdefault("HARNESS_PERMISSION_MODE", "danger-full-access")
     os.environ.setdefault("HARNESS_STREAM", "0")
     os.environ.setdefault("HARNESS_MEMORY_DISABLED", "1")
@@ -357,6 +359,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run harness-code-agent on a Terminal-Bench prompt.")
     parser.add_argument("prompt")
     parser.add_argument("--workspace", default="/app")
+    parser.add_argument(
+        "--task-name",
+        default=os.environ.get("HARNESS_TERMINAL_TASK_NAME", ""),
+        help="Terminal-Bench task name used for profile metadata such as per-task timeout.",
+    )
     return parser.parse_args(argv)
 
 

@@ -42,6 +42,7 @@ from harness_code_agent.core.mentions import (
 from harness_code_agent.sessions.events import FileChangeEvent, ToolResultEvent
 from harness_code_agent.sessions.store import SessionStore
 from harness_code_agent.profiles.base import AgentConfig
+from harness_code_agent.runtime.middleware import TimeBudgetMiddleware
 from harness_code_agent.skills import SkillRegistry
 
 
@@ -223,6 +224,41 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertIn(str(input_files[0]), submitted)
                 self.assertIn("Use read_file to inspect the full text", submitted)
                 self.assertNotIn("MIDDLE-OMITTED-" * 20, submitted)
+            finally:
+                session.close()
+
+    def test_terminal_session_applies_task_metadata_timeout_before_submit(self):
+        with (
+            patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
+            patch.dict(os.environ, {"HARNESS_TERMINAL_TASK_NAME": "overfull-hbox"}),
+        ):
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="terminal",
+                profile_explicit=True,
+            )
+            try:
+                session.submit("Ensure the LaTeX document compiles without overfull hbox warnings")
+
+                self.assertEqual(session.agent.time_budget, 750.0)
+                self.assertEqual(session.agent.current_task_metadata["task_name"], "overfull-hbox")
+                self.assertEqual(session.agent.current_task_metadata["category"], "debugging")
+                time_middleware = next(
+                    mw for mw in session.agent.middlewares if isinstance(mw, TimeBudgetMiddleware)
+                )
+                self.assertEqual(time_middleware.budget_seconds, 750.0)
+                metadata_events = [
+                    event
+                    for event in session.event_bus.events
+                    if event.type == "task_metadata_resolved"
+                ]
+                self.assertEqual(metadata_events[-1].payload["task_metadata"]["task_name"], "overfull-hbox")
+                timeout_events = [
+                    event
+                    for event in session.event_bus.events
+                    if event.type == "task_timeout_resolved"
+                ]
+                self.assertEqual(timeout_events[-1].payload["timeout_seconds"], 750.0)
             finally:
                 session.close()
 

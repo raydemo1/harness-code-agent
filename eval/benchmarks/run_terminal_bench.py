@@ -84,8 +84,17 @@ def default_local_dataset_path(repo_root: Path) -> Path:
     return (repo_root / ".harbor" / "datasets" / LOCAL_DATASET_DIR_NAME).resolve()
 
 
+def resolve_harbor_dataset_path(dataset_path: Path) -> Path:
+    tasks_root = dataset_path / "tasks"
+    if is_valid_harbor_dataset(dataset_path):
+        return tasks_root
+    raise RuntimeError(
+        f"Terminal-Bench 2.1 dataset at {dataset_path} must contain tasks/*/task.toml."
+    )
+
+
 def is_valid_harbor_dataset(dataset_path: Path) -> bool:
-    return any(dataset_path.glob("*/task.toml"))
+    return any(_task_files(dataset_path, None))
 
 
 def _download_and_extract_dataset_archive(dataset_path: Path) -> None:
@@ -162,9 +171,14 @@ def rewrite_task_images_to_ghcr(dataset_path: Path) -> int:
 
 
 def _task_files(dataset_path: Path, tasks: list[str] | None) -> list[Path]:
+    tasks_root = dataset_path / "tasks"
     if tasks:
-        return [dataset_path / task / "task.toml" for task in tasks if (dataset_path / task / "task.toml").exists()]
-    return list(dataset_path.glob("*/task.toml"))
+        return [
+            tasks_root / task / "task.toml"
+            for task in tasks
+            if (tasks_root / task / "task.toml").exists()
+        ]
+    return list(tasks_root.glob("*/task.toml"))
 
 
 def _task_docker_image(content: str) -> str:
@@ -270,7 +284,7 @@ def main() -> int:
         harbor_executable=harbor_executable,
         tasks=tasks,
         runner_env=args.runner_env,
-        dataset_path=dataset_path,
+        dataset_path=resolve_harbor_dataset_path(dataset_path),
         force_build=args.force_build,
     )
 

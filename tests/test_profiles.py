@@ -1,4 +1,6 @@
+import os
 import unittest
+from unittest.mock import patch
 
 from harness_code_agent.agent.prompts import (
     SHARED_AGENT_IDENTITY,
@@ -6,6 +8,7 @@ from harness_code_agent.agent.prompts import (
     PromptPrefixBuilder,
 )
 from harness_code_agent.profiles import PROFILES, get_profile, list_profiles
+from harness_code_agent.profiles.terminal import TerminalProfile
 
 
 class ProfilePromptTests(unittest.TestCase):
@@ -68,6 +71,20 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertIn("findings first", prompts["review"])
         self.assertIn("non-interactive", prompts["terminal"])
         self.assertIn("smallest suitable stack", prompts["app-builder"])
+
+    def test_terminal_profile_resolves_timeout_from_task_name_env(self):
+        with patch.dict(os.environ, {"HARNESS_TERMINAL_TASK_NAME": "terminal-bench/overfull-hbox"}):
+            timeout = TerminalProfile().resolve_task_timeout("instruction text without task slug")
+
+        self.assertEqual(timeout, 750.0)
+
+    def test_terminal_profile_resolves_task_metadata_from_task_name_env(self):
+        with patch.dict(os.environ, {"HARNESS_TERMINAL_TASK_NAME": "terminal-bench/configure-git-webserver"}):
+            metadata = TerminalProfile().resolve_task_metadata("workspace is /app")
+
+        self.assertEqual(metadata["task_name"], "configure-git-webserver")
+        self.assertEqual(metadata["category"], "system-administration")
+        self.assertEqual(metadata["agent_timeout_sec"], 900.0)
 
 
 if __name__ == "__main__":

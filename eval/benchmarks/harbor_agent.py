@@ -180,6 +180,8 @@ class HarnessAgent(BaseInstalledAgent):
     ) -> None:
         """Run our harness with --profile terminal on the given task."""
         escaped = shlex.quote(instruction)
+        task_name = _task_name_from_context(context)
+        task_name_arg = f" --task-name {shlex.quote(task_name)}" if task_name else ""
 
         # Pass secrets through Harbor's env channel instead of embedding them
         # in the logged shell command.
@@ -196,7 +198,7 @@ class HarnessAgent(BaseInstalledAgent):
                 f"cd \"$WORKSPACE\" && "
                 f"PYTHONPATH=/home/user/harness-agent "
                 f"python3 /home/user/harness-agent/eval/benchmarks/hca_terminal_runner.py "
-                f"--workspace \"$WORKSPACE\" {escaped}"
+                f"--workspace \"$WORKSPACE\"{task_name_arg} {escaped}"
             ),
             env=env_vars,
         )
@@ -235,6 +237,37 @@ def _copy_repo_snapshot(source: Path, dest: Path) -> None:
         return ignored
 
     shutil.copytree(source, dest, ignore=ignore)
+
+
+def _task_name_from_context(context: AgentContext) -> str:
+    candidates: list[object] = [
+        getattr(context, "task_name", None),
+        getattr(context, "task_id", None),
+        getattr(context, "name", None),
+    ]
+    task = getattr(context, "task", None)
+    if task is not None:
+        candidates.extend(
+            [
+                getattr(task, "name", None),
+                getattr(task, "task_name", None),
+                getattr(task, "id", None),
+            ]
+        )
+    metadata = getattr(context, "metadata", None)
+    if isinstance(metadata, dict):
+        candidates.extend(
+            [
+                metadata.get("task_name"),
+                metadata.get("task_id"),
+                metadata.get("name"),
+            ]
+        )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _populate_agent_context(context: AgentContext, metrics: dict) -> None:

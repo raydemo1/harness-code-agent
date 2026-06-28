@@ -8,14 +8,30 @@ from __future__ import annotations
 
 import re
 import shlex
+import os
 
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 
 
-_DANGEROUS_PATH_WRITE_PATTERNS = (
-    r">\s*(?:/etc/|/usr/|/bin/|/sbin/|/var/|~[/\\]|%USERPROFILE%|%WINDIR%|c:\\)",
-    r"\bopen\s*\(\s*['\"](?:/etc/|/usr/|/bin/|/sbin/|/var/|~[/\\]|c:\\)",
-    r"\b(?:write_text|write_bytes)\s*\([^)]*(?:/etc/|/usr/|/bin/|/sbin/|/var/|~[/\\]|c:\\)",
+_SYSTEM_WRITE_PATH = r"(?:/etc/|/usr/|/bin/|/sbin/|/var/|~[/\\]|%USERPROFILE%|%WINDIR%|c:\\)"
+_SYSTEM_PATH_WRITE_PATTERNS = (
+    rf"(?:^|[^\d&])(?:>>?|&>)\s*['\"]?(?P<path>{_SYSTEM_WRITE_PATH}[^'\"\s;|&)]*)",
+    rf"\bopen\s*\(\s*['\"](?P<path>{_SYSTEM_WRITE_PATH}[^'\"]*)",
+    rf"\b(?:Path|PurePath)\s*\(\s*['\"](?P<path>{_SYSTEM_WRITE_PATH}[^'\"]*)['\"]\s*\)\.(?:write_text|write_bytes)\b",
+    rf"\b(?:write_text|write_bytes)\s*\([^)]*['\"](?P<path>{_SYSTEM_WRITE_PATH}[^'\"]*)",
+)
+_CONTAINER_SYSTEM_CONFIG_WRITE_PREFIXES = (
+    "/etc/nginx/",
+    "/etc/apache2/",
+    "/etc/caddy/",
+    "/etc/lighttpd/",
+    "/etc/supervisor/",
+    "/etc/systemd/",
+    "/etc/default/",
+    "/etc/init.d/",
+    "/var/www/",
+    "/var/log/nginx/",
+    "/srv/",
 )
 _COMMAND_START = r"(?:^|[;&|]\s*)"
 
@@ -32,7 +48,10 @@ class TerminalShellEditPolicyMiddleware(AgentMiddleware):
         if agent_name not in MAIN_AGENT_NAMES or tool_name != "run_bash":
             return None
         command = str(tool_args.get("command") or "")
-        if _looks_dangerous_command(command):
+        if _looks_dangerous_command(
+            command,
+            allow_container_system_config_writes=_allows_container_system_config_writes(runtime_state),
+        ):
             return (
                 "[blocked] Terminal profile allows shell edits inside the task workspace, but this "
                 "command looks destructive or outside the workspace. Constrain the command to the "
@@ -41,14 +60,48 @@ class TerminalShellEditPolicyMiddleware(AgentMiddleware):
         return None
 
 
-def _looks_dangerous_command(command: str) -> bool:
+def _looks_dangerous_command(command: str, *, allow_container_system_config_writes: bool = False) -> bool:
     return (
-        any(re.search(pattern, command, flags=re.IGNORECASE) for pattern in _DANGEROUS_PATH_WRITE_PATTERNS)
+        _looks_like_system_path_write(
+            command,
+            allow_container_system_config_writes=allow_container_system_config_writes,
+        )
         or _looks_like_destructive_rm(command)
         or _looks_like_destructive_remove_item(command)
         or _looks_like_destructive_del(command)
         or _looks_like_destructive_git(command)
     )
+
+
+def _looks_like_system_path_write(
+    command: str,
+    *,
+    allow_container_system_config_writes: bool,
+) -> bool:
+    for pattern in _SYSTEM_PATH_WRITE_PATTERNS:
+        for match in re.finditer(pattern, command, flags=re.IGNORECASE):
+            path = _strip_quotes(match.group("path"))
+            if allow_container_system_config_writes and _is_container_system_config_path(path):
+                continue
+            return True
+    return False
+
+
+def _allows_container_system_config_writes(runtime_state) -> bool:
+    board = getattr(runtime_state, "task_board", None)
+    metadata = getattr(board, "task_metadata", {}) if board is not None else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    permission_mode = (
+        str(getattr(runtime_state, "permission_mode", "") or "")
+        or str(metadata.get("permission_mode") or "")
+        or os.environ.get("HARNESS_PERMISSION_MODE", "")
+    )
+    return permission_mode == "danger-full-access"
+
+
+def _is_container_system_config_path(path: str) -> bool:
+    normalized = _strip_quotes(path).replace("\\", "/").lower()
+    return normalized.startswith(_CONTAINER_SYSTEM_CONFIG_WRITE_PREFIXES)
 
 
 def _looks_like_destructive_rm(command: str) -> bool:
@@ -181,6 +234,10 @@ def _is_dangerous_target(token: str) -> bool:
     clean = raw.rstrip("/\\")
     if clean in {"", "."}:
         return False
+    if clean in {"/etc", "/usr", "/bin", "/sbin", "/var"}:
+        return True
+    if clean.startswith(("/etc/", "/usr/", "/bin/", "/sbin/", "/var/")):
+        return True
     if clean in {"~", "$home", "${home}", "%userprofile%", "%windir%"}:
         return True
     if clean.startswith(("~/", "~\\", "$home/", "$home\\", "${home}/", "${home}\\", "%userprofile%", "%windir%")):

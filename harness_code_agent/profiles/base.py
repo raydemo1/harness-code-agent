@@ -202,3 +202,12 @@ class BaseProfile(ABC):
         Returns timeout in seconds, or None to use the default budget.
         """
         return None
+
+    def resolve_task_metadata(self, user_prompt: str) -> dict | None:
+        """
+        Resolve profile-specific task metadata.
+
+        Profiles can expose benchmark/task metadata to runtime middleware without
+        making those middleware depend on a concrete benchmark launcher.
+        """
+        return None

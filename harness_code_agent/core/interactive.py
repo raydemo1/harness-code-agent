@@ -165,6 +165,7 @@ class InteractiveSession:
         self.last_assistant_text: str = ""
         self.profile_history: list[ProfileSwitchEvent] = []
         self._started_at: float | None = None
+        self._resolved_task_timeout: float | None = None
         self._closed = False
         self._close_lock = threading.Lock()
         self._bind_profile(self._pending_profile_name, source=self._profile_source)
@@ -284,6 +285,71 @@ class InteractiveSession:
         for mw in self.agent.middlewares:
             if isinstance(mw, TimeBudgetMiddleware):
                 mw.sync_start_time(self._started_at)
+
+    def _apply_profile_task_timeout(self, user_prompt: str) -> None:
+        if self.agent is None:
+            return
+        metadata = self._resolve_profile_task_metadata(user_prompt)
+        self.agent.current_task_metadata = metadata
+        resolver = getattr(self.profile, "resolve_task_timeout", None)
+        if resolver is None:
+            timeout = metadata.get("agent_timeout_sec") if metadata else None
+        else:
+            try:
+                timeout = resolver(user_prompt)
+            except Exception as exc:
+                log.debug("Failed to resolve task timeout for profile %s: %s", self.profile.name(), exc)
+                timeout = None
+            if timeout is None and metadata:
+                timeout = metadata.get("agent_timeout_sec")
+        if metadata and self.event_bus is not None:
+            payload = {
+                "profile": self.profile.name(),
+                "task_metadata": metadata,
+            }
+            self.event_bus.emit("task_metadata_resolved", agent="main_agent", payload=payload)
+        if timeout is None:
+            return
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            return
+        if timeout <= 0:
+            return
+        if self._resolved_task_timeout == timeout:
+            return
+        self._resolved_task_timeout = timeout
+        self.agent.time_budget = timeout
+        for mw in self.agent.middlewares:
+            if isinstance(mw, TimeBudgetMiddleware):
+                mw.budget_seconds = timeout
+                mw._warned = False
+                mw._critical = False
+                mw.sync_start_time(self._started_at)
+        if self.event_bus is not None:
+            self.event_bus.emit(
+                "task_timeout_resolved",
+                agent="main_agent",
+                payload={
+                    "profile": self.profile.name(),
+                    "timeout_seconds": timeout,
+                },
+            )
+
+    def _resolve_profile_task_metadata(self, user_prompt: str) -> dict:
+        resolver = getattr(self.profile, "resolve_task_metadata", None)
+        if resolver is None:
+            return {}
+        try:
+            metadata = resolver(user_prompt)
+        except Exception as exc:
+            log.debug("Failed to resolve task metadata for profile %s: %s", self.profile.name(), exc)
+            return {}
+        if not isinstance(metadata, dict):
+            return {}
+        resolved = dict(metadata)
+        resolved["permission_mode"] = self.permission_mode
+        return resolved
 
     def format_task(self, user_prompt: str) -> str:
         return f"Task:\n{user_prompt}"
@@ -478,6 +544,7 @@ class InteractiveSession:
         turn_started_at = time.time()
         baseline_dirty = git_dirty_paths(self.cwd)
         baseline_staged = git_staged_paths(self.cwd)
+        self._apply_profile_task_timeout(user_prompt)
         resolved = resolve_mentions(
             user_prompt,
             workspace_root=self.cwd,
@@ -781,6 +848,8 @@ class InteractiveSession:
         if self.tool_context is not None:
             self.tool_context.permission_policy = PermissionPolicy(mode=permission_mode)
             self.tool_context.approval_provider = self.approval_provider
+        if self.conversation is not None and getattr(self.conversation, "runtime_state", None) is not None:
+            self.conversation.runtime_state.permission_mode = permission_mode
         if self.session is not None:
             self.session_store.update_permission_mode(self.session.id, permission_mode)
         if self.event_bus is not None:

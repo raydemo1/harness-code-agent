@@ -3,10 +3,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from eval.benchmarks.hca_terminal_runner import export_session_artifacts, write_session_manifest
+from eval.benchmarks.hca_terminal_runner import export_session_artifacts, parse_args, write_session_manifest
 
 
 class TerminalRunnerArtifactTests(unittest.TestCase):
+    def test_parse_args_accepts_task_name_for_profile_metadata(self):
+        args = parse_args([
+            "--workspace",
+            "/app",
+            "--task-name",
+            "terminal-bench/overfull-hbox",
+            "solve it",
+        ])
+
+        self.assertEqual(args.workspace, "/app")
+        self.assertEqual(args.task_name, "terminal-bench/overfull-hbox")
+        self.assertEqual(args.prompt, "solve it")
+
     def test_exports_raw_session_observations_and_plan_history(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

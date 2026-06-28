@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -12,8 +13,15 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from eval.benchmarks.usage_metrics import aggregate_usage
+
 DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "eval" / "results"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "eval"
+TERMINAL_BENCH_24TASK_PATH = PROJECT_ROOT / "eval" / "tasks" / "terminal_bench_24task.json"
+TERMINAL_BENCH_METADATA_PATH = PROJECT_ROOT / "eval" / "benchmarks" / "tb2_tasks.json"
 
 
 @dataclass
@@ -86,6 +94,9 @@ def summarize_result_root(result_root: str | Path) -> EvalSummary:
             summary.tbench = _tbench_summary(payload, path.parent.name)
         elif suite == "claw_swe_bench":
             summary.claw = _claw_summary(payload, path.parent.name)
+    combined_tbench = _combined_tbench_24_summary(root)
+    if combined_tbench:
+        summary.tbench = combined_tbench
     return summary
 
 
@@ -268,6 +279,119 @@ def _tbench_summary(payload: dict[str, Any], run_name: str) -> dict[str, Any]:
     }
 
 
+def _combined_tbench_24_summary(root: Path) -> dict[str, Any]:
+    if not TERMINAL_BENCH_24TASK_PATH.exists():
+        return {}
+    try:
+        config = json.loads(TERMINAL_BENCH_24TASK_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    tasks = [str(task) for task in config.get("tasks") or []]
+    if not tasks:
+        return {}
+    metadata = _load_tbench_metadata()
+    candidates: dict[str, tuple[Path, dict[str, Any], dict[str, Any]]] = {}
+    for path in sorted(root.glob("*/summary.json"), key=lambda item: item.stat().st_mtime):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _suite_name(payload, path.parent.name) != "tbench":
+            continue
+        for item in payload.get("task_results") or []:
+            if not isinstance(item, dict):
+                continue
+            task = str(item.get("task") or "")
+            if task not in tasks or not _is_reportable_tbench_row(item):
+                continue
+            enriched = dict(item)
+            enriched["source_run"] = path.parent.name
+            enriched["source_summary_path"] = str(_display_path(path))
+            if "2.1" in str(payload.get("benchmark_name") or ""):
+                enriched["source"] = "rerun_2.1"
+            elif enriched.get("status") == "passed":
+                enriched["source"] = "carried_forward_success"
+            else:
+                enriched["source"] = "historical_rerun"
+            candidates[task] = (path, payload, enriched)
+    if not candidates:
+        return {}
+    task_results: list[dict[str, Any]] = []
+    for task in tasks:
+        if task in candidates:
+            _, _, item = candidates[task]
+            row = dict(item)
+        else:
+            row = {
+                "task": task,
+                "status": "missing",
+                "failure_kind": "missing",
+                "missing_metrics": True,
+            }
+        meta = metadata.get(task) or {}
+        row.setdefault("category", str(meta.get("category") or "unknown"))
+        row.setdefault("difficulty", str(meta.get("difficulty") or "unknown"))
+        task_results.append(row)
+
+    passed = sum(1 for item in task_results if item.get("status") == "passed")
+    summary = {
+        "run": "combined_terminal_bench_24task",
+        "benchmark_name": str(config.get("benchmark_name") or "Terminal-Bench 2.1 24-task subset"),
+        "task_set": str(config.get("task_set") or "24task"),
+        "task_count": len(tasks),
+        "passed": passed,
+        "pass_rate": passed / len(tasks) if tasks else 0.0,
+        "status": "passed" if passed == len(tasks) else "failed",
+        "category_results": _category_results(task_results),
+        "token_totals": {},
+        "turn_totals": {},
+        "tool_calls": 0,
+        "estimated_cost_usd": None,
+        "task_results": _tbench_task_rows(task_results),
+    }
+    summary.update(aggregate_usage(task_results))
+    return summary
+
+
+def _load_tbench_metadata() -> dict[str, Any]:
+    try:
+        payload = json.loads(TERMINAL_BENCH_METADATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_reportable_tbench_row(item: dict[str, Any]) -> bool:
+    status = str(item.get("status") or "")
+    if status == "passed":
+        return True
+    metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+    if metrics:
+        return True
+    failure_kind = str(item.get("failure_kind") or "")
+    if failure_kind == "agent_timeout":
+        return bool(item.get("has_hca_artifacts") or item.get("resolved_session_id") or item.get("session_id"))
+    return False
+
+
+def _category_results(task_results: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, dict[str, int]] = {}
+    for item in task_results:
+        category = str(item.get("category") or "unknown")
+        bucket = grouped.setdefault(category, {"task_count": 0, "passed": 0})
+        bucket["task_count"] += 1
+        if item.get("status") == "passed":
+            bucket["passed"] += 1
+    return {
+        category: {
+            "task_count": values["task_count"],
+            "passed": values["passed"],
+            "pass_rate": values["passed"] / values["task_count"] if values["task_count"] else 0.0,
+        }
+        for category, values in sorted(grouped.items())
+    }
+
+
 def _claw_summary(payload: dict[str, Any], run_name: str) -> dict[str, Any]:
     token_totals = payload.get("token_totals") or {}
     return {
@@ -373,6 +497,8 @@ def _tbench_task_rows(task_results: list[Any]) -> list[dict[str, Any]]:
                 "tool_calls": _optional_int(tools.get("tool_calls")),
                 "estimated_cost_usd": _optional_number(cost),
                 "failure_kind": failure_kind,
+                "source": str(item.get("source") or ""),
+                "source_summary_path": str(item.get("source_summary_path") or ""),
                 "missing_metrics": bool(item.get("missing_metrics")),
                 "has_hca_artifacts": bool(item.get("has_hca_artifacts")),
                 "verifier_failure_headline": str(item.get("verifier_failure_headline") or ""),
@@ -389,8 +515,8 @@ def _tbench_task_table(data: dict[str, Any]) -> list[str]:
     lines = [
         "## Terminal-Bench Per-Task Telemetry",
         "",
-        "| Task | Status | Failure Kind | Category | Difficulty | Elapsed | Tokens | Turns | Tools | Est. Cost |",
-        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Task | Status | Source | Failure Kind | Category | Difficulty | Elapsed | Tokens | Turns | Tools | Est. Cost |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
@@ -399,6 +525,7 @@ def _tbench_task_table(data: dict[str, Any]) -> list[str]:
                 [
                     _table_cell(row.get("task")),
                     _table_cell(row.get("status")),
+                    _table_cell(row.get("source")),
                     _table_cell(row.get("failure_kind")),
                     _table_cell(row.get("category")),
                     _table_cell(row.get("difficulty")),

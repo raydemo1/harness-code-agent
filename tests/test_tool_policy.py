@@ -331,6 +331,61 @@ class TerminalShellEditPolicyTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(blocked)
 
+    def test_blocks_system_config_writes_without_system_admin_context(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "cat > /etc/nginx/conf.d/git-site.conf <<'EOF'\nserver {}\nEOF"},
+            messages=[],
+            runtime_state=AgentRuntimeState(),
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+
+    def test_allows_container_system_config_writes_in_danger_full_access(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+        state = AgentRuntimeState(permission_mode="danger-full-access")
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "cat > /etc/nginx/conf.d/git-site.conf <<'EOF'\nserver {}\nEOF"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(blocked)
+
+    def test_danger_full_access_still_blocks_destructive_system_commands(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+        state = AgentRuntimeState(permission_mode="danger-full-access")
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "rm -rf /etc"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+
+    def test_container_system_config_write_requires_danger_full_access(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+        state = AgentRuntimeState(permission_mode="workspace-write")
+
+        blocked = middleware.before_tool(
+            "run_bash",
+            {"command": "cat > /etc/nginx/conf.d/git-site.conf <<'EOF'\nserver {}\nEOF"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+
 
 if __name__ == "__main__":
     unittest.main()
