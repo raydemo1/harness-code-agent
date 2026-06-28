@@ -300,7 +300,10 @@ def read_file(
                 f"[error] read_file can read at most {READ_FILE_MAX_LINES} lines per call. "
                 f"max_lines must be <= {READ_FILE_MAX_LINES}. "
                 f"{path} has {total_lines} total lines; requested {requested_lines} lines. "
-                f"Use start_line and max_lines <= {READ_FILE_MAX_LINES} to read a bounded range."
+                f"For sequential scans of large files, use a larger window up to {READ_FILE_MAX_LINES} "
+                f"lines, then advance start_line by the number of lines read. Use smaller windows when "
+                f"following search hits, inspecting local context, or avoiding the per-call token cap "
+                f"on dense files."
             ),
             error=f"read_file max_lines must be <= {READ_FILE_MAX_LINES}",
             metadata={

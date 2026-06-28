@@ -12,7 +12,12 @@ CORE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a workspace file. Prefer bounded reads with start_line and max_lines unless the file is known small.",
+            "description": (
+                "Read a workspace file. Prefer bounded reads with start_line and max_lines unless the file is known small. "
+                f"For sequential scans of large files (>1000 lines), use a larger window up to {READ_FILE_MAX_LINES} lines "
+                "to reduce round trips. Use narrower windows when following search hits, inspecting local context, "
+                "or avoiding the per-call token cap on dense files."
+            ),
             "parameters": {
                 "type": "object",
                 "required": ["path"],
@@ -28,6 +33,8 @@ CORE_TOOL_SCHEMAS = [
                         "minimum": 1,
                         "maximum": READ_FILE_MAX_LINES,
                         "description": f"Maximum lines to return for a bounded read. Must be <= {READ_FILE_MAX_LINES}. "
+                        "For sequential scans of large files, prefer a larger window; use smaller windows for targeted reads "
+                        "or token-dense content. "
                         "The per-call output is also capped by a token limit (whichever is smaller).",
                     },
                     "include_line_numbers": {

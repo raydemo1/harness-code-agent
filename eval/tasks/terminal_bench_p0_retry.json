@@ -1,0 +1,18 @@
+{
+  "suite": "terminal_bench_p0_retry",
+  "task_set": "p0_retry",
+  "benchmark_name": "Terminal-Bench 2.1 P0 retry after harbor_agent install fix",
+  "description": "Retry 6 tasks that previously failed in agent install stage (3 AgentSetupTimeoutError + 3 NonZeroAgentExitCodeError) after fixing harbor_agent.py: echo bug (; -> &&), URL 404 (release 20250604 deleted, switched to 20260623), stripped build (111MB -> 34MB), and curl -f flag.",
+  "selection_policy": {
+    "source": "previous eval run 2026-06-28_180721_tbench_remaining_medium_p3",
+    "method": "All 6 tasks with setup-stage failures (AgentSetupTimeoutError or NonZeroAgentExitCodeError)."
+  },
+  "tasks": [
+    "build-pov-ray",
+    "compile-compcert",
+    "constraints-scheduling",
+    "dna-insert",
+    "financial-document-processor",
+    "merge-diff-arc-agi-task"
+  ]
+}

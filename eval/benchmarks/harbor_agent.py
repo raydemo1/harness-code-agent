@@ -115,12 +115,13 @@ class HarnessAgent(BaseInstalledAgent):
                 "fi; "
                 "if [ \"$NEED_INSTALL\" = \"1\" ]; then "
                 "  echo 'Installing standalone Python 3.12 from GitHub...' && "
+                # Stripped build (~34MB) vs full build (~111MB): agent runtime needs no debug symbols.
                 "  URL='https://github.com/astral-sh/python-build-standalone/releases/"
-                "download/20250604/cpython-3.12.11+20250604-x86_64-unknown-linux-gnu-install_only.tar.gz' && "
-                "  ( curl -sL -o /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
+                "download/20260623/cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz' && "
+                "  ( curl -fsSL -o /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
                 "    wget -q -O /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
                 "    ( apt-get update -qq 2>/dev/null && apt-get install -y -qq curl 2>/dev/null && "
-                "      curl -sL -o /tmp/python.tar.gz \"$URL\" ) "
+                "      curl -fsSL -o /tmp/python.tar.gz \"$URL\" ) "
                 "  ) && "
                 "  mkdir -p /opt/python && "
                 "  tar -xzf /tmp/python.tar.gz -C /opt/python --strip-components=1 && "
@@ -130,9 +131,13 @@ class HarnessAgent(BaseInstalledAgent):
                 # Also update the bare 'python' command if it exists
                 "  ln -sf /opt/python/bin/python3 /usr/local/bin/python && "
                 "  rm -f /tmp/python.tar.gz && "
-                # Force hash table refresh so bash picks up the new binary
-                "  hash -r 2>/dev/null; "
-                "  echo \"standalone python installed: $(/usr/local/bin/python3 --version)\"; "
+                # Force hash table refresh so bash picks up the new binary.
+                # IMPORTANT: keep `&&` (not `;`) so a failed download breaks the chain
+                # instead of being masked by the echo below. The trailing
+                # `command -v python3` guard turns a silent skip into a loud failure.
+                "  hash -r 2>/dev/null && "
+                "  echo \"standalone python installed: $(/usr/local/bin/python3 --version)\" && "
+                "  command -v python3 >/dev/null 2>&1 || { echo 'FATAL: python3 still missing after install'; exit 1; }; "
                 "else "
                 "  echo 'Python version OK, no upgrade needed'; "
                 "fi"
