@@ -499,7 +499,10 @@ def build_retention_plan(
         if attempt.attempt_id in keep_attempt_ids:
             kept.append({"attempt_id": attempt.attempt_id, "task": attempt.task, "paths": paths})
             continue
-        safe_paths = [path for path in paths if _is_safe_path(path, allowed_roots)]
+        safe_paths = [
+            path for path in paths
+            if Path(path).exists() and _is_safe_path(path, allowed_roots)
+        ]
         if safe_paths:
             deletions.append({"attempt_id": attempt.attempt_id, "task": attempt.task, "paths": safe_paths})
     return {

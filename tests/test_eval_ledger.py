@@ -182,6 +182,32 @@ class EvalLedgerTests(unittest.TestCase):
         self.assertEqual(len(ledger["warnings"]), 1)
         self.assertIn("skip unreadable summary", ledger["warnings"][0])
 
+    def test_retention_plan_omits_missing_delete_paths(self):
+        from eval.scripts.eval_ledger import rebuild_eval_ledger
+
+        self._write_summary(
+            "2026-06-28_100000_tbench",
+            benchmark_name="Terminal-Bench 2.1",
+            task_set="manual",
+            task_results=[
+                {
+                    **self._task("cleanup-task", "failed", reward=0.0),
+                    "stdout_path": str(self.results / "missing.stdout.txt"),
+                }
+            ],
+        )
+        self._write_summary(
+            "2026-06-28_110000_tbench",
+            benchmark_name="Terminal-Bench 2.1",
+            task_set="manual",
+            task_results=[self._task("cleanup-task", "passed", reward=1.0)],
+        )
+
+        ledger = rebuild_eval_ledger(results_root=self.results, jobs_root=self.jobs)
+
+        self.assertEqual(ledger["retention_plan"]["delete_attempts"], [])
+        self.assertEqual(ledger["retention_plan"]["delete_path_count"], 0)
+
     def _write_summary(self, run_name, *, benchmark_name, task_set, task_results):
         run_dir = self.results / run_name
         run_dir.mkdir(parents=True)
