@@ -45,6 +45,29 @@ from eval.benchmarks.usage_metrics import parse_eval_metrics_from_text
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYTHON_STANDALONE_TARBALL = "python-3.12.13-x86_64-unknown-linux-gnu.tar.gz"
 CONTAINER_PYTHON_TARBALL = f"/tmp/{PYTHON_STANDALONE_TARBALL}"
+DEFAULT_DEBIAN_APT_MIRROR = "https://mirrors.tuna.tsinghua.edu.cn"
+
+
+def _configure_debian_apt_mirror_command() -> str:
+    """Return a shell snippet that makes Debian apt installs less proxy-sensitive."""
+    mirror = shlex.quote(DEFAULT_DEBIAN_APT_MIRROR)
+    return (
+        f"APT_MIRROR=${{HCA_APT_MIRROR:-{mirror}}}; "
+        "if command -v apt-get >/dev/null 2>&1; then "
+        "  if [ -f /etc/apt/sources.list.d/debian.sources ]; then "
+        "    sed -i "
+        "      -e \"s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g\" "
+        "      /etc/apt/sources.list.d/debian.sources || true; "
+        "  fi; "
+        "  if [ -f /etc/apt/sources.list ]; then "
+        "    sed -i "
+        "      -e \"s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g\" "
+        "      /etc/apt/sources.list || true; "
+        "  fi; "
+        "fi; "
+    )
 
 
 class HarnessAgent(BaseInstalledAgent):
@@ -91,6 +114,7 @@ class HarnessAgent(BaseInstalledAgent):
             command=(
                 "command -v git >/dev/null 2>&1 || "
                 "( command -v apt-get >/dev/null 2>&1 && "
+                f"  {_configure_debian_apt_mirror_command()} "
                 "  apt-get update -qq && apt-get install -y -qq git ) || "
                 "( command -v apk >/dev/null 2>&1 && apk add --no-cache git ) || "
                 "( command -v yum >/dev/null 2>&1 && yum install -y -q git ) || "
@@ -132,7 +156,8 @@ class HarnessAgent(BaseInstalledAgent):
                 "download/20260623/cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz' && "
                 "    ( curl -fsSL -o /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
                 "      wget -q -O /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
-                "      ( apt-get update -qq 2>/dev/null && apt-get install -y -qq curl 2>/dev/null && "
+                f"      ( {_configure_debian_apt_mirror_command()} "
+                "        apt-get update -qq 2>/dev/null && apt-get install -y -qq curl 2>/dev/null && "
                 "        curl -fsSL -o /tmp/python.tar.gz \"$URL\" ) "
                 "    ); "
                 "  fi && "
@@ -183,6 +208,7 @@ class HarnessAgent(BaseInstalledAgent):
                 "    -i https://pypi.tuna.tsinghua.edu.cn/simple 'psutil>=5.9.8,<8' && "
                 "  $PYTHON -c 'import openai, psutil; print(\"minimal harness deps installed\")' ) || "
                 "( command -v apt-get >/dev/null 2>&1 && "
+                f"  {_configure_debian_apt_mirror_command()} "
                 "  apt-get update -qq && apt-get install -y -qq python3-psutil && "
                 "  $PYTHON -c 'import openai, psutil' ) || "
                 "( echo 'FATAL: failed to install harness dependencies'; exit 1 )"

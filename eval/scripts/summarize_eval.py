@@ -32,6 +32,7 @@ class EvalSummary:
     memory: dict[str, Any] = field(default_factory=dict)
     latency: dict[str, Any] = field(default_factory=dict)
     tbench: dict[str, Any] = field(default_factory=dict)
+    tbench_extra_successes: list[dict[str, Any]] = field(default_factory=list)
     claw: dict[str, Any] = field(default_factory=dict)
     source_runs: list[str] = field(default_factory=list)
 
@@ -43,6 +44,7 @@ class EvalSummary:
             "memory": self.memory,
             "latency": self.latency,
             "tbench": self.tbench,
+            "tbench_extra_successes": list(self.tbench_extra_successes),
             "claw": self.claw,
             "source_runs": list(self.source_runs),
         }
@@ -97,6 +99,7 @@ def summarize_result_root(result_root: str | Path) -> EvalSummary:
     combined_tbench = _combined_tbench_24_summary(root)
     if combined_tbench:
         summary.tbench = combined_tbench
+    summary.tbench_extra_successes = _additional_tbench_successes(root, summary.tbench)
     return summary
 
 
@@ -144,6 +147,7 @@ def render_internal_report(summary: EvalSummary) -> str:
         "",
     ])
     lines.extend(_tbench_task_table(summary.tbench))
+    lines.extend(_tbench_extra_success_table(summary.tbench_extra_successes))
     return "\n".join(lines)
 
 
@@ -184,6 +188,7 @@ def render_resume_report(summary: EvalSummary) -> str:
         f"- Compaction: {_compaction_line(summary.cache)}",
         "",
         *_tbench_task_table(summary.tbench),
+        *_tbench_extra_success_table(summary.tbench_extra_successes),
         "## Resume Bullets",
         "",
         *bullets,
@@ -353,6 +358,36 @@ def _combined_tbench_24_summary(root: Path) -> dict[str, Any]:
     }
     summary.update(aggregate_usage(task_results))
     return summary
+
+
+def _additional_tbench_successes(root: Path, main_tbench: dict[str, Any]) -> list[dict[str, Any]]:
+    main_tasks = {
+        str(item.get("task") or "")
+        for item in main_tbench.get("task_results", [])
+        if isinstance(item, dict)
+    }
+    candidates: dict[str, tuple[float, dict[str, Any]]] = {}
+    for path in sorted(root.glob("*/summary.json"), key=lambda item: item.stat().st_mtime):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _suite_name(payload, path.parent.name) != "tbench":
+            continue
+        mtime = path.stat().st_mtime
+        for item in payload.get("task_results") or []:
+            if not isinstance(item, dict):
+                continue
+            task = str(item.get("task") or "")
+            if not task or task in main_tasks or item.get("status") != "passed":
+                continue
+            enriched = dict(item)
+            enriched["source"] = "supplemental_success"
+            enriched["source_run"] = path.parent.name
+            enriched["source_summary_path"] = str(_display_path(path))
+            candidates[task] = (mtime, enriched)
+    rows = _tbench_task_rows([item for _, item in sorted(candidates.values(), key=lambda pair: (pair[0], pair[1].get("task") or ""))])
+    return rows
 
 
 def _load_tbench_metadata() -> dict[str, Any]:
@@ -563,6 +598,40 @@ def _tbench_task_table(data: dict[str, Any]) -> list[str]:
                 f"{_table_cell(row.get('final_report_summary'))}"
             )
     lines.extend(["", "_`not captured` means no complete HCA session metrics were available for that task._", ""])
+    return lines
+
+
+def _tbench_extra_success_table(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return []
+    lines = [
+        "## Additional Terminal-Bench Successes Outside Main Snapshot",
+        "",
+        "These passed tasks are from supplemental reruns and are not counted in the main Terminal-Bench pass rate above.",
+        "",
+        "| Task | Source Run | Category | Difficulty | Elapsed | Tokens | Turns | Tools | Est. Cost |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        source = Path(str(row.get("source_summary_path") or "")).parent.name
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _table_cell(row.get("task")),
+                    _table_cell(source),
+                    _table_cell(row.get("category")),
+                    _table_cell(row.get("difficulty")),
+                    _elapsed_cell(row.get("elapsed_seconds")),
+                    _missing_int_cell(row.get("total_tokens")),
+                    _missing_int_cell(row.get("turns_finished")),
+                    _missing_int_cell(row.get("tool_calls")),
+                    _cost_cell(row.get("estimated_cost_usd")),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
     return lines
 
 

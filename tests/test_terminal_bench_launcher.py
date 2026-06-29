@@ -205,6 +205,18 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             shutil.rmtree(repo_root, ignore_errors=True)
             shutil.rmtree(dest_parent, ignore_errors=True)
 
+    def test_harbor_agent_apt_mirror_snippet_rewrites_debian_sources(self):
+        harbor_agent = self._import_harbor_agent_with_fakes()
+
+        command = harbor_agent._configure_debian_apt_mirror_command()
+
+        self.assertIn("HCA_APT_MIRROR", command)
+        self.assertIn("mirrors.tuna.tsinghua.edu.cn", command)
+        self.assertIn("/etc/apt/sources.list.d/debian.sources", command)
+        self.assertIn("/etc/apt/sources.list", command)
+        self.assertIn("deb.debian.org/debian-security", command)
+        self.assertIn("${APT_MIRROR}/debian-security", command)
+
     def _import_harbor_agent_with_fakes(self):
         fake_base = types.ModuleType("harbor.agents.installed.base")
         fake_base.BaseInstalledAgent = object

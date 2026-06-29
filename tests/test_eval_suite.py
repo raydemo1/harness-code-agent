@@ -427,8 +427,9 @@ class EvalSuiteTests(unittest.TestCase):
         memory_dir = results / "2026-06-08_memory_ab"
         latency_dir = results / "2026-06-08_latency"
         tbench_dir = results / "2026-06-08_tbench"
+        tbench_extra_dir = results / "2026-06-08_tbench_extra"
         claw_dir = results / "2026-06-08_claw"
-        for path in (cache_dir, memory_dir, latency_dir, tbench_dir, claw_dir):
+        for path in (cache_dir, memory_dir, latency_dir, tbench_dir, tbench_extra_dir, claw_dir):
             path.mkdir(parents=True)
 
         (cache_dir / "summary.json").write_text(json.dumps({
@@ -498,6 +499,30 @@ class EvalSuiteTests(unittest.TestCase):
                 },
             ],
         }), encoding="utf-8")
+        (tbench_extra_dir / "summary.json").write_text(json.dumps({
+            "suite": "tbench",
+            "benchmark_name": "Terminal-Bench 2.1",
+            "task_set": "hard_unrun",
+            "task_count": 1,
+            "passed": 1,
+            "pass_rate": 1.0,
+            "task_results": [
+                {
+                    "task": "bn-fit-modify",
+                    "status": "passed",
+                    "category": "scientific-computing",
+                    "difficulty": "hard",
+                    "elapsed_seconds": 678.9,
+                    "metrics": {
+                        "tokens": {"total_tokens": 4321},
+                        "turns": {"finished": 1},
+                        "tools": {"tool_calls": 17},
+                        "usage_cost": {"estimated_cost_usd": 0.0099},
+                    },
+                },
+            ],
+        }), encoding="utf-8")
+        (tbench_dir / "summary.json").touch()
         (claw_dir / "summary.json").write_text(json.dumps({
             "suite": "claw_swe_bench",
             "benchmark_name": "Claw-SWE-Bench Lite80",
@@ -527,6 +552,8 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("Terminal-Bench Per-Task Telemetry", resume)
         self.assertIn("| fix-git | passed | not captured | passed | software-engineering | easy | 12.3s | 1234 | 1 | 7 | $0.0012 |", resume)
         self.assertIn("| overfull-hbox | passed | not captured | passed | debugging | easy | 5.7s | not captured | not captured | not captured | not captured |", resume)
+        self.assertIn("Additional Terminal-Bench Successes Outside Main Snapshot", resume)
+        self.assertIn("| bn-fit-modify | 2026-06-08_tbench_extra | scientific-computing | hard | 678.9s | 4321 | 1 | 17 | $0.0099 |", resume)
         self.assertIn("Claw-SWE-Bench Lite80", resume)
         self.assertIn("64/80 patches", resume)
 
