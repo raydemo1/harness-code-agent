@@ -30,6 +30,28 @@ DOCKERHUB_IMAGE_TAG = "20251031"
 DEFAULT_AGENT_SETUP_TIMEOUT_SEC = 1200.0
 DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER = 3.0
 DEFAULT_DOCKER_PULL_TIMEOUT_SEC = 1800
+DEFAULT_VERIFIER_NO_PROXY_HOSTS = (
+    "localhost",
+    "127.0.0.1",
+    "host.docker.internal",
+    "http.docker.internal",
+    "astral.sh",
+    "releases.astral.sh",
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "raw.githubusercontent.com",
+    "pypi.org",
+    "pypi.python.org",
+    "files.pythonhosted.org",
+    "mirrors.tuna.tsinghua.edu.cn",
+    "pypi.tuna.tsinghua.edu.cn",
+    "deb.debian.org",
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "mirrors.aliyun.com",
+    "mirrors.ustc.edu.cn",
+)
 
 
 def resolve_harbor_executable(env: dict[str, str]) -> str:
@@ -163,6 +185,30 @@ def repair_task_images(dataset_path: Path, tasks: list[str] | None = None) -> in
     return repaired
 
 
+def patch_verifier_proxy_env(
+    dataset_path: Path,
+    tasks: list[str] | None = None,
+    *,
+    no_proxy_hosts: tuple[str, ...] = DEFAULT_VERIFIER_NO_PROXY_HOSTS,
+) -> int:
+    """Inject verifier no_proxy settings into the local Harbor dataset copy.
+
+    Harbor reads [verifier.env] from task.toml and forwards it to verifier
+    execution. The local Docker proxy can abort CONNECT requests to uv/PyPI
+    bootstrap hosts, so verifier scripts should bypass that proxy for these
+    hosts while leaving Docker's proxy available for other traffic.
+    """
+    patched = 0
+    no_proxy_value = ",".join(no_proxy_hosts)
+    for task_file in _task_files(dataset_path, tasks):
+        content = task_file.read_text(encoding="utf-8")
+        updated = _upsert_verifier_env_no_proxy(content, no_proxy_value)
+        if updated != content:
+            task_file.write_text(updated, encoding="utf-8", newline="\n")
+            patched += 1
+    return patched
+
+
 def pre_pull_task_images(
     dataset_path: Path,
     tasks: list[str] | None = None,
@@ -233,6 +279,66 @@ def _task_docker_images(dataset_path: Path, tasks: list[str] | None) -> list[str
             seen.add(image)
             images.append(image)
     return images
+
+
+def _upsert_verifier_env_no_proxy(content: str, no_proxy_value: str) -> str:
+    lines = content.splitlines()
+    header_index = next((idx for idx, line in enumerate(lines) if line.strip() == "[verifier.env]"), None)
+    if header_index is None:
+        prefix = content.rstrip("\n")
+        return (
+            prefix
+            + "\n\n[verifier.env]\n"
+            + f'NO_PROXY = "{_toml_escape(no_proxy_value)}"\n'
+            + f'no_proxy = "{_toml_escape(no_proxy_value)}"\n'
+        )
+
+    end_index = len(lines)
+    for idx in range(header_index + 1, len(lines)):
+        if re.match(r"^\s*\[[^\]]+\]\s*$", lines[idx]):
+            end_index = idx
+            break
+
+    changed = False
+    insert_at = header_index + 1
+    for key in ("NO_PROXY", "no_proxy"):
+        found = False
+        for idx in range(header_index + 1, end_index):
+            match = re.match(rf'^(\s*{re.escape(key)}\s*=\s*)"([^"]*)"\s*$', lines[idx])
+            if not match:
+                continue
+            merged = _merge_csv_values(match.group(2), no_proxy_value)
+            replacement = f'{match.group(1)}"{_toml_escape(merged)}"'
+            if replacement != lines[idx]:
+                lines[idx] = replacement
+                changed = True
+            found = True
+            break
+        if not found:
+            lines.insert(insert_at, f'{key} = "{_toml_escape(no_proxy_value)}"')
+            insert_at += 1
+            end_index += 1
+            changed = True
+
+    if not changed:
+        return content
+    return "\n".join(lines) + "\n"
+
+
+def _merge_csv_values(existing: str, additions: str) -> str:
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw in [*existing.split(","), *additions.split(",")]:
+        item = raw.strip()
+        if not item or item.lower() in seen:
+            continue
+        seen.add(item.lower())
+        values.append(item)
+    return ",".join(values)
+
+
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _replace_task_docker_image(content: str, image: str) -> str:
@@ -365,6 +471,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not pre-pull missing prebuilt Docker images before invoking Harbor.",
     )
+    parser.add_argument(
+        "--no-patch-verifier-proxy",
+        action="store_true",
+        help="Do not inject NO_PROXY/no_proxy into task verifier.env sections in the local dataset copy.",
+    )
     return parser.parse_args()
 
 
@@ -380,6 +491,9 @@ def main() -> int:
     if args.runner_env != "daytona" and not docker_daemon_running():
         print("Docker daemon is not running. Please start Docker and try again.", file=sys.stderr)
         return 125
+    verifier_proxy_patched = 0
+    if not args.no_patch_verifier_proxy:
+        verifier_proxy_patched = patch_verifier_proxy_env(dataset_path, selected_tasks)
     repaired_count = repair_task_images(dataset_path, selected_tasks)
     pulled_images: list[str] = []
     if args.runner_env != "daytona" and not args.force_build and not args.skip_image_prepull:
@@ -397,6 +511,7 @@ def main() -> int:
 
     print(f"Using TEMP/TMP: {env['TEMP']}")
     print(f"Prepared local dataset: {dataset_path}")
+    print(f"Patched verifier proxy env for {verifier_proxy_patched} task(s)")
     print(f"Repaired {repaired_count} broken task docker_image entries")
     print(f"Pre-pulled {len(pulled_images)} missing task image(s)")
     print(f"Running: {' '.join(command)}")

@@ -329,15 +329,6 @@ def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
         encoding="utf-8",
         newline="\n",
     )
-    lines = [
-        "# Claw-SWE-Bench Summary",
-        "",
-        "```json",
-        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
-        "```",
-        "",
-    ]
-    (run_dir / "report_internal.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 def _load_task_config(path: str | Path) -> dict[str, Any]:

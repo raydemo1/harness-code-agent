@@ -56,12 +56,13 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def write_eval_reports(output_root: str | Path, *, report_output_dir: str | Path | None = None) -> None:
-    from eval.scripts.summarize_eval import summarize_result_root, write_reports
+    from eval.scripts.eval_ledger import rebuild_eval_ledger, write_outputs
 
-    summary = summarize_result_root(Path(output_root))
-    output_dir = Path(report_output_dir) if report_output_dir is not None else PROJECT_ROOT / "eval"
-    write_reports(summary, output_dir=output_dir)
-    print(f"Wrote resume report: {output_dir / 'report_resume.md'}")
+    results_root = Path(output_root)
+    ledger = rebuild_eval_ledger(results_root=results_root, jobs_root=PROJECT_ROOT / "jobs")
+    output_dir = Path(report_output_dir) if report_output_dir is not None else results_root
+    write_outputs(ledger, output_root=output_dir)
+    print(f"Wrote eval ledger: {output_dir / 'SUMMARY.md'}")
 
 
 def base_env() -> dict[str, str]:
@@ -118,10 +119,6 @@ def write_suite_summary(run_dir: Path, summary: dict[str, Any], results: list[Ca
         encoding="utf-8",
         newline="\n",
     )
-    lines = [f"# {summary.get('suite', 'eval')} Summary", "", "```json"]
-    lines.append(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
-    lines.append("```")
-    (run_dir / "report_internal.md").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     if results:
         (run_dir / "cases.json").write_text(
             json.dumps([item.to_dict() for item in results], ensure_ascii=False, indent=2, sort_keys=True) + "\n",

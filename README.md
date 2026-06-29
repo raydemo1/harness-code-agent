@@ -419,7 +419,7 @@ python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 
 更多细节见 `eval/README.md` 和 `eval/benchmarks/README.md`。
 
-当前已汇总的真实评估结果见 `eval/report_resume.md`。截至 2026-06-17 的汇总口径：
+当前已汇总的真实评估结果见 `eval/results/SUMMARY.md`。截至 2026-06-17 的历史摘要：
 
 - DeepSeek context cache warmup：`29.2% -> 99.1%`。
 - Memory A/B：5 个任务，tool calls `-50.0%`，elapsed `-18.8%`，tokens `-44.7%`。

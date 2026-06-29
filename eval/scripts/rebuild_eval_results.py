@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -19,6 +22,9 @@ DEFAULT_JOBS_ROOT = PROJECT_ROOT / "jobs"
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
     ledger = rebuild_eval_ledger(
         results_root=Path(args.results_root),
         jobs_root=Path(args.jobs_root) if args.jobs_root else None,
@@ -52,7 +58,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Delete redundant artifacts from the generated retention plan. Default is dry-run.",
     )
+    parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)
+
+
+def run_self_test() -> None:
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        results = temp_dir / "results"
+        trial = results / "2026-01-01_tbench_unit" / "harbor_jobs" / "example-task" / "2026-01-01__00-00-00" / "example-task__trial"
+        trial.mkdir(parents=True)
+        (trial / "result.json").write_text(
+            json.dumps(
+                {
+                    "task_name": "example-task",
+                    "trial_name": "example-task__trial",
+                    "verifier_result": {"rewards": {"reward": 1.0}},
+                    "metrics": {"tokens": {"prompt_tokens": 10}, "tool_calls": {"total": 1}},
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        ledger = rebuild_eval_ledger(results_root=results, jobs_root=temp_dir / "jobs")
+        assert ledger["summary"]["total_tasks"] == 1
+        assert ledger["summary"]["passed"] == 1
+        write_outputs(ledger, output_root=results)
+        assert (results / "SUMMARY.md").exists()
+        assert (results / "ledger.json").exists()
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    print("self-test passed")
 
 
 if __name__ == "__main__":

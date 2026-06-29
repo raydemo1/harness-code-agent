@@ -15,6 +15,7 @@ from eval.benchmarks.run_terminal_bench import (
     ensure_local_dataset,
     is_valid_harbor_dataset,
     main,
+    patch_verifier_proxy_env,
     pre_pull_task_images,
     repair_task_images,
     resolve_harbor_dataset_path,
@@ -508,6 +509,86 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                 'docker_image = "alexgshaw/overfull-hbox:20251031"',
                 task_file.read_text(encoding="utf-8"),
             )
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_patch_verifier_proxy_env_populates_empty_verifier_env(self):
+        repo_root = self._workspace_path("test-terminal-bench-verifier-proxy-empty")
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
+        try:
+            task_dir = dataset_path / "tasks" / "circuit-fibsqrt"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            task_file = task_dir / "task.toml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "[verifier]",
+                        "timeout_sec = 3600.0",
+                        "",
+                        "[verifier.env]",
+                        "",
+                        "[environment]",
+                        'docker_image = "alexgshaw/circuit-fibsqrt:20251031"',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            patched = patch_verifier_proxy_env(dataset_path, ["circuit-fibsqrt"], no_proxy_hosts=("astral.sh", "pypi.org"))
+
+            self.assertEqual(patched, 1)
+            content = task_file.read_text(encoding="utf-8")
+            self.assertIn('[verifier.env]\nNO_PROXY = "astral.sh,pypi.org"\nno_proxy = "astral.sh,pypi.org"', content)
+            self.assertLess(content.index("NO_PROXY"), content.index("[environment]"))
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_patch_verifier_proxy_env_merges_existing_values(self):
+        repo_root = self._workspace_path("test-terminal-bench-verifier-proxy-merge")
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
+        try:
+            task_dir = dataset_path / "tasks" / "circuit-fibsqrt"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            task_file = task_dir / "task.toml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "[verifier.env]",
+                        'NO_PROXY = "localhost,astral.sh"',
+                        "",
+                        "[environment]",
+                        'docker_image = "alexgshaw/circuit-fibsqrt:20251031"',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            patched = patch_verifier_proxy_env(dataset_path, ["circuit-fibsqrt"], no_proxy_hosts=("astral.sh", "github.com"))
+            second = patch_verifier_proxy_env(dataset_path, ["circuit-fibsqrt"], no_proxy_hosts=("astral.sh", "github.com"))
+
+            content = task_file.read_text(encoding="utf-8")
+            self.assertEqual(patched, 1)
+            self.assertEqual(second, 0)
+            self.assertIn('NO_PROXY = "localhost,astral.sh,github.com"', content)
+            self.assertIn('no_proxy = "astral.sh,github.com"', content)
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_patch_verifier_proxy_env_appends_missing_section(self):
+        repo_root = self._workspace_path("test-terminal-bench-verifier-proxy-missing")
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
+        try:
+            task_dir = dataset_path / "tasks" / "fix-git"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            task_file = task_dir / "task.toml"
+            task_file.write_text("[environment]\n", encoding="utf-8")
+
+            patched = patch_verifier_proxy_env(dataset_path, ["fix-git"], no_proxy_hosts=("astral.sh",))
+
+            self.assertEqual(patched, 1)
+            self.assertTrue(task_file.read_text(encoding="utf-8").endswith('[verifier.env]\nNO_PROXY = "astral.sh"\nno_proxy = "astral.sh"\n'))
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 

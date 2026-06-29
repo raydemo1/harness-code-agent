@@ -419,23 +419,6 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("2", command)
         self.assertIn("--no-install-deps", command)
 
-    def test_memory_line_formats_negative_elapsed_as_slower(self):
-        from eval.scripts.summarize_eval import _memory_line
-
-        line = _memory_line(
-            {
-                "task_count": 5,
-                "tool_calls_reduction_ratio": 0.275,
-                "elapsed_seconds_reduction_ratio": -0.5223509772738612,
-                "total_tokens_reduction_ratio": 0.20209669438326525,
-            }
-        )
-
-        self.assertIn("tool calls -27.5%", line)
-        self.assertIn("elapsed +52.2% slower", line)
-        self.assertIn("tokens -20.2%", line)
-        self.assertNotIn("--52.2%", line)
-
     def test_harness_claw_adapter_builds_container_args_and_command(self):
         from eval.benchmarks.harness_claw_adapter import HarnessCodeAgentAdapter, _agent_command
 
@@ -464,7 +447,7 @@ class EvalSuiteTests(unittest.TestCase):
             "eval/scripts/run_basic_metrics_eval.py",
             "eval/scripts/run_terminal_bench_eval.py",
             "eval/scripts/run_claw_swe_bench_eval.py",
-            "eval/scripts/summarize_eval.py",
+            "eval/scripts/rebuild_eval_results.py",
         ):
             completed = subprocess.run(
                 [sys.executable, script, "--self-test"],
@@ -585,27 +568,6 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertTrue(diagnostic["has_hca_artifacts"])
         self.assertEqual(diagnostic["resolved_session_id"], "session-cross-job")
         self.assertEqual(diagnostic["diagnostic"]["job_dir"], str(trial_dir.parent))
-
-    def test_tbench_task_rows_include_failure_diagnostics(self):
-        from eval.scripts.summarize_eval import _tbench_task_rows
-
-        rows = _tbench_task_rows([
-            {
-                "task": "example",
-                "status": "failed",
-                "failure_kind": "agent_timeout",
-                "missing_metrics": True,
-                "has_hca_artifacts": False,
-                "verifier_failure_headline": "AgentTimeoutError",
-                "final_report_summary": "Stopped before final check.",
-            }
-        ])
-
-        self.assertEqual(rows[0]["failure_kind"], "agent_timeout")
-        self.assertTrue(rows[0]["missing_metrics"])
-        self.assertFalse(rows[0]["has_hca_artifacts"])
-        self.assertEqual(rows[0]["verifier_failure_headline"], "AgentTimeoutError")
-        self.assertEqual(rows[0]["final_report_summary"], "Stopped before final check.")
 
 
 if __name__ == "__main__":
