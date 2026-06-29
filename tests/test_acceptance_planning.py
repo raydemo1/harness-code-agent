@@ -157,6 +157,32 @@ class AcceptancePlanningTests(unittest.TestCase):
         removed_texts = [c["text"] for c in acceptance["removed_checks"]]
         self.assertIn("The targeted test passes", removed_texts)
 
+    def test_start_with_replan_required_still_initializes_acceptance(self):
+        """When recovery forces start→replan, acceptance checks must still be saved."""
+        state = AgentRuntimeState(session_id="acceptance-replan-start")
+        # Simulate recovery middleware having set replan_required
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "Repeated verification failure"
+
+        result = execute_tool_result(
+            "update_plan_state",
+            self._args(
+                update_kind="start",
+                replan_reason="Recovery required replan",
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(result.status, "success")
+        acceptance = result.metadata["planning_state"]["acceptance"]
+        # Acceptance checks must be initialized despite start→replan conversion
+        self.assertEqual(acceptance["revision"], 1)
+        self.assertEqual(len(acceptance["checks"]), 1)
+        self.assertEqual(acceptance["checks"][0]["text"], "The targeted test passes")
+        # replan_required should be cleared
+        self.assertFalse(state.task_board.replan_required)
+
     def test_progress_applies_atomic_acceptance_operations(self):
         state = AgentRuntimeState(session_id="acceptance-progress")
         execute_tool_result(

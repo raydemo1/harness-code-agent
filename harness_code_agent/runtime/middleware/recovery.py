@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from ..permissions import is_read_only_command
+from ..shell_classification import classify_safe_shell_command
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 
 
@@ -219,7 +220,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             ):
                 self._clear_mode(runtime_state)
             elif (
-                is_read_only_command(command)
+                classify_safe_shell_command(command) == "verify"
                 and self._looks_like_verification_failure(result)
             ):
                 self.observe_verification_failure(result, runtime_state)

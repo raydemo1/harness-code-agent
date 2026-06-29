@@ -149,6 +149,70 @@ class RecoveryStrategyTests(unittest.TestCase):
         self.assertTrue(state.task_board.replan_required)
         self.assertIn("probe failed", guidance.lower())
 
+    def test_file_read_output_does_not_trigger_verification_failure(self):
+        """cat/sed reading source code should not be matched as verification failure."""
+        state = AgentRuntimeState()
+        middleware = RecoveryStrategyMiddleware()
+
+        # Simulate reading source code that contains "failed" and "error" in string literals
+        source_output = (
+            '1\t#include <stdio.h>\n'
+            '2\tvoid handle() {\n'
+            '3\t    fprintf(stderr, "Error opening\\n");\n'
+            '4\t    // Failed to allocate memory\n'
+            '5\t    assert(value > 0);\n'
+            '6\t}'
+        )
+
+        # cat -n is classified as "read", not "verify" — should NOT trigger
+        middleware.post_tool(
+            "run_bash",
+            {"command": "cat -n sim.c"},
+            source_output,
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        middleware.post_tool(
+            "run_bash",
+            {"command": "sed -n '1,100p' sim.c"},
+            source_output,
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        # Should NOT have entered SPEC_RECHECK
+        self.assertEqual(state.recovery.mode, "NORMAL")
+        self.assertFalse(state.task_board.replan_required)
+
+    def test_verify_command_failure_still_triggers_recovery(self):
+        """pytest/make test failures should still trigger verification failure detection."""
+        state = AgentRuntimeState()
+        middleware = RecoveryStrategyMiddleware()
+
+        # pytest is classified as "verify" — SHOULD trigger
+        middleware.post_tool(
+            "run_bash",
+            {"command": "pytest -q"},
+            "FAILED test_task.py::test_output - AssertionError: expected 377 got 104",
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        middleware.post_tool(
+            "run_bash",
+            {"command": "pytest -q"},
+            "FAILED test_task.py::test_output - AssertionError: expected 377 got 104",
+            [],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        # Should have entered SPEC_RECHECK after 2 repeated failures
+        self.assertEqual(state.recovery.mode, "SPEC_RECHECK")
+        self.assertTrue(state.task_board.replan_required)
+
 
 class LoopDetectionMiddlewareTests(unittest.TestCase):
     def test_repeated_tool_fingerprint_warns_once_then_requests_stop(self):

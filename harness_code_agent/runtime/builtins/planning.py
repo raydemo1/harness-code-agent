@@ -62,6 +62,7 @@ def update_plan_state(
     remaining_issues = [str(item).strip() for item in (remaining_issues or []) if str(item).strip()]
     board = runtime_state.task_board
     normalized_step_notes: list[str] = []
+    original_update_kind = update_kind
 
     if board.replan_required:
         if update_kind == "start":
@@ -168,7 +169,7 @@ def update_plan_state(
     reused_existing_acceptance = False
     acceptance_replaced = False
     try:
-        if update_kind == "start" and acceptance_checks is not None:
+        if original_update_kind == "start" and acceptance_checks is not None:
             has_existing = bool(
                 board.acceptance.revision
                 or board.acceptance.checks
