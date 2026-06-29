@@ -53,7 +53,7 @@ class RecoveryStrategyTests(unittest.TestCase):
         self.assertEqual(state.recovery.mode, "RETHINK")
         self.assertTrue(state.task_board.requires_update)
 
-    def test_probe_mode_allows_only_one_read_only_verification_action(self):
+    def test_probe_mode_allows_read_only_verification_and_direct_fix(self):
         state = AgentRuntimeState()
         state.recovery.mode = "PROBE"
         middleware = RecoveryStrategyMiddleware()
@@ -65,6 +65,7 @@ class RecoveryStrategyTests(unittest.TestCase):
             runtime_state=state,
             agent_name="main_agent",
         )
+        state.recovery.mode = "PROBE"
         first_probe = middleware.before_tool(
             "run_bash",
             {"command": "whoami && git --version && which python3"},
@@ -87,13 +88,14 @@ class RecoveryStrategyTests(unittest.TestCase):
             agent_name="main_agent",
         )
 
-        self.assertIn("probe", edit_block.lower())
+        self.assertIsNone(edit_block)
         self.assertIsNone(first_probe)
         self.assertIn("probe", second_probe.lower())
 
-    def test_probe_mode_blocks_mutating_compound_commands(self):
+    def test_probe_mode_allows_mutating_compound_commands_to_resume_work(self):
         state = AgentRuntimeState()
         state.recovery.mode = "PROBE"
+        state.task_board.requires_update = True
         middleware = RecoveryStrategyMiddleware()
 
         blocked = middleware.before_tool(
@@ -104,8 +106,9 @@ class RecoveryStrategyTests(unittest.TestCase):
             agent_name="main_agent",
         )
 
-        self.assertIsNotNone(blocked)
-        self.assertIn("read-only", blocked)
+        self.assertIsNone(blocked)
+        self.assertEqual(state.recovery.mode, "NORMAL")
+        self.assertFalse(state.task_board.requires_update)
 
     def test_successful_probe_returns_recovery_to_normal(self):
         state = AgentRuntimeState()

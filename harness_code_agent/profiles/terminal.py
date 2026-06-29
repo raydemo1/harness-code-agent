@@ -24,7 +24,6 @@ from __future__ import annotations
 import os
 
 from .base import BaseProfile, AgentConfig, build_profile_prompt
-from ..tracking_policy import TASK_TRACKING_POLICY
 from ..runtime.middleware import (
     LoopDetectionMiddleware,
     TimeBudgetMiddleware,
@@ -67,23 +66,27 @@ class TerminalProfile(BaseProfile):
                     "and close the loop with command evidence."
                 ),
                 working_style=(
-                    "This profile starts every non-trivial task in tracked mode. Before the first action tool, "
-                    "call update_plan_state(mode=\"tracked\", update_kind=\"start\") with 1-10 concrete acceptance_checks. "
+                    "This profile starts every non-trivial task in tracked mode. First read the task "
+                    "instruction carefully: identify the exact deliverables, constraints, example "
+                    "inputs/outputs, and what you still need to explore to understand the problem. "
+                    "Then run a few targeted exploratory actions — read source files, compile, run "
+                    "example commands — before committing to a plan. Once the task structure is "
+                    "clear, call update_plan_state(mode=\"tracked\", update_kind=\"start\") with 1-10 "
+                    "concrete acceptance_checks. "
                     "Each check needs text, a short source grounded in the task, and a verification_command; "
                     "use manual only when command verification is impossible. Do not use echo/no-op commands "
                     "or 'checked by design' as verification; semantic constraints need scripts, diffs, greps, "
                     "or tests that can fail. Make the start plan follow this compact verification-first rhythm: "
-                    "Spec: restate exact deliverables and non-negotiable external contracts; Risks: identify "
+                    "Spec: restate the external contract and non-goals; Risks: identify "
                     "likely hidden-verifier checks such as paths, file counts, formats, protocols, ports, literal "
                     "output, and cleanup state; Validation: design failing commands or small assertion scripts "
-                    "that prove those requirements, preferably by replaying the user's literal workflow; "
+                    "that prove those requirements; "
                     "Implement: only then edit, debug, and rerun the acceptance commands. Each acceptance check "
                     "should map to an observable requirement from the task text. Avoid checks that only prove one "
                     "sample, a visible helper, a local substitute, an internal implementation detail, or that a "
                     "command can run. Track the framework-assigned acceptance_revision and give a reason "
                     "for every later add, update, or removal. On every replan, decide whether the current "
                     "acceptance checks still validate the new strategy; if not, update them in the same replan.\n\n"
-                    f"{TASK_TRACKING_POLICY}\n\n"
                     "Follow the task's exact external contract: preserve literal field/function names, hosts, "
                     "ports, URLs, protocols, branches, paths, filenames, shapes, signals/process behavior, "
                     "formats, and exact output. "

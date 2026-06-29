@@ -71,6 +71,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
 
     def __init__(self, *, enforce_acceptance: bool = False):
         self.enforce_acceptance = bool(enforce_acceptance)
+        self._missing_start_reminded = False
 
     def before_tool(
         self,
@@ -99,13 +100,6 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         board = runtime_state.task_board
         if board.planning_mode in {"unset", "skip"}:
             return None
-        if board.planning_mode == "tracked" and board.update_count == 0:
-            if tool_name == "run_bash" and _is_read_only_probe(tool_args.get("command", "")):
-                return None
-            return (
-                "[blocked] Planning mode is tracked but start state is missing. "
-                "Call update_plan_state with update_kind=\"start\" before tracked action tools."
-            )
         if board.replan_required:
             reason = f" Reason: {board.replan_reason}" if board.replan_reason else ""
             return (
@@ -147,6 +141,18 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             board.action_count = runtime_state.action_tool_count
             if board.planning_mode == "tracked":
                 board.needs_final_update = True
+                if (
+                    board.update_count == 0
+                    and runtime_state.action_tool_count >= 5
+                    and not self._missing_start_reminded
+                ):
+                    self._missing_start_reminded = True
+                    return (
+                        "[SYSTEM] You have completed several exploratory actions. "
+                        "Now is a good time to formalize the plan: call update_plan_state with "
+                        "update_kind=\"start\" and concrete acceptance_checks before diving "
+                        "deeper into implementation."
+                    )
         return None
 
     def _validate_terminal_final(self, tool_args: dict, runtime_state) -> str | None:

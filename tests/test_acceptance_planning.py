@@ -78,6 +78,85 @@ class AcceptancePlanningTests(unittest.TestCase):
             ],
         )
 
+    def test_start_is_idempotent_when_acceptance_already_initialized(self):
+        state = AgentRuntimeState(session_id="acceptance-start-idempotent")
+        first = execute_tool_result(
+            "update_plan_state",
+            self._args(),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        self.assertEqual(first.status, "success")
+
+        second = execute_tool_result(
+            "update_plan_state",
+            self._args(
+                next_action="continue implementation",
+                acceptance_checks=[
+                    {
+                        "text": "The targeted test passes",
+                        "source": "Fix the failing targeted test",
+                        "verification_command": "python -m unittest tests.test_target",
+                    }
+                ],
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(second.status, "success")
+        self.assertIn("already initialized", second.output)
+        acceptance = second.metadata["planning_state"]["acceptance"]
+        self.assertEqual(acceptance["revision"], 1)
+        self.assertEqual(acceptance["checks"][0]["text"], "The targeted test passes")
+
+    def test_start_replaces_acceptance_checks_when_different(self):
+        state = AgentRuntimeState(session_id="acceptance-start-replace")
+        first = execute_tool_result(
+            "update_plan_state",
+            self._args(),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        self.assertEqual(first.status, "success")
+        first_acceptance = first.metadata["planning_state"]["acceptance"]
+        self.assertEqual(first_acceptance["revision"], 1)
+        self.assertEqual(len(first_acceptance["checks"]), 1)
+
+        new_checks = [
+            {
+                "text": "sim 208 outputs 377",
+                "source": "Task example",
+                "verification_command": "cd /app && ./sim 208",
+            },
+            {
+                "text": "sim 0 outputs 0",
+                "source": "fib(isqrt(0))=0",
+                "verification_command": "cd /app && ./sim 0",
+            },
+        ]
+        second = execute_tool_result(
+            "update_plan_state",
+            self._args(
+                next_action="retry with corrected checks",
+                acceptance_checks=new_checks,
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(second.status, "success")
+        self.assertIn("replaced", second.output.lower())
+        acceptance = second.metadata["planning_state"]["acceptance"]
+        self.assertEqual(acceptance["revision"], 2)
+        self.assertEqual(len(acceptance["checks"]), 2)
+        check_texts = [c["text"] for c in acceptance["checks"]]
+        self.assertIn("sim 208 outputs 377", check_texts)
+        self.assertIn("sim 0 outputs 0", check_texts)
+        self.assertNotIn("The targeted test passes", check_texts)
+        removed_texts = [c["text"] for c in acceptance["removed_checks"]]
+        self.assertIn("The targeted test passes", removed_texts)
+
     def test_progress_applies_atomic_acceptance_operations(self):
         state = AgentRuntimeState(session_id="acceptance-progress")
         execute_tool_result(

@@ -61,6 +61,7 @@ def update_plan_state(
     blockers = [str(item).strip() for item in (blockers or []) if str(item).strip()]
     remaining_issues = [str(item).strip() for item in (remaining_issues or []) if str(item).strip()]
     board = runtime_state.task_board
+    normalized_step_notes: list[str] = []
 
     if board.replan_required:
         if update_kind == "start":
@@ -96,6 +97,15 @@ def update_plan_state(
             error="a required replan can only be cleared by update_kind=replan",
             metadata={"status_source": "validation"},
         )
+    if update_kind == "replan":
+        missing_steps = [
+            item
+            for item in [*completed_steps, current_step]
+            if item and item not in steps
+        ]
+        if missing_steps:
+            normalized_step_notes = list(dict.fromkeys(missing_steps))
+            steps = [*normalized_step_notes, *steps]
     if not goal:
         return ToolResult(
             tool="update_plan_state",
@@ -155,9 +165,54 @@ def update_plan_state(
     acceptance_checkpoint = board.acceptance.checkpoint()
     acceptance_revision_before_update = acceptance_checkpoint["revision"]
     acceptance_revision_after_update = acceptance_revision_before_update
+    reused_existing_acceptance = False
+    acceptance_replaced = False
     try:
         if update_kind == "start" and acceptance_checks is not None:
-            board.acceptance.initialize(acceptance_checks)
+            has_existing = bool(
+                board.acceptance.revision
+                or board.acceptance.checks
+                or board.acceptance.removed_checks
+            )
+            if has_existing:
+                existing_keys = {
+                    (
+                        c.get("text", ""),
+                        c.get("source", ""),
+                        c.get("verification_command", ""),
+                    )
+                    for c in board.acceptance.checks
+                }
+                new_keys = {
+                    (
+                        str(check.get("text", "")),
+                        str(check.get("source", "")),
+                        str(check.get("verification_command", "")),
+                    )
+                    for check in acceptance_checks
+                }
+                if existing_keys == new_keys:
+                    reused_existing_acceptance = True
+                else:
+                    replace_ops: list[dict] = [
+                        {"operation": "remove", "id": c["id"], "reason": "acceptance replacement on re-start"}
+                        for c in board.acceptance.checks
+                    ]
+                    for check in acceptance_checks:
+                        replace_ops.append({
+                            "operation": "add",
+                            "text": check.get("text"),
+                            "source": check.get("source"),
+                            "verification_command": check.get("verification_command"),
+                            "reason": "acceptance replacement on re-start",
+                        })
+                    board.acceptance.apply_operations(
+                        replace_ops,
+                        expected_revision=board.acceptance.revision,
+                    )
+                    acceptance_replaced = True
+            else:
+                board.acceptance.initialize(acceptance_checks)
         elif acceptance_operations:
             board.acceptance.apply_operations(
                 acceptance_operations,
@@ -283,6 +338,23 @@ def update_plan_state(
             f"{acceptance_revision_before_update} -> {acceptance_revision_after_update}. "
             f"Use acceptance_revision={acceptance_revision_after_update} for future "
             "acceptance_operations or final check_results."
+        )
+        if reused_existing_acceptance:
+            revision_status += (
+                "\nAcceptance checks were already initialized; kept the existing "
+                f"revision {acceptance_revision_after_update}."
+            )
+        if acceptance_replaced:
+            revision_status += (
+                "\nAcceptance checks replaced on re-start: removed previous checks "
+                f"and added {len(acceptance_checks)} new check(s). "
+                f"Revision bumped to {acceptance_revision_after_update}."
+            )
+    if normalized_step_notes:
+        revision_status += (
+            "\nReplan steps normalized to retain completed/current work: "
+            + ", ".join(normalized_step_notes)
+            + "."
         )
     status_output = f"\nPlan update count: {plan_update_count}." + revision_status
     acceptance_output = ""

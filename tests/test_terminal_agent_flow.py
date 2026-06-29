@@ -62,8 +62,6 @@ class AgentRuntimeStateTests(unittest.TestCase):
 
         self.assertIn("persistent shell", prompt.lower())
         self.assertIn("update_plan_state", prompt)
-        self.assertIn("## Task Tracking", prompt)
-        self.assertIn("PROBE", prompt)
         self.assertIn("tracked mode", prompt)
         self.assertIn("acceptance_checks", prompt)
         self.assertIn("exact output", prompt)
@@ -93,7 +91,7 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertTrue(any(isinstance(mw, TerminalShellEditPolicyMiddleware) for mw in middlewares))
         self.assertFalse(any(isinstance(mw, PreExitVerificationMiddleware) for mw in middlewares))
 
-    def test_terminal_tracked_mode_blocks_first_action_until_plan_start(self):
+    def test_terminal_tracked_mode_allows_first_action_and_reminds_about_plan_start(self):
         cfg = TerminalProfile().main_agent()
         state = Agent(
             name="main_agent",
@@ -110,10 +108,31 @@ class AgentRuntimeStateTests(unittest.TestCase):
             runtime_state=state,
             agent_name="main_agent",
         )
+        early_post = []
+        for _ in range(4):
+            early_post.append(
+                middleware.post_tool(
+                    "run_bash",
+                    {"command": "pytest"},
+                    "ok",
+                    messages=[],
+                    runtime_state=state,
+                    agent_name="main_agent",
+                )
+            )
+        reminder = middleware.post_tool(
+            "run_bash",
+            {"command": "pytest"},
+            "ok",
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
 
-        self.assertIsNotNone(blocked)
-        self.assertIn("update_plan_state", blocked)
-        self.assertIn("start", blocked)
+        self.assertIsNone(blocked)
+        self.assertTrue(all(post is None for post in early_post))
+        self.assertIn("update_plan_state", reminder)
+        self.assertIn("start", reminder)
 
 
 if __name__ == "__main__":

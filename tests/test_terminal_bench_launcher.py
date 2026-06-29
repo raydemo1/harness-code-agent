@@ -155,6 +155,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             os.environ,
             {
                 "OPENAI_API_KEY": "secret",
+                "OPENAI_BASE_URL": "https://api.deepseek.com",
                 "HARNESS_MODEL": "deepseek-v4-flash",
                 "MAX_AGENT_ITERATIONS": "100",
                 "MAX_AGENT_TOTAL_TOKENS": "900000",
@@ -170,6 +171,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         self.assertEqual(env["MAX_AGENT_TOOL_CALLS"], "400")
         self.assertEqual(env["AGENT_BUDGET_WARN_FRACTION"], "0.9")
         self.assertEqual(env["HARNESS_MODEL"], "deepseek-v4-flash")
+        self.assertEqual(env["HCA_MODEL_API_NO_PROXY_HOSTS"], "api.deepseek.com")
 
     def test_harbor_agent_snapshot_excludes_runtime_artifacts_and_large_python_tarball(self):
         harbor_agent = self._import_harbor_agent_with_fakes()

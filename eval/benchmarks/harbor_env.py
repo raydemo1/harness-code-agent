@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 
 RUNNER_ENV_KEYS = (
@@ -19,6 +20,17 @@ RUNNER_ENV_KEYS = (
     "MAX_AGENT_TOTAL_TOKENS",
     "AGENT_BUDGET_WARN_FRACTION",
 )
+MODEL_API_NO_PROXY_ENV = "HCA_MODEL_API_NO_PROXY_HOSTS"
+
+
+def model_api_no_proxy_hosts(base_url: str | None) -> list[str]:
+    if not base_url:
+        return []
+    parsed = urlparse(base_url if "://" in base_url else f"https://{base_url}")
+    host = parsed.hostname
+    if not host:
+        return []
+    return [host]
 
 
 def runner_env_vars() -> dict[str, str]:
@@ -27,4 +39,7 @@ def runner_env_vars() -> dict[str, str]:
         val = os.environ.get(key)
         if val:
             env_vars[key] = val
+    no_proxy_hosts = model_api_no_proxy_hosts(env_vars.get("OPENAI_BASE_URL"))
+    if no_proxy_hosts:
+        env_vars[MODEL_API_NO_PROXY_ENV] = ",".join(no_proxy_hosts)
     return env_vars

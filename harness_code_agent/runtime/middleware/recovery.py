@@ -122,10 +122,9 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
                 return "[blocked] Recovery probe is already in flight; wait for its result before another action."
             if tool_name == "run_bash" and is_read_only_command(tool_args.get("command", "")):
                 return None
-            return (
-                "[blocked] Recovery mode PROBE allows one read-only verification command "
-                "before edits or other action tools resume."
-            )
+            runtime_state.recovery.mode = "NORMAL"
+            runtime_state.task_board.requires_update = False
+            return None
 
         if mode == "ENV_FIX":
             if tool_name in {"write_file", "consult_subagent"}:
