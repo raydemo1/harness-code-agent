@@ -231,6 +231,34 @@ class TerminalRunnerArtifactTests(unittest.TestCase):
             manifest = json.loads((second / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["event_count"], 0)
 
+    def test_export_session_artifacts_skips_concurrently_written_partial_jsonl_line(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            harness_root = root / ".harness"
+            session_id = "session-partial-jsonl"
+            session_root = harness_root / "sessions" / session_id
+            session_root.mkdir(parents=True)
+            complete_event = {"sequence": 1, "type": "tool_call", "payload": {"tool": "run_bash"}}
+            (session_root / "events.jsonl").write_text(
+                json.dumps(complete_event) + "\n" + '{"sequence": 2, "type":',
+                encoding="utf-8",
+            )
+            (session_root / "session.json").write_text("{}", encoding="utf-8")
+
+            exported = export_session_artifacts(
+                harness_root=harness_root,
+                session_id=session_id,
+                artifacts_root=root / "artifacts",
+            )
+
+            trajectory = [
+                json.loads(line)
+                for line in (exported / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            manifest = json.loads((exported / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(trajectory, [complete_event])
+            self.assertEqual(manifest["event_count"], 1)
+
     def test_export_session_artifacts_preserves_early_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

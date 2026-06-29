@@ -15,6 +15,7 @@ from eval.benchmarks.run_terminal_bench import (
     ensure_local_dataset,
     is_valid_harbor_dataset,
     main,
+    pre_pull_task_images,
     repair_task_images,
     resolve_harbor_dataset_path,
     resolve_harbor_executable,
@@ -213,9 +214,12 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         self.assertIn("HCA_APT_MIRROR", command)
         self.assertIn("mirrors.tuna.tsinghua.edu.cn", command)
         self.assertIn("/etc/apt/sources.list.d/debian.sources", command)
+        self.assertIn("/etc/apt/sources.list.d/ubuntu.sources", command)
         self.assertIn("/etc/apt/sources.list", command)
         self.assertIn("deb.debian.org/debian-security", command)
         self.assertIn("${APT_MIRROR}/debian-security", command)
+        self.assertIn("archive.ubuntu.com/ubuntu", command)
+        self.assertIn("${UBUNTU_APT_MIRROR}", command)
 
     def _import_harbor_agent_with_fakes(self):
         fake_base = types.ModuleType("harbor.agents.installed.base")
@@ -502,6 +506,46 @@ class TerminalBenchLauncherTests(unittest.TestCase):
                 'docker_image = "alexgshaw/overfull-hbox:20251031"',
                 task_file.read_text(encoding="utf-8"),
             )
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_pre_pull_task_images_pulls_only_missing_selected_images(self):
+        repo_root = self._workspace_path("test-terminal-bench-image-prepull")
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
+        try:
+            for task, image in {
+                "missing-task": "alexgshaw/missing-task:20251031",
+                "present-task": "alexgshaw/present-task:20251031",
+                "unselected-task": "alexgshaw/unselected-task:20251031",
+            }.items():
+                task_dir = dataset_path / "tasks" / task
+                task_dir.mkdir(parents=True, exist_ok=True)
+                (task_dir / "task.toml").write_text(
+                    "\n".join(["[environment]", f'docker_image = "{image}"']),
+                    encoding="utf-8",
+                )
+
+            def fake_present(image: str) -> bool:
+                return image == "alexgshaw/present-task:20251031"
+
+            with (
+                patch("eval.benchmarks.run_terminal_bench._docker_image_present", side_effect=fake_present),
+                patch("eval.benchmarks.run_terminal_bench.subprocess.run") as run_mock,
+            ):
+                run_mock.return_value.returncode = 0
+                pulled = pre_pull_task_images(
+                    dataset_path,
+                    ["missing-task", "present-task"],
+                    timeout_sec=123,
+                )
+
+            self.assertEqual(pulled, ["alexgshaw/missing-task:20251031"])
+            run_mock.assert_called_once()
+            self.assertEqual(
+                run_mock.call_args.args[0],
+                ["docker", "pull", "alexgshaw/missing-task:20251031"],
+            )
+            self.assertEqual(run_mock.call_args.kwargs["timeout"], 123)
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 

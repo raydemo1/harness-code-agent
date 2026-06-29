@@ -42,6 +42,7 @@ class RecoveryState:
     mode: str = "NORMAL"
     failure_signature: str = ""
     repeat_count: int = 0
+    replan_attempt_count: int = 0
     last_successful_action: str = ""
     last_verification_result: str = ""
     probe_in_flight: bool = False

@@ -43,6 +43,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         runtime_state.recovery.mode = "NORMAL"
         runtime_state.recovery.failure_signature = ""
         runtime_state.recovery.repeat_count = 0
+        runtime_state.recovery.replan_attempt_count = 0
         runtime_state.recovery.probe_in_flight = False
 
     def _register_failure(self, signature: str, runtime_state) -> None:
@@ -171,6 +172,25 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
         if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
+            return None
+        if (
+            tool_name == "update_plan_state"
+            and result.startswith("[error]")
+            and runtime_state.task_board.replan_required
+        ):
+            runtime_state.recovery.replan_attempt_count += 1
+            if runtime_state.recovery.replan_attempt_count >= 3:
+                runtime_state.fallback.request_stop(
+                    reason="replan_deadlock",
+                    limit_type="replan_attempts",
+                    used=runtime_state.recovery.replan_attempt_count,
+                    limit=3,
+                    last_tool=tool_name,
+                )
+                return (
+                    "[SYSTEM] Required replanning failed repeatedly. The turn was stopped "
+                    "to avoid a recovery loop; report the blocker instead of continuing."
+                )
             return None
         if runtime_state.recovery.mode == "PROBE" and tool_name == "run_bash":
             runtime_state.recovery.probe_in_flight = False

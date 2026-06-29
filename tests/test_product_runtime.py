@@ -1258,6 +1258,34 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIn("shell-job-abc123", result.output)
         self.assertEqual(result.metadata["job_id"], "shell-job-abc123")
 
+    def test_run_bash_resets_dead_persistent_shell_session(self):
+        from harness_code_agent.runtime import tools
+
+        class DeadShell:
+            def __init__(self):
+                self.closed = False
+
+            def run(self, command, timeout=300):
+                raise RuntimeError("Shell failed to become ready")
+
+            def close(self):
+                self.closed = True
+
+        dead_shell = DeadShell()
+        runtime_state = SimpleNamespace(shell_session=dead_shell, shell_job_manager=None)
+
+        result = tools.run_bash(
+            "echo hi",
+            runtime_state=runtime_state,
+            execution_lane=tools.ToolExecutionLane.SHELL_SERIAL,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("Shell failed to become ready", result.output)
+        self.assertTrue(dead_shell.closed)
+        self.assertIsNone(runtime_state.shell_session)
+        self.assertTrue(result.metadata["shell_session_reset"])
+
     def test_run_bash_direct_call_detects_long_running_command(self):
         from harness_code_agent.runtime import tools
 

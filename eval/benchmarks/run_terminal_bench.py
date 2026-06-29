@@ -27,6 +27,9 @@ LOCAL_DATASET_DIR_NAME = "terminal-bench-2-1"
 TERMINAL_BENCH_LABEL = "Terminal-Bench 2.1"
 DOCKERHUB_IMAGE_NAMESPACE = "alexgshaw"
 DOCKERHUB_IMAGE_TAG = "20251031"
+DEFAULT_AGENT_SETUP_TIMEOUT_SEC = 1200.0
+DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER = 3.0
+DEFAULT_DOCKER_PULL_TIMEOUT_SEC = 1800
 
 
 def resolve_harbor_executable(env: dict[str, str]) -> str:
@@ -160,6 +163,41 @@ def repair_task_images(dataset_path: Path, tasks: list[str] | None = None) -> in
     return repaired
 
 
+def pre_pull_task_images(
+    dataset_path: Path,
+    tasks: list[str] | None = None,
+    *,
+    timeout_sec: int = DEFAULT_DOCKER_PULL_TIMEOUT_SEC,
+) -> list[str]:
+    """Pull missing prebuilt task images before Harbor starts environments.
+
+    Harbor's environment-start timeout includes Docker image pulls. Pulling
+    large or absent images up front keeps that timeout focused on container
+    startup and makes failures easier to diagnose.
+    """
+    pulled: list[str] = []
+    for image in _task_docker_images(dataset_path, tasks):
+        if _docker_image_present(image):
+            continue
+        print(f"Pulling missing task image: {image}", flush=True)
+        try:
+            completed = subprocess.run(
+                ["docker", "pull", image],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Timed out after {timeout_sec} seconds while pulling Docker image {image}."
+            ) from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(f"Failed to pull Docker image {image}: {detail}")
+        pulled.append(image)
+    return pulled
+
+
 def rewrite_task_images_to_ghcr(dataset_path: Path) -> int:
     """Backward-compatible name for older tests/integrations.
 
@@ -186,6 +224,17 @@ def _task_docker_image(content: str) -> str:
     return match.group(1) if match else ""
 
 
+def _task_docker_images(dataset_path: Path, tasks: list[str] | None) -> list[str]:
+    images: list[str] = []
+    seen: set[str] = set()
+    for task_file in _task_files(dataset_path, tasks):
+        image = _task_docker_image(task_file.read_text(encoding="utf-8"))
+        if image and image not in seen:
+            seen.add(image)
+            images.append(image)
+    return images
+
+
 def _replace_task_docker_image(content: str, image: str) -> str:
     return re.sub(
         r'^docker_image\s*=\s*".*"$',
@@ -208,6 +257,19 @@ def _docker_image_exists(image: str) -> bool:
     return completed.returncode == 0
 
 
+def _docker_image_present(image: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
 def build_harbor_run_command(
     harbor_executable: str,
     tasks: list[str],
@@ -215,6 +277,8 @@ def build_harbor_run_command(
     dataset_path: Path | None,
     force_build: bool,
     jobs_dir: Path | None = None,
+    agent_setup_timeout_sec: float | None = None,
+    environment_build_timeout_multiplier: float | None = None,
 ) -> list[str]:
     command = [harbor_executable, "run"]
     if jobs_dir is not None:
@@ -230,6 +294,16 @@ def build_harbor_run_command(
         command.extend(["--env", runner_env])
     if force_build:
         command.append("--force-build")
+    if agent_setup_timeout_sec is not None:
+        multiplier = agent_setup_timeout_sec / 600.0
+        command.extend(["--agent-setup-timeout-multiplier", str(multiplier)])
+    if environment_build_timeout_multiplier is not None:
+        command.extend(
+            [
+                "--environment-build-timeout-multiplier",
+                str(environment_build_timeout_multiplier),
+            ]
+        )
     for task in tasks:
         command.extend(["--include-task-name", task])
 
@@ -274,6 +348,23 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional Harbor jobs directory. Useful for isolating parallel task runs.",
     )
+    parser.add_argument(
+        "--agent-setup-timeout",
+        type=float,
+        default=DEFAULT_AGENT_SETUP_TIMEOUT_SEC,
+        help="Harbor agent setup timeout in seconds. Defaults higher than Harbor's built-in 360s to absorb slow apt/pip setup.",
+    )
+    parser.add_argument(
+        "--environment-build-timeout-multiplier",
+        type=float,
+        default=DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER,
+        help="Multiplier for Harbor environment build/start timeout, useful when Docker must pull large images.",
+    )
+    parser.add_argument(
+        "--skip-image-prepull",
+        action="store_true",
+        help="Do not pre-pull missing prebuilt Docker images before invoking Harbor.",
+    )
     return parser.parse_args()
 
 
@@ -284,11 +375,15 @@ def main() -> int:
     harbor_executable = resolve_harbor_executable(env)
 
     tasks = [] if args.full else args.task
+    selected_tasks = None if args.full or not args.task else tasks
     dataset_path = ensure_local_dataset(args.dataset_path or default_local_dataset_path(repo_root))
     if args.runner_env != "daytona" and not docker_daemon_running():
         print("Docker daemon is not running. Please start Docker and try again.", file=sys.stderr)
         return 125
-    repaired_count = repair_task_images(dataset_path, None if args.full else tasks)
+    repaired_count = repair_task_images(dataset_path, selected_tasks)
+    pulled_images: list[str] = []
+    if args.runner_env != "daytona" and not args.force_build and not args.skip_image_prepull:
+        pulled_images = pre_pull_task_images(dataset_path, selected_tasks)
     command = build_harbor_run_command(
         harbor_executable=harbor_executable,
         tasks=tasks,
@@ -296,11 +391,14 @@ def main() -> int:
         dataset_path=resolve_harbor_dataset_path(dataset_path),
         force_build=args.force_build,
         jobs_dir=args.jobs_dir,
+        agent_setup_timeout_sec=args.agent_setup_timeout,
+        environment_build_timeout_multiplier=args.environment_build_timeout_multiplier,
     )
 
     print(f"Using TEMP/TMP: {env['TEMP']}")
     print(f"Prepared local dataset: {dataset_path}")
     print(f"Repaired {repaired_count} broken task docker_image entries")
+    print(f"Pre-pulled {len(pulled_images)} missing task image(s)")
     print(f"Running: {' '.join(command)}")
 
     jobs_root = (args.jobs_dir or (repo_root / "jobs")).resolve()

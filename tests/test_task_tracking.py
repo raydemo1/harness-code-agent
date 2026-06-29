@@ -23,7 +23,7 @@ _install_fake_openai_module()
 
 from harness_code_agent import config
 from harness_code_agent.agent.loop import AgentRuntimeState
-from harness_code_agent.runtime.middlewares import TaskTrackingEnforcementMiddleware
+from harness_code_agent.runtime.middlewares import RecoveryStrategyMiddleware, TaskTrackingEnforcementMiddleware
 from harness_code_agent.runtime.tools import execute_tool, execute_tool_result
 
 
@@ -244,6 +244,80 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertIn("Updated plan state", result)
         self.assertFalse(state.task_board.replan_required)
         self.assertEqual(state.recovery.mode, "PROBE")
+
+    def test_required_replan_accepts_start_as_replan(self):
+        state = AgentRuntimeState(session_id="test-session")
+        state.recovery.mode = "SPEC_RECHECK"
+        state.recovery.failure_signature = "same verification failed twice"
+        state.task_board.planning_mode = "tracked"
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "same verification failed twice"
+
+        result = execute_tool(
+            "update_plan_state",
+            self._base_args(
+                update_kind="start",
+                current_step="verify",
+                completed_steps=["inspect", "edit"],
+                next_action="run the targeted regression test",
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIn("Updated plan state", result)
+        self.assertFalse(state.task_board.replan_required)
+        self.assertEqual(state.task_board.replan_reason, "same verification failed twice")
+        self.assertEqual(state.recovery.mode, "PROBE")
+        data = json.loads(self._state_path().read_text(encoding="utf-8"))
+        self.assertEqual(data["update_kind"], "replan")
+        self.assertEqual(data["replan_reason"], "same verification failed twice")
+
+    def test_required_replan_defaults_missing_reason_from_recovery_state(self):
+        state = AgentRuntimeState(session_id="test-session")
+        state.recovery.mode = "SPEC_RECHECK"
+        state.recovery.failure_signature = "probe failed after replan"
+        state.task_board.planning_mode = "tracked"
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = ""
+
+        result = execute_tool(
+            "update_plan_state",
+            self._base_args(
+                update_kind="replan",
+                current_step="verify",
+                completed_steps=["inspect", "edit"],
+                next_action="run the targeted regression test",
+            ),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIn("Updated plan state", result)
+        self.assertFalse(state.task_board.replan_required)
+        self.assertEqual(state.task_board.replan_reason, "probe failed after replan")
+        self.assertEqual(state.recovery.mode, "PROBE")
+
+    def test_repeated_failed_required_replans_trigger_fallback(self):
+        state = AgentRuntimeState(session_id="test-session")
+        state.task_board.planning_mode = "tracked"
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "same verification failed twice"
+        middleware = RecoveryStrategyMiddleware()
+
+        for _ in range(3):
+            middleware.post_tool(
+                "update_plan_state",
+                {"update_kind": "replan"},
+                "[error] replan update requires replan_reason",
+                [],
+                runtime_state=state,
+                agent_name="main_agent",
+            )
+
+        self.assertTrue(state.fallback.stop_requested)
+        self.assertEqual(state.fallback.stop_reason, "replan_deadlock")
+        self.assertTrue(state.task_board.replan_required)
 
     def test_atomic_replace_failure_keeps_previous_state_json(self):
         state = AgentRuntimeState(session_id="test-session")

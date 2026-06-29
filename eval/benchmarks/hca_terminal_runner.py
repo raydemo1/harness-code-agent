@@ -221,7 +221,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         return events
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
-            events.append(json.loads(line))
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
     return events
 
 

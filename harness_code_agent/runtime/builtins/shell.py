@@ -107,12 +107,18 @@ def run_bash(
             metadata={"timed_out": False, "status_source": "shell"},
         )
     except Exception as e:
+        metadata = {"status_source": "exception"}
+        if _looks_like_dead_shell_error(e):
+            metadata["shell_session_reset"] = _reset_runtime_shell_session(
+                runtime_state,
+                shell_session,
+            )
         return ToolResult(
             tool="run_bash",
             status="failed",
             output=f"[error] {e}",
             error=str(e),
-            metadata={"status_source": "exception"},
+            metadata=metadata,
         )
     finally:
         if owns_shell and shell_session is not None:
@@ -243,3 +249,21 @@ def _build_shell_output(stdout: str, stderr: str) -> str:
             return stdout + "\n\n--- STDERR ---\n" + stderr
         return "--- STDERR ---\n" + stderr
     return stdout
+
+
+def _looks_like_dead_shell_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "shell failed to become ready" in text
+
+
+def _reset_runtime_shell_session(runtime_state, shell_session) -> bool:
+    if runtime_state is None or shell_session is None:
+        return False
+    if getattr(runtime_state, "shell_session", None) is not shell_session:
+        return False
+    try:
+        shell_session.close()
+    except Exception:
+        pass
+    runtime_state.shell_session = None
+    return True

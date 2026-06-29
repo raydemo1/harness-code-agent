@@ -62,6 +62,16 @@ def update_plan_state(
     remaining_issues = [str(item).strip() for item in (remaining_issues or []) if str(item).strip()]
     board = runtime_state.task_board
 
+    if board.replan_required:
+        if update_kind == "start":
+            update_kind = "replan"
+        if update_kind == "replan" and not replan_reason:
+            replan_reason = (
+                board.replan_reason
+                or getattr(runtime_state.recovery, "failure_signature", "")
+                or "Recovery strategy requires a new plan."
+            )
+
     if mode != "tracked":
         return ToolResult(
             tool="update_plan_state",
@@ -256,6 +266,7 @@ def update_plan_state(
     board.actions_since_progress = 0
     board.planning_mode = mode
     if update_kind == "replan":
+        runtime_state.recovery.replan_attempt_count += 1
         runtime_state.recovery.mode = "PROBE"
         runtime_state.recovery.probe_in_flight = False
 

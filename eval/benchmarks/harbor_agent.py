@@ -45,28 +45,77 @@ from eval.benchmarks.usage_metrics import parse_eval_metrics_from_text
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYTHON_STANDALONE_TARBALL = "python-3.12.13-x86_64-unknown-linux-gnu.tar.gz"
 CONTAINER_PYTHON_TARBALL = f"/tmp/{PYTHON_STANDALONE_TARBALL}"
-DEFAULT_DEBIAN_APT_MIRROR = "https://mirrors.tuna.tsinghua.edu.cn"
+DEFAULT_DEBIAN_APT_MIRROR = "http://mirrors.tuna.tsinghua.edu.cn"
+DEFAULT_UBUNTU_APT_MIRROR = "http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+DEFAULT_PYPI_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 
 def _configure_debian_apt_mirror_command() -> str:
-    """Return a shell snippet that makes Debian apt installs less proxy-sensitive."""
-    mirror = shlex.quote(DEFAULT_DEBIAN_APT_MIRROR)
+    """Return a shell snippet that makes apt installs less proxy-sensitive."""
+    debian_mirror = shlex.quote(DEFAULT_DEBIAN_APT_MIRROR)
+    ubuntu_mirror = shlex.quote(DEFAULT_UBUNTU_APT_MIRROR)
     return (
-        f"APT_MIRROR=${{HCA_APT_MIRROR:-{mirror}}}; "
+        f"APT_MIRROR=${{HCA_APT_MIRROR:-{debian_mirror}}}; "
+        f"UBUNTU_APT_MIRROR=${{HCA_UBUNTU_APT_MIRROR:-{ubuntu_mirror}}}; "
         "if command -v apt-get >/dev/null 2>&1; then "
         "  if [ -f /etc/apt/sources.list.d/debian.sources ]; then "
         "    sed -i "
+        "      -e \"s|https://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
         "      -e \"s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://deb.debian.org/debian|${APT_MIRROR}/debian|g\" "
         "      -e \"s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g\" "
         "      /etc/apt/sources.list.d/debian.sources || true; "
         "  fi; "
+        "  if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then "
+        "    sed -i "
+        "      -e \"s|https://archive.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://archive.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|https://security.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://security.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      /etc/apt/sources.list.d/ubuntu.sources || true; "
+        "  fi; "
         "  if [ -f /etc/apt/sources.list ]; then "
         "    sed -i "
+        "      -e \"s|https://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
         "      -e \"s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://deb.debian.org/debian|${APT_MIRROR}/debian|g\" "
         "      -e \"s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|https://archive.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://archive.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|https://security.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://security.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
         "      /etc/apt/sources.list || true; "
         "  fi; "
         "fi; "
+    )
+
+
+def _apt_get_install_command(packages: str) -> str:
+    return (
+        "export DEBIAN_FRONTEND=noninteractive; "
+        f"{_configure_debian_apt_mirror_command()} "
+        "apt-get "
+        "-o Acquire::Retries=5 "
+        "-o Acquire::http::Timeout=30 "
+        "-o Acquire::https::Timeout=30 "
+        "update -qq && "
+        "apt-get "
+        "-o Dpkg::Lock::Timeout=300 "
+        "-y -qq --no-install-recommends install "
+        f"{packages}"
+    )
+
+
+def _pip_config_command() -> str:
+    index_url = shlex.quote(DEFAULT_PYPI_INDEX_URL)
+    return (
+        "mkdir -p /etc && "
+        "printf '[global]\\nindex-url = %s\\ntimeout = 120\\nretries = 10\\n' "
+        f"{index_url} > /etc/pip.conf"
     )
 
 
@@ -107,20 +156,27 @@ class HarnessAgent(BaseInstalledAgent):
         if python_tarball.exists():
             await environment.upload_file(python_tarball, CONTAINER_PYTHON_TARBALL)
 
-        # Step 2: Ensure git exists. Some minimal Terminal-Bench images omit it,
-        # but the session store uses git for lightweight workspace snapshots.
+        # Step 2: Ensure baseline system tooling exists. Several prebuilt
+        # Terminal-Bench images are intentionally tiny; installing these during
+        # setup prevents later agent/verifier phases from racing apt locks or
+        # spending task budget on infrastructure packages.
         await self.exec_as_root(
             environment,
             command=(
-                "command -v git >/dev/null 2>&1 || "
+                "command -v git >/dev/null 2>&1 && "
+                "command -v curl >/dev/null 2>&1 && "
+                "command -v unzip >/dev/null 2>&1 && "
+                "command -v g++ >/dev/null 2>&1 || "
                 "( command -v apt-get >/dev/null 2>&1 && "
-                f"  {_configure_debian_apt_mirror_command()} "
-                "  apt-get update -qq && apt-get install -y -qq git ) || "
+                f"  {_apt_get_install_command('ca-certificates git curl unzip build-essential')} ) || "
                 "( command -v apk >/dev/null 2>&1 && apk add --no-cache git ) || "
                 "( command -v yum >/dev/null 2>&1 && yum install -y -q git ) || "
-                "echo 'FATAL: git is not installed and no supported package manager was found'"
+                "{ echo 'FATAL: baseline tooling is missing and no supported package manager was found'; exit 1; }"
             ),
+            timeout_sec=900,
         )
+
+        await self.exec_as_root(environment, command=_pip_config_command())
 
         # Step 3: Ensure python3 >= 3.11 (openai + pydantic v2 need it)
         # Old containers ship Python 3.9/3.10 where import openai crashes
@@ -149,16 +205,19 @@ class HarnessAgent(BaseInstalledAgent):
                 "    echo 'Installing standalone Python 3.12 from vendored tarball...' && "
                 "    cp \"$VENDOR_TGZ\" /tmp/python.tar.gz; "
                 "  else "
-                # Fallback: download from GitHub when vendor tarball is absent.
+                # Fallback: download from npmmirror (China) first, then GitHub.
                 # Stripped build (~34MB) vs full build (~111MB): agent runtime needs no debug symbols.
-                "    echo 'Installing standalone Python 3.12 from GitHub...' && "
-                "    URL='https://github.com/astral-sh/python-build-standalone/releases/"
+                "    echo 'Installing standalone Python 3.12...' && "
+                "    URL_NPM='https://registry.npmmirror.com/-/binary/python-build-standalone/"
+                "20260623/cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz' && "
+                "    URL_GH='https://github.com/astral-sh/python-build-standalone/releases/"
                 "download/20260623/cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz' && "
-                "    ( curl -fsSL -o /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
-                "      wget -q -O /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
-                f"      ( {_configure_debian_apt_mirror_command()} "
-                "        apt-get update -qq 2>/dev/null && apt-get install -y -qq curl 2>/dev/null && "
-                "        curl -fsSL -o /tmp/python.tar.gz \"$URL\" ) "
+                "    ( curl -fsSL -o /tmp/python.tar.gz \"$URL_NPM\" 2>/dev/null || "
+                "      wget -q -O /tmp/python.tar.gz \"$URL_NPM\" 2>/dev/null || "
+                "      curl -fsSL -o /tmp/python.tar.gz \"$URL_GH\" 2>/dev/null || "
+                "      wget -q -O /tmp/python.tar.gz \"$URL_GH\" 2>/dev/null || "
+                f"      ( {_apt_get_install_command('curl')} 2>/dev/null && "
+                "        curl -fsSL -o /tmp/python.tar.gz \"$URL_NPM\" ) "
                 "    ); "
                 "  fi && "
                 "  mkdir -p /opt/python && "
@@ -195,21 +254,17 @@ class HarnessAgent(BaseInstalledAgent):
                 "  --find-links=/home/user/harness-agent/vendor_wheels openai && "
                 "( $PYTHON -m pip install --break-system-packages -q 'psutil>=5.9.8,<8' || "
                 "  $PYTHON -m pip install --break-system-packages -q "
-                "    -i https://pypi.org/simple 'psutil>=5.9.8,<8' || "
-                "  $PYTHON -m pip install --break-system-packages -q "
-                "    -i https://pypi.tuna.tsinghua.edu.cn/simple 'psutil>=5.9.8,<8' ) && "
+                "    -i https://pypi.org/simple 'psutil>=5.9.8,<8' ) && "
                 "$PYTHON -c 'import openai, psutil' || "
                 "( SITE=$($PYTHON -c 'import site; print(site.getsitepackages()[0])') && "
                 "  mkdir -p \"$SITE\" && "
                 "  for whl in /home/user/harness-agent/vendor_wheels/*.whl; do "
                 "    $PYTHON -m zipfile -e \"$whl\" \"$SITE\" 2>/dev/null; "
                 "  done && "
-                "  $PYTHON -m pip install --break-system-packages -q "
-                "    -i https://pypi.tuna.tsinghua.edu.cn/simple 'psutil>=5.9.8,<8' && "
+                "  $PYTHON -m pip install --break-system-packages -q 'psutil>=5.9.8,<8' && "
                 "  $PYTHON -c 'import openai, psutil; print(\"minimal harness deps installed\")' ) || "
                 "( command -v apt-get >/dev/null 2>&1 && "
-                f"  {_configure_debian_apt_mirror_command()} "
-                "  apt-get update -qq && apt-get install -y -qq python3-psutil && "
+                f"  {_apt_get_install_command('python3-psutil')} && "
                 "  $PYTHON -c 'import openai, psutil' ) || "
                 "( echo 'FATAL: failed to install harness dependencies'; exit 1 )"
             ),
