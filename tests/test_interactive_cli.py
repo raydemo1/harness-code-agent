@@ -31,7 +31,6 @@ _install_fake_openai_module()
 from harness_code_agent import config
 from harness_code_agent.core.interactive import (
     InteractiveSession,
-    PROFILE_SLASH_ALIASES,
     git_dirty_paths,
 )
 from harness_code_agent.core.mentions import (
@@ -849,7 +848,7 @@ class InteractiveCliTests(unittest.TestCase):
                 session.close()
 
     def test_short_slash_commands_switch_profiles(self):
-        conversations = [FakeConversation() for _ in range(7)]
+        conversations = [FakeConversation() for _ in range(6)]
         with patch(
             "harness_code_agent.agent.conversation.Agent.start_conversation",
             side_effect=conversations,
@@ -860,7 +859,6 @@ class InteractiveCliTests(unittest.TestCase):
                     ("/general", "general"),
                     ("/plan", "plan"),
                     ("/code", "coding-agent"),
-                    ("/terminal", "terminal"),
                     ("/app", "app-builder"),
                     ("/review", "review"),
                 ]
@@ -1329,6 +1327,29 @@ class InteractiveCliTests(unittest.TestCase):
                 )
             finally:
                 session.close()
+
+    def test_terminal_slash_command_is_not_product_visible(self):
+        session = InteractiveSession(cwd=self.temp_dir)
+        output = StringIO()
+        session.output_sink = lambda text: print(text, file=output)
+        try:
+            self.assertTrue(session.handle_slash_command("/terminal"))
+            self.assertEqual(session.profile.name(), "general")
+            self.assertIn("Unknown slash command: /terminal", output.getvalue())
+        finally:
+            session.close()
+
+    def test_profiles_slash_command_hides_eval_only_terminal_profile(self):
+        session = InteractiveSession(cwd=self.temp_dir)
+        output = StringIO()
+        session.output_sink = lambda text: print(text, file=output)
+        try:
+            self.assertTrue(session.handle_slash_command("/profiles"))
+            text = output.getvalue()
+            self.assertIn("coding-agent", text)
+            self.assertNotIn("terminal", text)
+        finally:
+            session.close()
 
     def test_handle_checkpoint_every_cadence(self):
         session = self._session()

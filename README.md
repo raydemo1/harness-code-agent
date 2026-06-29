@@ -11,7 +11,7 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 
 ## 功能特点
 
-- **Profile 驱动**：内置 `general`、`coding-agent`、`app-builder`、`terminal`、`plan`、`review` 六种任务模式；它们共享同一套 Agent 判断原则，再按场景切换工作节奏、权限边界和完成标准。默认先进入轻量 `general`，再按任务语义自动切到专用 profile。
+- **Profile 驱动**：产品入口内置 `general`、`coding-agent`、`app-builder`、`plan`、`review` 五种任务模式；它们共享同一套 Agent 判断原则，再按场景切换工作节奏、权限边界和完成标准。默认先进入轻量 `general`，再按任务语义自动切到专用 profile。`terminal` profile 保留为 Terminal-Bench 等评测入口的显式模式，不进入产品可见列表。
 - **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
 - **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
 - **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
@@ -161,9 +161,9 @@ echo "Fix the failing tests" | hca
 指定 profile：
 
 ```bash
-hca --profile terminal "Fix the broken symlinks in /tmp"
 hca --profile coding-agent "Fix the TypeError in parse_config()"
 hca --profile plan "Design the fix for the failing parser tests"
+hca --profile terminal "Fix the broken symlinks in /tmp"  # eval / benchmark 专用显式入口
 ```
 
 恢复旧 session 作为上下文：
@@ -179,7 +179,6 @@ hca --resume <session-id> "Continue the previous parser work"
 /code      # coding-agent，默认实施模式
 /general   # general，轻量问答和只读检查
 /plan      # 受限方案模式（只允许计划/状态工件写入）
-/terminal  # CLI / shell 任务
 /app       # app-builder Web 应用构建
 /review    # 只读代码评审
 ```
@@ -198,9 +197,10 @@ Skill 同样分成两种调用方式：
 | `general` | 默认入口，用于普通问答、讨论和轻量只读仓库检查；不会改文件或运行 shell |
 | `coding-agent` | 本地仓库的主要实施模式；先理解现有设计，再完成窄而完整的修改、测试和验证 |
 | `app-builder` | 根据产品需求选择最小合适技术栈，构建完整 Web 应用并完成浏览器验证 |
-| `terminal` | 面向 Terminal-Bench 2.0 风格的非交互 CLI / shell 任务，强调字面规格和命令证据 |
 | `plan` | 先调查仓库，再分轮澄清高影响偏好，输出 decision-complete Markdown 计划 |
 | `review` | 独立只读代码评审，按 findings-first 结构输出，不修改工作区 |
+
+`terminal` profile 面向 Terminal-Bench / Harbor 这类非交互评测场景保留，可通过评测 runner 或显式 `--profile terminal` 启动；它不出现在 `/profiles`、`--list-profiles` 或 slash profile 切换列表中。
 
 最终 system prompt 由稳定的共享层与 profile-local 合同组合而成。共享层负责证据意识、诚实表达、工具节制和主 Agent 所有权；各 profile 只描述本场景的 Role、Working Style、Boundaries 与 Completion。工具 schema、权限过滤、规划门禁和退出验证仍由运行时代码强制执行，不依赖 prompt 重复喊规则。
 
@@ -432,7 +432,7 @@ python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 
 1. 在 `harness_code_agent/profiles/` 下新增继承 `BaseProfile` 的类。
 2. 实现 `name()`、`description()`、`main_agent()`，必要时覆盖 `acceptance_criteria()`。
-3. 在 `harness_code_agent/profiles/__init__.py` 的 `PROFILES` 中注册。
+3. 在 `harness_code_agent/profiles/__init__.py` 的 `PROFILES` 中注册；只有产品可见 profile 再加入 `PRODUCT_PROFILES`。
 4. 为 profile 的关键行为添加测试。
 
 新增工具时，通常需要：
@@ -453,5 +453,5 @@ python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 - `.env` 不应提交到版本库，使用 `.env.template` 作为配置模板。
 - `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名；DeepSeek 默认 `fast/normal/hard/max` 映射为 flash non-thinking、flash high、pro high、pro max，summary 等轻量 LLM 任务固定使用 `fast`。
 - `app-builder` 的浏览器能力依赖 Playwright；未安装时相关工具会不可用或报错。
-- `terminal` profile 针对非交互式 CLI 任务优化，会更积极地执行 shell 命令和本地验证。
+- `terminal` profile 针对非交互式 CLI 评测任务优化，会更积极地执行 shell 命令和本地验证；Terminal-Bench runner 会用评测标记放宽容器内绝对路径写入，但普通产品 profile 不继承该权限边界。
 - 默认 `workspace-write` 模式会对白名单外 shell 命令和未知工具触发批准流程；自动化 benchmark 可按需切换权限模式。

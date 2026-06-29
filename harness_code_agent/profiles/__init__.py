@@ -17,6 +17,12 @@ PROFILES: dict[str, type[BaseProfile]] = {
     "review": ReviewProfile,
 }
 
+PRODUCT_PROFILES: dict[str, type[BaseProfile]] = {
+    name: cls
+    for name, cls in PROFILES.items()
+    if name != "terminal"
+}
+
 
 def get_profile(name: str, cfg: ProfileConfig | None = None) -> BaseProfile:
     """Get a profile instance by name, optionally with custom config."""
@@ -28,8 +34,8 @@ def get_profile(name: str, cfg: ProfileConfig | None = None) -> BaseProfile:
 
 
 def list_profiles() -> list[dict[str, str]]:
-    """List all available profiles."""
+    """List product-visible profiles."""
     return [
         {"name": cls().name(), "description": cls().description()}
-        for cls in PROFILES.values()
+        for cls in PRODUCT_PROFILES.values()
     ]

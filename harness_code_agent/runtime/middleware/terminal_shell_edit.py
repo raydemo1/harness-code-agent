@@ -20,19 +20,6 @@ _SYSTEM_PATH_WRITE_PATTERNS = (
     rf"\b(?:Path|PurePath)\s*\(\s*['\"](?P<path>{_SYSTEM_WRITE_PATH}[^'\"]*)['\"]\s*\)\.(?:write_text|write_bytes)\b",
     rf"\b(?:write_text|write_bytes)\s*\([^)]*['\"](?P<path>{_SYSTEM_WRITE_PATH}[^'\"]*)",
 )
-_CONTAINER_SYSTEM_CONFIG_WRITE_PREFIXES = (
-    "/etc/nginx/",
-    "/etc/apache2/",
-    "/etc/caddy/",
-    "/etc/lighttpd/",
-    "/etc/supervisor/",
-    "/etc/systemd/",
-    "/etc/default/",
-    "/etc/init.d/",
-    "/var/www/",
-    "/var/log/nginx/",
-    "/srv/",
-)
 _COMMAND_START = r"(?:^|[;&|]\s*)"
 
 
@@ -48,9 +35,10 @@ class TerminalShellEditPolicyMiddleware(AgentMiddleware):
         if agent_name not in MAIN_AGENT_NAMES or tool_name != "run_bash":
             return None
         command = str(tool_args.get("command") or "")
+        relax_container_paths = _allows_container_absolute_path_mutation(runtime_state)
         if _looks_dangerous_command(
             command,
-            allow_container_system_config_writes=_allows_container_system_config_writes(runtime_state),
+            allow_container_absolute_path_mutation=relax_container_paths,
         ):
             return (
                 "[blocked] Terminal profile allows shell edits inside the task workspace, but this "
@@ -60,15 +48,24 @@ class TerminalShellEditPolicyMiddleware(AgentMiddleware):
         return None
 
 
-def _looks_dangerous_command(command: str, *, allow_container_system_config_writes: bool = False) -> bool:
+def _looks_dangerous_command(command: str, *, allow_container_absolute_path_mutation: bool = False) -> bool:
     return (
         _looks_like_system_path_write(
             command,
-            allow_container_system_config_writes=allow_container_system_config_writes,
+            allow_container_absolute_path_mutation=allow_container_absolute_path_mutation,
         )
-        or _looks_like_destructive_rm(command)
-        or _looks_like_destructive_remove_item(command)
-        or _looks_like_destructive_del(command)
+        or _looks_like_destructive_rm(
+            command,
+            allow_container_absolute_path_mutation=allow_container_absolute_path_mutation,
+        )
+        or _looks_like_destructive_remove_item(
+            command,
+            allow_container_absolute_path_mutation=allow_container_absolute_path_mutation,
+        )
+        or _looks_like_destructive_del(
+            command,
+            allow_container_absolute_path_mutation=allow_container_absolute_path_mutation,
+        )
         or _looks_like_destructive_git(command)
     )
 
@@ -76,18 +73,18 @@ def _looks_dangerous_command(command: str, *, allow_container_system_config_writ
 def _looks_like_system_path_write(
     command: str,
     *,
-    allow_container_system_config_writes: bool,
+    allow_container_absolute_path_mutation: bool,
 ) -> bool:
     for pattern in _SYSTEM_PATH_WRITE_PATTERNS:
         for match in re.finditer(pattern, command, flags=re.IGNORECASE):
             path = _strip_quotes(match.group("path"))
-            if allow_container_system_config_writes and _is_container_system_config_path(path):
+            if allow_container_absolute_path_mutation and _is_container_absolute_path(path):
                 continue
             return True
     return False
 
 
-def _allows_container_system_config_writes(runtime_state) -> bool:
+def _allows_container_absolute_path_mutation(runtime_state) -> bool:
     board = getattr(runtime_state, "task_board", None)
     metadata = getattr(board, "task_metadata", {}) if board is not None else {}
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -96,41 +93,73 @@ def _allows_container_system_config_writes(runtime_state) -> bool:
         or str(metadata.get("permission_mode") or "")
         or os.environ.get("HARNESS_PERMISSION_MODE", "")
     )
-    return permission_mode == "danger-full-access"
+    return permission_mode == "danger-full-access" and _is_terminal_eval_mode()
 
 
-def _is_container_system_config_path(path: str) -> bool:
+def _is_terminal_eval_mode() -> bool:
+    return os.environ.get("HCA_TERMINAL_EVAL_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_container_absolute_path(path: str) -> bool:
     normalized = _strip_quotes(path).replace("\\", "/").lower()
-    return normalized.startswith(_CONTAINER_SYSTEM_CONFIG_WRITE_PREFIXES)
+    return normalized.startswith("/")
 
 
-def _looks_like_destructive_rm(command: str) -> bool:
+def _looks_like_destructive_rm(
+    command: str,
+    *,
+    allow_container_absolute_path_mutation: bool = False,
+) -> bool:
     for args in _command_args(command, "rm"):
         tokens = _shell_words(args)
         if not _has_rm_recursive_force(tokens):
             continue
-        if any(_is_dangerous_target(token) for token in _positional_tokens(tokens)):
+        if any(
+            _is_dangerous_target(
+                token,
+                allow_container_absolute_path_mutation=allow_container_absolute_path_mutation,
+            )
+            for token in _positional_tokens(tokens)
+        ):
             return True
     return False
 
 
-def _looks_like_destructive_remove_item(command: str) -> bool:
+def _looks_like_destructive_remove_item(
+    command: str,
+    *,
+    allow_container_absolute_path_mutation: bool = False,
+) -> bool:
     for args in _command_args(command, "remove-item"):
         tokens = _shell_words(args)
         has_recurse = any(_is_powershell_switch(token, ("recurse", "r")) for token in tokens)
         has_force = any(_is_powershell_switch(token, ("force", "f")) for token in tokens)
-        if has_recurse and has_force and any(_is_dangerous_target(token) for token in _positional_tokens(tokens)):
+        if has_recurse and has_force and any(
+            _is_dangerous_target(
+                token,
+                allow_container_absolute_path_mutation=allow_container_absolute_path_mutation,
+            )
+            for token in _positional_tokens(tokens)
+        ):
             return True
     return False
 
 
-def _looks_like_destructive_del(command: str) -> bool:
+def _looks_like_destructive_del(
+    command: str,
+    *,
+    allow_container_absolute_path_mutation: bool = False,
+) -> bool:
     for command_name in ("del", "erase"):
         for args in _command_args(command, command_name):
             tokens = _shell_words(args)
             has_recursive_delete = any(_strip_quotes(token).lower() == "/s" for token in tokens)
             if has_recursive_delete and any(
-                _is_dangerous_target(token) for token in _positional_tokens(tokens, skip_slash_options=True)
+                _is_dangerous_target(
+                    token,
+                    allow_container_absolute_path_mutation=allow_container_absolute_path_mutation,
+                )
+                for token in _positional_tokens(tokens, skip_slash_options=True)
             ):
                 return True
     return False
@@ -227,7 +256,11 @@ def _positional_tokens(tokens: list[str], *, skip_slash_options: bool = False) -
     return positional
 
 
-def _is_dangerous_target(token: str) -> bool:
+def _is_dangerous_target(
+    token: str,
+    *,
+    allow_container_absolute_path_mutation: bool = False,
+) -> bool:
     raw = _strip_quotes(token).lower()
     if raw in {"/", "/*", "~", "$home", "${home}", "%userprofile%", "%windir%"}:
         return True
@@ -237,7 +270,7 @@ def _is_dangerous_target(token: str) -> bool:
     if clean in {"/etc", "/usr", "/bin", "/sbin", "/var"}:
         return True
     if clean.startswith(("/etc/", "/usr/", "/bin/", "/sbin/", "/var/")):
-        return True
+        return not allow_container_absolute_path_mutation
     if clean in {"~", "$home", "${home}", "%userprofile%", "%windir%"}:
         return True
     if clean.startswith(("~/", "~\\", "$home/", "$home\\", "${home}/", "${home}\\", "%userprofile%", "%windir%")):

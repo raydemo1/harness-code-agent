@@ -58,7 +58,6 @@ PROFILE_SLASH_ALIASES = {
     "/general": "general",
     "/code": "coding-agent",
     "/app": "app-builder",
-    "/terminal": "terminal",
     "/plan": "plan",
     "/review": "review",
 }

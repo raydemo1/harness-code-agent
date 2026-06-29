@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness_code_agent import config
 from harness_code_agent.agent.runtime_state import AgentRuntimeState
@@ -344,7 +345,29 @@ class TerminalShellEditPolicyTests(unittest.TestCase):
 
         self.assertIsNotNone(blocked)
 
-    def test_allows_container_system_config_writes_in_danger_full_access(self):
+    def test_allows_container_absolute_path_mutations_in_eval_danger_full_access(self):
+        middleware = TerminalShellEditPolicyMiddleware()
+        state = AgentRuntimeState(permission_mode="danger-full-access")
+
+        commands = [
+            "cat > /etc/nginx/conf.d/git-site.conf <<'EOF'\nserver {}\nEOF",
+            "python -c \"open('/usr/local/bin/x','w').write('x')\"",
+            "rm -rf /var/www/app",
+        ]
+
+        with patch.dict("os.environ", {"HCA_TERMINAL_EVAL_MODE": "1"}):
+            for command in commands:
+                with self.subTest(command=command):
+                    blocked = middleware.before_tool(
+                        "run_bash",
+                        {"command": command},
+                        messages=[],
+                        runtime_state=state,
+                        agent_name="main_agent",
+                    )
+                    self.assertIsNone(blocked)
+
+    def test_danger_full_access_without_eval_marker_still_blocks_system_path_writes(self):
         middleware = TerminalShellEditPolicyMiddleware()
         state = AgentRuntimeState(permission_mode="danger-full-access")
 
@@ -356,21 +379,28 @@ class TerminalShellEditPolicyTests(unittest.TestCase):
             agent_name="main_agent",
         )
 
-        self.assertIsNone(blocked)
+        self.assertIsNotNone(blocked)
 
     def test_danger_full_access_still_blocks_destructive_system_commands(self):
         middleware = TerminalShellEditPolicyMiddleware()
         state = AgentRuntimeState(permission_mode="danger-full-access")
 
-        blocked = middleware.before_tool(
-            "run_bash",
-            {"command": "rm -rf /etc"},
-            messages=[],
-            runtime_state=state,
-            agent_name="main_agent",
-        )
+        commands = [
+            "rm -rf /etc",
+            "git reset --hard HEAD",
+        ]
 
-        self.assertIsNotNone(blocked)
+        with patch.dict("os.environ", {"HCA_TERMINAL_EVAL_MODE": "1"}):
+            for command in commands:
+                with self.subTest(command=command):
+                    blocked = middleware.before_tool(
+                        "run_bash",
+                        {"command": command},
+                        messages=[],
+                        runtime_state=state,
+                        agent_name="main_agent",
+                    )
+                    self.assertIsNotNone(blocked)
 
     def test_container_system_config_write_requires_danger_full_access(self):
         middleware = TerminalShellEditPolicyMiddleware()
