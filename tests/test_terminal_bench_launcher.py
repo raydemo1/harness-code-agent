@@ -10,6 +10,7 @@ from unittest.mock import patch
 from eval.benchmarks.run_terminal_bench import (
     build_harbor_run_command,
     build_launch_environment,
+    DEFAULT_VERIFIER_NO_PROXY_HOSTS,
     default_local_dataset_path,
     docker_daemon_running,
     ensure_local_dataset,
@@ -231,6 +232,8 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
         self.assertIn("HCA_NO_PROXY_HOSTS", command)
         self.assertIn("astral.sh", command)
+        self.assertIn("huggingface.co", command)
+        self.assertIn("us.aws.cdn.hf.co", command)
         self.assertIn("HCA_APT_MIRROR_PAIRS", command)
         self.assertIn("mirrors.tuna.tsinghua.edu.cn", command)
         self.assertIn("mirrors.aliyun.com", command)
@@ -590,6 +593,42 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             self.assertEqual(second, 0)
             self.assertIn('NO_PROXY = "localhost,astral.sh,github.com"', content)
             self.assertIn('no_proxy = "astral.sh,github.com"', content)
+        finally:
+            shutil.rmtree(repo_root, ignore_errors=True)
+
+    def test_verifier_proxy_defaults_include_huggingface_download_hosts(self):
+        self.assertIn("huggingface.co", DEFAULT_VERIFIER_NO_PROXY_HOSTS)
+        self.assertIn("us.aws.cdn.hf.co", DEFAULT_VERIFIER_NO_PROXY_HOSTS)
+        self.assertIn("cas-bridge.xethub.hf.co", DEFAULT_VERIFIER_NO_PROXY_HOSTS)
+
+    def test_patch_verifier_proxy_env_adds_huggingface_hosts_to_existing_task(self):
+        repo_root = self._workspace_path("test-terminal-bench-verifier-proxy-hf")
+        dataset_path = repo_root / ".harbor" / "datasets" / "terminal-bench-2-1"
+        try:
+            task_dir = dataset_path / "tasks" / "reshard-c4-data"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            task_file = task_dir / "task.toml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "[verifier.env]",
+                        'NO_PROXY = "localhost,astral.sh"',
+                        'no_proxy = "localhost,astral.sh"',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            patched = patch_verifier_proxy_env(dataset_path, ["reshard-c4-data"])
+
+            content = task_file.read_text(encoding="utf-8")
+            self.assertEqual(patched, 1)
+            self.assertIn("huggingface.co", content)
+            self.assertIn("us.aws.cdn.hf.co", content)
+            self.assertIn("cas-bridge.xethub.hf.co", content)
+            self.assertIn('NO_PROXY = "localhost,astral.sh,127.0.0.1', content)
+            self.assertIn('no_proxy = "localhost,astral.sh,127.0.0.1', content)
         finally:
             shutil.rmtree(repo_root, ignore_errors=True)
 
