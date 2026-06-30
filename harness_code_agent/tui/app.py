@@ -218,6 +218,7 @@ class TuiApp(App):
         self._pending_stream_chars = 0
         self._stream_flush_scheduled = False
         self._submitting = False
+        self._pending_submissions: deque[str] = deque()
         self._cancellation_token = CancellationToken()
 
         # Approval/question state
@@ -364,23 +365,35 @@ class TuiApp(App):
     # ── Async submit ────────────────────────────────────────────────────────
 
     def _submit_async(self, text: str) -> bool:
-        """Dispatch submit to background worker. Non-blocking."""
-        if self._submitting:
+        """Accept user input and run it now or enqueue it behind the active turn."""
+        text = str(text or "").strip()
+        if not text:
             return False
+        if self._submitting:
+            self._pending_submissions.append(text)
+            self._output(f"queued: {_preview_submission(text)}", title="queued")
+            return True
+        return self._start_submission(text)
+
+    def _start_submission(self, text: str) -> bool:
+        """Dispatch one accepted submission. Non-blocking for agent turns."""
+        if self._run_slash_command_if_needed(text):
+            self._drain_pending_submissions()
+            return True
         self._submitting = True
-        self._input_enabled(False)
         self._clear_pending_stream_deltas()
         self._streaming_current_response = False
         self._stream_header_printed = False
-        self._cancellation_token = CancellationToken()
-        self._submit_worker(text)
+        token = CancellationToken()
+        self._cancellation_token = token
+        self._submit_worker(text, token)
         return True
 
     @work(thread=True, exclusive=True, exit_on_error=False)
-    def _submit_worker(self, text: str) -> None:
+    def _submit_worker(self, text: str, cancellation_token: CancellationToken) -> None:
         """Run session.submit() in a background thread."""
         try:
-            result = self.session.submit(text, cancellation_token=self._cancellation_token)
+            result = self.session.submit(text, cancellation_token=cancellation_token)
             self.post_message(SubmitComplete(result))
         except CancelledError:
             self.post_message(SubmitCancelled())
@@ -388,6 +401,25 @@ class TuiApp(App):
             self.post_message(SubmitError(str(exc)))
         except Exception as exc:
             self.post_message(SubmitError(str(exc)))
+
+    def _run_slash_command_if_needed(self, text: str) -> bool:
+        if not text.startswith("/"):
+            return False
+        if self.registry is not None and self.registry.is_agent_command(text):
+            return False
+        try:
+            should_continue = self.session.handle_slash_command(text)
+        except Exception as exc:
+            self._output(f"Error: {exc}", title="error")
+            return True
+        if not should_continue:
+            self.exit()
+        return True
+
+    def _drain_pending_submissions(self) -> None:
+        while not self._submitting and self._pending_submissions:
+            text = self._pending_submissions.popleft()
+            self._start_submission(text)
 
     # ── Message handlers (UI thread) ────────────────────────────────────────
 
@@ -474,6 +506,7 @@ class TuiApp(App):
             self._output(result.checkpoint, title="checkpoint")
         self._submitting = False
         self._input_enabled(True)
+        self._drain_pending_submissions()
 
     def on_submit_cancelled(self, msg: SubmitCancelled) -> None:
         """Handle submit cancellation."""
@@ -492,6 +525,7 @@ class TuiApp(App):
         transcript.append_block(block)
         self._submitting = False
         self._input_enabled(True)
+        self._drain_pending_submissions()
 
     def on_submit_error(self, msg: SubmitError) -> None:
         """Handle submit error."""
@@ -508,6 +542,7 @@ class TuiApp(App):
         self._output(f"Error: {msg.error}", title="error")
         self._submitting = False
         self._input_enabled(True)
+        self._drain_pending_submissions()
 
     def on_output_event(self, msg: OutputEvent) -> None:
         """Handle background thread output (compact, permission, etc.)."""
@@ -808,3 +843,10 @@ class TuiApp(App):
         except Exception:
             log.debug("Error closing session during exit", exc_info=True)
         super().exit(*args, **kwargs)
+
+
+def _preview_submission(text: str, limit: int = 80) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 3)] + "..."

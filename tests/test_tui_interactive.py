@@ -2,11 +2,14 @@
 import asyncio
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from harness_code_agent.agent.cancellation import CancelledError
 from harness_code_agent.tui.app import TuiApp
 from harness_code_agent.tui.state import SessionStatusSnapshot, TranscriptBlock, TuiState
 from harness_code_agent.tui.widgets import SubmitTextArea
@@ -132,6 +135,133 @@ class TuiInteractiveTests(unittest.TestCase):
                     self.assertIn("hello", submitted)
                     text_area = app.query_one("#input-text", SubmitTextArea)
                     self.assertEqual(text_area.text, "")
+        _run(_test())
+
+    def test_input_stays_visible_and_queues_while_turn_runs(self):
+        async def _test():
+            submitted = []
+            started = threading.Event()
+            release = threading.Event()
+            mock = _mock_session(self.root)
+
+            def capture(text, cancellation_token=None):
+                submitted.append(text)
+                started.set()
+                release.wait(2)
+                return SimpleNamespace(notice="", checkpoint="")
+
+            mock.submit = capture
+
+            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
+                MockSession.return_value = mock
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test() as pilot:
+                    await pilot.press("f", "i", "r", "s", "t")
+                    await pilot.press("enter")
+                    for _ in range(20):
+                        if started.is_set():
+                            break
+                        await pilot.pause(0.01)
+
+                    input_area = app.query_one("#input-area")
+                    self.assertTrue(input_area.display)
+                    await pilot.press("s", "e", "c", "o", "n", "d")
+                    await pilot.press("enter")
+                    text_area = app.query_one("#input-text", SubmitTextArea)
+                    self.assertEqual(text_area.text, "")
+                    self.assertEqual(submitted, ["first"])
+
+                    release.set()
+                    for _ in range(50):
+                        if submitted == ["first", "second"] and not app._submitting:
+                            break
+                        await pilot.pause(0.01)
+                    self.assertEqual(submitted, ["first", "second"])
+        _run(_test())
+
+    def test_ctrl_c_cancels_active_turn_but_preserves_queue(self):
+        async def _test():
+            submitted = []
+            started = threading.Event()
+            interrupted = []
+            mock = _mock_session(self.root)
+            mock.interrupt_current_shell = lambda: interrupted.append(True) or True
+
+            def capture(text, cancellation_token=None):
+                submitted.append(text)
+                if text == "first":
+                    started.set()
+                    for _ in range(200):
+                        if cancellation_token is not None and cancellation_token.is_cancelled:
+                            raise CancelledError("Turn cancelled by user")
+                        time.sleep(0.01)
+                    raise AssertionError("first turn was not cancelled")
+                return SimpleNamespace(notice="", checkpoint="")
+
+            mock.submit = capture
+
+            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
+                MockSession.return_value = mock
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test() as pilot:
+                    self.assertTrue(app._submit_async("first"))
+                    for _ in range(20):
+                        if started.is_set():
+                            break
+                        await pilot.pause(0.01)
+                    self.assertTrue(app._submit_async("second"))
+
+                    await pilot.press("ctrl+c")
+                    for _ in range(50):
+                        if submitted == ["first", "second"] and not app._submitting:
+                            break
+                        await pilot.pause(0.01)
+
+                    self.assertEqual(submitted, ["first", "second"])
+                    self.assertEqual(interrupted, [True])
+                    self.assertTrue(
+                        any(block.title == "turn cancelled" for block in app.state.blocks)
+                    )
+        _run(_test())
+
+    def test_slash_command_queues_behind_running_turn(self):
+        async def _test():
+            submitted = []
+            commands = []
+            started = threading.Event()
+            release = threading.Event()
+            mock = _mock_session(self.root)
+            mock.handle_slash_command = lambda line: commands.append(line) or True
+
+            def capture(text, cancellation_token=None):
+                submitted.append(text)
+                started.set()
+                release.wait(2)
+                return SimpleNamespace(notice="", checkpoint="")
+
+            mock.submit = capture
+
+            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
+                MockSession.return_value = mock
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test() as pilot:
+                    self.assertTrue(app._submit_async("first"))
+                    for _ in range(20):
+                        if started.is_set():
+                            break
+                        await pilot.pause(0.01)
+
+                    self.assertTrue(app._submit_async("/help"))
+                    self.assertEqual(commands, [])
+
+                    release.set()
+                    for _ in range(50):
+                        if commands == ["/help"] and not app._submitting:
+                            break
+                        await pilot.pause(0.01)
+
+                    self.assertEqual(submitted, ["first"])
+                    self.assertEqual(commands, ["/help"])
         _run(_test())
 
     def test_empty_input_not_submitted(self):

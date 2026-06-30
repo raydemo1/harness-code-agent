@@ -533,22 +533,6 @@ class InputArea(Vertical):
         if app is None:
             return
 
-        # Handle slash commands
-        if text.startswith("/"):
-            if self._registry is not None and self._registry.is_agent_command(text):
-                if app._submit_async(text):
-                    text_area.text = ""
-                    self.query_one("#cmd-palette", CommandPalette).update_candidates([])
-                return
-            try:
-                should_continue = app.session.handle_slash_command(text)
-            except Exception:
-                return
-            if not should_continue:
-                app.exit()
-            return
-
-        # Submit to agent
         if app._submit_async(text):
             text_area.text = ""
             self.query_one("#cmd-palette", CommandPalette).update_candidates([])
