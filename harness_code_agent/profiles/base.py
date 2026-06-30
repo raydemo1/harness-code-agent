@@ -18,6 +18,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from ..tracking_policy import TASK_TRACKING_POLICY
+from ..runtime.middleware import (
+    AcceptanceReviewMiddleware,
+    ErrorGuidanceMiddleware,
+    LoopDetectionMiddleware,
+    RecoveryStrategyMiddleware,
+    TaskTrackingEnforcementMiddleware,
+    TimeBudgetMiddleware,
+)
 from ..runtime.permissions import (
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_EDIT,
@@ -53,6 +61,50 @@ def build_profile_prompt(
     )
 
 
+def build_execution_middlewares(
+    *,
+    task_budget: float,
+    loop_file_edit_threshold: int,
+    loop_command_repeat_threshold: int,
+    time_warn_threshold: float = 0.60,
+    time_critical_threshold: float = 0.85,
+    enforce_acceptance: bool = False,
+    require_start_after_n_actions: int | None = None,
+    acceptance_review_timeout: float | None = None,
+    extra_after_error: list | None = None,
+    extra_before_time_budget: list | None = None,
+) -> list:
+    """Build the shared execution loop used by write-capable profiles."""
+    middlewares = [
+        LoopDetectionMiddleware(
+            file_edit_threshold=loop_file_edit_threshold,
+            command_repeat_threshold=loop_command_repeat_threshold,
+        ),
+        ErrorGuidanceMiddleware(),
+    ]
+    middlewares.extend(extra_after_error or [])
+    if acceptance_review_timeout is not None:
+        middlewares.append(AcceptanceReviewMiddleware(timeout_seconds=acceptance_review_timeout))
+    middlewares.extend(
+        [
+            TaskTrackingEnforcementMiddleware(
+                enforce_acceptance=enforce_acceptance,
+                require_start_after_n_actions=require_start_after_n_actions,
+            ),
+            RecoveryStrategyMiddleware(),
+        ]
+    )
+    middlewares.extend(extra_before_time_budget or [])
+    middlewares.append(
+        TimeBudgetMiddleware(
+            budget_seconds=task_budget,
+            warn_threshold=time_warn_threshold,
+            critical_threshold=time_critical_threshold,
+        )
+    )
+    return middlewares
+
+
 @dataclass
 class AgentConfig:
     """Configuration for the main agent."""
@@ -85,6 +137,8 @@ class ProfileConfig:
     loop_file_edit_threshold: int | None = None      # edits before loop warning
     loop_command_repeat_threshold: int | None = None  # repeats before loop warning
     task_tracking_nudge_after: int | None = None      # tool calls before tracking nudge
+    require_start_after_n_actions: int | None = None  # action tools before tracked start is required
+    acceptance_review_timeout: float | None = None    # fast-model acceptance review timeout
     time_warn_threshold: float | None = None          # fraction of budget for warning
     time_critical_threshold: float | None = None      # fraction of budget for critical
 

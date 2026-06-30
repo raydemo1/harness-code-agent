@@ -23,14 +23,8 @@ from __future__ import annotations
 
 import os
 
-from .base import BaseProfile, AgentConfig, build_profile_prompt
+from .base import BaseProfile, AgentConfig, build_execution_middlewares, build_profile_prompt
 from ..runtime.middleware import (
-    LoopDetectionMiddleware,
-    TimeBudgetMiddleware,
-    TaskTrackingEnforcementMiddleware,
-    ErrorGuidanceMiddleware,
-    RecoveryStrategyMiddleware,
-    AcceptanceReviewMiddleware,
     TerminalShellEditPolicyMiddleware,
 )
 
@@ -125,24 +119,16 @@ class TerminalProfile(BaseProfile):
                     "ran after the final structured file edit."
                 ),
             ),
-            middlewares=[
-                LoopDetectionMiddleware(
-                    file_edit_threshold=self._get("loop_file_edit_threshold"),
-                    command_repeat_threshold=self._get("loop_command_repeat_threshold"),
-                ),
-                ErrorGuidanceMiddleware(),
-                TerminalShellEditPolicyMiddleware(),
-                AcceptanceReviewMiddleware(
-                    timeout_seconds=self._get("acceptance_review_timeout"),
-                ),
-                TaskTrackingEnforcementMiddleware(enforce_acceptance=True),
-                RecoveryStrategyMiddleware(),
-                TimeBudgetMiddleware(
-                    budget_seconds=self._get("task_budget"),
-                    warn_threshold=self._get("time_warn_threshold"),
-                    critical_threshold=self._get("time_critical_threshold"),
-                ),
-            ],
+            middlewares=build_execution_middlewares(
+                task_budget=self._get("task_budget"),
+                loop_file_edit_threshold=self._get("loop_file_edit_threshold"),
+                loop_command_repeat_threshold=self._get("loop_command_repeat_threshold"),
+                time_warn_threshold=self._get("time_warn_threshold"),
+                time_critical_threshold=self._get("time_critical_threshold"),
+                enforce_acceptance=True,
+                acceptance_review_timeout=self._get("acceptance_review_timeout"),
+                extra_after_error=[TerminalShellEditPolicyMiddleware()],
+            ),
             time_budget=self._get("task_budget"),
             initial_planning_mode="tracked",
         )

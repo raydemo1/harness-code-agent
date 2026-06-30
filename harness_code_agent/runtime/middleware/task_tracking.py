@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 
+from ...agent.acceptance import AcceptanceError
 from ..shell_classification import classify_safe_shell_command
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 
@@ -69,8 +70,14 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
 
     ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "consult_subagent", "browser_test"}
 
-    def __init__(self, *, enforce_acceptance: bool = False):
+    def __init__(
+        self,
+        *,
+        enforce_acceptance: bool = False,
+        require_start_after_n_actions: int | None = None,
+    ):
         self.enforce_acceptance = bool(enforce_acceptance)
+        self.require_start_after_n_actions = require_start_after_n_actions
         self._missing_start_reminded = False
 
     def before_tool(
@@ -89,15 +96,21 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             update_kind = str(tool_args.get("update_kind") or "").strip().lower()
             if update_kind == "start" and not tool_args.get("acceptance_checks"):
                 return (
-                    "[blocked] Terminal planning start requires 1-10 acceptance_checks "
+                    "[blocked] Tracked planning start requires 1-10 acceptance_checks "
                     "with text, source, and verification_command."
                 )
             if update_kind == "final":
-                return self._validate_terminal_final(tool_args, runtime_state)
+                return self._validate_acceptance_final(tool_args, runtime_state)
             return None
         if tool_name not in self.ACTION_TOOLS:
             return None
         board = runtime_state.task_board
+        if self._requires_tracked_start(runtime_state):
+            return (
+                "[blocked] This task has reached multi-step execution. "
+                "Call update_plan_state with mode=\"tracked\", update_kind=\"start\", "
+                "and concrete acceptance_checks before more edits or commands."
+            )
         if board.planning_mode in {"unset", "skip"}:
             return None
         if board.replan_required:
@@ -155,7 +168,23 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
                     )
         return None
 
-    def _validate_terminal_final(self, tool_args: dict, runtime_state) -> str | None:
+    def _requires_tracked_start(self, runtime_state) -> bool:
+        if not self.enforce_acceptance or self.require_start_after_n_actions is None:
+            return False
+        try:
+            threshold = int(self.require_start_after_n_actions)
+        except (TypeError, ValueError):
+            return False
+        if threshold <= 0:
+            return False
+        board = runtime_state.task_board
+        if board.update_count > 0:
+            return False
+        if board.planning_mode not in {"unset", "skip", "tracked"}:
+            return False
+        return int(getattr(runtime_state, "action_tool_count", 0) or 0) >= threshold
+
+    def _validate_acceptance_final(self, tool_args: dict, runtime_state) -> str | None:
         result_status = str(tool_args.get("result_status") or "").strip().lower()
         if result_status != "success":
             return None
@@ -170,6 +199,17 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
                 f"Replace weak verification_command for {weak_command['id']!s}: "
                 f"{weak_command['verification_command']!r}."
             )
+        checkpoint = acceptance.checkpoint()
+        try:
+            acceptance.validate_final(
+                result_status=result_status,
+                expected_revision=tool_args.get("acceptance_revision"),
+                raw_results=tool_args.get("check_results"),
+            )
+        except AcceptanceError as exc:
+            return f"[blocked] {exc}"
+        finally:
+            acceptance.rollback(checkpoint, if_revision=acceptance.revision)
         facts = runtime_state.execution_facts
         if facts.last_foreground_shell_sequence == 0:
             return (

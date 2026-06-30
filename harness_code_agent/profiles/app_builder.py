@@ -4,14 +4,9 @@ App Builder profile for single-agent web app creation and browser verification.
 from __future__ import annotations
 
 from ..tracking_policy import TASK_TRACKING_POLICY
-from .base import BaseProfile, AgentConfig, build_profile_prompt
+from .base import BaseProfile, AgentConfig, build_execution_middlewares, build_profile_prompt
 from ..runtime.middleware import (
-    ErrorGuidanceMiddleware,
-    LoopDetectionMiddleware,
     PreExitVerificationMiddleware,
-    RecoveryStrategyMiddleware,
-    TaskTrackingEnforcementMiddleware,
-    TimeBudgetMiddleware,
 )
 
 
@@ -48,7 +43,18 @@ _APP_BUILDER_SYSTEM = build_profile_prompt(
 
 
 class AppBuilderProfile(BaseProfile):
-    _DEFAULT_TASK_BUDGET = 3600
+    _DEFAULTS = {
+        "task_budget": 3600,
+        "loop_file_edit_threshold": 4,
+        "loop_command_repeat_threshold": 3,
+        "require_start_after_n_actions": 5,
+        "acceptance_review_timeout": 10.0,
+        "time_warn_threshold": 0.60,
+        "time_critical_threshold": 0.85,
+    }
+
+    def _get(self, key: str):
+        return self.cfg.resolve(key, self.name(), self._DEFAULTS[key])
 
     def name(self) -> str:
         return "app-builder"
@@ -60,21 +66,24 @@ class AppBuilderProfile(BaseProfile):
         return AgentConfig(
             system_prompt=_APP_BUILDER_SYSTEM,
             blocked_tool_names=set(),
-            middlewares=[
-                LoopDetectionMiddleware(),
-                ErrorGuidanceMiddleware(),
-                TaskTrackingEnforcementMiddleware(),
-                RecoveryStrategyMiddleware(),
-                PreExitVerificationMiddleware(
-                    verification_prompt=(
-                        "Verify the app against the original request. Run concrete checks, "
-                        "and use browser_test when a browser UI is involved."
+            middlewares=build_execution_middlewares(
+                task_budget=self._get("task_budget"),
+                loop_file_edit_threshold=self._get("loop_file_edit_threshold"),
+                loop_command_repeat_threshold=self._get("loop_command_repeat_threshold"),
+                time_warn_threshold=self._get("time_warn_threshold"),
+                time_critical_threshold=self._get("time_critical_threshold"),
+                enforce_acceptance=True,
+                require_start_after_n_actions=self._get("require_start_after_n_actions"),
+                acceptance_review_timeout=self._get("acceptance_review_timeout"),
+                extra_before_time_budget=[
+                    PreExitVerificationMiddleware(
+                        verification_prompt=(
+                            "Verify the app against the original request. Run concrete checks, "
+                            "and use browser_test when a browser UI is involved."
+                        ),
+                        include_task_requirements=True,
                     ),
-                    include_task_requirements=True,
-                ),
-                TimeBudgetMiddleware(
-                    budget_seconds=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
-                ),
-            ],
-            time_budget=self.cfg.resolve("task_budget", self.name(), self._DEFAULT_TASK_BUDGET),
+                ],
+            ),
+            time_budget=self._get("task_budget"),
         )

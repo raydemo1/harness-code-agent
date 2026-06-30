@@ -10,6 +10,12 @@ from harness_code_agent.agent.prompts import (
 from harness_code_agent.profiles import PRODUCT_PROFILES, PROFILES, get_profile, list_profiles
 from harness_code_agent.profiles.terminal import TerminalProfile
 from harness_code_agent.profiles.router import route_profile_for_turn
+from harness_code_agent.runtime.middleware import (
+    AcceptanceReviewMiddleware,
+    PreExitVerificationMiddleware,
+    TaskTrackingEnforcementMiddleware,
+    TerminalShellEditPolicyMiddleware,
+)
 
 
 class ProfilePromptTests(unittest.TestCase):
@@ -90,6 +96,43 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertIn("findings first", prompts["review"])
         self.assertIn("non-interactive", prompts["terminal"])
         self.assertIn("smallest suitable stack", prompts["app-builder"])
+
+    def test_execution_profiles_share_acceptance_enforcement(self):
+        for name in ("coding-agent", "app-builder"):
+            with self.subTest(profile=name):
+                cfg = get_profile(name).main_agent()
+                tracking = [
+                    mw for mw in cfg.middlewares
+                    if isinstance(mw, TaskTrackingEnforcementMiddleware)
+                ]
+
+                self.assertEqual(cfg.initial_planning_mode, "unset")
+                self.assertTrue(any(isinstance(mw, AcceptanceReviewMiddleware) for mw in cfg.middlewares))
+                self.assertEqual(len(tracking), 1)
+                self.assertTrue(tracking[0].enforce_acceptance)
+                self.assertIsNotNone(tracking[0].require_start_after_n_actions)
+
+    def test_read_only_and_planning_profiles_do_not_get_execution_acceptance_loop(self):
+        for name in ("general", "plan", "review"):
+            with self.subTest(profile=name):
+                middlewares = get_profile(name).main_agent().middlewares
+
+                self.assertFalse(any(isinstance(mw, AcceptanceReviewMiddleware) for mw in middlewares))
+                self.assertFalse(
+                    any(
+                        isinstance(mw, TaskTrackingEnforcementMiddleware)
+                        and mw.enforce_acceptance
+                        for mw in middlewares
+                    )
+                )
+
+    def test_terminal_keeps_eval_specific_shell_policy_without_pre_exit_verifier(self):
+        cfg = get_profile("terminal").main_agent()
+
+        self.assertEqual(cfg.initial_planning_mode, "tracked")
+        self.assertTrue(any(isinstance(mw, AcceptanceReviewMiddleware) for mw in cfg.middlewares))
+        self.assertTrue(any(isinstance(mw, TerminalShellEditPolicyMiddleware) for mw in cfg.middlewares))
+        self.assertFalse(any(isinstance(mw, PreExitVerificationMiddleware) for mw in cfg.middlewares))
 
     def test_terminal_profile_resolves_timeout_from_task_name_env(self):
         with patch.dict(os.environ, {"HARNESS_TERMINAL_TASK_NAME": "terminal-bench/overfull-hbox"}):

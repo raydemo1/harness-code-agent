@@ -555,7 +555,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIn("update_plan_state", blocked)
         self.assertIn("final", blocked)
 
-    def test_terminal_start_requires_acceptance_checks(self):
+    def test_tracked_start_requires_acceptance_checks(self):
         middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
         state = AgentRuntimeState()
         state.task_board.planning_mode = "tracked"
@@ -570,6 +570,154 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
 
         self.assertIsNotNone(blocked)
         self.assertIn("acceptance_checks", blocked)
+        self.assertNotIn("Terminal", blocked)
+
+    def test_unset_mode_allows_small_skip_path_before_start_threshold(self):
+        middleware = TaskTrackingEnforcementMiddleware(
+            enforce_acceptance=True,
+            require_start_after_n_actions=3,
+        )
+        state = AgentRuntimeState()
+
+        for _ in range(2):
+            self.assertIsNone(
+                middleware.before_tool(
+                    "run_bash",
+                    {"command": "pytest"},
+                    messages=[],
+                    runtime_state=state,
+                    agent_name="main_agent",
+                )
+            )
+            self.assertIsNone(
+                middleware.post_tool(
+                    "run_bash",
+                    {"command": "pytest"},
+                    "ok",
+                    messages=[],
+                    runtime_state=state,
+                    agent_name="main_agent",
+                )
+            )
+
+        self.assertEqual(state.task_board.planning_mode, "unset")
+        self.assertEqual(state.task_board.action_count, 2)
+
+    def test_unset_mode_requires_tracked_start_after_action_threshold(self):
+        middleware = TaskTrackingEnforcementMiddleware(
+            enforce_acceptance=True,
+            require_start_after_n_actions=2,
+        )
+        state = AgentRuntimeState()
+
+        for _ in range(2):
+            self.assertIsNone(
+                middleware.before_tool(
+                    "run_bash",
+                    {"command": "pytest"},
+                    messages=[],
+                    runtime_state=state,
+                    agent_name="main_agent",
+                )
+            )
+            middleware.post_tool(
+                "run_bash",
+                {"command": "pytest"},
+                "ok",
+                messages=[],
+                runtime_state=state,
+                agent_name="main_agent",
+            )
+
+        blocked = middleware.before_tool(
+            "apply_patch",
+            {"path": "x.py", "search": "a", "replace": "b"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("multi-step execution", blocked)
+        self.assertIn("update_plan_state", blocked)
+        self.assertIn("acceptance_checks", blocked)
+
+    def test_threshold_start_with_acceptance_checks_allows_more_actions(self):
+        middleware = TaskTrackingEnforcementMiddleware(
+            enforce_acceptance=True,
+            require_start_after_n_actions=1,
+        )
+        state = AgentRuntimeState()
+        middleware.post_tool(
+            "run_bash",
+            {"command": "pytest"},
+            "ok",
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(
+            middleware.before_tool(
+                "update_plan_state",
+                {
+                    "update_kind": "start",
+                    "acceptance_checks": [
+                        {
+                            "text": "Tests pass",
+                            "source": "User asked for verified fix",
+                            "verification_command": "pytest",
+                        }
+                    ],
+                },
+                messages=[],
+                runtime_state=state,
+                agent_name="main_agent",
+            )
+        )
+        state.task_board.planning_mode = "tracked"
+        state.task_board.update_count = 1
+
+        self.assertIsNone(
+            middleware.before_tool(
+                "apply_patch",
+                {"path": "x.py", "search": "a", "replace": "b"},
+                messages=[],
+                runtime_state=state,
+                agent_name="main_agent",
+            )
+        )
+
+    def test_acceptance_success_requires_check_results(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "tracked"
+        state.task_board.update_count = 1
+        state.task_board.acceptance.initialize(
+            [{"text": "Tests pass", "source": "Run the tests", "verification_command": "pytest"}]
+        )
+        state.execution_facts.record_result(
+            "run_bash",
+            status="success",
+            return_code=0,
+            metadata={"status_source": "shell"},
+        )
+
+        blocked = middleware.before_tool(
+            "update_plan_state",
+            {
+                "update_kind": "final",
+                "result_status": "success",
+                "acceptance_revision": 1,
+                "check_results": [],
+            },
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("every active acceptance check", blocked)
 
     def test_terminal_success_requires_latest_foreground_shell_to_succeed_after_edit(self):
         middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
@@ -678,7 +826,14 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
 
         blocked = middleware.before_tool(
             "update_plan_state",
-            {"update_kind": "final", "result_status": "success"},
+            {
+                "update_kind": "final",
+                "result_status": "success",
+                "acceptance_revision": 1,
+                "check_results": [
+                    {"id": "check_1", "status": "passed", "summary": "pytest passed"}
+                ],
+            },
             messages=[],
             runtime_state=state,
             agent_name="main_agent",

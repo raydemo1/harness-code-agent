@@ -200,7 +200,7 @@ Skill 同样分成两种调用方式：
 | `plan` | 先调查仓库，再分轮澄清高影响偏好，输出 decision-complete Markdown 计划 |
 | `review` | 独立只读代码评审，按 findings-first 结构输出，不修改工作区 |
 
-`terminal` profile 面向 Terminal-Bench / Harbor 这类非交互评测场景保留，可通过评测 runner 或显式 `--profile terminal` 启动；它不出现在 `/profiles`、`--list-profiles` 或 slash profile 切换列表中。
+`coding-agent`、`app-builder` 和 `terminal` 共享执行型验收闭环：小而低风险的任务仍可走轻量 skip 路径；一旦进入 tracked 或执行步数超过阈值，运行时会要求 `acceptance_checks`、可失败的验证命令、replan 时同步维护验收项，并在 final update 中提交每个 active check 的结果。`terminal` profile 面向 Terminal-Bench / Harbor 这类非交互评测场景保留，可通过评测 runner 或显式 `--profile terminal` 启动；它不出现在 `/profiles`、`--list-profiles` 或 slash profile 切换列表中。
 
 最终 system prompt 由稳定的共享层与 profile-local 合同组合而成。共享层负责证据意识、诚实表达、工具节制和主 Agent 所有权；各 profile 只描述本场景的 Role、Working Style、Boundaries 与 Completion。工具 schema、权限过滤、规划门禁和退出验证仍由运行时代码强制执行，不依赖 prompt 重复喊规则。
 
@@ -340,6 +340,8 @@ PROFILE_<PROFILE_NAME>_<KEY>=value
 ```bash
 PROFILE_TERMINAL_TASK_BUDGET=1800
 PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.45
+PROFILE_CODING_AGENT_REQUIRE_START_AFTER_N_ACTIONS=5
+PROFILE_APP_BUILDER_ACCEPTANCE_REVIEW_TIMEOUT=10
 ```
 
 ## 权限模式
@@ -453,5 +455,5 @@ python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 - `.env` 不应提交到版本库，使用 `.env.template` 作为配置模板。
 - `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名；DeepSeek 默认 `fast/normal/hard/max` 映射为 flash non-thinking、flash high、pro high、pro max，summary 等轻量 LLM 任务固定使用 `fast`。
 - `app-builder` 的浏览器能力依赖 Playwright；未安装时相关工具会不可用或报错。
-- `terminal` profile 针对非交互式 CLI 评测任务优化，会更积极地执行 shell 命令和本地验证；Terminal-Bench runner 会用评测标记放宽容器内绝对路径写入，但普通产品 profile 不继承该权限边界。
+- `terminal` profile 针对非交互式 CLI 评测任务优化，会更积极地执行 shell 命令和本地验证；Terminal-Bench runner 会用评测标记加 `danger-full-access` 放宽容器内绝对路径写入，但普通产品 profile 只继承验收/验证闭环，不继承该权限边界。
 - 默认 `workspace-write` 模式会对白名单外 shell 命令和未知工具触发批准流程；自动化 benchmark 可按需切换权限模式。

@@ -8,15 +8,10 @@ benchmark profiles.
 """
 from __future__ import annotations
 
-from .base import BaseProfile, AgentConfig, build_profile_prompt
+from .base import BaseProfile, AgentConfig, build_execution_middlewares, build_profile_prompt
 from ..tracking_policy import TASK_TRACKING_POLICY
 from ..runtime.middleware import (
-    ErrorGuidanceMiddleware,
-    LoopDetectionMiddleware,
     PreExitVerificationMiddleware,
-    RecoveryStrategyMiddleware,
-    TaskTrackingEnforcementMiddleware,
-    TimeBudgetMiddleware,
 )
 
 
@@ -25,6 +20,8 @@ class CodingAgentProfile(BaseProfile):
         "task_budget": 3600,
         "loop_file_edit_threshold": 5,
         "loop_command_repeat_threshold": 3,
+        "require_start_after_n_actions": 5,
+        "acceptance_review_timeout": 10.0,
         "time_warn_threshold": 0.60,
         "time_critical_threshold": 0.85,
     }
@@ -70,27 +67,25 @@ class CodingAgentProfile(BaseProfile):
                     "same facts in the final planning update."
                 ),
             ),
-            middlewares=[
-                LoopDetectionMiddleware(
-                    file_edit_threshold=self._get("loop_file_edit_threshold"),
-                    command_repeat_threshold=self._get("loop_command_repeat_threshold"),
-                ),
-                ErrorGuidanceMiddleware(),
-                TaskTrackingEnforcementMiddleware(),
-                RecoveryStrategyMiddleware(),
-                PreExitVerificationMiddleware(
-                    verification_prompt=(
-                        "Verify the original coding request against the repository state. "
-                        "Run the most relevant tests or checks available. If any check fails, fix it before stopping."
+            middlewares=build_execution_middlewares(
+                task_budget=self._get("task_budget"),
+                loop_file_edit_threshold=self._get("loop_file_edit_threshold"),
+                loop_command_repeat_threshold=self._get("loop_command_repeat_threshold"),
+                time_warn_threshold=self._get("time_warn_threshold"),
+                time_critical_threshold=self._get("time_critical_threshold"),
+                enforce_acceptance=True,
+                require_start_after_n_actions=self._get("require_start_after_n_actions"),
+                acceptance_review_timeout=self._get("acceptance_review_timeout"),
+                extra_before_time_budget=[
+                    PreExitVerificationMiddleware(
+                        verification_prompt=(
+                            "Verify the original coding request against the repository state. "
+                            "Run the most relevant tests or checks available. If any check fails, fix it before stopping."
+                        ),
+                        include_task_requirements=True,
                     ),
-                    include_task_requirements=True,
-                ),
-                TimeBudgetMiddleware(
-                    budget_seconds=self._get("task_budget"),
-                    warn_threshold=self._get("time_warn_threshold"),
-                    critical_threshold=self._get("time_critical_threshold"),
-                ),
-            ],
+                ],
+            ),
             time_budget=self._get("task_budget"),
         )
 
