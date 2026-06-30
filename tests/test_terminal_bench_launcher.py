@@ -232,6 +232,8 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
         self.assertIn("HCA_NO_PROXY_HOSTS", command)
         self.assertIn("astral.sh", command)
+        self.assertIn("download.pytorch.org", command)
+        self.assertIn("download-r2.pytorch.org", command)
         self.assertIn("huggingface.co", command)
         self.assertIn("us.aws.cdn.hf.co", command)
         self.assertIn("HCA_APT_MIRROR_PAIRS", command)
@@ -597,6 +599,8 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             shutil.rmtree(repo_root, ignore_errors=True)
 
     def test_verifier_proxy_defaults_include_huggingface_download_hosts(self):
+        self.assertIn("download.pytorch.org", DEFAULT_VERIFIER_NO_PROXY_HOSTS)
+        self.assertIn("download-r2.pytorch.org", DEFAULT_VERIFIER_NO_PROXY_HOSTS)
         self.assertIn("huggingface.co", DEFAULT_VERIFIER_NO_PROXY_HOSTS)
         self.assertIn("us.aws.cdn.hf.co", DEFAULT_VERIFIER_NO_PROXY_HOSTS)
         self.assertIn("cas-bridge.xethub.hf.co", DEFAULT_VERIFIER_NO_PROXY_HOSTS)
@@ -624,6 +628,8 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
             content = task_file.read_text(encoding="utf-8")
             self.assertEqual(patched, 1)
+            self.assertIn("download.pytorch.org", content)
+            self.assertIn("download-r2.pytorch.org", content)
             self.assertIn("huggingface.co", content)
             self.assertIn("us.aws.cdn.hf.co", content)
             self.assertIn("cas-bridge.xethub.hf.co", content)
