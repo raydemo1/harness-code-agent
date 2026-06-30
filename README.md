@@ -1,27 +1,79 @@
 # Harness Code Agent
 
-Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本地 autonomous coding agent 框架。它把“主 agent 负责完整执行闭环、只读子 agent 负责咨询”的模式封装成可复用的 profile，并提供本地仓库分析、权限策略、会话记录、工具调用、浏览器测试、规划文件和 benchmark 适配能力。
+Harness Code Agent，简称 HCA，是一个面向真实本地仓库工作的 autonomous coding agent 框架。
 
-项目适合用于：
+它不是一组 prompt，也不是把 shell 随便交给模型。HCA 更像是给模型装了一套工程化运行时：它知道什么时候该问、什么时候该读代码、什么时候能改文件、什么时候必须验证、什么时候该承认卡住，以及如何把整个过程记录成可以复盘的证据。
 
-- 在本地代码仓库中自动完成修复、重构、测试和验证任务。
-- 从一句话 prompt 生成并迭代 Web 应用。
-- 运行 Terminal-Bench / SWE-Bench 风格的任务。
-- 构建和调试新的 agent profile、middleware、tool runtime 或 benchmark adapter。
+HCA 基于 OpenAI-compatible Chat Completions API，可以接 DeepSeek、OpenAI 或其他兼容服务。它把 profile、工具权限、会话记录、上下文压缩、恢复策略、验收检查、浏览器验证和 benchmark 适配组合成一个本地 coding agent runtime。日常可以用它修 bug、重构、写测试、做 review、生成计划、构建小型 Web 应用；评测时也可以用同一套 runtime 跑 Terminal-Bench / Claw-SWE-Bench 风格任务。
 
-## 功能特点
+## 为什么做这个
 
-- **Profile 驱动**：产品入口内置 `general`、`coding-agent`、`app-builder`、`plan`、`review` 五种任务模式；它们共享同一套 Agent 判断原则，再按场景切换工作节奏、权限边界和完成标准。默认先进入轻量 `general`，再按任务语义自动切到专用 profile。`terminal` profile 保留为 Terminal-Bench 等评测入口的显式模式，不进入产品可见列表。
-- **单主控 agent 架构**：主 agent 负责读代码、规划、修改、验证和最终决策；子 agent 仅用于只读调查、并行搜索、测试设计或 review。
-- **OpenAI-compatible API**：通过 `OPENAI_BASE_URL` 和 `HARNESS_MODEL` 可切换到兼容 OpenAI 协议的服务。
-- **本地仓库工作流**：交互式模式默认使用启动 `hca` 时所在的当前目录，文件读写会经过路径检查。
-- **运行时权限策略**：支持 `workspace-write`、`llm-auto`、`danger-full-access` 三种权限模式；受限调查/计划工作使用 `plan` profile。
-- **会话与事件记录**：每次运行会写入 `.harness/` 元数据、事件和文件快照。
-- **工具系统**：支持 `repo_search` / `list_files` / `read_file` 仓库检查、受控 `parallel` 并行只读调用、文件写入、持久 shell、用户选择提问、Web 搜索/抓取、规划文件、只读子 agent、可选浏览器测试等工具。
-- **中间件防护**：包含循环检测、任务跟踪、错误恢复、时间预算、退出前验证等行为约束。
-- **评估与 Benchmark 适配**：`eval/` 下提供轻量评估脚本、任务集、结果汇总，以及 Terminal-Bench 2.0 / Harbor 和 Claw-SWE-Bench 运行入口。
-- **项目规则文件**：交互式 session 启动时会读取当前工作区根目录的 `HARNESS.md`，并作为稳定系统提示的一部分注入。
-- **缓存友好上下文**：稳定规则放在前缀；工具结果和事实失效提示采用追加式历史，避免每轮改动前部上下文，提高 prompt cache 命中率。当前 DeepSeek context cache 评估中，stable warmup 从 `29.2%` 提升到 `99.1%`，compaction 后命中率为 `83.2%`。
+真实软件任务里，模型本身强不强只是一部分。很多失败并不是因为模型完全不会，而是因为 agent loop 不够稳：
+
+- 没读清楚代码就开始改。
+- 读到旧输出后不知道它已经失效。
+- 命令失败后反复走同一条路。
+- 没有验证就提前说完成。
+- 一次 Docker、代理或依赖波动被误记成能力失败。
+- 长任务跑完后没有成本、tokens、工具调用和失败轨迹的可靠台账。
+
+HCA 解决的是这些“模型外面”的问题。它给模型提供一个更可靠的执行环境，让模型的能力真正落到仓库、测试和评测结果上。
+
+## 当前效果
+
+我更愿意把这个结果看成一件事：HCA 不是靠换一个更大的模型来变强，而是在 `deepseek-v4-flash` 这个更轻的模型上，把 agent runtime 该做的事情补齐了。
+
+当前本地 Terminal-Bench 2.1 ledger 用完整 89 个任务做分母，强视觉任务也计入失败：
+
+| 对比项 | 口径 | 结果 |
+| --- | --- | ---: |
+| HCA 本地结果 | Terminal-Bench 2.1 task ledger，`deepseek-v4-flash`，high reasoning，不是 Pro/Max | `55/89` passed，`61.8%` |
+| DeepSeek 官方参考 | [DeepSeek-V4-Flash model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) 中的 Terminal Bench 2.0 Acc，V4-Flash-Max | `56.9%` |
+
+和 DeepSeek 官方 V4-Flash-Max 的 `56.9%` 相比，HCA 当前结果高出 `4.9` 个百分点。这里没有把它包装成严格同场 leaderboard 复现：我们的结果来自本地 Terminal-Bench 2.1 ledger，官方数字来自 DeepSeek 模型卡里的 Terminal Bench 2.0 口径。但这个对比仍然很有意义，因为 HCA 用的是 Flash high reasoning，不是 Flash Max，也不是 Pro/Max，却把完整 task 分母上的完成率推到了更高的位置。
+
+这正是这个框架想证明的东西：模型能力只是起点，真正决定长任务能不能落地的，是 profile、工具治理、恢复策略、缓存友好上下文和可复盘的 eval ledger。HCA 做的是把这些工程层补上，让同一个模型系列在真实终端任务里更少卡死、更少误判、更稳定地走到可验证结果。
+
+其他已记录的运行时收益：
+
+| 方向 | 结果 |
+| --- | --- |
+| DeepSeek context cache warmup | `29.2% -> 99.1%` |
+| Memory A/B suite | tool calls `-50.0%`，elapsed `-18.8%`，tokens `-44.7%` |
+| Latency smoke | turn p95 `22542ms`，LLM response p95 `7983ms`，TTFT p95 `3348ms` |
+
+当前人类可读评估结果见 [eval/results/SUMMARY.md](eval/results/SUMMARY.md)。重新从 raw artifacts 汇总：
+
+```bash
+python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-root jobs
+```
+
+## 它适合做什么
+
+HCA 适合需要 agent 真正在本地项目里工作的场景：
+
+- 自动修 bug、补测试、跑验证，并解释改动。
+- 读仓库后回答架构、调用链、配置和行为问题。
+- 在改代码前产出可执行的实施计划。
+- 做只读代码审查，优先输出风险和 bug。
+- 从一句需求构建可运行的 Web 应用，并用浏览器验证。
+- 通过 Harbor 跑 Terminal-Bench 任务，收集成本、tokens、工具调用和失败轨迹。
+- 研究新的 agent profile、middleware、tool runtime 或 benchmark adapter。
+
+## 核心设计
+
+HCA 的核心不是“让模型更自由”，而是“让模型在正确边界里更自主”。
+
+| 组件 | 作用 |
+| --- | --- |
+| Profile | 定义当前任务是什么：普通问答、代码实施、应用构建、计划、评审或 benchmark |
+| Tool runtime | 提供文件、搜索、shell、web、子 agent、浏览器、MCP 等工具，并统一权限和并行策略 |
+| Middleware | 处理循环检测、错误恢复、任务跟踪、验收检查、时间预算和退出前验证 |
+| Workspace service | 约束文件读写范围，拒绝敏感路径，必要时创建快照 |
+| Session log | 记录事件、观察、工具结果、LLM usage 和 checkpoint，方便复盘 |
+| Eval ledger | 从 raw 结果重建 task-level 真相，避免单次中断或环境波动污染总结果 |
+
+一句话概括：模型负责判断和生成，HCA 负责给它一个可治理、可验证、可复盘的工作现场。
 
 ## 项目结构
 
@@ -29,225 +81,212 @@ Harness Code Agent 是一个基于 OpenAI-compatible Chat Completions API 的本
 .
 ├── harness_code_agent/     # 核心 Python 包
 │   ├── cli.py              # `hca` 命令行入口
-│   ├── core/               # Harness 控制器、CLI 命令处理、日志配置
-│   ├── agent/              # Agent conversation、运行状态、trace、上下文压缩/恢复
-│   ├── runtime/            # 工具 registry/runner、内置工具、权限、审批和 middleware
-│   ├── workspace/          # 工作区路径保护、快照和持久 shell
-│   ├── sessions/           # 会话元数据与事件日志
+│   ├── core/               # 交互 session、路由、TUI glue
+│   ├── agent/              # conversation state、trace、上下文压缩、provider 适配
+│   ├── runtime/            # 工具、权限、middleware、approval
+│   ├── workspace/          # 路径保护、快照、持久 shell
+│   ├── sessions/           # session metadata 和事件日志
 │   ├── skills/             # skill registry
-│   └── profiles/           # 不同任务场景的 profile
-├── skills/                 # agent 可读取的本地技能说明
+│   └── profiles/           # general、coding-agent、app-builder、plan、review 等模式
+├── skills/                 # agent 可按需读取的本地技能说明
 ├── eval/                   # 评估脚本、任务集、结果、benchmark adapter
-│   ├── scripts/            # 基础指标、Terminal-Bench、Claw-SWE-Bench 独立评估入口和报告汇总
+│   ├── scripts/            # 基础指标、Terminal-Bench、Claw-SWE-Bench runner
 │   ├── tasks/              # 固定轻量评估任务配置
 │   ├── benchmarks/         # Terminal-Bench launcher 和 Harbor adapter
-│   └── results/            # 真实运行产物
+│   └── results/            # raw artifacts 与生成报告
 └── tests/                  # unittest 测试
 ```
 
-## 环境要求
+## 安装
+
+环境要求：
 
 - Python 3.10+
 - Git
-- 可用的 OpenAI-compatible API key
-- 可选：Playwright Chromium 浏览器，用于 `app-builder` 相关浏览器测试
-- 可选：Docker 和 Harbor，用于 Terminal-Bench 任务
+- 一个 OpenAI-compatible API key
+- 可选：Playwright Chromium，用于浏览器验证
+- 可选：Docker 和 Harbor，用于 Terminal-Bench
 
-## 安装
-
-1. 克隆或进入项目目录：
+安装项目：
 
 ```bash
 cd harness-code-agent
-```
-
-2. 以 editable 方式安装项目和依赖，这会注册 `hca` 命令：
-
-```bash
 pip install -e .
 ```
 
-如果只想在源码目录内临时运行，也可以安装 `requirements.txt` 后使用 `python -m harness_code_agent.cli`，但不会自动注册 `hca` console script。
+如果只想在源码目录临时运行，也可以安装 `requirements.txt` 后使用：
 
-3. 如需 `app-builder` 浏览器测试，安装 Playwright Chromium：
+```bash
+python -m harness_code_agent.cli
+```
+
+但推荐 editable install，因为它会注册 `hca` 命令。
+
+如果要使用 `app-builder` 的浏览器验证：
 
 ```bash
 python -m playwright install chromium
 ```
 
-4. 创建并填写 `.env`：
+创建 `.env`：
 
 ```bash
 cp .env.template .env
 ```
 
-Windows PowerShell 可以使用：
+Windows PowerShell：
 
 ```powershell
 Copy-Item .env.template .env
 ```
 
-然后编辑 `.env`：
+DeepSeek 示例配置：
 
 ```env
 OPENAI_API_KEY=sk-your-deepseek-key-here
 OPENAI_BASE_URL=https://api.deepseek.com
 HARNESS_MODEL=deepseek-v4-flash
-HARNESS_MODEL_INTENSITY=hard
+HARNESS_MODEL_INTENSITY=normal
 # HARNESS_MODEL_FAST=deepseek-v4-flash
 # HARNESS_MODEL_NORMAL=deepseek-v4-flash
 # HARNESS_MODEL_HARD=deepseek-v4-pro
 # HARNESS_MODEL_MAX=deepseek-v4-pro
 ```
 
+DeepSeek 默认档位：
+
+| Intensity | 默认行为 |
+| --- | --- |
+| `fast` | `deepseek-v4-flash`，不启用 thinking |
+| `normal` | `deepseek-v4-flash`，high reasoning |
+| `hard` | `deepseek-v4-pro`，high reasoning |
+| `max` | `deepseek-v4-pro`，max reasoning |
+
 ## 快速开始
 
-运行环境诊断：
-
-```bash
-hca
-# 然后在交互提示符中输入：
-/doctor
-```
-
-查看当前配置：
-
-```bash
-hca
-/config show
-```
-
-查看可用 profile：
-
-```bash
-hca --list-profiles
-```
-
-进入交互式本地开发助手。默认 profile 是 `general`，工作区就是启动 `hca` 时所在的当前目录；TTY 中会打开 Textual 全屏 TUI。普通问答会直接回答，需要改代码、规划、review 或构建应用的任务会在当前 session 内自动切到对应 profile：
+进入交互式 TUI：
 
 ```bash
 hca
 ```
 
-然后在 TUI 输入栏中提交任务，例如 `Fix the failing tests`。常用快捷键：
+然后输入任务，例如：
 
 ```text
-Enter        提交当前输入；输入完整 slash command 时会直接执行
-Shift+Enter  插入换行
-Tab          接受当前补全候选
-Esc          关闭补全候选
-Ctrl-C       取消当前运行中的 turn
-Ctrl-T       切换 thought 元信息显示
-Ctrl-K       手动压缩上下文
-Ctrl-P       切换权限模式
+修复 parser 测试失败，并说明你改了什么
 ```
 
-也可以启动后立即提交第一个任务，然后继续留在交互模式：
+常用命令：
+
+```text
+/doctor       检查本地配置
+/config show  查看当前解析后的运行时配置
+/profiles     查看产品可见 profile
+/help         查看命令和可用 workflow
+```
+
+也可以启动时直接提交任务：
 
 ```bash
 hca "Fix the failing tests"
 ```
 
-如果需要给 E2E 或脚本使用，可以提交第一个任务后直接退出：
+脚本或 CI 风格入口：
 
 ```bash
 hca -p "Fix the failing tests"
 hca --print "Fix the failing tests"
-
-# 也支持管道输入
-echo "Fix the failing tests" | hca
+echo "Review this repo for obvious bugs" | hca
 ```
+
+常用 TUI 快捷键：
+
+```text
+Enter         提交输入
+Shift+Enter   插入换行
+Tab           接受补全
+Esc           关闭补全
+Ctrl-C        取消当前 turn
+Ctrl-T        切换 thought 元信息显示
+Ctrl-K        手动压缩上下文
+Ctrl-P        切换权限模式
+```
+
+## Profiles
+
+Profile 是 HCA 的主要工作模式。它决定 agent 当前是在回答问题、改代码、做计划、做 review、构建应用，还是跑 benchmark。
+
+| Profile | 用途 |
+| --- | --- |
+| `general` | 默认轻量入口，用于普通问答和只读仓库检查 |
+| `coding-agent` | 本地仓库主要实施模式，负责修改、测试和验证 |
+| `app-builder` | 构建可运行 Web 应用，并进行浏览器验证 |
+| `plan` | 只调查和写计划，不直接改代码 |
+| `review` | 只读代码审查，按 findings-first 结构输出 |
+
+`terminal` profile 专门给 Terminal-Bench / Harbor 使用。它可以通过 eval runner 或显式 `--profile terminal` 启动，但不会出现在普通产品 profile 列表里，也不会被自动路由选中。
 
 指定 profile：
 
 ```bash
 hca --profile coding-agent "Fix the TypeError in parse_config()"
-hca --profile plan "Design the fix for the failing parser tests"
-hca --profile terminal "Fix the broken symlinks in /tmp"  # eval / benchmark 专用显式入口
+hca --profile plan "Design the parser migration"
+hca --profile review "Review the current branch"
+hca --profile terminal "Fix the broken symlinks in /tmp"
 ```
 
-恢复旧 session 作为上下文：
-
-```bash
-hca --resume <session-id>
-hca --resume <session-id> "Continue the previous parser work"
-```
-
-交互模式里可以用短 slash 命令切换 profile：
+TUI 中可用短命令：
 
 ```text
-/code      # coding-agent，默认实施模式
-/general   # general，轻量问答和只读检查
-/plan      # 受限方案模式（只允许计划/状态工件写入）
-/app       # app-builder Web 应用构建
-/review    # 只读代码评审
-```
-
-Skill 同样分成两种调用方式：
-
-- 面向用户的工作流不会进入模型的常驻 catalog，而是动态注册为 `/name`，例如 `/workflows`、`/triage`、`/implement`、`/handoff`。
-- 面向 Agent 的工程纪律只把精简 description 放入 system prompt；Agent 判断相关时再通过 `read_skill_file` 加载正文，例如 `diagnosing-bugs`、`tdd`、`domain-modeling`。
-
-`/help` 会同时列出固定系统命令和当前可用的用户 skill。文件与会话仍使用 `@file:`、`@session:` 显式引用；skill 不再使用 `@skill:`。
-
-## Profile 说明
-
-| Profile | 用途 |
-| --- | --- |
-| `general` | 默认入口，用于普通问答、讨论和轻量只读仓库检查；不会改文件或运行 shell |
-| `coding-agent` | 本地仓库的主要实施模式；先理解现有设计，再完成窄而完整的修改、测试和验证 |
-| `app-builder` | 根据产品需求选择最小合适技术栈，构建完整 Web 应用并完成浏览器验证 |
-| `plan` | 先调查仓库，再分轮澄清高影响偏好，输出 decision-complete Markdown 计划 |
-| `review` | 独立只读代码评审，按 findings-first 结构输出，不修改工作区 |
-
-`coding-agent`、`app-builder` 和 `terminal` 共享执行型验收闭环：小而低风险的任务仍可走轻量 skip 路径；一旦进入 tracked 或执行步数超过阈值，运行时会要求 `acceptance_checks`、可失败的验证命令、replan 时同步维护验收项，并在 final update 中提交每个 active check 的结果。`terminal` profile 面向 Terminal-Bench / Harbor 这类非交互评测场景保留，可通过评测 runner 或显式 `--profile terminal` 启动；它不出现在 `/profiles`、`--list-profiles` 或 slash profile 切换列表中。
-
-最终 system prompt 由稳定的共享层与 profile-local 合同组合而成。共享层负责证据意识、诚实表达、工具节制和主 Agent 所有权；各 profile 只描述本场景的 Role、Working Style、Boundaries 与 Completion。工具 schema、权限过滤、规划门禁和退出验证仍由运行时代码强制执行，不依赖 prompt 重复喊规则。
-
-Claw-SWE-Bench 仍作为外部评测保留，但直接使用 `coding-agent`，不再维护一个与日常代码任务高度重叠的产品 profile。
-
-`plan` profile 在交互模式下会进入显式 handoff：计划输出后不会自动改代码，而是提示用户选择下一步。
-
-```bash
-hca
+/general
+/code
 /plan
-设计 parser 修复方案
-# 查看计划后：
-继续
-# 或继续修改计划：
-补充兼容性风险和回滚方案
+/app
+/review
 ```
 
-用户回复“继续”“执行”“开始”等短确认时，CLI 会切换到默认 `coding-agent` profile，并把刚才的 Markdown 计划注入为 approved plan；如果回复的是一段修改建议，则继续停留在 `plan` profile 修改计划。
+`plan` profile 有显式 handoff：它写完计划后会停住。用户回复“继续”“执行”“开始”这类短确认时，HCA 会切换到 `coding-agent`，并把刚才的 Markdown 计划注入为 approved plan。
 
-## 会话和工作区
+## Skills
 
-交互模式默认直接在当前目录工作，不再为开发任务创建带时间戳的工作区。该目录会自动初始化 Git 仓库，并在 `.harness/` 中记录 session metadata、events 和文件快照。
+Skills 采用渐进式披露。HCA 不会把所有长规则常驻塞进 prompt，而是先给模型一个精简 catalog；当任务需要某个 skill 时，再用 `read_skill_file` 读取完整说明。
 
-自动 checkpoint 默认在每个完成的 turn 后运行，可在交互模式中用 `/checkpoint auto off` 关闭，或用 `/checkpoint every <N> turns` 调整频率。自动 checkpoint 只会尝试提交本轮新增的可提交变更；如果没有本轮新增变更，会提示没有需要 checkpoint 的内容。本轮开始前已经存在的 dirty 文件不会被自动提交；如果本轮开始前已有 staged changes，自动 checkpoint 会跳过，避免混入用户已暂存内容。
+- 用户可直接调用的 workflow 暴露为 slash command，例如 `/implement`、`/triage`、`/handoff`、`/workflows`。
+- 面向 agent 的工程纪律只放 name、description、path，相关时再按需加载正文。
+- 文件和历史 session 用 `@file:`、`@session:` 明确引用。
 
-常用会话命令：
+这样既保留了专业工作流，又不会把上下文窗口浪费在暂时用不上的长文档上。
 
-```bash
-hca
-/help
-/profiles
+## 会话、快照和复盘
+
+交互模式默认在启动 `hca` 的当前目录工作。HCA 会在 `.harness/` 下记录：
+
+- session metadata
+- event logs
+- observations
+- file snapshots
+- checkpoint 信息
+
+常用命令：
+
+```text
 /sessions
 /session <session-id>
 /resume <session-id>
 /fork <session-id>
 /rollback <session-id> <path>
 /checkpoint status
+/checkpoint auto off
 /compact show
 ```
 
-非交互入口也保留了一个快速查看最新 session 的兼容命令：
+兼容的非交互命令：
 
 ```bash
 hca session show latest
 ```
 
-可以用 `@` mention 把文件或历史 session 作为上下文注入当前 turn：
+在任务里引用文件或历史 session：
 
 ```text
 根据 @README.md 修复文档里的启动示例
@@ -255,11 +294,62 @@ hca session show latest
 根据 @"docs/path with spaces.md" 补充测试说明
 ```
 
-## MCP 客户端
+## 工具运行时
 
-HCA 可以作为 MCP client 连接外部 MCP server，并把 server 暴露的 tools 转成当前 agent 可调用的 function tools。第一版支持 `stdio` 本地进程和 `streamable_http`，只接入 MCP Tools，不接入 Resources 或 Prompts。
+HCA 的工具不是简单丢给模型自由调用，而是经过权限、lane、审批和 middleware 管理。
 
-配置文件位于工作区本地 `.harness/mcp.json`，默认不提交到仓库。示例：
+内置工具包括：
+
+- repository search 和 bounded file read
+- workspace-scoped 文件写入
+- structured patch
+- persistent shell jobs
+- web search / fetch
+- read-only sub-agent consultation
+- 并行只读工具调用
+- 用户选择提问
+- 可选浏览器验证
+- MCP server 暴露的 tools
+
+Runtime 还会注入循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。这部分是 HCA 的关键价值之一：模型可以尝试，但尝试必须留下证据，也必须能被运行时纠偏。
+
+## 权限模式
+
+| 模式 | 行为 |
+| --- | --- |
+| `workspace-write` | 默认模式。允许安全读取和工作区内受控写入；risky shell 和未知工具需要批准；极危命令永远阻断 |
+| `llm-auto` | 与 `workspace-write` 同范围，但需要人工批准的调用交给 fast model 判断；低置信或失败默认拒绝 |
+| `danger-full-access` | 放行非黑名单工具调用，适合受控 benchmark 环境；极危命令仍然阻断 |
+
+文件写入通过 `WorkspaceService` 做路径检查，默认拒绝写出工作区，也拒绝 `.git/` 和敏感 `.env` 文件。
+
+受限调查或方案设计请使用 `--profile plan`。它只暴露必要读工具、只读 shell、用户提问、子 agent 咨询和计划状态更新。
+
+## Docker Shell Sandbox
+
+设置 `HARNESS_SANDBOX_MODE=docker` 后，`run_bash` 会在按 session 懒启动并复用的 Docker 容器中执行。当前工作区会挂载到容器 `/workspace`，命令固定走 Linux Bash；即使宿主机是 Windows，也应使用 Bash 语法。
+
+```env
+HARNESS_SANDBOX_MODE=docker
+HARNESS_DOCKER_IMAGE=python:3.12
+HARNESS_DOCKER_NETWORK=none
+```
+
+默认网络是 `none`，适合隔离不可信命令。需要安装依赖时再显式改成 `bridge`。
+
+安全边界：
+
+- 工作区挂载为读写，容器命令可以修改项目文件。
+- POSIX 主机默认使用当前用户的 `uid:gid`，避免 root-owned 文件。
+- Windows Docker Desktop 不强制 UID 映射，以保持兼容。
+- 文件类工具仍在宿主侧通过 `WorkspaceService` 执行；只有 shell 命令进入容器。
+- 如果要跑完全不可信工作负载，建议使用外部 VM 或更强 Docker 隔离策略。
+
+## MCP Client
+
+HCA 可以连接 MCP server，把 server tools 暴露给当前 profile。第一版支持 `stdio` 和 `streamable_http` transports。
+
+工作区本地配置位于 `.harness/mcp.json`：
 
 ```json
 {
@@ -284,16 +374,60 @@ HCA 可以作为 MCP client 连接外部 MCP server，并把 server 暴露的 to
 }
 ```
 
-MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具冲突。`permission` 是 server 级默认权限，`tool_permissions` 可按 tool 覆盖；未声明时默认 `dangerous`，在 `workspace-write` 模式会触发审批。配置中的 `${VAR}` 会从环境变量展开。
-
-交互模式中可用：
+MCP tools 会命名为 `mcp__{server}__{tool}`，避免和内置工具冲突。
 
 ```text
-/mcp status   # 查看 server 连接状态
-/mcp list     # 查看已注册 MCP tools
-/mcp reload   # 重新加载 .harness/mcp.json
-/doctor       # 同时检查 MCP 配置和连接状态
+/mcp status
+/mcp list
+/mcp reload
+/doctor
 ```
+
+## Evaluation
+
+评估代码在 `eval/` 下。
+
+常用命令：
+
+```bash
+python eval/scripts/run_basic_metrics_eval.py --dry-run
+python eval/scripts/run_basic_metrics_eval.py --suites memory,latency
+python eval/scripts/run_terminal_bench_eval.py --dry-run
+python eval/scripts/run_terminal_bench_eval.py --tbench-task-set 24task
+python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-root jobs
+```
+
+运行单个 Terminal-Bench task：
+
+```bash
+python eval/benchmarks/run_terminal_bench.py --task fix-git
+```
+
+运行多个 task：
+
+```bash
+python eval/benchmarks/run_terminal_bench.py --task fix-git --task query-optimize
+```
+
+运行本地完整任务列表：
+
+```bash
+python eval/benchmarks/run_terminal_bench.py --full
+```
+
+使用 Daytona：
+
+```bash
+python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
+```
+
+Eval ledger 会从 raw `summary.json`、Harbor `result.json`、HCA artifacts、stdout、stderr 里重建 task-level 结果。它比单次 run summary 更适合作为最终报告，因为它能合并多次 rerun，区分任务成功、agent timeout、verifier failure、infra/setup failure，并保留成本、tokens、工具调用和失败轨迹。
+
+更多说明：
+
+- [eval/README.md](eval/README.md)
+- [eval/benchmarks/README.md](eval/benchmarks/README.md)
+- [eval/results/SUMMARY.md](eval/results/SUMMARY.md)
 
 ## 配置项
 
@@ -301,41 +435,39 @@ MCP tools 会以 `mcp__{server}__{tool}` 的名字暴露，避免和内置工具
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | 空 | API key，必填 |
+| `OPENAI_API_KEY` | 空 | API key |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API 地址 |
-| `HARNESS_MODEL` | `gpt-4o` | 全局兜底模型名；非 DeepSeek provider 和自定义档位默认使用它 |
-| `HARNESS_MODEL_INTENSITY` | `hard` | 主 agent 默认任务强度：`fast` / `normal` / `hard` / `max` |
-| `HARNESS_MODEL_FAST` | provider 默认 | 覆盖 `fast` 档模型；summary 等轻量 LLM 任务使用该档 |
+| `HARNESS_MODEL` | `gpt-4o` | 全局兜底模型名 |
+| `HARNESS_MODEL_INTENSITY` | `hard` | 主 agent 强度：`fast` / `normal` / `hard` / `max` |
+| `HARNESS_MODEL_FAST` | provider 默认 | 覆盖 `fast` 档模型 |
 | `HARNESS_MODEL_NORMAL` | provider 默认 | 覆盖 `normal` 档模型 |
-| `HARNESS_MODEL_HARD` | provider 默认 | 覆盖 `hard` 档模型；DeepSeek 默认是主 agent 档位 |
+| `HARNESS_MODEL_HARD` | provider 默认 | 覆盖 `hard` 档模型 |
 | `HARNESS_MODEL_MAX` | provider 默认 | 覆盖 `max` 档模型 |
-| `HARNESS_PROVIDER` | `auto` | Provider adapter：`auto` / `openai` / `deepseek` / `openai-compatible` |
-| `HARNESS_STREAM` | `auto` | CLI streaming：`auto` 表示仅 TTY 实时输出，`1` 强制开启，`0` 关闭 |
-| `HARNESS_WINDOWS_SHELL` | `auto` | Windows shell 后端：`auto` / `pwsh` / `powershell` / `cmd` |
-| `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式：`workspace-write` / `llm-auto` / `danger-full-access` |
-| `HARNESS_SANDBOX_MODE` | `host` | Shell sandbox：`host` 使用宿主 shell，`docker` 让 `run_bash` 在 Docker 容器内执行 |
-| `HARNESS_DOCKER_IMAGE` | `python:3.12` | Docker sandbox 使用的镜像 |
-| `HARNESS_DOCKER_NETWORK` | `none` | Docker sandbox 网络：`none` / `bridge` |
-| `HARNESS_DOCKER_USER` | 空 | 空值时 POSIX 非 root 自动使用 `uid:gid`，Windows 不映射；非空值原样传递为 `--user` |
-| `HARNESS_CONTEXT_WINDOW_TOKENS` | `200000` | 上下文窗口估算值，用于推导默认压缩/重置阈值 |
-| `COMPRESS_THRESHOLD` | `170000` | 自动压缩触发阈值；默认是 `HARNESS_CONTEXT_WINDOW_TOKENS * 0.85` |
-| `MAX_AGENT_ITERATIONS` | `60` | 单次 agent loop 最大迭代数 |
-| `MAX_AGENT_TOTAL_TOKENS` | `0` | 单个 turn 的累计 LLM token 预算；`0` 表示不启用本地 token 预算限制 |
-| `MAX_AGENT_TOOL_CALLS` | `200` | 单个 turn 最大工具调用预算；超过后阻断未执行工具并触发本地 `agent_fallback` |
-| `AGENT_BUDGET_WARN_FRACTION` | `0.8` | token / tool call 预算达到该比例时发一次 `agent_budget_warning` |
-| `HARNESS_TRACE_STDERR` | 空 | 设置为 `1` / `true` / `yes` / `on` 时输出底层 API 错误追踪 |
-| `MAX_HARNESS_ROUNDS` | `5` | 兼容保留的 harness loop / benchmark 调参项 |
-| `PASS_THRESHOLD` | `7.0` | 兼容保留的 harness loop / benchmark 调参项 |
+| `HARNESS_PROVIDER` | `auto` | `auto` / `openai` / `deepseek` / `openai-compatible` |
+| `HARNESS_STREAM` | `auto` | streaming：`auto` / `1` / `0` |
+| `HARNESS_WINDOWS_SHELL` | `auto` | Windows shell：`auto` / `pwsh` / `powershell` / `cmd` |
+| `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式 |
+| `HARNESS_SANDBOX_MODE` | `host` | Shell sandbox：`host` / `docker` |
+| `HARNESS_DOCKER_IMAGE` | `python:3.12` | Docker sandbox 镜像 |
+| `HARNESS_DOCKER_NETWORK` | `none` | Docker 网络：`none` / `bridge` |
+| `HARNESS_DOCKER_USER` | 空 | Docker user override |
+| `HARNESS_CONTEXT_WINDOW_TOKENS` | `200000` | 上下文窗口估算值 |
+| `COMPRESS_THRESHOLD` | `170000` | 自动压缩阈值 |
+| `MAX_AGENT_ITERATIONS` | `60` | 单个 agent loop 最大迭代数 |
+| `MAX_AGENT_TOTAL_TOKENS` | `0` | 单 turn token 预算；`0` 表示不启用本地 token 限制 |
+| `MAX_AGENT_TOOL_CALLS` | `200` | 单 turn 工具调用预算 |
+| `AGENT_BUDGET_WARN_FRACTION` | `0.8` | 预算提醒阈值 |
+| `HARNESS_TRACE_STDERR` | 空 | 为 true 时输出底层 API 错误追踪 |
+| `MAX_HARNESS_ROUNDS` | `5` | 旧 harness loop 兼容项 |
+| `PASS_THRESHOLD` | `7.0` | 旧 harness loop 兼容项 |
 
-交互式模式会把启动 `hca` 时所在的目录作为当前工作目录，不需要在 `.env` 中配置 `HARNESS_WORKSPACE`。代码中的 `config.WORKSPACE` 仍作为运行时内部字段使用，用来告诉工具、会话记录和权限检查“当前项目根目录”在哪里。
-
-Profile 参数也可通过环境变量覆盖，格式为：
+Profile 参数可通过环境变量覆盖：
 
 ```bash
 PROFILE_<PROFILE_NAME>_<KEY>=value
 ```
 
-例如：
+示例：
 
 ```bash
 PROFILE_TERMINAL_TASK_BUDGET=1800
@@ -344,116 +476,56 @@ PROFILE_CODING_AGENT_REQUIRE_START_AFTER_N_ACTIONS=5
 PROFILE_APP_BUILDER_ACCEPTANCE_REVIEW_TIMEOUT=10
 ```
 
-## 权限模式
-
-| 模式 | 行为 |
-| --- | --- |
-| `workspace-write` | 默认模式，允许读工具、路径受控的项目内结构化写工具、白名单 shell；非白名单 shell 和未知工具需要批准；极危黑名单命令永远阻断 |
-| `llm-auto` | LLM 自动审批模式，允许范围与 `workspace-write` 相同；原本需要人工批准的 risky shell、unknown、dangerous 调用由 fast 模型判断，低置信或失败默认拒绝；极危黑名单命令永远阻断 |
-| `danger-full-access` | 放行非黑名单工具调用，适合受控 benchmark 环境；极危黑名单命令仍永远阻断 |
-
-文件写入会通过 `WorkspaceService` 做路径约束，防止写出工作区；默认也会拒绝写入 `.git/` 和敏感 `.env` 文件。
-受限调查/计划工作请使用 `--profile plan`；该 profile 只暴露必要读工具、只读 shell、用户提问/子 agent 咨询和 `update_plan_state`。
-
-## Docker Shell Sandbox
-
-设置 `HARNESS_SANDBOX_MODE=docker` 后，`run_bash` 会在按 session 懒启动并复用的 Docker 容器中执行。当前工作区会以读写方式挂载到容器 `/workspace`，容器内固定使用 Linux Bash；即使宿主机是 Windows，启用该模式后 shell 命令也应使用 Bash 语法。
-
-容器默认启用 `--security-opt=no-new-privileges`，禁止容器内进程获取额外内核权限。
-
-默认网络为 `HARNESS_DOCKER_NETWORK=none`，适合隔离不可信命令。需要在容器内安装依赖时，可显式改为 `bridge`。`read_file`、`write_file` 和 `apply_patch` 仍在宿主侧通过 `WorkspaceService` 执行，以保留路径保护、快照和敏感文件拒写能力。
-
-### 安全边界
-
-- **工作区挂载为读写**：容器可读取和修改挂载的工作区目录。如果 agent 执行了破坏性命令，工作区中的文件可能被删除或篡改。Git checkpoint 可在每次 turn 后自动创建恢复点。
-- **用户隔离**：`HARNESS_DOCKER_USER` 未设置时，POSIX 环境会自动使用当前用户的 `uid:gid` 运行容器进程，避免以 root 身份写入文件。Windows / Docker Desktop 环境不强制做 UID 映射，以保持兼容性。如需更强的用户隔离，请显式设置 `HARNESS_DOCKER_USER=1000:1000`（或对应值），或通过外部容器策略（如 Docker `userns-remap`）管理。
-- **root 命令 opt-in**：如果需要在容器内执行 `apt-get` 等 root 权限命令，可显式设置 `HARNESS_DOCKER_USER=root` 或 `HARNESS_DOCKER_USER=0:0`。这种模式可能把 `/workspace` 中新建或修改的文件变成 root 所有，后续宿主侧编辑、删除或 Git 操作可能需要手动修复权限。
-- **宿主命令隔离**：`run_bash` 的命令在容器内执行，不受宿主 shell 环境影响。但文件类工具（`read_file`、`write_file`、`apply_patch`）仍然在宿主侧运行。
-- **强隔离需求**：如果需要在完全不可信的环境下运行 agent，建议将整个项目运行在外部虚拟机或使用 `userns-remap` 等 Docker 安全策略，而不依赖 `HARNESS_DOCKER_USER` 默认映射。
-
 ## 测试
 
-项目测试使用标准库 `unittest`：
+运行完整 unittest：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-可单独运行某个测试文件：
+运行常用 focused suites：
 
 ```bash
 python -m unittest tests.test_profiles
 python -m unittest tests.test_product_runtime
+python -m unittest tests.test_eval_ledger
+python -m unittest tests.test_terminal_bench_launcher
 ```
-
-## Terminal-Bench 运行
-
-`eval/benchmarks/` 目录提供 Harbor adapter。基础准备：
-
-```bash
-pip install harbor
-docker info
-```
-
-确保 `.env` 中 API 配置可用后，运行单个任务：
-
-```bash
-python eval/benchmarks/run_terminal_bench.py --task fix-git
-```
-
-运行多个任务：
-
-```bash
-python eval/benchmarks/run_terminal_bench.py --task fix-git --task query-optimize
-```
-
-运行本地完整数据集：
-
-```bash
-python eval/benchmarks/run_terminal_bench.py --full
-```
-
-使用 Daytona 云环境：
-
-```bash
-python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
-```
-
-更多细节见 `eval/README.md` 和 `eval/benchmarks/README.md`。
-
-当前已汇总的真实评估结果见 `eval/results/SUMMARY.md`。截至 2026-06-17 的历史摘要：
-
-- DeepSeek context cache warmup：`29.2% -> 99.1%`。
-- Memory A/B：5 个任务，tool calls `-50.0%`，elapsed `-18.8%`，tokens `-44.7%`。
-- Latency：turn p95 `22542ms`，LLM response p95 `7983ms`，TTFT p95 `3348ms`。
-- Terminal-Bench 2.0 8-task subset：`3/8` passed，`37.5%`；Claw-SWE-Bench 尚未运行。
 
 ## 开发指南
 
-新增 profile 时，通常需要：
+新增 profile：
 
-1. 在 `harness_code_agent/profiles/` 下新增继承 `BaseProfile` 的类。
-2. 实现 `name()`、`description()`、`main_agent()`，必要时覆盖 `acceptance_criteria()`。
-3. 在 `harness_code_agent/profiles/__init__.py` 的 `PROFILES` 中注册；只有产品可见 profile 再加入 `PRODUCT_PROFILES`。
-4. 为 profile 的关键行为添加测试。
+1. 在 `harness_code_agent/profiles/` 下新增 `BaseProfile` 实现。
+2. 实现 `name()`、`description()`、`main_agent()`。
+3. 在 `harness_code_agent/profiles/__init__.py` 中注册。
+4. 只有产品可见 profile 才加入 `PRODUCT_PROFILES`。
+5. 为关键行为补测试。
 
-新增工具时，通常需要：
+新增内置工具：
 
-1. 在 `harness_code_agent/runtime/builtins/` 下按领域实现工具函数，例如文件工具放 `filesystem.py`，shell 工具放 `shell.py`。
-2. 在 `harness_code_agent/runtime/builtins/schemas.py` 中声明 tool schema。
-3. 在 `harness_code_agent/runtime/builtins/registry.py` 的 `_build_builtin_tool_registry()` 中注册 handler，并显式声明权限分类。
-   例如查询天气这类外部只读工具应使用 `TOOL_PERMISSION_NETWORK_READ`。
-4. 如果现有分类不够表达风险，再扩展 `harness_code_agent/runtime/permissions.py` 的权限分类。
-5. 添加单元测试覆盖正常路径和失败路径。
+1. 在 `harness_code_agent/runtime/builtins/` 下按领域实现工具函数。
+2. 在 `harness_code_agent/runtime/builtins/schemas.py` 中声明 schema。
+3. 在 registry 中注册 handler 和 permission class。
+4. 只有现有权限分类表达不了风险时，才新增分类。
+5. 覆盖成功路径和失败路径测试。
 
-`harness_code_agent/runtime/tools.py` 只保留旧 public API 的兼容 re-export，新生产代码不要继续往这里堆实现。
+新增 middleware：
 
-新增 middleware 时，建议先明确它要拦截的是 tool call、tool result 还是 agent loop 退出条件，并在 `harness_code_agent/runtime/middleware/` 下按职责拆分实现，再从 `harness_code_agent/runtime/middleware/__init__.py` 导出。`harness_code_agent/runtime/middlewares.py` 只保留旧 public API 的兼容 re-export。
+1. 先明确它拦截的是 tool call、tool result、loop iteration 还是 pre-exit。
+2. 真正的约束写在代码里，不只写 prompt。
+3. 关键行为发事件，方便 debug 和复盘。
+4. 用回归测试覆盖它要防的具体失败模式。
+
+`harness_code_agent/runtime/tools.py` 和 `harness_code_agent/runtime/middlewares.py` 只保留旧 public API 的兼容 re-export，新代码应放在结构化模块里。
 
 ## 注意事项
 
-- `.env` 不应提交到版本库，使用 `.env.template` 作为配置模板。
-- `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名；DeepSeek 默认 `fast/normal/hard/max` 映射为 flash non-thinking、flash high、pro high、pro max，summary 等轻量 LLM 任务固定使用 `fast`。
-- `app-builder` 的浏览器能力依赖 Playwright；未安装时相关工具会不可用或报错。
-- `terminal` profile 针对非交互式 CLI 评测任务优化，会更积极地执行 shell 命令和本地验证；Terminal-Bench runner 会用评测标记加 `danger-full-access` 放宽容器内绝对路径写入，但普通产品 profile 只继承验收/验证闭环，不继承该权限边界。
-- 默认 `workspace-write` 模式会对白名单外 shell 命令和未知工具触发批准流程；自动化 benchmark 可按需切换权限模式。
+- 不要提交 `.env`，使用 `.env.template` 作为模板。
+- `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名。
+- `app-builder` 的浏览器验证依赖 Playwright。
+- `terminal` profile 是 eval-only 默认定位，不应进入普通产品自动路由。
+- Terminal-Bench runner 会设置 `HARNESS_PERMISSION_MODE=danger-full-access` 和 `HCA_TERMINAL_EVAL_MODE=1`，以允许容器内绝对路径写入，同时保留破坏性命令保护。
+- 默认 `workspace-write` 会对 risky shell 和未知工具触发批准流程。
+- 如果 eval run 被中断，要报告为 interrupted 或 incomplete，不要把局部结果包装成最终 benchmark 数字。

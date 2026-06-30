@@ -48,3 +48,15 @@ optional host dependency `datasets`; the launcher will clone the upstream
 `opensquilla/claw-swe-bench` orchestrator into `.harbor/datasets/` on first use.
 
 Use `eval/results/SUMMARY.md` as the human-facing summary. It should only contain metrics produced from real runs.
+The current Terminal-Bench ledger reports the official-like full-task denominator:
+`55/89` passed (`61.8%`) with `deepseek-v4-flash` at high reasoning
+(`HARNESS_MODEL_INTENSITY=normal`). As a reference point, the
+[DeepSeek-V4-Flash model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
+reports `56.9%` Terminal Bench 2.0 Acc for V4-Flash-Max, so the local HCA
+ledger is `4.9` points higher while using Flash high reasoning rather than
+Flash Max. This is not a strict same-runner leaderboard reproduction, but it is
+a useful signal that the runtime layer improves task completion.
+
+Strong-vision tasks are counted as failures for the main pass rate and are
+listed separately only to explain the boundary of a text-only model plus
+terminal tools.

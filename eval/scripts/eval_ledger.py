@@ -474,6 +474,18 @@ def build_summary(
     excluded_finals = excluded_finals or []
     included_attempts = [attempt for attempt in attempts if attempt.task not in EXCLUDED_TASKS]
     excluded_attempts = [attempt for attempt in attempts if attempt.task in EXCLUDED_TASKS]
+    excluded_final_tasks = {item.task for item in excluded_finals}
+    excluded_passed_tasks = {item.task for item in excluded_finals if item.status == "passed"}
+    configured_excluded_tasks = set(EXCLUDED_TASKS)
+    benchmark_tasks = _terminal_bench_task_inventory()
+    observed_final_tasks = {item.task for item in finals} | excluded_final_tasks
+    if benchmark_tasks and observed_final_tasks and observed_final_tasks.issubset(benchmark_tasks):
+        official_total_tasks = len(benchmark_tasks)
+    else:
+        official_total_tasks = len(finals) + len(excluded_finals)
+    main_passed = sum(1 for item in finals if item.status == "passed")
+    official_passed = main_passed + len(excluded_passed_tasks)
+    official_failed = max(official_total_tasks - official_passed, 0)
     final_totals = _totals_from_finals(finals)
     attempt_totals = _totals_from_attempts(included_attempts)
     failed = [item for item in finals if item.status != "passed"]
@@ -484,24 +496,46 @@ def build_summary(
     for item in failed:
         key = item.failure_kind or "unknown"
         failure_kinds[key] = failure_kinds.get(key, 0) + 1
+    excluded_failure_count = len(configured_excluded_tasks - excluded_passed_tasks)
+    if excluded_failure_count:
+        failure_kinds["strong_vision_or_not_attempted"] = excluded_failure_count
     v21_tasks = {
         attempt.task
         for attempt in included_attempts
         if attempt.benchmark_version == "2.1"
     }
     return {
-        "total_tasks": len(finals),
-        "passed": sum(1 for item in finals if item.status == "passed"),
-        "failed": len(failed),
-        "pass_rate": _safe_rate(sum(1 for item in finals if item.status == "passed"), len(finals)),
+        "benchmark_task_count": len(benchmark_tasks) if benchmark_tasks else official_total_tasks,
+        "total_tasks": official_total_tasks,
+        "passed": official_passed,
+        "failed": official_failed,
+        "pass_rate": _safe_rate(official_passed, official_total_tasks),
+        "evaluated_main_tasks": len(finals),
+        "main_passed": main_passed,
+        "main_failed": len(failed),
         "source_versions": dict(sorted(source_versions.items())),
         "fallback_2_0_tasks": sum(1 for item in finals if item.source_version == "2.0"),
         "excluded_task_count": len(excluded_finals),
+        "configured_excluded_task_count": len(configured_excluded_tasks),
+        "excluded_with_results_count": len(excluded_finals),
         "excluded_tasks": [
             {"task": item.task, "reason": EXCLUDED_TASKS.get(item.task, "excluded")}
             for item in sorted(excluded_finals, key=lambda item: item.task)
         ],
+        "configured_excluded_tasks": [
+            {"task": task, "reason": EXCLUDED_TASKS[task]}
+            for task in sorted(configured_excluded_tasks)
+        ],
+        "excluded_without_results": [
+            {"task": task, "reason": EXCLUDED_TASKS[task]}
+            for task in sorted(configured_excluded_tasks - excluded_final_tasks)
+        ],
         "terminal_bench_2_1_attempted_tasks": len(v21_tasks),
+        "terminal_bench_2_1_attempted_tasks_including_excluded": len({
+            attempt.task
+            for attempt in attempts
+            if attempt.benchmark_version == "2.1"
+        }),
         "failure_kinds": dict(sorted(failure_kinds.items())),
         "final_selected_totals": final_totals,
         "all_attempt_totals": attempt_totals,
@@ -509,6 +543,19 @@ def build_summary(
         "excluded_attempt_count": len(excluded_attempts),
         "warning_count": len(warnings) + sum(len(item.warnings) for item in attempts),
     }
+
+
+def _terminal_bench_task_inventory() -> set[str]:
+    path = Path(__file__).resolve().parents[1] / "benchmarks" / "tb2_tasks.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if isinstance(data, dict):
+        return {str(key) for key in data}
+    if isinstance(data, list):
+        return {str(item) for item in data}
+    return set()
 
 
 def build_retention_plan(
@@ -614,10 +661,13 @@ def render_summary_markdown(ledger: dict[str, Any]) -> str:
         f"- Passed: **{summary.get('passed', 0)}**",
         f"- Failed: **{summary.get('failed', 0)}**",
         f"- Pass rate: **{_percent(summary.get('pass_rate'))}**",
+        f"- Main task results recorded: **{summary.get('evaluated_main_tasks', 0)}**",
         f"- Source versions: {_source_version_line(summary.get('source_versions') or {})}",
         f"- 2.0 fallback tasks: **{summary.get('fallback_2_0_tasks', 0)}**",
-        f"- Terminal-Bench 2.1 attempted tasks: **{summary.get('terminal_bench_2_1_attempted_tasks', 0)}**",
-        f"- Excluded tasks: **{summary.get('excluded_task_count', 0)}**",
+        f"- Terminal-Bench 2.1 attempted main tasks: **{summary.get('terminal_bench_2_1_attempted_tasks', 0)}**",
+        f"- Terminal-Bench 2.1 attempted tasks including excluded: **{summary.get('terminal_bench_2_1_attempted_tasks_including_excluded', 0)}**",
+        f"- Strong-vision tasks counted as failures: **{summary.get('configured_excluded_task_count', summary.get('excluded_task_count', 0))}**",
+        f"- Strong-vision tasks with results: **{summary.get('excluded_with_results_count', summary.get('excluded_task_count', 0))}**",
         "",
         "## Excluded Tasks",
         "",
@@ -632,6 +682,17 @@ def render_summary_markdown(ledger: dict[str, Any]) -> str:
             )
     else:
         lines.append("| none |  |  |  |")
+    excluded_without_results = summary.get("excluded_without_results") or []
+    if excluded_without_results:
+        lines.extend([
+            "",
+            "## Excluded Tasks Without Results",
+            "",
+            "| Task | Reason |",
+            "| --- | --- |",
+        ])
+        for item in excluded_without_results:
+            lines.append(f"| {_cell(item.get('task'))} | {_cell(item.get('reason'))} |")
     lines.extend([
         "",
         "## Aggregate Stats",
@@ -1011,14 +1072,27 @@ def _results_json(ledger: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": ledger.get("schema_version"),
         "generated_at": ledger.get("generated_at"),
+        "benchmark_task_count": summary.get("benchmark_task_count", 0),
         "total_tasks": summary.get("total_tasks", 0),
         "passed": summary.get("passed", 0),
         "failed": summary.get("failed", 0),
         "pass_rate": summary.get("pass_rate", 0.0),
+        "evaluated_main_tasks": summary.get("evaluated_main_tasks", 0),
+        "main_passed": summary.get("main_passed", 0),
+        "main_failed": summary.get("main_failed", 0),
         "source_versions": summary.get("source_versions") or {},
         "fallback_2_0_tasks": summary.get("fallback_2_0_tasks", 0),
         "excluded_task_count": summary.get("excluded_task_count", 0),
+        "configured_excluded_task_count": summary.get("configured_excluded_task_count", 0),
+        "excluded_with_results_count": summary.get("excluded_with_results_count", 0),
         "excluded_tasks": summary.get("excluded_tasks") or [],
+        "configured_excluded_tasks": summary.get("configured_excluded_tasks") or [],
+        "excluded_without_results": summary.get("excluded_without_results") or [],
+        "terminal_bench_2_1_attempted_tasks": summary.get("terminal_bench_2_1_attempted_tasks", 0),
+        "terminal_bench_2_1_attempted_tasks_including_excluded": summary.get(
+            "terminal_bench_2_1_attempted_tasks_including_excluded",
+            0,
+        ),
         "final_selected_totals": summary.get("final_selected_totals") or {},
         "all_attempt_totals": summary.get("all_attempt_totals") or {},
         "tasks": ledger.get("final_results") or [],
