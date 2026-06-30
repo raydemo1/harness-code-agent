@@ -452,13 +452,6 @@ class CompactCommandTests(unittest.TestCase):
         self.assertIsNotNone(spec, "/compact command should be registered")
         self.assertEqual(spec.usage, "/compact show")
 
-    def test_compact_show_subcommand(self):
-        """`/compact show` displays the latest compacted summary."""
-        from harness_code_agent.tui.commands import default_command_registry
-        registry = default_command_registry()
-        spec = registry._by_name.get("/compact")
-        self.assertIsNotNone(spec)
-
     def test_compact_show_reads_latest_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             from harness_code_agent.tui.commands import default_command_registry

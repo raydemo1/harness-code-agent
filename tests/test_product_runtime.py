@@ -61,45 +61,38 @@ class ProductRuntimeTests(unittest.TestCase):
         finally:
             importlib.reload(config)
 
-    def test_deepseek_reasoning_content_round_trips_on_tool_call_assistant_message(self):
+    def test_deepseek_reasoning_content_round_trips(self):
         from harness_code_agent.agent.loop import _assistant_message_from_response
 
-        msg = SimpleNamespace(
-            content=None,
-            reasoning_content="think carefully",
-            tool_calls=[
-                SimpleNamespace(
-                    id="call_1",
-                    function=SimpleNamespace(name="read_file", arguments='{"path":"README.md"}'),
-                ),
-            ],
-        )
+        cases = [
+            ("direct_attr", SimpleNamespace(
+                content=None,
+                reasoning_content="think carefully",
+                tool_calls=[
+                    SimpleNamespace(
+                        id="call_1",
+                        function=SimpleNamespace(name="read_file", arguments='{"path":"README.md"}'),
+                    ),
+                ],
+            ), "think carefully"),
+            ("model_extra", SimpleNamespace(
+                content=None,
+                model_extra={"reasoning_content": "provider extra thinking"},
+                tool_calls=[],
+            ), "provider extra thinking"),
+        ]
 
-        with (
-            patch("harness_code_agent.agent.conversation.config.BASE_URL", "https://api.deepseek.com"),
-            patch("harness_code_agent.agent.conversation.config.MODEL", "deepseek-v4-flash"),
-        ):
-            assistant_msg = _assistant_message_from_response(msg)
+        for label, msg, expected in cases:
+            with self.subTest(source=label):
+                with (
+                    patch("harness_code_agent.agent.conversation.config.BASE_URL", "https://api.deepseek.com"),
+                    patch("harness_code_agent.agent.conversation.config.MODEL", "deepseek-v4-flash"),
+                ):
+                    assistant_msg = _assistant_message_from_response(msg)
 
-        self.assertEqual(assistant_msg["reasoning_content"], "think carefully")
-        self.assertEqual(assistant_msg["tool_calls"][0]["function"]["name"], "read_file")
-
-    def test_deepseek_reasoning_content_round_trips_from_model_extra(self):
-        from harness_code_agent.agent.loop import _assistant_message_from_response
-
-        msg = SimpleNamespace(
-            content=None,
-            model_extra={"reasoning_content": "provider extra thinking"},
-            tool_calls=[],
-        )
-
-        with (
-            patch("harness_code_agent.agent.conversation.config.BASE_URL", "https://api.deepseek.com"),
-            patch("harness_code_agent.agent.conversation.config.MODEL", "deepseek-v4-flash"),
-        ):
-            assistant_msg = _assistant_message_from_response(msg)
-
-        self.assertEqual(assistant_msg["reasoning_content"], "provider extra thinking")
+                self.assertEqual(assistant_msg["reasoning_content"], expected)
+                if label == "direct_attr":
+                    self.assertEqual(assistant_msg["tool_calls"][0]["function"]["name"], "read_file")
 
     def test_non_deepseek_assistant_message_omits_reasoning_content(self):
         from harness_code_agent.agent.loop import _assistant_message_from_response
@@ -304,36 +297,6 @@ class ProductRuntimeTests(unittest.TestCase):
         fake_client = FakeClient()
         with patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client):
             conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=lambda _: None))
-            completion = conversation._request_assistant_message(
-                conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10)
-            )
-
-        self.assertEqual(completion[0]["content"], "fallback")
-        self.assertTrue(fake_client.chat.completions.calls[0]["stream"])
-        self.assertNotIn("stream", fake_client.chat.completions.calls[1])
-
-    def test_streaming_request_traces_pre_chunk_fallback_reason(self):
-        from harness_code_agent.agent.loop import Agent, AgentConversation
-
-        class FakeCompletions:
-            def create(self, **kwargs):
-                if kwargs.get("stream"):
-                    raise RuntimeError("stream unavailable")
-                return SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content="fallback", tool_calls=None),
-                            finish_reason="stop",
-                        )
-                    ]
-                )
-
-        class FakeClient:
-            def __init__(self):
-                self.chat = SimpleNamespace(completions=FakeCompletions())
-
-        with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
-            conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=lambda _: None))
 
         with patch.object(conversation.trace, "error") as trace_error:
             completion = conversation._request_assistant_message(
@@ -341,6 +304,8 @@ class ProductRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(completion[0]["content"], "fallback")
+        self.assertTrue(fake_client.chat.completions.calls[0]["stream"])
+        self.assertNotIn("stream", fake_client.chat.completions.calls[1])
         trace_error.assert_called_once()
         self.assertEqual(trace_error.call_args.args[0], "stream_fallback")
         self.assertIn("stream unavailable", trace_error.call_args.args[1])
@@ -1029,161 +994,97 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(second_diag["cache_hit_tokens"], 80)
         self.assertEqual(second_diag["cache_miss_tokens"], 20)
 
-    def test_invalidated_long_observation_keeps_original_message_and_appends_notice(self):
+    def test_invalidated_observation_keeps_original_message_and_appends_notice(self):
         from harness_code_agent.agent.loop import Agent, AgentConversation
 
-        class FakeCompletions:
-            def __init__(self):
-                self.calls = []
+        cases = [
+            ("long", "SECRET_FULL_CONTENT_UNSAFE" * 700, True),
+            ("short", "SHORT_STALE_CONTENT", False),
+        ]
 
-            def create(self, **kwargs):
-                self.calls.append(json.loads(json.dumps(kwargs["messages"])))
-                call_count = len(self.calls)
-                if call_count == 1:
-                    message = SimpleNamespace(
-                        content=None,
-                        tool_calls=[
-                            SimpleNamespace(
-                                id="tc_read",
-                                type="function",
-                                function=SimpleNamespace(
-                                    name="read_file",
-                                    arguments='{"path":"note.txt"}',
-                                ),
+        for label, file_content, expect_observation_files in cases:
+            with self.subTest(observation_length=label):
+
+                class FakeCompletions:
+                    def __init__(self):
+                        self.calls = []
+
+                    def create(self, **kwargs):
+                        self.calls.append(json.loads(json.dumps(kwargs["messages"])))
+                        call_count = len(self.calls)
+                        if call_count == 1:
+                            message = SimpleNamespace(
+                                content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="tc_read",
+                                        type="function",
+                                        function=SimpleNamespace(
+                                            name="read_file",
+                                            arguments='{"path":"note.txt"}',
+                                        ),
+                                    )
+                                ],
                             )
-                        ],
-                    )
-                    finish_reason = "tool_calls"
-                elif call_count == 2:
-                    message = SimpleNamespace(
-                        content=None,
-                        tool_calls=[
-                            SimpleNamespace(
-                                id="tc_write",
-                                type="function",
-                                function=SimpleNamespace(
-                                    name="write_file",
-                                    arguments='{"path":"note.txt","content":"updated"}',
-                                ),
+                            finish_reason = "tool_calls"
+                        elif call_count == 2:
+                            message = SimpleNamespace(
+                                content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="tc_write",
+                                        type="function",
+                                        function=SimpleNamespace(
+                                            name="write_file",
+                                            arguments='{"path":"note.txt","content":"updated"}',
+                                        ),
+                                    )
+                                ],
                             )
-                        ],
-                    )
-                    finish_reason = "tool_calls"
-                else:
-                    message = SimpleNamespace(content="done", tool_calls=None)
-                    finish_reason = "stop"
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
-                    usage=None,
-                )
+                            finish_reason = "tool_calls"
+                        else:
+                            message = SimpleNamespace(content="done", tool_calls=None)
+                            finish_reason = "stop"
+                        return SimpleNamespace(
+                            choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+                            usage=None,
+                        )
 
-        class FakeClient:
-            def __init__(self):
-                self.chat = SimpleNamespace(completions=FakeCompletions())
+                class FakeClient:
+                    def __init__(self):
+                        self.chat = SimpleNamespace(completions=FakeCompletions())
 
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "note.txt").write_text("SECRET_FULL_CONTENT_UNSAFE" * 700, encoding="utf-8")
-            fake_client = FakeClient()
-            with (
-                patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client),
-                patch("harness_code_agent.agent.conversation.config.WORKSPACE", str(root)),
-            ):
-                conversation = AgentConversation(Agent("test", "system", use_tools=True))
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    (root / "note.txt").write_text(file_content, encoding="utf-8")
+                    fake_client = FakeClient()
+                    with (
+                        patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client),
+                        patch("harness_code_agent.agent.conversation.config.WORKSPACE", str(root)),
+                    ):
+                        conversation = AgentConversation(Agent("test", "system", use_tools=True))
 
-            with (
-                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 3),
-                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
-                patch("harness_code_agent.runtime.tools.config.WORKSPACE", str(root)),
-            ):
-                conversation.run_until_idle()
+                    with (
+                        patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 3),
+                        patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+                        patch("harness_code_agent.runtime.tools.config.WORKSPACE", str(root)),
+                    ):
+                        conversation.run_until_idle()
 
-            second_prompt = json.dumps(fake_client.chat.completions.calls[1], ensure_ascii=False)
-            third_prompt = json.dumps(fake_client.chat.completions.calls[2], ensure_ascii=False)
+                    third_prompt = json.dumps(fake_client.chat.completions.calls[2], ensure_ascii=False)
 
-            self.assertIn("SECRET_FULL_CONTENT_UNSAFE", second_prompt)
-            self.assertIn("SECRET_FULL_CONTENT_UNSAFE", third_prompt)
-            self.assertIn("[OBS obs_0001 observed]", third_prompt)
-            self.assertNotIn("[OBS obs_0001 stale]", third_prompt)
-            self.assertIn("FACT INVALIDATION", third_prompt)
-            self.assertIn("Stale observations: obs_0001", third_prompt)
-            self.assertNotIn("Compressed stale long observations", third_prompt)
-            self.assertTrue(list((root / ".harness" / "observations").rglob("*.txt")))
+                    self.assertIn(label == "long" and "SECRET_FULL_CONTENT_UNSAFE" or "SHORT_STALE_CONTENT", third_prompt)
+                    self.assertIn("FACT INVALIDATION", third_prompt)
+                    self.assertNotIn("Compressed stale long observations", third_prompt)
 
-    def test_invalidated_short_observation_keeps_original_message_and_appends_notice(self):
-        from harness_code_agent.agent.loop import Agent, AgentConversation
-
-        class FakeCompletions:
-            def __init__(self):
-                self.calls = []
-
-            def create(self, **kwargs):
-                self.calls.append(json.loads(json.dumps(kwargs["messages"])))
-                call_count = len(self.calls)
-                if call_count == 1:
-                    message = SimpleNamespace(
-                        content=None,
-                        tool_calls=[
-                            SimpleNamespace(
-                                id="tc_read",
-                                type="function",
-                                function=SimpleNamespace(
-                                    name="read_file",
-                                    arguments='{"path":"note.txt"}',
-                                ),
-                            )
-                        ],
-                    )
-                    finish_reason = "tool_calls"
-                elif call_count == 2:
-                    message = SimpleNamespace(
-                        content=None,
-                        tool_calls=[
-                            SimpleNamespace(
-                                id="tc_write",
-                                type="function",
-                                function=SimpleNamespace(
-                                    name="write_file",
-                                    arguments='{"path":"note.txt","content":"updated"}',
-                                ),
-                            )
-                        ],
-                    )
-                    finish_reason = "tool_calls"
-                else:
-                    message = SimpleNamespace(content="done", tool_calls=None)
-                    finish_reason = "stop"
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
-                    usage=None,
-                )
-
-        class FakeClient:
-            def __init__(self):
-                self.chat = SimpleNamespace(completions=FakeCompletions())
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "note.txt").write_text("SHORT_STALE_CONTENT", encoding="utf-8")
-            fake_client = FakeClient()
-            with (
-                patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client),
-                patch("harness_code_agent.agent.conversation.config.WORKSPACE", str(root)),
-            ):
-                conversation = AgentConversation(Agent("test", "system", use_tools=True))
-
-            with (
-                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 3),
-                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
-                patch("harness_code_agent.runtime.tools.config.WORKSPACE", str(root)),
-            ):
-                conversation.run_until_idle()
-
-            third_prompt = json.dumps(fake_client.chat.completions.calls[2], ensure_ascii=False)
-
-            self.assertIn("SHORT_STALE_CONTENT", third_prompt)
-            self.assertIn("FACT INVALIDATION", third_prompt)
-            self.assertNotIn("Compressed stale long observations", third_prompt)
+                    if label == "long":
+                        second_prompt = json.dumps(fake_client.chat.completions.calls[1], ensure_ascii=False)
+                        self.assertIn("SECRET_FULL_CONTENT_UNSAFE", second_prompt)
+                        self.assertIn("[OBS obs_0001 observed]", third_prompt)
+                        self.assertNotIn("[OBS obs_0001 stale]", third_prompt)
+                        self.assertIn("Stale observations: obs_0001", third_prompt)
+                    if expect_observation_files:
+                        self.assertTrue(list((root / ".harness" / "observations").rglob("*.txt")))
 
     def test_trace_writer_stores_traces_under_harness_directory_without_stderr_by_default(self):
         from harness_code_agent.agent.loop import TraceWriter

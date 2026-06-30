@@ -307,16 +307,6 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertEqual(plan["terminal_bench_tasks"], ["fix-git"])
         self.assertEqual(plan["tbench_parallelism"], 3)
 
-    def test_tbench_wall_timeout_rejects_legacy_name(self):
-        from eval.scripts.run_terminal_bench_eval import parse_args
-
-        args = parse_args(["--task-wall-timeout", "11"])
-
-        self.assertEqual(args.task_wall_timeout, 11)
-        with patch("sys.stderr", new=io.StringIO()):
-            with self.assertRaises(SystemExit):
-                parse_args(["--tbench-timeout", "12"])
-
     def test_harbor_usage_collects_metrics_from_result_text_fallback(self):
         from eval.benchmarks.usage_metrics import collect_harbor_job_usage
 

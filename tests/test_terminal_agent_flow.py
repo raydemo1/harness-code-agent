@@ -17,13 +17,7 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent.agent.loop import Agent
-from harness_code_agent.runtime.middlewares import (
-    AcceptanceReviewMiddleware,
-    PreExitVerificationMiddleware,
-    RecoveryStrategyMiddleware,
-    TaskTrackingEnforcementMiddleware,
-    TerminalShellEditPolicyMiddleware,
-)
+from harness_code_agent.runtime.middlewares import TaskTrackingEnforcementMiddleware
 from harness_code_agent.profiles.terminal import TerminalProfile
 
 
@@ -81,15 +75,6 @@ class AgentRuntimeStateTests(unittest.TestCase):
         self.assertIn("inside the task workspace", prompt)
         self.assertIn("preview or explain broad edits", prompt)
         self.assertEqual(cfg.initial_planning_mode, "tracked")
-
-    def test_terminal_main_agent_uses_enforcement_middlewares(self):
-        middlewares = TerminalProfile().main_agent().middlewares
-
-        self.assertTrue(any(isinstance(mw, TaskTrackingEnforcementMiddleware) for mw in middlewares))
-        self.assertTrue(any(isinstance(mw, RecoveryStrategyMiddleware) for mw in middlewares))
-        self.assertTrue(any(isinstance(mw, AcceptanceReviewMiddleware) for mw in middlewares))
-        self.assertTrue(any(isinstance(mw, TerminalShellEditPolicyMiddleware) for mw in middlewares))
-        self.assertFalse(any(isinstance(mw, PreExitVerificationMiddleware) for mw in middlewares))
 
     def test_terminal_tracked_mode_allows_first_action_and_reminds_about_plan_start(self):
         cfg = TerminalProfile().main_agent()

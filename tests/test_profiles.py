@@ -13,6 +13,7 @@ from harness_code_agent.profiles.router import route_profile_for_turn
 from harness_code_agent.runtime.middleware import (
     AcceptanceReviewMiddleware,
     PreExitVerificationMiddleware,
+    RecoveryStrategyMiddleware,
     TaskTrackingEnforcementMiddleware,
     TerminalShellEditPolicyMiddleware,
 )
@@ -132,6 +133,8 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertEqual(cfg.initial_planning_mode, "tracked")
         self.assertTrue(any(isinstance(mw, AcceptanceReviewMiddleware) for mw in cfg.middlewares))
         self.assertTrue(any(isinstance(mw, TerminalShellEditPolicyMiddleware) for mw in cfg.middlewares))
+        self.assertTrue(any(isinstance(mw, TaskTrackingEnforcementMiddleware) for mw in cfg.middlewares))
+        self.assertTrue(any(isinstance(mw, RecoveryStrategyMiddleware) for mw in cfg.middlewares))
         self.assertFalse(any(isinstance(mw, PreExitVerificationMiddleware) for mw in cfg.middlewares))
 
     def test_terminal_profile_resolves_timeout_from_task_name_env(self):

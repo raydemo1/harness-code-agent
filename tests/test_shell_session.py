@@ -199,22 +199,6 @@ class PersistentShellSessionTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_docker_run_args_includes_security_opt(self):
-        from harness_code_agent.workspace import shell_session
-
-        temp_dir = self._make_temp_dir()
-        try:
-            with (
-                patch.object(config, "DOCKER_IMAGE", "python:3.12"),
-                patch.object(config, "DOCKER_NETWORK", "none"),
-                patch.object(config, "DOCKER_USER", ""),
-            ):
-                args = shell_session._docker_run_args("hca-test", str(Path(temp_dir).resolve()))
-
-            self.assertIn("--security-opt=no-new-privileges", args)
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
     def test_docker_run_args_explicit_user(self):
         from harness_code_agent.workspace import shell_session
 

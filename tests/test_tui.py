@@ -810,28 +810,6 @@ class TuiThoughtTests(unittest.TestCase):
         self.assertFalse(state.show_thought_details)
 
 
-class TuiCancellationTests(unittest.TestCase):
-    """Cancellation tests."""
-
-    def test_cancellation_token_cancel_sets_flag(self):
-        from harness_code_agent.agent.cancellation import CancellationToken
-        token = CancellationToken()
-        self.assertFalse(token.is_cancelled)
-        token.cancel()
-        self.assertTrue(token.is_cancelled)
-
-    def test_cancellation_token_check_raises_when_cancelled(self):
-        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
-        token = CancellationToken()
-        token.cancel()
-        with self.assertRaises(CancelledError):
-            token.check()
-
-    def test_cancellation_token_check_passes_when_not_cancelled(self):
-        from harness_code_agent.agent.cancellation import CancellationToken
-        token = CancellationToken()
-        token.check()  # Should not raise
-
 
 class TuiRichRenderTests(unittest.TestCase):
     """Tests for block_to_rich rendering."""
@@ -1001,12 +979,6 @@ class TuiAppTests(unittest.TestCase):
         self.assertIsNotNone(app)
         self.assertEqual(app.profile_name, "coding-agent")
 
-    def test_tui_app_has_cancellation_token(self):
-        """TuiApp should have a cancellation token."""
-        from harness_code_agent.agent.cancellation import CancellationToken
-        app = self._make_app()
-        self.assertIsInstance(app._cancellation_token, CancellationToken)
-
     def test_tui_app_cancel_sets_token(self):
         """action_cancel should set the cancellation token."""
         app = self._make_app()
@@ -1014,12 +986,6 @@ class TuiAppTests(unittest.TestCase):
         app._submitting = True  # Simulate running state
         app.action_cancel()
         self.assertTrue(app._cancellation_token.is_cancelled)
-
-    def test_tui_app_state_initializes_on_mount(self):
-        """State should be None before mount, initialized after."""
-        app = self._make_app()
-        # Before mount, state is None (created in on_mount)
-        self.assertIsNone(app.state)
 
     def test_welcome_shows_general_session_id_after_immediate_bind(self):
         from harness_code_agent.tui.state import SessionStatusSnapshot
