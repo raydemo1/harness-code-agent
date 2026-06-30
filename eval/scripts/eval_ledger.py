@@ -21,6 +21,15 @@ from eval.benchmarks.usage_metrics import parse_eval_metrics_from_text
 RUN_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{6})")
 HARBOR_JOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}__\d{2}-\d{2}-\d{2}$")
 FAILED_KEEP_COUNT = 3
+EXCLUDED_TASKS = {
+    "chess-best-move": "vision_required",
+    "code-from-image": "vision_required",
+    "extract-moves-from-video": "vision_required",
+    "gcode-to-text": "vision_required",
+    "path-tracing": "vision_required",
+    "sam-cell-seg": "vision_required",
+    "video-processing": "vision_required",
+}
 
 
 @dataclass
@@ -92,13 +101,20 @@ def rebuild_eval_ledger(
         warnings=warnings,
     )
     attempts = dedupe_attempts(attempts)
-    finals = select_final_results(attempts)
+    all_finals = select_final_results(attempts)
+    finals = [item for item in all_finals if item.task not in EXCLUDED_TASKS]
+    excluded_finals = [item for item in all_finals if item.task in EXCLUDED_TASKS]
     retention = build_retention_plan(
         attempts=attempts,
-        finals=finals,
+        finals=all_finals,
         allowed_roots=[path for path in (results_root, jobs_root_path) if path is not None],
     )
-    summary = build_summary(attempts=attempts, finals=finals, warnings=warnings)
+    summary = build_summary(
+        attempts=attempts,
+        finals=finals,
+        excluded_finals=excluded_finals,
+        warnings=warnings,
+    )
     return {
         "schema_version": 1,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -106,6 +122,10 @@ def rebuild_eval_ledger(
         "jobs_root": str(jobs_root_path) if jobs_root_path else "",
         "summary": summary,
         "final_results": [item.to_dict() for item in finals],
+        "excluded_results": [
+            {**item.to_dict(), "exclusion_reason": EXCLUDED_TASKS[item.task]}
+            for item in excluded_finals
+        ],
         "attempts": [item.to_dict() for item in sorted_attempts(attempts)],
         "retention_plan": retention,
         "warnings": warnings,
@@ -444,9 +464,18 @@ def _select_best_attempt(attempts: list[Attempt]) -> Attempt:
     return sorted(pool, key=lambda item: (item.run_timestamp, item.run_name, item.attempt_id), reverse=True)[0]
 
 
-def build_summary(*, attempts: list[Attempt], finals: list[TaskFinal], warnings: list[str]) -> dict[str, Any]:
+def build_summary(
+    *,
+    attempts: list[Attempt],
+    finals: list[TaskFinal],
+    excluded_finals: list[TaskFinal] | None = None,
+    warnings: list[str],
+) -> dict[str, Any]:
+    excluded_finals = excluded_finals or []
+    included_attempts = [attempt for attempt in attempts if attempt.task not in EXCLUDED_TASKS]
+    excluded_attempts = [attempt for attempt in attempts if attempt.task in EXCLUDED_TASKS]
     final_totals = _totals_from_finals(finals)
-    attempt_totals = _totals_from_attempts(attempts)
+    attempt_totals = _totals_from_attempts(included_attempts)
     failed = [item for item in finals if item.status != "passed"]
     source_versions: dict[str, int] = {}
     for item in finals:
@@ -455,7 +484,11 @@ def build_summary(*, attempts: list[Attempt], finals: list[TaskFinal], warnings:
     for item in failed:
         key = item.failure_kind or "unknown"
         failure_kinds[key] = failure_kinds.get(key, 0) + 1
-    v21_tasks = {attempt.task for attempt in attempts if attempt.benchmark_version == "2.1"}
+    v21_tasks = {
+        attempt.task
+        for attempt in included_attempts
+        if attempt.benchmark_version == "2.1"
+    }
     return {
         "total_tasks": len(finals),
         "passed": sum(1 for item in finals if item.status == "passed"),
@@ -463,11 +496,17 @@ def build_summary(*, attempts: list[Attempt], finals: list[TaskFinal], warnings:
         "pass_rate": _safe_rate(sum(1 for item in finals if item.status == "passed"), len(finals)),
         "source_versions": dict(sorted(source_versions.items())),
         "fallback_2_0_tasks": sum(1 for item in finals if item.source_version == "2.0"),
+        "excluded_task_count": len(excluded_finals),
+        "excluded_tasks": [
+            {"task": item.task, "reason": EXCLUDED_TASKS.get(item.task, "excluded")}
+            for item in sorted(excluded_finals, key=lambda item: item.task)
+        ],
         "terminal_bench_2_1_attempted_tasks": len(v21_tasks),
         "failure_kinds": dict(sorted(failure_kinds.items())),
         "final_selected_totals": final_totals,
         "all_attempt_totals": attempt_totals,
-        "attempt_count": len(attempts),
+        "attempt_count": len(included_attempts),
+        "excluded_attempt_count": len(excluded_attempts),
         "warning_count": len(warnings) + sum(len(item.warnings) for item in attempts),
     }
 
@@ -562,6 +601,7 @@ def render_summary_markdown(ledger: dict[str, Any]) -> str:
     summary = ledger.get("summary") or {}
     finals = ledger.get("final_results") or []
     attempts = ledger.get("attempts") or []
+    excluded = ledger.get("excluded_results") or []
     retention = ledger.get("retention_plan") or {}
     lines = [
         "# Terminal-Bench Task Ledger",
@@ -577,6 +617,22 @@ def render_summary_markdown(ledger: dict[str, Any]) -> str:
         f"- Source versions: {_source_version_line(summary.get('source_versions') or {})}",
         f"- 2.0 fallback tasks: **{summary.get('fallback_2_0_tasks', 0)}**",
         f"- Terminal-Bench 2.1 attempted tasks: **{summary.get('terminal_bench_2_1_attempted_tasks', 0)}**",
+        f"- Excluded tasks: **{summary.get('excluded_task_count', 0)}**",
+        "",
+        "## Excluded Tasks",
+        "",
+        "| Task | Reason | Latest Status | Source Version |",
+        "| --- | --- | --- | --- |",
+    ]
+    if excluded:
+        for item in sorted(excluded, key=lambda row: str(row.get("task") or "")):
+            lines.append(
+                f"| {_cell(item.get('task'))} | {_cell(item.get('exclusion_reason'))} | "
+                f"{_cell(item.get('status'))} | {_cell(item.get('source_version'))} |"
+            )
+    else:
+        lines.append("| none |  |  |  |")
+    lines.extend([
         "",
         "## Aggregate Stats",
         "",
@@ -587,7 +643,7 @@ def render_summary_markdown(ledger: dict[str, Any]) -> str:
         "",
         "## Failure Kinds",
         "",
-    ]
+    ])
     failure_kinds = summary.get("failure_kinds") or {}
     if failure_kinds:
         lines.extend(f"- {kind}: {count}" for kind, count in sorted(failure_kinds.items()))
@@ -961,9 +1017,12 @@ def _results_json(ledger: dict[str, Any]) -> dict[str, Any]:
         "pass_rate": summary.get("pass_rate", 0.0),
         "source_versions": summary.get("source_versions") or {},
         "fallback_2_0_tasks": summary.get("fallback_2_0_tasks", 0),
+        "excluded_task_count": summary.get("excluded_task_count", 0),
+        "excluded_tasks": summary.get("excluded_tasks") or [],
         "final_selected_totals": summary.get("final_selected_totals") or {},
         "all_attempt_totals": summary.get("all_attempt_totals") or {},
         "tasks": ledger.get("final_results") or [],
+        "excluded_results": ledger.get("excluded_results") or [],
         "warnings": ledger.get("warnings") or [],
     }
 
@@ -1140,6 +1199,8 @@ def _coverage_rows(attempts: list[dict[str, Any]], *, version: str) -> list[str]
     grouped: dict[str, list[dict[str, Any]]] = {}
     for attempt in attempts:
         if attempt.get("benchmark_version") == version:
+            if attempt.get("task") in EXCLUDED_TASKS:
+                continue
             grouped.setdefault(str(attempt.get("task") or ""), []).append(attempt)
     if not grouped:
         return ["| none |  | 0 |  |"]

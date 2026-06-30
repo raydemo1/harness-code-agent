@@ -169,6 +169,31 @@ class EvalLedgerTests(unittest.TestCase):
         ]
         self.assertEqual(len(kept_failed), 3)
 
+    def test_vision_required_tasks_are_excluded_from_main_results(self):
+        from eval.scripts.eval_ledger import rebuild_eval_ledger
+
+        self._write_summary(
+            "2026-06-28_100000_tbench",
+            benchmark_name="Terminal-Bench 2.1",
+            task_set="manual",
+            task_results=[
+                self._task("code-from-image", "failed", reward=0.0, tool_calls=9),
+                self._task("regular-task", "passed", reward=1.0, tool_calls=2),
+            ],
+        )
+
+        ledger = rebuild_eval_ledger(results_root=self.results, jobs_root=self.jobs)
+
+        self.assertEqual([item["task"] for item in ledger["final_results"]], ["regular-task"])
+        self.assertEqual(ledger["summary"]["total_tasks"], 1)
+        self.assertEqual(ledger["summary"]["passed"], 1)
+        self.assertEqual(ledger["summary"]["excluded_task_count"], 1)
+        self.assertEqual(ledger["summary"]["attempt_count"], 1)
+        self.assertEqual(ledger["summary"]["excluded_attempt_count"], 1)
+        self.assertEqual(ledger["excluded_results"][0]["task"], "code-from-image")
+        self.assertEqual(ledger["excluded_results"][0]["exclusion_reason"], "vision_required")
+        self.assertEqual(len([item for item in ledger["attempts"] if item["task"] == "code-from-image"]), 1)
+
     def test_unreadable_json_records_warning_without_failing(self):
         from eval.scripts.eval_ledger import rebuild_eval_ledger
 

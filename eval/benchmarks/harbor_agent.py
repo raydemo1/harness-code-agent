@@ -47,7 +47,46 @@ PYTHON_STANDALONE_TARBALL = "python-3.12.13-x86_64-unknown-linux-gnu.tar.gz"
 CONTAINER_PYTHON_TARBALL = f"/tmp/{PYTHON_STANDALONE_TARBALL}"
 DEFAULT_DEBIAN_APT_MIRROR = "http://mirrors.tuna.tsinghua.edu.cn"
 DEFAULT_UBUNTU_APT_MIRROR = "http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+DEFAULT_APT_MIRROR_PAIRS = (
+    (DEFAULT_DEBIAN_APT_MIRROR, DEFAULT_UBUNTU_APT_MIRROR),
+    ("http://mirrors.aliyun.com", "http://mirrors.aliyun.com/ubuntu"),
+    ("http://mirrors.ustc.edu.cn", "http://mirrors.ustc.edu.cn/ubuntu"),
+    ("http://deb.debian.org", "http://archive.ubuntu.com/ubuntu"),
+)
 DEFAULT_PYPI_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
+DEFAULT_NO_PROXY_HOSTS = (
+    "localhost",
+    "127.0.0.1",
+    "host.docker.internal",
+    "http.docker.internal",
+    "astral.sh",
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "raw.githubusercontent.com",
+    "pypi.org",
+    "pypi.python.org",
+    "files.pythonhosted.org",
+    "registry.npmmirror.com",
+    "mirrors.tuna.tsinghua.edu.cn",
+    "pypi.tuna.tsinghua.edu.cn",
+    "deb.debian.org",
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "mirrors.aliyun.com",
+    "mirrors.ustc.edu.cn",
+    "releases.astral.sh",
+)
+
+
+def _no_proxy_export_command() -> str:
+    hosts = ",".join(DEFAULT_NO_PROXY_HOSTS)
+    quoted_hosts = shlex.quote(hosts)
+    return (
+        f"HCA_NO_PROXY_HOSTS=${{HCA_NO_PROXY_HOSTS:-{quoted_hosts}}}; "
+        "export NO_PROXY=\"${NO_PROXY:+$NO_PROXY,}${HCA_NO_PROXY_HOSTS}\"; "
+        "export no_proxy=\"${no_proxy:+$no_proxy,}${HCA_NO_PROXY_HOSTS}\"; "
+    )
 
 
 def _configure_debian_apt_mirror_command() -> str:
@@ -60,6 +99,18 @@ def _configure_debian_apt_mirror_command() -> str:
         "if command -v apt-get >/dev/null 2>&1; then "
         "  if [ -f /etc/apt/sources.list.d/debian.sources ]; then "
         "    sed -i "
+        "      -e \"s|https://mirrors.tuna.tsinghua.edu.cn/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://mirrors.tuna.tsinghua.edu.cn/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://mirrors.tuna.tsinghua.edu.cn/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|http://mirrors.tuna.tsinghua.edu.cn/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|https://mirrors.aliyun.com/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://mirrors.aliyun.com/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://mirrors.aliyun.com/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|http://mirrors.aliyun.com/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|https://mirrors.ustc.edu.cn/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://mirrors.ustc.edu.cn/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://mirrors.ustc.edu.cn/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|http://mirrors.ustc.edu.cn/debian|${APT_MIRROR}/debian|g\" "
         "      -e \"s|https://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
         "      -e \"s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
         "      -e \"s|https://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
@@ -70,6 +121,12 @@ def _configure_debian_apt_mirror_command() -> str:
         "  fi; "
         "  if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then "
         "    sed -i "
+        "      -e \"s|https://mirrors.tuna.tsinghua.edu.cn/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://mirrors.tuna.tsinghua.edu.cn/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|https://mirrors.aliyun.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://mirrors.aliyun.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|https://mirrors.ustc.edu.cn/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://mirrors.ustc.edu.cn/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
         "      -e \"s|https://archive.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
         "      -e \"s|http://archive.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
         "      -e \"s|https://security.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
@@ -78,12 +135,30 @@ def _configure_debian_apt_mirror_command() -> str:
         "  fi; "
         "  if [ -f /etc/apt/sources.list ]; then "
         "    sed -i "
+        "      -e \"s|https://mirrors.tuna.tsinghua.edu.cn/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://mirrors.tuna.tsinghua.edu.cn/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://mirrors.tuna.tsinghua.edu.cn/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|http://mirrors.tuna.tsinghua.edu.cn/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|https://mirrors.aliyun.com/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://mirrors.aliyun.com/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://mirrors.aliyun.com/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|http://mirrors.aliyun.com/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|https://mirrors.ustc.edu.cn/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|http://mirrors.ustc.edu.cn/debian-security|${APT_MIRROR}/debian-security|g\" "
+        "      -e \"s|https://mirrors.ustc.edu.cn/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|http://mirrors.ustc.edu.cn/debian|${APT_MIRROR}/debian|g\" "
         "      -e \"s|https://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
         "      -e \"s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
         "      -e \"s|https://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
         "      -e \"s|http://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g\" "
         "      -e \"s|https://deb.debian.org/debian|${APT_MIRROR}/debian|g\" "
         "      -e \"s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g\" "
+        "      -e \"s|https://mirrors.tuna.tsinghua.edu.cn/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://mirrors.tuna.tsinghua.edu.cn/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|https://mirrors.aliyun.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://mirrors.aliyun.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|https://mirrors.ustc.edu.cn/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
+        "      -e \"s|http://mirrors.ustc.edu.cn/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
         "      -e \"s|https://archive.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
         "      -e \"s|http://archive.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
         "      -e \"s|https://security.ubuntu.com/ubuntu|${UBUNTU_APT_MIRROR}|g\" "
@@ -95,24 +170,41 @@ def _configure_debian_apt_mirror_command() -> str:
 
 
 def _apt_get_install_command(packages: str) -> str:
+    mirror_pairs = " ".join(
+        f"{debian}|{ubuntu}" for debian, ubuntu in DEFAULT_APT_MIRROR_PAIRS
+    )
+    quoted_pairs = shlex.quote(mirror_pairs)
     return (
+        f"{_no_proxy_export_command()} "
         "export DEBIAN_FRONTEND=noninteractive; "
-        f"{_configure_debian_apt_mirror_command()} "
-        "apt-get "
-        "-o Acquire::Retries=5 "
-        "-o Acquire::http::Timeout=30 "
-        "-o Acquire::https::Timeout=30 "
-        "update -qq && "
-        "apt-get "
-        "-o Dpkg::Lock::Timeout=300 "
-        "-y -qq --no-install-recommends install "
-        f"{packages}"
+        f"APT_MIRROR_PAIRS=${{HCA_APT_MIRROR_PAIRS:-{quoted_pairs}}}; "
+        "APT_INSTALL_OK=0; "
+        "for APT_PAIR in $APT_MIRROR_PAIRS; do "
+        "  export HCA_APT_MIRROR=${APT_PAIR%%|*}; "
+        "  export HCA_UBUNTU_APT_MIRROR=${APT_PAIR#*|}; "
+        "  echo \"Trying apt mirror pair: $HCA_APT_MIRROR / $HCA_UBUNTU_APT_MIRROR\"; "
+        f"  {_configure_debian_apt_mirror_command()} "
+        "  if apt-get "
+        "      -o Acquire::Retries=3 "
+        "      -o Acquire::http::Timeout=30 "
+        "      -o Acquire::https::Timeout=30 "
+        "      update -qq && "
+        "     apt-get "
+        "      -o Dpkg::Lock::Timeout=300 "
+        "      -y -qq --no-install-recommends install "
+        f"      {packages}; then "
+        "    APT_INSTALL_OK=1; "
+        "    break; "
+        "  fi; "
+        "done; "
+        "[ \"$APT_INSTALL_OK\" = \"1\" ]"
     )
 
 
 def _pip_config_command() -> str:
     index_url = shlex.quote(DEFAULT_PYPI_INDEX_URL)
     return (
+        f"{_no_proxy_export_command()} "
         "mkdir -p /etc && "
         "printf '[global]\\nindex-url = %s\\ntimeout = 120\\nretries = 10\\n' "
         f"{index_url} > /etc/pip.conf"
@@ -295,6 +387,7 @@ class HarnessAgent(BaseInstalledAgent):
                 f"[ -d \"$WORKSPACE\" ] || WORKSPACE=/root; "
                 f"[ -d \"$WORKSPACE\" ] || WORKSPACE=/; "
                 f"cd \"$WORKSPACE\" && "
+                f"{_no_proxy_export_command()} "
                 "if [ -n \"${HCA_MODEL_API_NO_PROXY_HOSTS:-}\" ]; then "
                 "  export NO_PROXY=\"${NO_PROXY:+$NO_PROXY,}${HCA_MODEL_API_NO_PROXY_HOSTS}\"; "
                 "  export no_proxy=\"${no_proxy:+$no_proxy,}${HCA_MODEL_API_NO_PROXY_HOSTS}\"; "

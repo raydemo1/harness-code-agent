@@ -224,6 +224,23 @@ class TerminalBenchLauncherTests(unittest.TestCase):
         self.assertIn("archive.ubuntu.com/ubuntu", command)
         self.assertIn("${UBUNTU_APT_MIRROR}", command)
 
+    def test_harbor_agent_apt_install_uses_fallback_mirrors_and_no_proxy(self):
+        harbor_agent = self._import_harbor_agent_with_fakes()
+
+        command = harbor_agent._apt_get_install_command("curl git")
+
+        self.assertIn("HCA_NO_PROXY_HOSTS", command)
+        self.assertIn("astral.sh", command)
+        self.assertIn("HCA_APT_MIRROR_PAIRS", command)
+        self.assertIn("mirrors.tuna.tsinghua.edu.cn", command)
+        self.assertIn("mirrors.aliyun.com", command)
+        self.assertIn("mirrors.ustc.edu.cn", command)
+        self.assertIn("deb.debian.org", command)
+        self.assertIn("archive.ubuntu.com", command)
+        self.assertIn("for APT_PAIR in $APT_MIRROR_PAIRS", command)
+        self.assertIn("Dpkg::Lock::Timeout=300", command)
+        self.assertIn("curl git", command)
+
     def _import_harbor_agent_with_fakes(self):
         fake_base = types.ModuleType("harbor.agents.installed.base")
         fake_base.BaseInstalledAgent = object
