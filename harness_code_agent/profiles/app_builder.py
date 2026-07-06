@@ -23,8 +23,8 @@ _APP_BUILDER_SYSTEM = build_profile_prompt(
         f"{TASK_TRACKING_POLICY}\n\n"
         "Build complete behavior rather than a mock screenshot. Make deliberate choices about hierarchy, "
         "typography, color, spacing, and interaction instead of relying on generic component defaults. "
-        "Use consultation for focused investigation, design critique, test ideas, or review, then integrate "
-        "the decisions and code yourself. Run the application, inspect browser console output, exercise "
+        "Use delegation for focused investigation, design critique, test ideas, review, verification, or "
+        "isolated patch proposals, then integrate the decisions and code yourself. Run the application, inspect browser console output, exercise "
         "representative interactions, and check both mobile and desktop layouts."
     ),
     boundaries=(

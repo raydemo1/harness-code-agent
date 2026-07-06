@@ -305,8 +305,8 @@ HCA 的工具不是简单丢给模型自由调用，而是经过权限、lane、
 - structured patch
 - persistent shell jobs
 - web search / fetch
-- read-only sub-agent consultation
-- 并行只读工具调用
+- delegated agents for exploration, review, verification, test design, and isolated patch proposals
+- 并行安全命令和并行只读 delegated agents
 - 用户选择提问
 - 可选浏览器验证
 - MCP server 暴露的 tools

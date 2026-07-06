@@ -15,6 +15,7 @@ def run_bash(
     timeout: int = 300,
     runtime_state=None,
     agent_name: str | None = None,
+    tool_context=None,
     execution_lane: ToolExecutionLane | str | None = None,
 ) -> ToolResult:
     """Run a shell command inside the agent's persistent shell session."""
@@ -67,7 +68,7 @@ def run_bash(
     if use_temporary_shell:
         from ...workspace.shell_session import PersistentShellSession
 
-        shell_session = PersistentShellSession(config.WORKSPACE)
+        shell_session = PersistentShellSession(_workspace_root(tool_context))
         owns_shell = True
     elif runtime_state is not None:
         shell_session = runtime_state.shell_session
@@ -230,6 +231,12 @@ def stop_shell_job(job_id: str, runtime_state=None) -> ToolResult:
 
 def _shell_job_manager(runtime_state):
     return getattr(runtime_state, "shell_job_manager", None) if runtime_state is not None else None
+
+
+def _workspace_root(tool_context=None) -> str:
+    if tool_context is not None:
+        return str(tool_context.workspace.root)
+    return config.WORKSPACE
 
 
 def _clamp_shell_output_chars(value: int) -> int:

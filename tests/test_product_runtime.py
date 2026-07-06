@@ -2225,7 +2225,7 @@ class ProductRuntimeTests(unittest.TestCase):
         workspace_policy = PermissionPolicy(mode="workspace-write")
         read_decision = workspace_policy.decide_tool_call("read_file", {"path": "x.txt"})
         repo_search_decision = workspace_policy.decide_tool_call("repo_search", {"pattern": "needle"})
-        parallel_decision = workspace_policy.decide_tool_call("parallel", {"tool_uses": []})
+        parallel_decision = workspace_policy.decide_tool_call("parallel_agents", {"agents": []})
         edit_decision = workspace_policy.decide_tool_call("write_file", {"path": "x.txt"})
         plan_decision = workspace_policy.decide_tool_call("update_plan_state", {"mode": "tracked"})
         safe_shell_decision = workspace_policy.decide_tool_call(
@@ -2257,7 +2257,7 @@ class ProductRuntimeTests(unittest.TestCase):
         llm_auto_policy = PermissionPolicy(mode="llm-auto")
         llm_read_decision = llm_auto_policy.decide_tool_call("read_file", {"path": "x.txt"})
         llm_repo_search_decision = llm_auto_policy.decide_tool_call("repo_search", {"pattern": "needle"})
-        llm_parallel_decision = llm_auto_policy.decide_tool_call("parallel", {"tool_uses": []})
+        llm_parallel_decision = llm_auto_policy.decide_tool_call("parallel_commands", {"commands": []})
         llm_edit_decision = llm_auto_policy.decide_tool_call("write_file", {"path": "x.txt"})
         llm_plan_decision = llm_auto_policy.decide_tool_call("update_plan_state", {"mode": "tracked"})
         llm_safe_shell_decision = llm_auto_policy.decide_tool_call(

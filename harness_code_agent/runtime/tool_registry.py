@@ -130,8 +130,10 @@ def _default_lane_for_tool(name: str, permission: str) -> ToolExecutionLane:
         return ToolExecutionLane.WORKSPACE_READ
     if name in {"web_search", "web_fetch"}:
         return ToolExecutionLane.NETWORK_READ
-    if name == "consult_subagent":
+    if name in {"delegate_agent", "parallel_agents"}:
         return ToolExecutionLane.SUBAGENT_READ
+    if name == "parallel_commands":
+        return ToolExecutionLane.WORKSPACE_READ
     if name in {"write_file", "apply_patch"}:
         return ToolExecutionLane.WORKSPACE_WRITE
     if name in {"ask_user", "update_plan_state"}:

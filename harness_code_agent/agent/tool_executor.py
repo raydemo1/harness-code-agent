@@ -313,7 +313,7 @@ class ToolExecutor:
     def _execute_one_unlimited(self, prepared: PreparedToolCall) -> ExecutedToolCall:
         if prepared.name == "run_bash" and prepared.lane == ToolExecutionLane.SHELL_SERIAL:
             if self.runtime_state.shell_session is None:
-                self.runtime_state.shell_session = PersistentShellSession(config.WORKSPACE)
+                self.runtime_state.shell_session = PersistentShellSession(_agent_workspace_root(self.agent))
         tool_result = execute_tool_result(
             prepared.name,
             prepared.args,
@@ -490,3 +490,9 @@ def _semaphore_for(lane: ToolExecutionLane):
     if lane == ToolExecutionLane.NETWORK_READ:
         return ToolExecutor._network_semaphore
     return None
+
+
+def _agent_workspace_root(agent) -> str:
+    if getattr(agent, "tool_context", None) is not None:
+        return str(agent.tool_context.workspace.root)
+    return config.WORKSPACE

@@ -110,7 +110,9 @@ class TerminalProfile(BaseProfile):
                     "Shell-driven file writes are allowed inside the task workspace. Avoid opaque broad "
                     "mutations; constrain shell writes to the task workspace, preview or explain broad edits "
                     "before applying them, and follow mutations with verification or a convergence check. "
-                    "Consultation is read-only advice, not completed work."
+                    "Use delegation for parallel exploration, test design, independent review, verification, "
+                    "or isolated patch proposals when that reduces hidden-verifier risk; never treat delegated "
+                    "output as completed work until you integrate and verify it yourself."
                 ),
                 completion=(
                     "Verify every active acceptance check and include the latest acceptance_revision plus one "

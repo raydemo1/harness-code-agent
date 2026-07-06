@@ -68,7 +68,7 @@ class TaskTrackingMiddleware(AgentMiddleware):
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
     """Hard-require planning updates for tracked mode."""
 
-    ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "consult_subagent", "browser_test"}
+    ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
 
     def __init__(
         self,
@@ -105,6 +105,8 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
         if tool_name not in self.ACTION_TOOLS:
             return None
         board = runtime_state.task_board
+        if _is_pre_start_read_only_delegate(tool_name, tool_args, board):
+            return None
         if self._requires_tracked_start(runtime_state):
             return (
                 "[blocked] This task has reached multi-step execution. "
@@ -143,6 +145,8 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             return None
 
         if tool_name in self.ACTION_TOOLS:
+            if _is_pre_start_read_only_delegate(tool_name, tool_args, board):
+                return None
             if (
                 board.planning_mode == "tracked"
                 and board.update_count == 0
@@ -267,3 +271,12 @@ def _weak_acceptance_command(checks: list[dict]) -> dict | None:
 
 def _is_read_only_probe(command: str) -> bool:
     return classify_safe_shell_command(command) == "read"
+
+
+def _is_pre_start_read_only_delegate(tool_name: str, tool_args: dict, board) -> bool:
+    return (
+        tool_name == "delegate_agent"
+        and str((tool_args or {}).get("agent_profile") or "").strip().lower().replace("-", "_") != "patch"
+        and board.update_count == 0
+        and board.planning_mode in {"unset", "skip", "tracked"}
+    )

@@ -1,7 +1,7 @@
 """Composition root for built-in tool registration."""
 from __future__ import annotations
 
-from ...agent.consultation import consult_subagent
+from ...agent.delegation import delegate_agent
 from ..permissions import (
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_EDIT,
@@ -15,7 +15,7 @@ from .discovery import tool_search
 from .filesystem import apply_patch, list_files, read_file, read_skill_file, repo_search, write_file
 from .interaction import ask_user
 from .memory_tools import memory_search, read_memory_file, remember_memory
-from .parallel import parallel
+from .parallel import parallel_agents, parallel_commands
 from .planning import update_plan_state
 from .schemas import BROWSER_TOOL_SCHEMAS, CORE_TOOL_SCHEMAS
 from .shell import list_shell_jobs, read_shell_output, run_bash, stop_shell_job
@@ -29,7 +29,8 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "read_skill_file": read_skill_file,
         "repo_search": repo_search,
         "tool_search": tool_search,
-        "parallel": parallel,
+        "parallel_agents": parallel_agents,
+        "parallel_commands": parallel_commands,
         "write_file": write_file,
         "apply_patch": apply_patch,
         "update_plan_state": update_plan_state,
@@ -42,7 +43,7 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "list_shell_jobs": list_shell_jobs,
         "read_shell_output": read_shell_output,
         "stop_shell_job": stop_shell_job,
-        "consult_subagent": consult_subagent,
+        "delegate_agent": delegate_agent,
         "web_search": web_search,
         "web_fetch": web_fetch,
         "browser_test": browser_test,
@@ -53,13 +54,14 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "read_skill_file": TOOL_PERMISSION_READ,
         "repo_search": TOOL_PERMISSION_READ,
         "tool_search": TOOL_PERMISSION_READ,
-        "parallel": TOOL_PERMISSION_READ,
+        "parallel_agents": TOOL_PERMISSION_READ,
+        "parallel_commands": TOOL_PERMISSION_READ,
         "list_files": TOOL_PERMISSION_READ,
         "ask_user": TOOL_PERMISSION_READ,
         "memory_search": TOOL_PERMISSION_READ,
         "remember_memory": TOOL_PERMISSION_EDIT,
         "read_memory_file": TOOL_PERMISSION_READ,
-        "consult_subagent": TOOL_PERMISSION_READ,
+        "delegate_agent": TOOL_PERMISSION_READ,
         "web_search": TOOL_PERMISSION_NETWORK_READ,
         "web_fetch": TOOL_PERMISSION_NETWORK_READ,
         "write_file": TOOL_PERMISSION_EDIT,
@@ -77,13 +79,14 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "read_skill_file": ToolExecutionLane.WORKSPACE_READ,
         "repo_search": ToolExecutionLane.WORKSPACE_READ,
         "tool_search": ToolExecutionLane.CONTROL_SERIAL,
-        "parallel": ToolExecutionLane.WORKSPACE_READ,
+        "parallel_agents": ToolExecutionLane.SUBAGENT_READ,
+        "parallel_commands": ToolExecutionLane.WORKSPACE_READ,
         "list_files": ToolExecutionLane.WORKSPACE_READ,
         "ask_user": ToolExecutionLane.CONTROL_SERIAL,
         "memory_search": ToolExecutionLane.WORKSPACE_READ,
         "remember_memory": ToolExecutionLane.WORKSPACE_WRITE,
         "read_memory_file": ToolExecutionLane.WORKSPACE_READ,
-        "consult_subagent": ToolExecutionLane.SUBAGENT_READ,
+        "delegate_agent": ToolExecutionLane.SUBAGENT_READ,
         "web_search": ToolExecutionLane.NETWORK_READ,
         "web_fetch": ToolExecutionLane.NETWORK_READ,
         "write_file": ToolExecutionLane.WORKSPACE_WRITE,

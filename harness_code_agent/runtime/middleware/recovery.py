@@ -17,7 +17,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         "no module named",
         "modulenotfounderror",
     )
-    ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "consult_subagent", "browser_test"}
+    ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
     VERIFICATION_FAILURE_PATTERNS = (
         "assert",
         "failed",
@@ -128,12 +128,12 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             return None
 
         if mode == "ENV_FIX":
-            if tool_name in {"write_file", "consult_subagent"}:
+            if tool_name in {"write_file", "delegate_agent"}:
                 return "[blocked] Recovery mode ENV_FIX only allows diagnosis, installation, and environment repair actions."
             return None
 
         if mode == "SPEC_RECHECK":
-            if tool_name in {"write_file", "consult_subagent"}:
+            if tool_name in {"write_file", "delegate_agent"}:
                 return "[blocked] Recovery mode SPEC_RECHECK is read-only. Re-read the task and verification outputs first."
             if tool_name == "run_bash" and not is_read_only_command(tool_args.get("command", "")):
                 return "[blocked] Recovery mode SPEC_RECHECK only allows read-only verification commands."
@@ -145,7 +145,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             return None
 
         if mode == "FINAL_VERIFY":
-            if tool_name in {"consult_subagent", "web_search", "web_fetch"}:
+            if tool_name in {"delegate_agent", "web_search", "web_fetch"}:
                 return "[blocked] Recovery mode FINAL_VERIFY only allows direct verification and final fixes."
             return None
 

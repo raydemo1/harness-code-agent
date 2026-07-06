@@ -573,19 +573,19 @@ class TuiNoiseReductionTests(unittest.TestCase):
         # Should not contain the full content
         self.assertNotIn("x" * 5000, block.title)
 
-    def test_parallel_tool_call_shows_nested_tool_count(self):
+    def test_parallel_agents_tool_call_shows_nested_agent_count(self):
         state = self._make_state()
 
         call_event = SimpleNamespace(
             to_dict=lambda: {
                 "type": "tool_call",
                 "payload": {
-                    "tool": "parallel",
+                    "tool": "parallel_agents",
                     "args": {
-                        "tool_uses": [
-                            {"tool_name": "list_files", "arguments": {"directory": "."}},
-                            {"tool_name": "read_file", "arguments": {"path": "README.md"}},
-                            {"tool_name": "repo_search", "arguments": {"pattern": "parallel"}},
+                        "agents": [
+                            {"agent_profile": "explore", "task": "inspect"},
+                            {"agent_profile": "review", "task": "review"},
+                            {"agent_profile": "verify", "task": "verify"},
                         ]
                     },
                 },
@@ -593,7 +593,7 @@ class TuiNoiseReductionTests(unittest.TestCase):
         )
         block = state.apply_event(call_event)
 
-        self.assertEqual(block.title, "parallel(同时执行了3个工具)")
+        self.assertEqual(block.title, "parallel_agents(同时执行了3个工具)")
 
     def test_parallel_tool_result_shows_nested_success_counts(self):
         state = self._make_state()
@@ -602,8 +602,8 @@ class TuiNoiseReductionTests(unittest.TestCase):
             to_dict=lambda: {
                 "type": "tool_call",
                 "payload": {
-                    "tool": "parallel",
-                    "args": {"tool_uses": [{"tool_name": "list_files"}, {"tool_name": "read_file"}]},
+                    "tool": "parallel_commands",
+                    "args": {"commands": [{"command": "git status --short"}, {"command": "python --version"}]},
                 },
             },
         )
@@ -611,11 +611,11 @@ class TuiNoiseReductionTests(unittest.TestCase):
             to_dict=lambda: {
                 "type": "tool_result",
                 "payload": {
-                    "tool": "parallel",
+                    "tool": "parallel_commands",
                     "status": "success",
-                    "output": "[redacted parallel output: 4096 chars]",
+                    "output": "[redacted parallel_commands output: 4096 chars]",
                     "metadata": {
-                        "tool_use_count": 2,
+                        "item_count": 2,
                         "success_count": 1,
                         "failed_count": 1,
                     },

@@ -51,8 +51,9 @@ class CodingAgentProfile(BaseProfile):
                     f"{TASK_TRACKING_POLICY}\n\n"
                     "Use repository tools for inspection and the shell for reproduction, tests, builds, "
                     "and other execution. Treat command output as evidence: classify failures and change "
-                    "strategy instead of repeating hopeful variants. Consultation can sharpen investigation "
-                    "or review, but perform all edits and integration yourself."
+                    "strategy instead of repeating hopeful variants. Delegation can sharpen investigation, "
+                    "test design, review, verification, or isolated patch drafting, but perform all real "
+                    "workspace edits and integration yourself."
                 ),
                 boundaries=(
                     "Keep unrelated refactors out of scope and do not add speculative extension points. "

@@ -87,37 +87,85 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "parallel",
+            "name": "parallel_commands",
             "description": (
-                "Run up to 8 independent side-effect-safe tool calls concurrently. "
-                "Use this to gather related repository, web, memory, or consultation context efficiently. "
-                "Only read/network/subagent lanes are allowed; edits, shell commands, planning, user prompts, approvals, and long-running jobs are rejected."
+                "Run up to 8 independent read-only or verification shell commands concurrently. "
+                "Use this for safe parallel checks such as independent test files, git status/diff, or bounded inspections. "
+                "Commands that edit files, install dependencies, start services, mutate git state, or depend on shared shell cwd/env are rejected."
             ),
             "parameters": {
                 "type": "object",
-                "required": ["tool_uses"],
+                "required": ["commands"],
                 "properties": {
-                    "tool_uses": {
+                    "commands": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 8,
-                        "description": "Independent tool uses to execute in parallel.",
+                        "description": "Independent read-only or verification commands to execute in parallel.",
                         "items": {
                             "type": "object",
-                            "required": ["tool_name", "arguments"],
+                            "required": ["command"],
                             "properties": {
                                 "id": {
                                     "type": "string",
-                                    "description": "Optional short label for this tool use.",
+                                    "description": "Optional short label for this command.",
                                 },
-                                "tool_name": {
+                                "command": {
                                     "type": "string",
-                                    "description": "Registered tool name, e.g. read_file, list_files, repo_search, web_search, consult_subagent.",
+                                    "description": "Shell command. Must be read-only or verification-only.",
                                 },
-                                "arguments": {
-                                    "type": "object",
-                                    "description": "Arguments for the target tool.",
+                                "timeout": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1800,
+                                    "default": 300,
+                                    "description": "Per-command timeout in seconds.",
                                 },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "parallel_agents",
+            "description": (
+                "Run up to 8 independent read-only delegated agents concurrently. "
+                "Use this when several codebase investigations, test-design passes, reviews, or verification checks can proceed without shared state. "
+                "Patch delegates are not allowed in parallel_agents."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["agents"],
+                "properties": {
+                    "agents": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "description": "Independent delegated agent tasks to run in parallel.",
+                        "items": {
+                            "type": "object",
+                            "required": ["agent_profile", "task"],
+                            "properties": {
+                                "id": {"type": "string", "description": "Optional short label for this delegated task."},
+                                "agent_profile": {
+                                    "type": "string",
+                                    "enum": ["explore", "test_design", "review", "verify"],
+                                    "description": "Read-only delegate profile to run.",
+                                },
+                                "task": {"type": "string", "description": "Detailed delegated task."},
+                                "expected_output": {"type": "string", "description": "Optional output focus."},
+                                "allowed_paths": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Optional workspace paths the delegate should stay within.",
+                                    "default": [],
+                                },
+                                "max_turns": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
+                                "max_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "default": 300},
                             },
                         },
                     },
@@ -592,25 +640,48 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "consult_subagent",
+            "name": "delegate_agent",
             "description": (
-                "Ask a read-only consultation sub-agent for findings, evidence, recommendations, and risks. "
-                "Use only for local codebase investigation, parallel search, test design, or review. "
-                "The main agent owns all code changes, final integration, verification, and stop decisions."
+                "Delegate bounded work to a focused sub-agent with its own context. "
+                "Use explore, test_design, review, or verify for read-only work; use patch only for an isolated workspace patch proposal. "
+                "The main agent owns integration, applying any patch, final verification, and stop decisions."
             ),
             "parameters": {
                 "type": "object",
-                "required": ["task"],
+                "required": ["agent_profile", "task"],
                 "properties": {
+                    "agent_profile": {
+                        "type": "string",
+                        "enum": ["explore", "test_design", "review", "verify", "patch"],
+                        "description": "Delegate profile to run.",
+                    },
                     "task": {
                         "type": "string",
-                        "description": "Detailed read-only consultation request",
+                        "description": "Detailed delegated task.",
                     },
-                    "scope": {
+                    "expected_output": {
                         "type": "string",
-                        "enum": ["codebase_investigation", "parallel_search", "test_design", "review"],
-                        "description": "Consultation mode",
-                        "default": "codebase_investigation",
+                        "description": "Optional description of the desired output focus.",
+                    },
+                    "allowed_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional workspace paths the delegate should stay within.",
+                        "default": [],
+                    },
+                    "max_turns": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 6,
+                        "description": "Approximate maximum delegated reasoning/tool rounds.",
+                    },
+                    "max_seconds": {
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 1800,
+                        "default": 300,
+                        "description": "Delegate time budget in seconds.",
                     },
                 },
             },

@@ -642,6 +642,80 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIn("update_plan_state", blocked)
         self.assertIn("acceptance_checks", blocked)
 
+    def test_pre_start_read_only_delegate_is_allowed_after_action_threshold(self):
+        middleware = TaskTrackingEnforcementMiddleware(
+            enforce_acceptance=True,
+            require_start_after_n_actions=2,
+        )
+        state = AgentRuntimeState()
+
+        for _ in range(2):
+            middleware.post_tool(
+                "run_bash",
+                {"command": "pytest"},
+                "ok",
+                messages=[],
+                runtime_state=state,
+                agent_name="main_agent",
+            )
+
+        blocked = middleware.before_tool(
+            "delegate_agent",
+            {"agent_profile": "explore", "task": "inspect the parser"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(blocked)
+
+    def test_pre_start_read_only_delegate_does_not_count_as_tracked_action(self):
+        middleware = TaskTrackingEnforcementMiddleware()
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "tracked"
+
+        reminder = middleware.post_tool(
+            "delegate_agent",
+            {"agent_profile": "explore", "task": "inspect the parser"},
+            "ok",
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(reminder)
+        self.assertEqual(state.action_tool_count, 0)
+        self.assertEqual(state.task_board.action_count, 0)
+        self.assertFalse(state.task_board.needs_final_update)
+
+    def test_pre_start_patch_delegate_requires_tracked_start_after_threshold(self):
+        middleware = TaskTrackingEnforcementMiddleware(
+            enforce_acceptance=True,
+            require_start_after_n_actions=2,
+        )
+        state = AgentRuntimeState()
+
+        for _ in range(2):
+            middleware.post_tool(
+                "run_bash",
+                {"command": "pytest"},
+                "ok",
+                messages=[],
+                runtime_state=state,
+                agent_name="main_agent",
+            )
+
+        blocked = middleware.before_tool(
+            "delegate_agent",
+            {"agent_profile": "patch", "task": "draft a parser fix"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertIn("update_plan_state", blocked)
+
     def test_threshold_start_with_acceptance_checks_allows_more_actions(self):
         middleware = TaskTrackingEnforcementMiddleware(
             enforce_acceptance=True,

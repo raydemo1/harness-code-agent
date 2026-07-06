@@ -369,7 +369,7 @@ def _summarize_tool_args(args: Any) -> str:
 
 
 def _tool_call_title(tool: str, args: Any) -> str:
-    if tool == "parallel":
+    if tool in {"parallel_commands", "parallel_agents"}:
         count = _parallel_tool_count_from_args(args)
         if count is not None:
             return f"{tool}({_format_tool_count(count)})"
@@ -380,25 +380,27 @@ def _tool_call_title(tool: str, args: Any) -> str:
 def _parallel_tool_count_from_args(args: Any) -> int | None:
     if not isinstance(args, dict):
         return None
-    tool_uses = args.get("tool_uses")
-    if not isinstance(tool_uses, list):
+    items = args.get("commands")
+    if not isinstance(items, list):
+        items = args.get("agents")
+    if not isinstance(items, list):
         return None
-    return len(tool_uses)
+    return len(items)
 
 
 def _parallel_result_summary(tool: str, metadata: Any) -> str:
-    if tool != "parallel" or not isinstance(metadata, dict):
+    if tool not in {"parallel_commands", "parallel_agents"} or not isinstance(metadata, dict):
         return ""
-    tool_uses = metadata.get("tool_uses")
-    count = _coerce_int(metadata.get("tool_use_count"))
+    items = metadata.get("items")
+    count = _coerce_int(metadata.get("item_count"))
     success_count = _coerce_int(metadata.get("success_count"))
     failed_count = _coerce_int(metadata.get("failed_count"))
-    if isinstance(tool_uses, list):
-        count = count if count is not None else len(tool_uses)
+    if isinstance(items, list):
+        count = count if count is not None else len(items)
         if success_count is None:
-            success_count = sum(1 for item in tool_uses if isinstance(item, dict) and item.get("status") == "success")
+            success_count = sum(1 for item in items if isinstance(item, dict) and item.get("status") == "success")
         if failed_count is None:
-            failed_count = sum(1 for item in tool_uses if isinstance(item, dict) and item.get("status") == "failed")
+            failed_count = sum(1 for item in items if isinstance(item, dict) and item.get("status") == "failed")
     if count is None:
         return ""
     parts = [_format_tool_count(count)]

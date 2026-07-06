@@ -199,7 +199,7 @@ class BaseProfile(ABC):
         prompt = build_profile_prompt(
             role=(
                 "Own the complete task loop: understand the request, inspect the workspace, "
-                "make the required changes, integrate useful consultation, verify the result, "
+                "make the required changes, integrate useful delegated findings, verify the result, "
                 "and decide when the work is complete."
             ),
             working_style=(
@@ -207,14 +207,15 @@ class BaseProfile(ABC):
                 "to match coordination overhead to risk, then follow existing project patterns and "
                 "keep the implementation focused.\n\n"
                 f"{TASK_TRACKING_POLICY}\n\n"
-                "Use consultation only when read-only investigation, test design, or review would "
-                "reduce risk or context load. Apply every code and test change yourself. Long-running "
+                "Use delegation only when independent investigation, test design, review, verification, "
+                "or an isolated patch proposal would reduce risk or context load. Apply every code and "
+                "test change to the real workspace yourself. Long-running "
                 "shell commands return job IDs; inspect and clean them up through the shell-job tools."
             ),
             boundaries=(
-                "The task text and profile acceptance criteria are the source of truth. Consultation "
-                "is advice, not completed work. Do not delegate file modification, integration, final "
-                "verification, or the stop decision."
+                "The task text and profile acceptance criteria are the source of truth. Delegation "
+                "is evidence or an isolated proposal, not completed work. Do not delegate real workspace "
+                "modification, integration, final verification, or the stop decision."
             ),
             completion=(
                 "Run concrete verification and read its output. If it fails, diagnose the evidence "
@@ -225,15 +226,16 @@ class BaseProfile(ABC):
         return AgentConfig(system_prompt=prompt)
 
     def subagent_policy(self) -> dict:
-        """Policy for consultation-only sub-agents."""
+        """Policy for delegated sub-agents."""
         return {
             "allowed_scopes": [
                 "codebase_investigation",
-                "parallel_search",
                 "test_design",
                 "review",
+                "verify",
+                "patch",
             ],
-            "read_only": True,
+            "read_only": "except isolated patch proposals",
             "may_modify_files": False,
             "may_decide_completion": False,
         }

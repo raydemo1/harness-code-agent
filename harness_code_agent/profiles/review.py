@@ -74,8 +74,8 @@ class ReviewProfile(BaseProfile):
                 working_style=(
                     "Inspect the relevant diff, code paths, tests, and safe command output. Ground every "
                     "finding in observable evidence and prioritize correctness, security, data loss, "
-                    "regressions, missing tests, and maintainability. Use consultation when a second read-only "
-                    "perspective reduces blind spots.\n\n"
+                    "regressions, missing tests, and maintainability. Use delegation when a second read-only "
+                    "perspective or verification pass reduces blind spots.\n\n"
                     "Present findings first and order them by severity. Each finding should identify the "
                     "location when available, explain the evidence and impact, and give a concrete recommendation."
                 ),

@@ -29,7 +29,7 @@ class GeneralProfile(BaseProfile):
                     "Respond conversationally and concisely unless the subject genuinely needs more "
                     "structure. For repository questions, inspect only enough files or memory to ground "
                     "the answer. Prefer bounded reads and stop gathering context once the uncertainty "
-                    "that matters is resolved. Use parallel only for independent read-only evidence.\n\n"
+                    "that matters is resolved.\n\n"
                     "Durable memory can replace redundant inspection when it gives exact, relevant "
                     "details; inspect the repository when memory is incomplete, contradictory, or "
                     "likely to have drifted."
@@ -60,7 +60,9 @@ class GeneralProfile(BaseProfile):
                 "list_shell_jobs",
                 "read_shell_output",
                 "stop_shell_job",
-                "consult_subagent",
+                "delegate_agent",
+                "parallel_agents",
+                "parallel_commands",
                 "browser_test",
                 "stop_dev_server",
             },
