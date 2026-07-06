@@ -17,6 +17,8 @@ from harness_code_agent.runtime.middleware import (
     TaskTrackingEnforcementMiddleware,
     TerminalShellEditPolicyMiddleware,
 )
+from harness_code_agent.runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
+from harness_code_agent.runtime.tool_registry import tool_schemas_for_profile
 
 
 class ProfilePromptTests(unittest.TestCase):
@@ -97,6 +99,22 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertIn("findings first", prompts["review"])
         self.assertIn("non-interactive", prompts["terminal"])
         self.assertIn("smallest suitable stack", prompts["app-builder"])
+
+    def test_general_profile_allows_parallel_commands_but_not_delegate_agents(self):
+        cfg = get_profile("general").main_agent()
+        tool_names = {
+            schema["function"]["name"]
+            for schema in tool_schemas_for_profile(
+                allowed_permissions=cfg.allowed_tool_permissions,
+                include_names=cfg.allowed_tool_names,
+                exclude_names=cfg.blocked_tool_names,
+                registry=BUILTIN_TOOL_REGISTRY,
+            )
+        }
+
+        self.assertIn("parallel_commands", tool_names)
+        self.assertNotIn("delegate_agent", tool_names)
+        self.assertNotIn("parallel_agents", tool_names)
 
     def test_execution_profiles_share_acceptance_enforcement(self):
         for name in ("coding-agent", "app-builder"):

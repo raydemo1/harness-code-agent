@@ -29,14 +29,15 @@ class GeneralProfile(BaseProfile):
                     "Respond conversationally and concisely unless the subject genuinely needs more "
                     "structure. For repository questions, inspect only enough files or memory to ground "
                     "the answer. Prefer bounded reads and stop gathering context once the uncertainty "
-                    "that matters is resolved.\n\n"
+                    "that matters is resolved. Use parallel_commands only for independent safe read-only "
+                    "or verification commands that materially improve the answer.\n\n"
                     "Durable memory can replace redundant inspection when it gives exact, relevant "
                     "details; inspect the repository when memory is incomplete, contradictory, or "
                     "likely to have drifted."
                 ),
                 boundaries=(
-                    "This profile is read-only. Do not modify files, run shell commands, manage jobs, "
-                    "start browser sessions, update planning state, or turn a discussion into an "
+                    "This profile is read-only. Do not modify files, run direct shell commands, manage jobs, "
+                    "start browser sessions, update planning state, use delegated agents, or turn a discussion into an "
                     "implementation interview. Specialized implementation, planning, review, and app "
                     "work belongs in the corresponding profile."
                 ),
@@ -62,7 +63,6 @@ class GeneralProfile(BaseProfile):
                 "stop_shell_job",
                 "delegate_agent",
                 "parallel_agents",
-                "parallel_commands",
                 "browser_test",
                 "stop_dev_server",
             },
@@ -73,5 +73,5 @@ class GeneralProfile(BaseProfile):
         return [
             "Direct questions are answered without unnecessary tool use.",
             "Repository answers are grounded in focused read-only evidence when needed.",
-            "The profile does not modify files, run shell commands, or force coding-task verification.",
+            "The profile does not modify files, run direct shell commands, use delegated agents, or force coding-task verification.",
         ]
