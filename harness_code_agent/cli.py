@@ -125,6 +125,17 @@ def run_batch(
         return 1
 
     try:
+        if first_task.startswith("/"):
+            from .tui.commands import default_command_registry
+
+            registry = default_command_registry(skill_registry=session.skill_registry)
+            if not registry.is_agent_command(first_task):
+                if session.session_id:
+                    print(f"hca session: {session.session_id}")
+                print(f"workspace: {session.cwd}")
+                session.handle_slash_command(first_task)
+                return 0
+
         result = session.submit(first_task)
         if session.session_id:
             print(f"hca session: {session.session_id}")

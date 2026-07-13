@@ -102,6 +102,51 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertIsNotNone(app.query_one("#cmd-palette"))
         _run(_test())
 
+    def test_narrow_layout_hides_empty_plan_and_input_line_numbers(self):
+        async def _test():
+            app = self._make_app()
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                plan = app.query_one("#plan-panel")
+                transcript = app.query_one("#transcript")
+                input_text = app.query_one("#input-text", SubmitTextArea)
+
+                self.assertFalse(plan.display)
+                self.assertGreaterEqual(transcript.region.width, 76)
+                self.assertFalse(input_text.show_line_numbers)
+
+        _run(_test())
+
+    def test_wide_layout_shows_plan_only_after_plan_exists(self):
+        async def _test():
+            app = self._make_app()
+            async with app.run_test(size=(120, 40)) as pilot:
+                plan = app.query_one("#plan-panel")
+                self.assertFalse(plan.display)
+
+                from harness_code_agent.tui.app import SessionEvent
+                event = SimpleNamespace(
+                    to_dict=lambda: {
+                        "type": "tool_result",
+                        "payload": {
+                            "tool": "update_plan_state",
+                            "status": "success",
+                            "metadata": {
+                                "planning_state": {
+                                    "steps": ["inspect", "fix", "verify"],
+                                    "current_step": "fix",
+                                    "completed_steps": ["inspect"],
+                                }
+                            },
+                        },
+                    }
+                )
+                app.post_message(SessionEvent(event))
+                await pilot.pause()
+                self.assertTrue(plan.display)
+
+        _run(_test())
+
     def test_tui_approval_provider_has_project_allowlist(self):
         async def _test():
             with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
@@ -473,7 +518,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertEqual(status_bar.status, "running")
         _run(_test())
 
-    def test_click_context_bar_toggles_permission_mode(self):
+    def test_click_status_bar_toggles_permission_mode(self):
         async def _test():
             mock = _mock_session(self.root)
 
@@ -487,7 +532,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 MockSession.return_value = mock
                 app = TuiApp(cwd=self.root, profile_name="coding-agent")
                 async with app.run_test() as pilot:
-                    await pilot.click("#context-bar")
+                    await pilot.click("#status-bar")
                     await pilot.pause(0.01)
                     self.assertEqual(app.state.snapshot.permission_mode, "llm-auto")
                     self.assertFalse(any(block.title == "permission mode switched" for block in app.state.blocks))

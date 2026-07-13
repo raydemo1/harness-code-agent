@@ -40,7 +40,7 @@ from ..sessions.store import Session, SessionStore
 from ..sessions.turn_summary import generate_turn_summary, should_summarize_turn
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
-from ..workspace.shell_session import docker_cli_path, docker_info_check, docker_shell_hint, sandbox_mode, windows_shell_hint, windows_shell_path
+from ..workspace.shell_session import docker_cli_path, docker_info_check, docker_shell_hint, sandbox_mode, validate_shell_configuration, windows_shell_hint, windows_shell_path
 from .mentions import MentionResolutionError, ResolvedMention, render_mention_context, resolve_mentions
 
 
@@ -111,6 +111,7 @@ class InteractiveSession:
     ):
         self.cwd = Path(cwd).resolve()
         config.WORKSPACE = str(self.cwd)
+        validate_shell_configuration()
         self.stream_sink = stream_sink or stream_callback
         self.event_listener = event_listener
         self.permission_mode = os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write")

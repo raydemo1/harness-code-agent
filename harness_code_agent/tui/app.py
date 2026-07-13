@@ -86,6 +86,9 @@ class OutputEvent(Message):
 class TuiApp(App):
     """Full-screen Textual TUI for Harness Code Agent."""
 
+    TITLE = "Harness Code Agent"
+    SUB_TITLE = "Local coding workspace"
+
     BINDINGS = [
         Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
         Binding("ctrl+t", "toggle_thought", "Toggle thought", show=False, priority=True),
@@ -114,6 +117,8 @@ class TuiApp(App):
     CSS = """
     Screen {
         layout: vertical;
+        background: #020617;
+        color: #e2e8f0;
     }
 
     #main-area {
@@ -123,42 +128,71 @@ class TuiApp(App):
     #transcript {
         width: 1fr;
         height: 100%;
-        border: solid #333333;
+        padding: 1 2;
+        background: #020617;
+        overflow-x: hidden;
+        scrollbar-size-horizontal: 0;
+        scrollbar-size-vertical: 1;
     }
 
     #plan-panel {
-        width: 38;
+        display: none;
+        width: 30;
         height: 100%;
-        border: solid #333333;
-        padding: 1;
+        border-left: solid #1e293b;
+        padding: 1 2;
+        background: #0f172a;
     }
 
     #input-area {
         height: auto;
-        max-height: 10;
-        border: solid #333333;
+        max-height: 9;
+        margin: 0 2;
+        border: round #334155;
+        background: #0f172a;
+    }
+
+    #input-area:focus-within {
+        border: round #3b82f6;
+    }
+
+    #prompt-row {
+        height: 3;
+    }
+
+    #input-prompt {
+        width: 3;
+        height: 3;
+        padding: 0 0 0 1;
+        color: #60a5fa;
+        text-style: bold;
     }
 
     #cmd-palette {
         display: none;
         height: auto;
         max-height: 10;
-        background: $surface;
-        border: solid #555555;
+        background: #111827;
+        border-bottom: solid #334155;
+        padding: 0 1;
     }
 
     #input-text {
         height: 3;
+        width: 1fr;
+        background: #0f172a;
+        border: none;
     }
 
     #status-bar {
         height: 1;
-        background: #2d2d3d;
+        margin: 0 2;
+        background: #0f172a;
+        color: #94a3b8;
     }
 
     #context-bar {
-        height: 1;
-        background: #2d2d3d;
+        display: none;
     }
 
     /* Approval panel */
@@ -766,7 +800,9 @@ class TuiApp(App):
             return
         try:
             self._refresh_context_snapshot()
-            self.query_one("#plan-panel", PlanPanel).update_steps(self.state.plan_steps)
+            plan_panel = self.query_one("#plan-panel", PlanPanel)
+            plan_panel.update_steps(self.state.plan_steps)
+            plan_panel.display = bool(self.state.plan_steps and self.size.width >= 100)
             self.query_one("#status-bar", StatusBar).update_from_snapshot(self.state.snapshot)
             self.query_one("#context-bar", ContextBar).update_from_snapshot(self.state.snapshot)
         except NoMatches:

@@ -1,6 +1,7 @@
 """Textual widgets for the Harness Code Agent TUI."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Group
@@ -10,7 +11,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Input, RichLog, Static, TextArea
@@ -121,16 +122,16 @@ def block_to_rich(block: TranscriptBlock):
         body = _assistant_body_renderable(block.body, streaming=block.status == "streaming")
         return Group(header, body, Text(""))
     if block.kind == "tool":
-        marker = "tool"
+        marker = "·"
         if block.status == "success":
-            marker = "ok"
+            marker = "✓"
         elif block.status == "failed":
-            marker = "error"
+            marker = "×"
         elif block.status == "running":
-            marker = "run"
+            marker = "›"
         text = Text()
         text.append(f"  {marker} ", style=f"bold {border}")
-        text.append(block.title, style=f"bold {border}")
+        text.append(_humanize_tool_title(block.title, block.status), style=f"bold {border}")
         if block.body:
             text.append(f"  {block.body}", style="dim")
         return text
@@ -159,6 +160,29 @@ def block_to_rich(block: TranscriptBlock):
     if block.body:
         text.append(f"  {block.body}", style="dim")
     return text
+
+
+def _humanize_tool_title(title: str, status: str) -> str:
+    """Turn internal tool identifiers into a compact activity feed label."""
+    tool, separator, details = title.partition("(")
+    details = details[:-1] if separator and details.endswith(")") else details
+    labels = {
+        "read_file": ("Reading", "Read"),
+        "write_file": ("Writing", "Wrote"),
+        "apply_patch": ("Editing", "Edited"),
+        "run_bash": ("Running", "Ran"),
+        "search_files": ("Searching", "Searched"),
+        "list_files": ("Listing", "Listed"),
+        "parallel_commands": ("Running in parallel", "Ran in parallel"),
+        "parallel_agents": ("Delegating in parallel", "Delegated in parallel"),
+        "delegate_agent": ("Delegating", "Delegated"),
+        "update_plan_state": ("Updating plan", "Updated plan"),
+    }
+    running, completed = labels.get(tool, (tool.replace("_", " "), tool.replace("_", " ")))
+    label = running if status == "running" else completed
+    if details:
+        return f"{label}  {details}"
+    return label
 
 
 def _assistant_body_renderable(body: str, *, streaming: bool):
@@ -197,18 +221,23 @@ def _streaming_body_excerpt(body: str) -> str:
     )
 
 
-def welcome_rich(snapshot: SessionStatusSnapshot) -> Panel:
-    """Render the welcome message as a Rich Panel."""
+def welcome_rich(snapshot: SessionStatusSnapshot) -> Group:
+    """Render a compact product header without nesting another border."""
     session_text = snapshot.session_id if snapshot.session_id else "pending"
-    lines = [
-        f"[bold #3874cb]Harness Code Agent[/] [#888888]Textual TUI[/]",
-        f"[#888888]session[/] {session_text}  [#888888]profile[/] {snapshot.profile}",
-        f"[#888888]workspace[/] {snapshot.cwd}",
-        "",
-        "[#888888]Use /help for commands. Ctrl-C cancels current turn.[/]",
-    ]
-    body = Text.from_markup("\n".join(lines))
-    return Panel(body, border_style="#555555")
+    if len(session_text) > 12:
+        session_text = f"{session_text[:11]}…"
+    brand = Text("Harness", style="bold #f8fafc")
+    brand.append("  code agent", style="#64748b")
+    meta = Text()
+    meta.append(snapshot.profile, style="#60a5fa")
+    meta.append("  ·  ", style="#334155")
+    workspace_path = Path(snapshot.cwd)
+    workspace_name = workspace_path.name or str(workspace_path)
+    meta.append(workspace_name, style="#94a3b8")
+    meta.append("  ·  ", style="#334155")
+    meta.append(f"session {session_text}", style="#64748b")
+    hint = Text("Type a task or /help  ·  Enter send  ·  Ctrl+C cancel", style="#64748b")
+    return Group(brand, meta, hint, Text(""))
 
 
 class TranscriptView(RichLog):
@@ -274,7 +303,7 @@ class PlanPanel(Static):
         if not self.steps:
             return Text("No plan yet", style="dim")
 
-        text = Text()
+        text = Text("Plan\n", style="bold #cbd5e1")
         for index, step in enumerate(self.steps):
             if index:
                 text.append("\n")
@@ -299,17 +328,26 @@ class StatusBar(Static):
     model: reactive[str] = reactive("")
     turn: reactive[int] = reactive(0)
     status: reactive[str] = reactive("idle")
+    context_percent: reactive[int] = reactive(0)
+    permission_mode: reactive[str] = reactive("workspace-write")
+    dirty_count: reactive[int] = reactive(0)
 
     def render(self) -> Text:
         status_style = "green" if self.status == "idle" else "yellow" if self.status in ("running", "tool", "thinking") else "red"
         text = Text()
-        text.append(f" {self.profile}", style="bold")
-        text.append(f" │ ", style="dim")
-        text.append(f"model: {self.model}", style="")
-        text.append(f" │ ", style="dim")
-        text.append(f"T: {self.turn}", style="bold")
-        text.append(f" │ ", style="dim")
-        text.append(f"{self.status}", style=status_style)
+        text.append(f" {self.status}", style=f"bold {status_style}")
+        text.append("  ·  ", style="#475569")
+        text.append(self.profile, style="bold #cbd5e1")
+        if not self.size.width or self.size.width >= 90:
+            text.append(f"  {self.model}", style="#94a3b8")
+        text.append("  ·  ", style="#475569")
+        text.append(f"turn {self.turn}", style="#94a3b8")
+        text.append("  ·  ", style="#475569")
+        text.append(f"context {self.context_percent}%", style="#94a3b8")
+        if self.dirty_count and (not self.size.width or self.size.width >= 70):
+            text.append(f"  ·  {self.dirty_count} changed", style="#fbbf24")
+        text.append("  ·  ", style="#475569")
+        text.append(self.permission_mode, style="#94a3b8")
         return text
 
     def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
@@ -317,6 +355,17 @@ class StatusBar(Static):
         self.model = snap.model
         self.turn = snap.turn
         self.status = snap.status
+        self.permission_mode = snap.permission_mode
+        self.dirty_count = snap.dirty_count
+        if snap.context_window_tokens > 0:
+            self.context_percent = min(999, int(round(snap.context_tokens * 100 / snap.context_window_tokens)))
+        else:
+            self.context_percent = 0
+
+    def on_click(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_toggle_permission"):
+            app.action_toggle_permission()
 
 
 # ── ContextBar ──────────────────────────────────────────────────────────────
@@ -437,9 +486,14 @@ class InputArea(Vertical):
 
     def compose(self) -> ComposeResult:
         yield CommandPalette(id="cmd-palette")
-        yield SubmitTextArea.code_editor(
-            id="input-text",
-        )
+        with Horizontal(id="prompt-row"):
+            yield Static("›", id="input-prompt")
+            yield SubmitTextArea(
+                id="input-text",
+                soft_wrap=True,
+                show_line_numbers=False,
+                tab_behavior="focus",
+            )
 
     def on_mount(self) -> None:
         self.query_one("#cmd-palette", CommandPalette).display = False

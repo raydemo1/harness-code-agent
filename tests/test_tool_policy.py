@@ -194,6 +194,42 @@ class ErrorGuidanceTests(unittest.TestCase):
         self.assertIsNotNone(guidance)
         self.assertIn("file or directory", guidance.lower())
 
+    def test_powershell_command_not_found_guidance_uses_powershell_commands(self) -> None:
+        middleware = ErrorGuidanceMiddleware()
+
+        with (
+            patch("harness_code_agent.runtime.middleware.error_guidance.os.name", "nt"),
+            patch("harness_code_agent.runtime.middleware.error_guidance.config.WINDOWS_SHELL", "pwsh"),
+        ):
+            guidance = middleware.post_tool(
+                "run_bash",
+                {"command": "missing-tool"},
+                "[error] command not found: missing-tool",
+                [],
+                runtime_state=AgentRuntimeState(),
+            )
+
+        self.assertIn("Get-Command", guidance)
+        self.assertIn("winget", guidance)
+        self.assertNotIn("apt-get", guidance)
+
+    def test_wsl_command_not_found_guidance_keeps_linux_commands(self) -> None:
+        middleware = ErrorGuidanceMiddleware()
+
+        with (
+            patch("harness_code_agent.runtime.middleware.error_guidance.os.name", "nt"),
+            patch("harness_code_agent.runtime.middleware.error_guidance.config.WINDOWS_SHELL", "wsl"),
+        ):
+            guidance = middleware.post_tool(
+                "run_bash",
+                {"command": "missing-tool"},
+                "[error] command not found: missing-tool",
+                [],
+                runtime_state=AgentRuntimeState(),
+            )
+
+        self.assertIn("apt-get", guidance)
+
 
 class TerminalShellEditPolicyTests(unittest.TestCase):
     def test_allows_explicit_shell_file_edit_inside_workspace(self):

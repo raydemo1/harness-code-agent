@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
 
+from ... import config
 from .base import AgentMiddleware
 
 
@@ -128,6 +130,53 @@ class ErrorGuidanceMiddleware(AgentMiddleware):
     def __init__(self):
         self._last_guidance_type: str | None = None
 
+    @staticmethod
+    def _for_active_shell(guidance_type: str, default: str) -> str:
+        """Return recovery commands that match the explicitly selected shell."""
+        if os.name != "nt" or (config.WINDOWS_SHELL or "pwsh").strip().lower() != "pwsh":
+            return default
+
+        powershell_guidance = {
+            "command_not_found": (
+                "The command is not installed or is not on PATH. Try:\n"
+                "  Get-Command <command> -ErrorAction SilentlyContinue\n"
+                "  winget search <package>\n"
+                "  winget install <package>  (after confirming the package id)\n"
+                "For Python tools, use: python -m pip install <package>."
+            ),
+            "file_not_found": (
+                "A file or directory doesn't exist. Check:\n"
+                "  Get-Location\n"
+                "  Test-Path -LiteralPath '<path>'\n"
+                "  Get-ChildItem -LiteralPath '<parent>' -Force\n"
+                "  Get-ChildItem -Recurse -Filter '<filename>'"
+            ),
+            "permission_denied": (
+                "Access was denied. Check the resolved path and current ACL with:\n"
+                "  Resolve-Path -LiteralPath '<path>'\n"
+                "  Get-Acl -LiteralPath '<path>' | Format-List\n"
+                "Only relaunch pwsh as Administrator when the operation truly requires elevation."
+            ),
+            "git": (
+                "Not in a git repository. Check:\n"
+                "  Get-Location\n"
+                "  git rev-parse --show-toplevel\n"
+                "  Get-ChildItem -Path .. -Directory -Filter .git -Recurse -ErrorAction SilentlyContinue"
+            ),
+            "disk_full": (
+                "Disk space is exhausted. Inspect it with:\n"
+                "  Get-Volume\n"
+                "  Get-PSDrive -PSProvider FileSystem\n"
+                "Review large files before removing anything."
+            ),
+            "oom": (
+                "The process may have exceeded available memory. Check Task Manager or:\n"
+                "  Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize\n"
+                "Then reduce batch size, workers, or process concurrency."
+            ),
+        }
+        return powershell_guidance.get(guidance_type, default)
+
     def post_tool(self, tool_name: str, tool_args: dict, result: str,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
@@ -148,6 +197,7 @@ class ErrorGuidanceMiddleware(AgentMiddleware):
                     return None
                 self._last_guidance_type = guidance_type
                 log.info(f"Error guidance: matched '{guidance_type}'")
+                suggestion = self._for_active_shell(guidance_type, suggestion)
                 return f"[SYSTEM] Error detected — here's how to fix it:\n{suggestion}"
 
         self._last_guidance_type = None

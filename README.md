@@ -445,7 +445,7 @@ Eval ledger 会从 raw `summary.json`、Harbor `result.json`、HCA artifacts、s
 | `HARNESS_MODEL_MAX` | provider 默认 | 覆盖 `max` 档模型 |
 | `HARNESS_PROVIDER` | `auto` | `auto` / `openai` / `deepseek` / `openai-compatible` |
 | `HARNESS_STREAM` | `auto` | streaming：`auto` / `1` / `0` |
-| `HARNESS_WINDOWS_SHELL` | `auto` | Windows shell：`auto` / `pwsh` / `powershell` / `cmd` |
+| `HARNESS_WINDOWS_SHELL` | `pwsh` | Windows host shell：`pwsh` / `wsl`；严格使用所选后端，不自动降级 |
 | `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式 |
 | `HARNESS_SANDBOX_MODE` | `host` | Shell sandbox：`host` / `docker` |
 | `HARNESS_DOCKER_IMAGE` | `python:3.12` | Docker sandbox 镜像 |

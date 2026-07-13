@@ -52,6 +52,8 @@ class PersistentShellSession:
 
 
 class _BaseShellBackend:
+    _SYNC_TIMEOUT_SECONDS = 5
+
     def __init__(self, cwd: str):
         self.cwd = cwd
         self._queue: queue.Queue[bytes] = queue.Queue()
@@ -117,7 +119,7 @@ class _BaseShellBackend:
         marker = f"__CODEX_SYNC_{uuid.uuid4().hex}__"
         self._drain_queue()
         self._send(self._build_sync_command(marker))
-        synced = self._read_until(marker, timeout=5)
+        synced = self._read_until(marker, timeout=self._SYNC_TIMEOUT_SECONDS)
         if synced is None:
             raise RuntimeError("Shell failed to become ready")
 
@@ -328,54 +330,53 @@ def _run_docker_checked(args: list[str], action: str) -> None:
 
 
 def windows_shell_path() -> str | None:
-    requested = (config.WINDOWS_SHELL or "auto").strip().lower()
-    if requested == "auto":
-        return shutil.which("pwsh") or shutil.which("powershell") or shutil.which("cmd.exe") or os.environ.get("ComSpec")
+    requested = (config.WINDOWS_SHELL or "pwsh").strip().lower()
     if requested == "pwsh":
         return shutil.which("pwsh")
-    if requested == "powershell":
-        return shutil.which("powershell")
-    if requested == "cmd":
-        return shutil.which("cmd.exe") or os.environ.get("ComSpec")
-    raise ValueError("HARNESS_WINDOWS_SHELL must be auto, pwsh, powershell, or cmd")
+    if requested == "wsl":
+        return shutil.which("wsl.exe")
+    raise ValueError("HARNESS_WINDOWS_SHELL must be pwsh or wsl")
 
 
 def windows_shell_kind() -> str:
-    requested = (config.WINDOWS_SHELL or "auto").strip().lower()
-    if requested == "auto":
-        path = windows_shell_path()
-        if not path:
-            return "missing"
-        name = Path(path).name.lower()
-        if name.startswith("pwsh"):
-            return "pwsh"
-        if name.startswith("powershell"):
-            return "powershell"
-        return "cmd"
-    if requested in {"pwsh", "powershell", "cmd"}:
+    requested = (config.WINDOWS_SHELL or "pwsh").strip().lower()
+    if requested in {"pwsh", "wsl"}:
         return requested
-    raise ValueError("HARNESS_WINDOWS_SHELL must be auto, pwsh, powershell, or cmd")
+    raise ValueError("HARNESS_WINDOWS_SHELL must be pwsh or wsl")
 
 
 def windows_shell_hint() -> str:
     if os.name != "nt":
         return "POSIX shell"
     kind = windows_shell_kind()
-    if kind in {"pwsh", "powershell"}:
-        return "PowerShell"
-    if kind == "cmd":
-        return "cmd.exe"
+    if kind == "pwsh":
+        return "PowerShell 7 (pwsh)"
+    if kind == "wsl":
+        return "WSL Bash"
     return "no Windows shell"
 
 
-def _make_windows_shell_backend(cwd: str) -> "_BaseShellBackend":
-    path = windows_shell_path()
-    if not path:
-        raise RuntimeError("No Windows shell found")
+def validate_shell_configuration() -> None:
+    """Validate the explicitly selected host shell without choosing a fallback."""
+    if sandbox_mode() == "docker" or os.name != "nt":
+        return
     kind = windows_shell_kind()
-    if kind in {"pwsh", "powershell"}:
+    if windows_shell_path() is None:
+        executable = "pwsh.exe" if kind == "pwsh" else "wsl.exe"
+        raise RuntimeError(
+            f"HARNESS_WINDOWS_SHELL={kind} selected, but {executable} was not found. "
+            "Install the selected shell or choose the other explicit backend."
+        )
+
+
+def _make_windows_shell_backend(cwd: str) -> "_BaseShellBackend":
+    validate_shell_configuration()
+    path = windows_shell_path()
+    assert path is not None
+    kind = windows_shell_kind()
+    if kind == "pwsh":
         return _PowerShellBackend(cwd, executable=path)
-    return _CmdShellBackend(cwd, executable=path)
+    return _WslShellBackend(cwd, executable=path)
 
 
 class _DockerShellBackend(_BaseShellBackend):
@@ -474,7 +475,11 @@ class _DockerShellBackend(_BaseShellBackend):
         )
 
 
-class _CmdShellBackend(_BaseShellBackend):
+class _WslShellBackend(_BaseShellBackend):
+    """Persistent Bash session launched through the explicitly selected WSL backend."""
+
+    _SYNC_TIMEOUT_SECONDS = 20
+
     def __init__(self, cwd: str, *, executable: str):
         self.executable = executable
         super().__init__(cwd)
@@ -482,15 +487,23 @@ class _CmdShellBackend(_BaseShellBackend):
     def _start(self) -> None:
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         self._process = subprocess.Popen(
-            [self.executable, "/Q", "/V:ON", "/D", "/K", "prompt="],
-            cwd=self.cwd,
+            [
+                self.executable,
+                "--cd",
+                self.cwd,
+                "--exec",
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-s",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             creationflags=creationflags,
         )
         if self._process.stdin is None or self._process.stdout is None:
-            raise RuntimeError("Failed to create persistent Windows shell")
+            raise RuntimeError("Failed to create persistent WSL shell")
 
     def _reader_loop(self) -> None:
         assert self._process.stdout is not None
@@ -506,24 +519,18 @@ class _CmdShellBackend(_BaseShellBackend):
         self._process.stdin.flush()
 
     def _interrupt_impl(self) -> None:
-        if self._process.poll() is None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-        if self._process.stdin is not None:
-            self._process.stdin.close()
-        if self._process.stdout is not None:
-            self._process.stdout.close()
+        self._stop_process(timeout=2)
         self._start()
         self._start_reader()
 
     def _cleanup_impl(self) -> None:
+        self._stop_process(timeout=5)
+
+    def _stop_process(self, *, timeout: int) -> None:
         if self._process.poll() is None:
             self._process.terminate()
             try:
-                self._process.wait(timeout=5)
+                self._process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 self._process.kill()
         if self._process.stdin is not None:
@@ -532,39 +539,26 @@ class _CmdShellBackend(_BaseShellBackend):
             self._process.stdout.close()
 
     def _build_sync_command(self, marker: str) -> str:
-        return f"echo {marker}\r\n"
+        return f"printf '%s\\n' '{marker}'\n"
 
     def _build_script(self, command: str, marker: str) -> str:
         stdout_marker = f"__CODEX_STDOUT_{marker}__"
         stderr_marker = f"__CODEX_STDERR_{marker}__"
         exit_marker = f"__CODEX_EXIT_{marker}__"
         return (
-            f"set \"__CODEX_OUT=%TEMP%\\{marker}.out\"\r\n"
-            f"set \"__CODEX_ERR=%TEMP%\\{marker}.err\"\r\n"
-            f"({command}) 1>\"%__CODEX_OUT%\" 2>\"%__CODEX_ERR%\"\r\n"
-            f"echo {stdout_marker}\r\n"
-            "type \"%__CODEX_OUT%\"\r\n"
-            f"echo {stderr_marker}\r\n"
-            "type \"%__CODEX_ERR%\"\r\n"
-            f"echo {exit_marker}:!ERRORLEVEL!\r\n"
-            "del /Q \"%__CODEX_OUT%\" \"%__CODEX_ERR%\"\r\n"
+            "__hca_out=$(mktemp)\n"
+            "__hca_err=$(mktemp)\n"
+            "{\n"
+            f"{command}\n"
+            "} 1>\"$__hca_out\" 2>\"$__hca_err\"\n"
+            "__hca_status=$?\n"
+            f"printf '%s\\n' '{stdout_marker}'\n"
+            "cat \"$__hca_out\"\n"
+            f"printf '\\n%s\\n' '{stderr_marker}'\n"
+            "cat \"$__hca_err\"\n"
+            f"printf '\\n%s:%s\\n' '{exit_marker}' \"$__hca_status\"\n"
+            "rm -f \"$__hca_out\" \"$__hca_err\"\n"
         )
-
-    def _normalize_output(self, stdout: str, stderr: str) -> tuple[str, str]:
-        import re
-
-        def strip_prompts(text: str) -> str:
-            lines = []
-            for line in self._clean_section(text).splitlines():
-                line = line.rstrip()
-                line = re.sub(r"^[A-Za-z]:[^\r\n>]*>", "", line)
-                if line.endswith(">") and (":\\" in line or ":/" in line):
-                    continue
-                if line:
-                    lines.append(line)
-            return "\n".join(lines).strip()
-
-        return strip_prompts(stdout), strip_prompts(stderr)
 
 
 class _PowerShellBackend(_BaseShellBackend):

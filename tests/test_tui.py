@@ -846,7 +846,8 @@ class TuiRichRenderTests(unittest.TestCase):
         block = TranscriptBlock("tool", "read_file(path=x.py)", "", "running")
         rendered = block_to_rich(block)
         self.assertNotEqual(rendered.__class__.__name__, "Panel")
-        self.assertIn("read_file", str(rendered))
+        self.assertIn("Reading", str(rendered))
+        self.assertNotIn("read_file", str(rendered))
 
     def test_thought_block_renders_with_purple_border(self):
         block = TranscriptBlock("thought", "thinking", "thought for 12.3s", "thought")
@@ -871,7 +872,7 @@ class TuiRichRenderTests(unittest.TestCase):
         plain = text.plain
         self.assertIn("coding-agent", plain)
         self.assertIn("gpt-4", plain)
-        self.assertIn("T: 3", plain)
+        self.assertIn("turn 3", plain)
 
     def test_context_bar_color_thresholds(self):
         from rich.text import Text
@@ -1001,7 +1002,7 @@ class TuiAppTests(unittest.TestCase):
             status="idle",
         )
 
-        plain = welcome_rich(snapshot).renderable.plain
+        plain = "\n".join(renderable.plain for renderable in welcome_rich(snapshot).renderables)
 
         self.assertIn("session session-123", plain)
         self.assertIn("general", plain)

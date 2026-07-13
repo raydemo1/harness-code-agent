@@ -12,7 +12,7 @@ from typing import Literal
 import psutil
 
 from .. import config
-from .shell_session import _docker_user_arg, docker_cli_path, sandbox_mode, windows_shell_kind, windows_shell_path
+from .shell_session import _docker_user_arg, docker_cli_path, sandbox_mode, validate_shell_configuration, windows_shell_kind, windows_shell_path
 
 
 ShellJobStatus = Literal["running", "exited", "stopped", "failed"]
@@ -206,11 +206,11 @@ class ShellJobManager:
         )
 
     def _start_windows_process(self, command: str) -> subprocess.Popen:
+        validate_shell_configuration()
         path = windows_shell_path()
-        if not path:
-            raise RuntimeError("No Windows shell found")
+        assert path is not None
         kind = windows_shell_kind()
-        if kind in {"pwsh", "powershell"}:
+        if kind == "pwsh":
             wrapped = (
                 f"& {{ {command} }}; "
                 "if ($global:LASTEXITCODE -is [int]) { exit $global:LASTEXITCODE } "
@@ -218,7 +218,7 @@ class ShellJobManager:
             )
             args = [path, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", wrapped]
         else:
-            args = [path, "/D", "/C", command]
+            args = [path, "--cd", self.workspace, "--exec", "bash", "-lc", command]
         return subprocess.Popen(
             args,
             cwd=self.workspace,

@@ -1478,6 +1478,43 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("no task provided", errors.getvalue())
 
+    def test_batch_local_slash_command_is_not_sent_to_model(self):
+        from harness_code_agent import cli
+
+        calls = []
+        root = Path.cwd()
+
+        class FakeSession:
+            session_id = "session-local"
+            cwd = root
+            skill_registry = None
+
+            def __init__(self, **kwargs):
+                self.output_sink = kwargs.get("output_sink", print)
+
+            def handle_slash_command(self, line):
+                calls.append(("slash", line))
+                return True
+
+            def submit(self, line):
+                calls.append(("submit", line))
+                raise AssertionError("local slash commands must not reach the model")
+
+            def close(self):
+                calls.append(("close", ""))
+
+        with patch("harness_code_agent.cli.InteractiveSession", FakeSession):
+            result = cli.run_batch(
+                cwd=root,
+                profile_name="coding-agent",
+                resume_session_id=None,
+                first_task="/doctor",
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn(("slash", "/doctor"), calls)
+        self.assertNotIn(("submit", "/doctor"), calls)
+
     def test_stream_callback_auto_respects_tty(self):
         from harness_code_agent import cli
 

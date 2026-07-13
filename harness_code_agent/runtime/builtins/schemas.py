@@ -570,7 +570,12 @@ CORE_TOOL_SCHEMAS = [
                     else ""
                 )
                 + (
-                    "On Windows this runs PowerShell by default; prefer PowerShell syntax, or cmd.exe syntax only when HARNESS_WINDOWS_SHELL=cmd. "
+                    f"On Windows this uses the explicitly configured HARNESS_WINDOWS_SHELL={config.WINDOWS_SHELL} backend with no fallback. "
+                    + (
+                        "Use Bash syntax; commands run inside WSL and start in the workspace. "
+                        if (config.WINDOWS_SHELL or "pwsh").strip().lower() == "wsl"
+                        else "Use PowerShell 7 syntax; commands start in the Windows workspace. "
+                    )
                     if os.name == "nt"
                     else "On POSIX this runs a shell suitable for standard Bash-style commands. "
                 )

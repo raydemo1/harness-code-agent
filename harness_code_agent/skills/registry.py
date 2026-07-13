@@ -105,7 +105,7 @@ class SkillRegistry:
             )
             self.skills.append(skill)
             self._by_name[key] = skill
-            log.info("Discovered skill: %s", name)
+            log.debug("Discovered skill: %s", name)
 
     def build_catalog_prompt(self) -> str:
         """Build the stable prompt catalog for model-invoked skills only."""
