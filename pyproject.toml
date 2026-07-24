@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "harness-code-agent"
+name = "veriforge"
 version = "0.1.0"
-description = "Interactive local coding agent runtime"
+description = "VeriForge — verifiable local coding-agent runtime"
 requires-python = ">=3.10"
 dependencies = [
     "openai>=1.0.0",
@@ -25,7 +25,7 @@ eval = [
 ]
 
 [project.scripts]
-hca = "harness_code_agent.cli:main"
+veriforge = "harness_code_agent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["harness_code_agent*"]

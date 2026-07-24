@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             result = session.submit(prompt)
             if session.session_id:
-                print(f"hca session: {session.session_id}")
+                print(f"veriforge session: {session.session_id}")
             print(f"workspace: {session.cwd}")
             print_turn_result(result)
         finally:
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run harness-code-agent on a Claw-SWE-Bench prompt.")
+    parser = argparse.ArgumentParser(description="Run VeriForge on a Claw-SWE-Bench prompt.")
     parser.add_argument("prompt_file")
     parser.add_argument("--workspace", default="/testbed")
     return parser.parse_args(argv)

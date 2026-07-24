@@ -392,7 +392,7 @@ class HarnessAgent(BaseInstalledAgent):
         # in the logged shell command.
         env_vars = runner_env_vars()
 
-        # Run hca from the task workspace while importing the cloned agent code.
+        # Run VeriForge from the task workspace while importing the cloned agent code.
         result = await self.exec_as_agent(
             environment,
             command=(

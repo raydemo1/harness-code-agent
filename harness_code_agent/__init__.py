@@ -1,2 +1,1 @@
-"""Harness Code Agent package."""
-
+"""VeriForge package."""

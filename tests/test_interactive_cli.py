@@ -1428,8 +1428,8 @@ class InteractiveCliTests(unittest.TestCase):
                 return True
 
         cases = [
-            (["hca", "fix", "tests"], {"first_task": "fix tests"}),
-            (["hca", "--profile", "terminal", "fix", "shell"], {"profile_name": "terminal", "first_task": "fix shell"}),
+            (["veriforge", "fix", "tests"], {"first_task": "fix tests"}),
+            (["veriforge", "--profile", "terminal", "fix", "shell"], {"profile_name": "terminal", "first_task": "fix shell"}),
         ]
         for argv, expected in cases:
             with self.subTest(argv=argv):
@@ -1456,7 +1456,7 @@ class InteractiveCliTests(unittest.TestCase):
                 with (
                     patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
                     patch("harness_code_agent.cli.TuiApp") as tui_app,
-                    patch.object(sys, "argv", ["hca", flag, "fix", "tests"]),
+                    patch.object(sys, "argv", ["veriforge", flag, "fix", "tests"]),
                 ):
                     result = cli.main()
 
@@ -1471,7 +1471,7 @@ class InteractiveCliTests(unittest.TestCase):
         errors = StringIO()
         with (
             redirect_stderr(errors),
-            patch.object(sys, "argv", ["hca", "-p"]),
+            patch.object(sys, "argv", ["veriforge", "-p"]),
         ):
             result = cli.main()
 
@@ -1593,7 +1593,7 @@ class InteractiveCliTests(unittest.TestCase):
         errors = StringIO()
         with (
             redirect_stderr(errors),
-            patch.object(sys, "argv", ["hca"]),
+            patch.object(sys, "argv", ["veriforge"]),
             patch.object(sys.stdin, "read", return_value=""),
         ):
             result = cli.main()
@@ -1607,7 +1607,7 @@ class InteractiveCliTests(unittest.TestCase):
         with (
             patch("harness_code_agent.agent.conversation.Agent.start_conversation", return_value=FakeConversation()),
             patch("harness_code_agent.cli.TuiApp") as tui_app,
-            patch.object(sys, "argv", ["hca"]),
+            patch.object(sys, "argv", ["veriforge"]),
             patch.object(sys.stdin, "read", return_value="fix from pipe"),
             patch.object(sys.stdin, "isatty", return_value=False),
             patch.object(sys.stdout, "isatty", return_value=False),

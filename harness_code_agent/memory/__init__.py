@@ -1,4 +1,4 @@
-"""File-system long-term memory for Harness Code Agent."""
+"""File-system long-term memory for VeriForge."""
 
 from .store import MemoryRecord, MemoryStore, default_memory_root
 

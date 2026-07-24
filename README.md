@@ -2,11 +2,17 @@
 
 VeriForge — Verifiable Coding-Agent Runtime
 
-VeriForge（原 Harness Code Agent，简称 HCA）是一个面向真实本地仓库工作的 autonomous coding agent 框架，重点是把 agent 的执行过程做成可治理、可验证、可复盘的工程化运行时。
+VeriForge 是一个面向真实本地仓库工作的 autonomous coding agent 框架，重点是把 agent 的执行过程做成可治理、可验证、可复盘的工程化运行时。
 
 它不是一组 prompt，也不是把 shell 随便交给模型。VeriForge 更像是给模型装了一套工程化运行时：它知道什么时候该问、什么时候该读代码、什么时候能改文件、什么时候必须验证、什么时候该承认卡住，以及如何把整个过程记录成可以复盘的证据。
 
 VeriForge 基于 OpenAI-compatible Chat Completions API，可以接 DeepSeek、OpenAI 或其他兼容服务。它把 profile、工具权限、会话记录、上下文压缩、恢复策略、验收检查、浏览器验证和 benchmark 适配组合成一个本地 coding agent runtime。日常可以用它修 bug、重构、写测试、做 review、生成计划、构建小型 Web 应用；评测时也可以用同一套 runtime 跑 Terminal-Bench / Claw-SWE-Bench 风格任务。
+
+## TUI 预览
+
+![VeriForge TUI：计划进度、对话区、输入框与运行状态](docs/images/veriforge-tui.png)
+
+终端界面将任务计划直接呈现在对话流中，并持续展示当前 Profile、剩余上下文与模型状态；工具执行、恢复过程和验证结果都保留在同一条可复盘的运行轨迹里。
 
 ## 为什么做这个
 
@@ -82,7 +88,7 @@ VeriForge 的核心不是“让模型更自由”，而是“让模型在正确�
 ```text
 .
 ├── harness_code_agent/     # 核心 Python 包
-│   ├── cli.py              # `hca` 命令行入口
+│   ├── cli.py              # `veriforge` 命令行入口
 │   ├── core/               # 交互 session、路由、TUI glue
 │   ├── agent/              # conversation state、trace、上下文压缩、provider 适配
 │   ├── runtime/            # 工具、权限、middleware、approval
@@ -122,7 +128,7 @@ pip install -e .
 python -m harness_code_agent.cli
 ```
 
-但推荐 editable install，因为它会注册 `hca` 命令。
+但推荐 editable install，因为它会注册 `veriforge` 命令。
 
 如果要使用 `app-builder` 的浏览器验证：
 
@@ -169,7 +175,7 @@ DeepSeek 默认档位：
 进入交互式 TUI：
 
 ```bash
-hca
+veriforge
 ```
 
 然后输入任务，例如：
@@ -190,15 +196,15 @@ hca
 也可以启动时直接提交任务：
 
 ```bash
-hca "Fix the failing tests"
+veriforge "Fix the failing tests"
 ```
 
 脚本或 CI 风格入口：
 
 ```bash
-hca -p "Fix the failing tests"
-hca --print "Fix the failing tests"
-echo "Review this repo for obvious bugs" | hca
+veriforge -p "Fix the failing tests"
+veriforge --print "Fix the failing tests"
+echo "Review this repo for obvious bugs" | veriforge
 ```
 
 常用 TUI 快捷键：
@@ -231,10 +237,10 @@ Profile 是 VeriForge 的主要工作模式。它决定 agent 当前是在回答
 指定 profile：
 
 ```bash
-hca --profile coding-agent "Fix the TypeError in parse_config()"
-hca --profile plan "Design the parser migration"
-hca --profile review "Review the current branch"
-hca --profile terminal "Fix the broken symlinks in /tmp"
+veriforge --profile coding-agent "Fix the TypeError in parse_config()"
+veriforge --profile plan "Design the parser migration"
+veriforge --profile review "Review the current branch"
+veriforge --profile terminal "Fix the broken symlinks in /tmp"
 ```
 
 TUI 中可用短命令：
@@ -261,7 +267,7 @@ Skills 采用渐进式披露。VeriForge 不会把所有长规则常驻塞进 pr
 
 ## 会话、快照和复盘
 
-交互模式默认在启动 `hca` 的当前目录工作。VeriForge 会在 `.harness/` 下记录：
+交互模式默认在启动 `veriforge` 的当前目录工作。VeriForge 会在 `.harness/` 下记录：
 
 - session metadata
 - event logs
@@ -285,7 +291,7 @@ Skills 采用渐进式披露。VeriForge 不会把所有长规则常驻塞进 pr
 兼容的非交互命令：
 
 ```bash
-hca session show latest
+veriforge session show latest
 ```
 
 在任务里引用文件或历史 session：

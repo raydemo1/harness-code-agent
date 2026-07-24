@@ -71,7 +71,7 @@ class SlashCommandRegistry:
         return list(self.specs)
 
     def format_help(self) -> str:
-        lines = ["hca commands:"]
+        lines = ["VeriForge commands:"]
         current_group = ""
         for spec in self.specs:
             if spec.group != current_group:

@@ -1,4 +1,4 @@
-"""Run harness-code-agent on Claw-SWE-Bench through the upstream orchestrator."""
+"""Run VeriForge on Claw-SWE-Bench through the upstream orchestrator."""
 from __future__ import annotations
 
 import argparse
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     defaults = _load_task_config(TASK_CONFIG)
-    parser = argparse.ArgumentParser(description="Run harness-code-agent on Claw-SWE-Bench.")
+    parser = argparse.ArgumentParser(description="Run VeriForge on Claw-SWE-Bench.")
     parser.add_argument("--task-config", default=str(TASK_CONFIG))
     parser.add_argument("--dataset-name", default=defaults["dataset_name"])
     parser.add_argument("--dataset-config", default=defaults["dataset_config"])

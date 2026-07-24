@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run real DeepSeek context/cache evaluations for harness-code-agent.",
+        description="Run real DeepSeek context/cache evaluations for VeriForge.",
     )
     parser.add_argument(
         "--scenarios",
@@ -470,7 +470,7 @@ class DeepSeekContextEvaluator:
 
 def make_system_prompt() -> str:
     return (
-        "You are evaluating the harness-code-agent context lifecycle. "
+        "You are evaluating the VeriForge context lifecycle. "
         "Keep answers short. Do not claim to have executed tools. "
         "Focus on prompt-cache stability, compaction rewrite effects, and token usage."
     )

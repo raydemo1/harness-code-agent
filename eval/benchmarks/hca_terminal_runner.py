@@ -145,7 +145,7 @@ def install_artifact_export_hooks(state: dict[str, Any]) -> None:
                 runner_error=str(state.get("runner_error") or reason),
             )
         except BaseException:
-            print("Failed best-effort HCA artifact export:", file=sys.stderr)
+            print("Failed best-effort VeriForge artifact export:", file=sys.stderr)
             traceback.print_exc()
 
     def on_exit() -> None:
@@ -207,7 +207,7 @@ def start_periodic_artifact_export(
                     runner_error=str(state.get("runner_error") or "periodic partial artifact export"),
                 )
             except BaseException:
-                print("Failed periodic HCA artifact export:", file=sys.stderr)
+                print("Failed periodic VeriForge artifact export:", file=sys.stderr)
                 traceback.print_exc()
 
     thread = threading.Thread(target=loop, name="hca-artifact-export", daemon=True)
@@ -289,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
                 if part
             )
             hook_state["runner_error"] = runner_error
-        print(f"hca session: {session_id}", flush=True)
+        print(f"veriforge session: {session_id}", flush=True)
         print(f"workspace: {session.cwd}", flush=True)
         try:
             manifest_path = write_session_manifest(
@@ -298,9 +298,9 @@ def main(argv: list[str] | None = None) -> int:
                 harness_root=session_store.root,
                 artifacts_root=os.environ.get("HCA_ARTIFACTS_ROOT", "/logs/artifacts"),
             )
-            print(f"hca early artifacts: {manifest_path}", flush=True)
+            print(f"veriforge early artifacts: {manifest_path}", flush=True)
         except Exception:
-            print("Failed to write early HCA artifact manifest:", file=sys.stderr)
+            print("Failed to write early VeriForge artifact manifest:", file=sys.stderr)
             traceback.print_exc()
         try:
             result = session.submit(args.prompt)
@@ -315,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             hook_state["session_store"] = session_store
             hook_state["runner_error"] = runner_error
             if session.session_id:
-                print(f"hca session: {session.session_id}", flush=True)
+                print(f"veriforge session: {session.session_id}", flush=True)
             print(f"workspace: {session.cwd}", flush=True)
             if result is not None:
                 print_turn_result(result)
@@ -336,9 +336,9 @@ def main(argv: list[str] | None = None) -> int:
                         artifacts_root=os.environ.get("HCA_ARTIFACTS_ROOT", "/logs/artifacts"),
                         runner_error=runner_error,
                     )
-                    print(f"hca artifacts: {artifact_path}", flush=True)
+                    print(f"veriforge artifacts: {artifact_path}", flush=True)
                 except Exception:
-                    print("Failed to export HCA session artifacts:", file=sys.stderr)
+                    print("Failed to export VeriForge session artifacts:", file=sys.stderr)
                     traceback.print_exc()
             periodic_export_stop.set()
         if session_store is not None and session_id:
@@ -360,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run harness-code-agent on a Terminal-Bench prompt.")
+    parser = argparse.ArgumentParser(description="Run VeriForge on a Terminal-Bench prompt.")
     parser.add_argument("prompt")
     parser.add_argument("--workspace", default="/app")
     parser.add_argument(

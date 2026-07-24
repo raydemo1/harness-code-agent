@@ -1,4 +1,4 @@
-"""Claw-SWE-Bench adapter for harness-code-agent.
+"""Claw-SWE-Bench adapter for VeriForge.
 
 This module is imported by eval/benchmarks/run_claw_swe_bench.py after the
 upstream claw-swe-bench repository has been added to PYTHONPATH.
@@ -61,9 +61,9 @@ FORWARDED_ENV_PREFIXES = (
 
 
 class HarnessCodeAgentAdapter(BaseClawAdapter):
-    """Runs harness-code-agent inside each SWE-bench container."""
+    """Runs VeriForge inside each SWE-bench container."""
 
-    name = "harness-code-agent"
+    name = "veriforge"
 
     def __init__(
         self,
@@ -118,7 +118,7 @@ class HarnessCodeAgentAdapter(BaseClawAdapter):
         result = workspace.run_in_container(_bootstrap_command(), timeout=900)
         if result.exit_code != 0:
             raise RuntimeError(
-                "Failed to bootstrap harness-code-agent runtime in container: "
+                "Failed to bootstrap VeriForge runtime in container: "
                 f"{result.stderr or result.stdout}"
             )
 
@@ -310,5 +310,5 @@ def _decode(value: bytes | str | None) -> str:
 
 
 def _session_id(stdout: str) -> str | None:
-    match = re.search(r"^hca session:\s*(\S+)", stdout, flags=re.MULTILINE)
+    match = re.search(r"^veriforge session:\s*(\S+)", stdout, flags=re.MULTILINE)
     return match.group(1) if match else None

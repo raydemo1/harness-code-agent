@@ -128,7 +128,7 @@ def write_suite_summary(run_dir: Path, summary: dict[str, Any], results: list[Ca
 
 
 def session_id_from_stdout(stdout: str) -> str:
-    match = re.search(r"^hca session:\s*(\S+)", stdout, flags=re.MULTILINE)
+    match = re.search(r"^veriforge session:\s*(\S+)", stdout, flags=re.MULTILINE)
     return match.group(1) if match else ""
 
 

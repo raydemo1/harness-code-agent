@@ -18,12 +18,12 @@ eval/
 - `scripts/run_terminal_bench_eval.py` runs the fixed Terminal-Bench subsets and delegates each task to `benchmarks/run_terminal_bench.py`.
 - `scripts/run_claw_swe_bench_eval.py` runs Claw-SWE-Bench through the local harness adapter.
 - `scripts/deepseek_context_eval.py` runs the DeepSeek context/cache scenarios and writes timestamped outputs under `results/`.
-- `scripts/rebuild_eval_results.py` scans raw `summary.json`, Harbor `result.json`, HCA artifacts, stdout, and stderr to regenerate `results/ledger.json`, `results/results.json`, `results/retention_plan.json`, and `results/SUMMARY.md`.
+- `scripts/rebuild_eval_results.py` scans raw `summary.json`, Harbor `result.json`, VeriForge artifacts, stdout, and stderr to regenerate `results/ledger.json`, `results/results.json`, `results/retention_plan.json`, and `results/SUMMARY.md`.
 - `tasks/memory_ab.json`, `tasks/latency_smoke.json`, `tasks/terminal_bench_8task.json`, and `tasks/terminal_bench_24task.json` define the lightweight interview-project eval workload.
 - `benchmarks/run_terminal_bench.py` launches the fixed Terminal-Bench subset through Harbor.
 - `benchmarks/run_claw_swe_bench.py` launches Claw-SWE-Bench through the upstream orchestrator with the local harness adapter.
-- `benchmarks/harbor_agent.py` is Harbor's installed-agent adapter for running `hca --profile terminal` inside task containers.
-- `benchmarks/harness_claw_adapter.py` runs `hca` with the `coding-agent` profile inside each Claw-SWE-Bench container and lets the upstream runner collect patches. Claw remains an external evaluation scenario rather than a separate product profile.
+- `benchmarks/harbor_agent.py` is Harbor's installed-agent adapter for running VeriForge with the `terminal` profile inside task containers.
+- `benchmarks/harness_claw_adapter.py` runs VeriForge with the `coding-agent` profile inside each Claw-SWE-Bench container and lets the upstream runner collect patches. Claw remains an external evaluation scenario rather than a separate product profile.
 - `benchmarks/tb2_tasks.json` stores Terminal-Bench task metadata used by the terminal profile and launcher.
 
 ## Common Commands
@@ -52,7 +52,7 @@ The current Terminal-Bench ledger reports the official-like full-task denominato
 `55/89` passed (`61.8%`) with `deepseek-v4-flash` at high reasoning
 (`HARNESS_MODEL_INTENSITY=normal`). As a reference point, the
 [DeepSeek-V4-Flash model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
-reports `56.9%` Terminal Bench 2.0 Acc for V4-Flash-Max, so the local HCA
+reports `56.9%` Terminal Bench 2.0 Acc for V4-Flash-Max, so the local VeriForge
 ledger is `4.9` points higher while using Flash high reasoning rather than
 Flash Max. This is not a strict same-runner leaderboard reproduction, but it is
 a useful signal that the runtime layer improves task completion.

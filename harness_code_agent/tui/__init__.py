@@ -1,4 +1,4 @@
-"""Textual terminal UI for Harness Code Agent."""
+"""Textual terminal UI for VeriForge."""
 
 from .app import TuiApp
 

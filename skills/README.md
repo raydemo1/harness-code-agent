@@ -1,6 +1,6 @@
 # Skill system
 
-HCA uses two invocation surfaces:
+VeriForge uses two invocation surfaces:
 
 - **User-invoked skills** set `disable-model-invocation: true` and appear as dynamic `/name` commands.
 - **Model-invoked skills** omit that flag; only their concise descriptions enter the stable model catalog.
@@ -11,8 +11,8 @@ The engineering and productivity foundation is a one-time fork of [mattpocock/sk
 
 Local adaptations:
 
-- user workflows use HCA dynamic slash commands;
+- user workflows use VeriForge dynamic slash commands;
 - model-invoked skills are composed through `read_skill_file`, not slash commands;
 - `workflows` and `setup-workflows` replace author-branded names;
 - excluded upstream workflows: `prototype`, `to-prd`, and `teach`;
-- HCA-specific core skills cover PRD ownership, guarded execution, frontend design, and frontend diagnosis.
+- VeriForge-specific core skills cover PRD ownership, guarded execution, frontend design, and frontend diagnosis.

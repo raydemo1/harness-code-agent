@@ -376,7 +376,7 @@ class EvalSuiteTests(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             self.assertEqual(kwargs["env"]["HARNESS_PERMISSION_MODE"], "danger-full-access")
-            return subprocess.CompletedProcess(command, 0, stdout="hca session: missing\nmarker", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="veriforge session: missing\nmarker", stderr="")
 
         with (
             patch("eval.scripts.run_basic_metrics_eval.subprocess.run", side_effect=fake_run),

@@ -1,4 +1,4 @@
-"""hca command-line interface."""
+"""VeriForge command-line interface."""
 
 from __future__ import annotations
 
@@ -33,14 +33,14 @@ def main(argv: list[str] | None = None) -> int:
     _configure_stdio_encoding()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "run":
-        _print_error("Error: 'run' is no longer supported. Use 'hca \"<task>\"' or start 'hca' interactively.")
+        _print_error("Error: 'run' is no longer supported. Use 'veriforge \"<task>\"' or start 'veriforge' interactively.")
         return 1
     if argv == ["session", "show", "latest"]:
         return show_latest_session(Path.cwd())
     if len(argv) >= 2 and argv[:2] == ["session", "observe"]:
         return observe_session(Path.cwd(), argv[2:])
 
-    parser = argparse.ArgumentParser(prog="hca", description="Interactive local coding agent")
+    parser = argparse.ArgumentParser(prog="veriforge", description="VeriForge interactive local coding agent")
     parser.add_argument("task", nargs="*", help="Optional first task to submit after startup")
     parser.add_argument("--profile", default=PRODUCT_DEFAULT_PROFILE, help="Profile name to use before the session starts")
     parser.add_argument("--resume", help="Session id to resume as context")
@@ -131,14 +131,14 @@ def run_batch(
             registry = default_command_registry(skill_registry=session.skill_registry)
             if not registry.is_agent_command(first_task):
                 if session.session_id:
-                    print(f"hca session: {session.session_id}")
+                    print(f"veriforge session: {session.session_id}")
                 print(f"workspace: {session.cwd}")
                 session.handle_slash_command(first_task)
                 return 0
 
         result = session.submit(first_task)
         if session.session_id:
-            print(f"hca session: {session.session_id}")
+            print(f"veriforge session: {session.session_id}")
         print(f"workspace: {session.cwd}")
         print_turn_result(result)
     except MentionResolutionError as e:
@@ -202,7 +202,7 @@ def observe_session(cwd: Path, args: list[str]) -> int:
         export = True
         target_args.remove("--export")
     if len(target_args) != 1:
-        _print_error("Error: Usage: hca session observe latest|<session-id>|project [--export]")
+        _print_error("Error: Usage: veriforge session observe latest|<session-id>|project [--export]")
         return 2
 
     target = target_args[0]
