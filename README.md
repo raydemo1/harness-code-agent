@@ -1,10 +1,12 @@
-# Harness Code Agent
+# VeriForge
 
-Harness Code Agent，简称 HCA，是一个面向真实本地仓库工作的 autonomous coding agent 框架。
+VeriForge — Verifiable Coding-Agent Runtime
 
-它不是一组 prompt，也不是把 shell 随便交给模型。HCA 更像是给模型装了一套工程化运行时：它知道什么时候该问、什么时候该读代码、什么时候能改文件、什么时候必须验证、什么时候该承认卡住，以及如何把整个过程记录成可以复盘的证据。
+VeriForge（原 Harness Code Agent，简称 HCA）是一个面向真实本地仓库工作的 autonomous coding agent 框架，重点是把 agent 的执行过程做成可治理、可验证、可复盘的工程化运行时。
 
-HCA 基于 OpenAI-compatible Chat Completions API，可以接 DeepSeek、OpenAI 或其他兼容服务。它把 profile、工具权限、会话记录、上下文压缩、恢复策略、验收检查、浏览器验证和 benchmark 适配组合成一个本地 coding agent runtime。日常可以用它修 bug、重构、写测试、做 review、生成计划、构建小型 Web 应用；评测时也可以用同一套 runtime 跑 Terminal-Bench / Claw-SWE-Bench 风格任务。
+它不是一组 prompt，也不是把 shell 随便交给模型。VeriForge 更像是给模型装了一套工程化运行时：它知道什么时候该问、什么时候该读代码、什么时候能改文件、什么时候必须验证、什么时候该承认卡住，以及如何把整个过程记录成可以复盘的证据。
+
+VeriForge 基于 OpenAI-compatible Chat Completions API，可以接 DeepSeek、OpenAI 或其他兼容服务。它把 profile、工具权限、会话记录、上下文压缩、恢复策略、验收检查、浏览器验证和 benchmark 适配组合成一个本地 coding agent runtime。日常可以用它修 bug、重构、写测试、做 review、生成计划、构建小型 Web 应用；评测时也可以用同一套 runtime 跑 Terminal-Bench / Claw-SWE-Bench 风格任务。
 
 ## 为什么做这个
 
@@ -17,22 +19,22 @@ HCA 基于 OpenAI-compatible Chat Completions API，可以接 DeepSeek、OpenAI 
 - 一次 Docker、代理或依赖波动被误记成能力失败。
 - 长任务跑完后没有成本、tokens、工具调用和失败轨迹的可靠台账。
 
-HCA 解决的是这些“模型外面”的问题。它给模型提供一个更可靠的执行环境，让模型的能力真正落到仓库、测试和评测结果上。
+VeriForge 解决的是这些“模型外面”的问题。它给模型提供一个更可靠的执行环境，让模型的能力真正落到仓库、测试和评测结果上。
 
 ## 当前效果
 
-我更愿意把这个结果看成一件事：HCA 不是靠换一个更大的模型来变强，而是在 `deepseek-v4-flash` 这个更轻的模型上，把 agent runtime 该做的事情补齐了。
+我更愿意把这个结果看成一件事：VeriForge 不是靠换一个更大的模型来变强，而是在 `deepseek-v4-flash` 这个更轻的模型上，把 agent runtime 该做的事情补齐了。
 
 当前本地 Terminal-Bench 2.1 ledger 用完整 89 个任务做分母，强视觉任务也计入失败：
 
 | 对比项 | 口径 | 结果 |
 | --- | --- | ---: |
-| HCA 本地结果 | Terminal-Bench 2.1 task ledger，`deepseek-v4-flash`，high reasoning，不是 Pro/Max | `55/89` passed，`61.8%` |
+| VeriForge 本地结果 | Terminal-Bench 2.1 task ledger，`deepseek-v4-flash`，high reasoning，不是 Pro/Max | `55/89` passed，`61.8%` |
 | DeepSeek 官方参考 | [DeepSeek-V4-Flash model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) 中的 Terminal Bench 2.0 Acc，V4-Flash-Max | `56.9%` |
 
-和 DeepSeek 官方 V4-Flash-Max 的 `56.9%` 相比，HCA 当前结果高出 `4.9` 个百分点。这里没有把它包装成严格同场 leaderboard 复现：我们的结果来自本地 Terminal-Bench 2.1 ledger，官方数字来自 DeepSeek 模型卡里的 Terminal Bench 2.0 口径。但这个对比仍然很有意义，因为 HCA 用的是 Flash high reasoning，不是 Flash Max，也不是 Pro/Max，却把完整 task 分母上的完成率推到了更高的位置。
+和 DeepSeek 官方 V4-Flash-Max 的 `56.9%` 相比，VeriForge 当前结果高出 `4.9` 个百分点。这里没有把它包装成严格同场 leaderboard 复现：我们的结果来自本地 Terminal-Bench 2.1 ledger，官方数字来自 DeepSeek 模型卡里的 Terminal Bench 2.0 口径。但这个对比仍然很有意义，因为 VeriForge 用的是 Flash high reasoning，不是 Flash Max，也不是 Pro/Max，却把完整 task 分母上的完成率推到了更高的位置。
 
-这正是这个框架想证明的东西：模型能力只是起点，真正决定长任务能不能落地的，是 profile、工具治理、恢复策略、缓存友好上下文和可复盘的 eval ledger。HCA 做的是把这些工程层补上，让同一个模型系列在真实终端任务里更少卡死、更少误判、更稳定地走到可验证结果。
+这正是这个框架想证明的东西：模型能力只是起点，真正决定长任务能不能落地的，是 profile、工具治理、恢复策略、缓存友好上下文和可复盘的 eval ledger。VeriForge 做的是把这些工程层补上，让同一个模型系列在真实终端任务里更少卡死、更少误判、更稳定地走到可验证结果。
 
 其他已记录的运行时收益：
 
@@ -50,7 +52,7 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 
 ## 它适合做什么
 
-HCA 适合需要 agent 真正在本地项目里工作的场景：
+VeriForge 适合需要 agent 真正在本地项目里工作的场景：
 
 - 自动修 bug、补测试、跑验证，并解释改动。
 - 读仓库后回答架构、调用链、配置和行为问题。
@@ -62,7 +64,7 @@ HCA 适合需要 agent 真正在本地项目里工作的场景：
 
 ## 核心设计
 
-HCA 的核心不是“让模型更自由”，而是“让模型在正确边界里更自主”。
+VeriForge 的核心不是“让模型更自由”，而是“让模型在正确边界里更自主”。
 
 | 组件 | 作用 |
 | --- | --- |
@@ -73,7 +75,7 @@ HCA 的核心不是“让模型更自由”，而是“让模型在正确边界�
 | Session log | 记录事件、观察、工具结果、LLM usage 和 checkpoint，方便复盘 |
 | Eval ledger | 从 raw 结果重建 task-level 真相，避免单次中断或环境波动污染总结果 |
 
-一句话概括：模型负责判断和生成，HCA 负责给它一个可治理、可验证、可复盘的工作现场。
+一句话概括：模型负责判断和生成，VeriForge 负责给它一个可治理、可验证、可复盘的工作现场。
 
 ## 项目结构
 
@@ -110,7 +112,7 @@ HCA 的核心不是“让模型更自由”，而是“让模型在正确边界�
 安装项目：
 
 ```bash
-cd harness-code-agent
+cd veriforge-agent
 pip install -e .
 ```
 
@@ -214,7 +216,7 @@ Ctrl-P        切换权限模式
 
 ## Profiles
 
-Profile 是 HCA 的主要工作模式。它决定 agent 当前是在回答问题、改代码、做计划、做 review、构建应用，还是跑 benchmark。
+Profile 是 VeriForge 的主要工作模式。它决定 agent 当前是在回答问题、改代码、做计划、做 review、构建应用，还是跑 benchmark。
 
 | Profile | 用途 |
 | --- | --- |
@@ -245,11 +247,11 @@ TUI 中可用短命令：
 /review
 ```
 
-`plan` profile 有显式 handoff：它写完计划后会停住。用户回复“继续”“执行”“开始”这类短确认时，HCA 会切换到 `coding-agent`，并把刚才的 Markdown 计划注入为 approved plan。
+`plan` profile 有显式 handoff：它写完计划后会停住。用户回复“继续”“执行”“开始”这类短确认时，VeriForge 会切换到 `coding-agent`，并把刚才的 Markdown 计划注入为 approved plan。
 
 ## Skills
 
-Skills 采用渐进式披露。HCA 不会把所有长规则常驻塞进 prompt，而是先给模型一个精简 catalog；当任务需要某个 skill 时，再用 `read_skill_file` 读取完整说明。
+Skills 采用渐进式披露。VeriForge 不会把所有长规则常驻塞进 prompt，而是先给模型一个精简 catalog；当任务需要某个 skill 时，再用 `read_skill_file` 读取完整说明。
 
 - 用户可直接调用的 workflow 暴露为 slash command，例如 `/implement`、`/triage`、`/handoff`、`/workflows`。
 - 面向 agent 的工程纪律只放 name、description、path，相关时再按需加载正文。
@@ -259,7 +261,7 @@ Skills 采用渐进式披露。HCA 不会把所有长规则常驻塞进 prompt�
 
 ## 会话、快照和复盘
 
-交互模式默认在启动 `hca` 的当前目录工作。HCA 会在 `.harness/` 下记录：
+交互模式默认在启动 `hca` 的当前目录工作。VeriForge 会在 `.harness/` 下记录：
 
 - session metadata
 - event logs
@@ -296,7 +298,7 @@ hca session show latest
 
 ## 工具运行时
 
-HCA 的工具不是简单丢给模型自由调用，而是经过权限、lane、审批和 middleware 管理。
+VeriForge 的工具不是简单丢给模型自由调用，而是经过权限、lane、审批和 middleware 管理。
 
 内置工具包括：
 
@@ -311,7 +313,7 @@ HCA 的工具不是简单丢给模型自由调用，而是经过权限、lane、
 - 可选浏览器验证
 - MCP server 暴露的 tools
 
-Runtime 还会注入循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。这部分是 HCA 的关键价值之一：模型可以尝试，但尝试必须留下证据，也必须能被运行时纠偏。
+Runtime 还会注入循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。这部分是 VeriForge 的关键价值之一：模型可以尝试，但尝试必须留下证据，也必须能被运行时纠偏。
 
 ## 权限模式
 
@@ -347,7 +349,7 @@ HARNESS_DOCKER_NETWORK=none
 
 ## MCP Client
 
-HCA 可以连接 MCP server，把 server tools 暴露给当前 profile。第一版支持 `stdio` 和 `streamable_http` transports。
+VeriForge 可以连接 MCP server，把 server tools 暴露给当前 profile。第一版支持 `stdio` 和 `streamable_http` transports。
 
 工作区本地配置位于 `.harness/mcp.json`：
 
@@ -421,7 +423,7 @@ python eval/benchmarks/run_terminal_bench.py --full
 python eval/benchmarks/run_terminal_bench.py --task fix-git --env daytona
 ```
 
-Eval ledger 会从 raw `summary.json`、Harbor `result.json`、HCA artifacts、stdout、stderr 里重建 task-level 结果。它比单次 run summary 更适合作为最终报告，因为它能合并多次 rerun，区分任务成功、agent timeout、verifier failure、infra/setup failure，并保留成本、tokens、工具调用和失败轨迹。
+Eval ledger 会从 raw `summary.json`、Harbor `result.json`、VeriForge artifacts、stdout、stderr 里重建 task-level 结果。它比单次 run summary 更适合作为最终报告，因为它能合并多次 rerun，区分任务成功、agent timeout、verifier failure、infra/setup failure，并保留成本、tokens、工具调用和失败轨迹。
 
 更多说明：
 
