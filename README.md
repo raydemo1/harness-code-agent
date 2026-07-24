@@ -10,7 +10,7 @@ VeriForge 基于 OpenAI-compatible Chat Completions API，可以接 DeepSeek、O
 
 ## TUI 预览
 
-![VeriForge TUI：计划进度、对话区、输入框与运行状态](docs/images/veriforge-tui.png)
+![VeriForge TUI：计划进度、对话区、输入框与运行状态](https://raw.githubusercontent.com/raydemo1/veriforge-agent/main/docs/images/veriforge-tui.png)
 
 终端界面将任务计划直接呈现在对话流中，并持续展示当前 Profile、剩余上下文与模型状态；工具执行、恢复过程和验证结果都保留在同一条可复盘的运行轨迹里。
 
