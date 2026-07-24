@@ -1,4 +1,4 @@
-"""Textual widgets for the Harness Code Agent TUI."""
+"""Textual widgets for the VeriForge TUI."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from rich.console import Group
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
@@ -14,13 +16,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
+from textual.strip import Strip
 from textual.widgets import Input, RichLog, Static, TextArea
 
 from .state import TranscriptBlock
 
 if TYPE_CHECKING:
     from .commands import SlashCommandRegistry
-    from .state import PlanStep, SessionStatusSnapshot
+    from .state import SessionStatusSnapshot
 
 
 # ── SubmitTextArea ──────────────────────────────────────────────────────────
@@ -42,6 +45,8 @@ class PaletteDismiss(Message):
 
 class SubmitTextArea(TextArea):
     """TextArea that submits on Enter and inserts newline on Shift+Enter."""
+
+    PLACEHOLDER = "Ask anything  ·  / commands  ·  @ files"
 
     BINDINGS = TextArea.BINDINGS + [
         Binding("enter", "submit", "Submit", show=False, priority=True),
@@ -85,21 +90,49 @@ class SubmitTextArea(TextArea):
             return False
         return bool(app.route_active_panel_key(key))
 
+    def render_line(self, y: int) -> Strip:
+        """Render a visible first-line prompt without displacing the cursor."""
+        line = super().render_line(y)
+        if y != 0 or self.text:
+            return line
+
+        available = max(0, line.cell_length - 1)
+        if available <= 0:
+            return line
+        ghost_style = Style(
+            color="#a3a3a3",
+            bgcolor=self.rich_style.bgcolor,
+        )
+        ghost_strip = Strip([Segment(f" {self.PLACEHOLDER}", ghost_style)])
+        ghost_strip = ghost_strip.crop(0, available).extend_cell_length(
+            available,
+            ghost_style,
+        )
+        return Strip.join([line.crop(0, 1), ghost_strip])
+
 # ── TranscriptView ──────────────────────────────────────────────────────────
 
+_INK = "#f5f5f5"
+_MUTED = "#b4b4b8"
+_SUBTLE = "#737373"
+_ACCENT = "#7dd3fc"
+_SUCCESS = "#86efac"
+_WARNING = "#fde68a"
+_ERROR = "#fca5a5"
+
 _KIND_BORDER_COLORS = {
-    "user": "#3874cb",
-    "assistant": "#4caf50",
-    "tool": "#d79921",
-    "thought": "#b48ead",
-    "failure": "#bf616a",
-    "approval": "#b16286",
-    "plan": "#3874cb",
-    "summary": "#4caf50",
-    "profile": "#3874cb",
-    "file": "#d79921",
-    "session": "#555555",
-    "status": "#555555",
+    "user": _ACCENT,
+    "assistant": _SUCCESS,
+    "tool": _ACCENT,
+    "thought": "#d8b4fe",
+    "failure": _ERROR,
+    "approval": "#f0abfc",
+    "plan": _ACCENT,
+    "summary": _SUCCESS,
+    "profile": _ACCENT,
+    "file": _WARNING,
+    "session": _MUTED,
+    "status": _MUTED,
 }
 
 _ASSISTANT_MARKDOWN_CHAR_LIMIT = 12_000
@@ -114,38 +147,41 @@ def block_to_rich(block: TranscriptBlock):
     status = f" [{block.status}]" if block.status else ""
 
     if block.kind == "user":
-        header = Text(f"You{status}", style=f"bold {border}")
-        body = Text(block.body)
+        header = Text(f"› You{status}", style=f"bold {border}")
+        body = Text(block.body, style=_INK)
         return Group(header, body, Text(""))
     if block.kind == "assistant":
-        header = Text(f"Assistant{status}", style=f"bold {border}")
+        header = Text(f"• Assistant{status}", style=f"bold {border}")
         body = _assistant_body_renderable(block.body, streaming=block.status == "streaming")
         return Group(header, body, Text(""))
     if block.kind == "tool":
         marker = "·"
+        marker_color = _MUTED
         if block.status == "success":
             marker = "✓"
+            marker_color = _SUCCESS
         elif block.status == "failed":
             marker = "×"
+            marker_color = _ERROR
         elif block.status == "running":
             marker = "›"
+            marker_color = _ACCENT
         text = Text()
-        text.append(f"  {marker} ", style=f"bold {border}")
-        text.append(_humanize_tool_title(block.title, block.status), style=f"bold {border}")
+        text.append(f"  {marker} ", style=f"bold {marker_color}")
+        text.append(_humanize_tool_title(block.title, block.status), style=f"bold {_INK}")
         if block.body:
-            text.append(f"  {block.body}", style="dim")
+            text.append(f"  {block.body}", style=_MUTED)
         return text
     if block.kind == "thought":
-        return Text(f"  thinking {block.body or ''}", style=f"dim {border}")
+        return Text(f"  thinking {block.body or ''}", style=border)
     if block.kind == "failure":
-        title = f"❌ Error{status}"
+        title = f"Error{status}"
         return Panel(Text(block.body or ""), title=title, border_style=border)
     if block.kind == "approval":
         title = f"Approval{status}"
         return Panel(Text(block.body or ""), title=title, border_style=border)
     if block.kind == "plan":
-        title = f"Plan{status}"
-        return Panel(Text(block.body or ""), title=title, border_style=border)
+        return _plan_update_renderable(block.body)
     if block.kind == "summary":
         title = f"Turn Summary{status}"
         return Panel(Markdown(block.body) if block.body else Text(""), title=title, border_style=border)
@@ -156,9 +192,9 @@ def block_to_rich(block: TranscriptBlock):
         title = f"File{status}"
         return Panel(Text(block.body or ""), title=title, border_style=border)
     text = Text()
-    text.append(f"  {block.title}{status}", style=f"dim {border}")
+    text.append(f"  {block.title}{status}", style=border)
     if block.body:
-        text.append(f"  {block.body}", style="dim")
+        text.append(f"  {block.body}", style=_MUTED)
     return text
 
 
@@ -185,14 +221,32 @@ def _humanize_tool_title(title: str, status: str) -> str:
     return label
 
 
+def _plan_update_renderable(body: str) -> Group:
+    lines = Text()
+    for index, raw_line in enumerate(body.splitlines()):
+        if index:
+            lines.append("\n")
+        marker, _, label = raw_line.partition(" ")
+        if marker == "✓":
+            lines.append("  ✓ ", style=f"bold {_SUCCESS}")
+            lines.append(label, style=f"strike {_MUTED}")
+        elif marker == "›":
+            lines.append("  › ", style=f"bold {_WARNING}")
+            lines.append(label, style=f"bold {_INK}")
+        else:
+            lines.append("  ○ ", style=_MUTED)
+            lines.append(label, style=_MUTED)
+    return Group(Text("Plan", style=f"bold {_ACCENT}"), lines, Text(""))
+
+
 def _assistant_body_renderable(body: str, *, streaming: bool):
     if not body:
-        return Text("")
+        return Text("", style=_INK)
     if streaming:
-        return Text(_streaming_body_excerpt(body))
+        return Text(_streaming_body_excerpt(body), style=_INK)
     if len(body) > _ASSISTANT_MARKDOWN_CHAR_LIMIT:
-        return Text(_assistant_body_excerpt(body))
-    return Markdown(body)
+        return Text(_assistant_body_excerpt(body), style=_INK)
+    return Markdown(body, style=_INK)
 
 
 def _assistant_body_excerpt(body: str) -> str:
@@ -222,22 +276,19 @@ def _streaming_body_excerpt(body: str) -> str:
 
 
 def welcome_rich(snapshot: SessionStatusSnapshot) -> Group:
-    """Render a compact product header without nesting another border."""
-    session_text = snapshot.session_id if snapshot.session_id else "pending"
-    if len(session_text) > 12:
-        session_text = f"{session_text[:11]}…"
-    brand = Text("Harness", style="bold #f8fafc")
-    brand.append("  code agent", style="#64748b")
+    """Render a quiet, terminal-native arrival state."""
+    brand = Text("VeriForge", style=f"bold {_INK}")
     meta = Text()
-    meta.append(snapshot.profile, style="#60a5fa")
-    meta.append("  ·  ", style="#334155")
+    meta.append(snapshot.profile, style=f"bold {_ACCENT}")
+    if snapshot.permission_mode:
+        meta.append("  ·  ", style=_SUBTLE)
+        permission_color = _ERROR if snapshot.permission_mode == "danger-full-access" else _MUTED
+        meta.append(snapshot.permission_mode, style=permission_color)
+    meta.append("  ·  ", style=_SUBTLE)
     workspace_path = Path(snapshot.cwd)
     workspace_name = workspace_path.name or str(workspace_path)
-    meta.append(workspace_name, style="#94a3b8")
-    meta.append("  ·  ", style="#334155")
-    meta.append(f"session {session_text}", style="#64748b")
-    hint = Text("Type a task or /help  ·  Enter send  ·  Ctrl+C cancel", style="#64748b")
-    return Group(brand, meta, hint, Text(""))
+    meta.append(workspace_name, style=_MUTED)
+    return Group(brand, meta, Text(""))
 
 
 class TranscriptView(RichLog):
@@ -288,41 +339,10 @@ class TranscriptView(RichLog):
         self.write(welcome_rich(snapshot))
 
 
-# ── PlanPanel ───────────────────────────────────────────────────────────────
-
-class PlanPanel(Static):
-    """Persistent compact plan step list."""
-
-    steps: reactive[list["PlanStep"]] = reactive(list)
-
-    def update_steps(self, steps: list["PlanStep"]) -> None:
-        self.steps = list(steps)
-        self.refresh()
-
-    def render(self) -> Text:
-        if not self.steps:
-            return Text("No plan yet", style="dim")
-
-        text = Text("Plan\n", style="bold #cbd5e1")
-        for index, step in enumerate(self.steps):
-            if index:
-                text.append("\n")
-            if step.status == "completed":
-                text.append("✓ ", style="#a3be8c")
-                text.append(step.text, style="dim strike")
-            elif step.status == "current":
-                text.append("→ ", style="bold #ebcb8b")
-                text.append(step.text, style="bold #ebcb8b")
-            else:
-                text.append("○ ", style="dim")
-                text.append(step.text, style="dim")
-        return text
-
-
 # ── StatusBar ───────────────────────────────────────────────────────────────
 
 class StatusBar(Static):
-    """Bottom status bar showing profile, model, turn, status."""
+    """Bottom status bar showing the active model and run state."""
 
     profile: reactive[str] = reactive("")
     model: reactive[str] = reactive("")
@@ -333,21 +353,23 @@ class StatusBar(Static):
     dirty_count: reactive[int] = reactive(0)
 
     def render(self) -> Text:
-        status_style = "green" if self.status == "idle" else "yellow" if self.status in ("running", "tool", "thinking") else "red"
+        active = self.status not in {"idle", "ready"}
+        status_style = _WARNING if self.status in ("running", "tool", "thinking") else _ERROR
         text = Text()
-        text.append(f" {self.status}", style=f"bold {status_style}")
-        text.append("  ·  ", style="#475569")
-        text.append(self.profile, style="bold #cbd5e1")
-        if not self.size.width or self.size.width >= 90:
-            text.append(f"  {self.model}", style="#94a3b8")
-        text.append("  ·  ", style="#475569")
-        text.append(f"turn {self.turn}", style="#94a3b8")
-        text.append("  ·  ", style="#475569")
-        text.append(f"context {self.context_percent}%", style="#94a3b8")
+        if active:
+            text.append(f" {self.status}", style=f"bold {status_style}")
+            text.append("  ·  ", style=_SUBTLE)
+        else:
+            text.append(" ")
+        text.append(self.profile, style=f"bold {_ACCENT}")
+        text.append("  ·  ", style=_SUBTLE)
+        remaining = max(0, 100 - self.context_percent)
+        text.append(f"{remaining}% context left", style=_MUTED)
         if self.dirty_count and (not self.size.width or self.size.width >= 70):
-            text.append(f"  ·  {self.dirty_count} changed", style="#fbbf24")
-        text.append("  ·  ", style="#475569")
-        text.append(self.permission_mode, style="#94a3b8")
+            text.append(f"  ·  {self.dirty_count} changed", style=_WARNING)
+        if self.model:
+            text.append("  ·  ", style=_SUBTLE)
+            text.append(self.model, style=f"bold {_INK}")
         return text
 
     def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
@@ -361,65 +383,6 @@ class StatusBar(Static):
             self.context_percent = min(999, int(round(snap.context_tokens * 100 / snap.context_window_tokens)))
         else:
             self.context_percent = 0
-
-    def on_click(self) -> None:
-        app = getattr(self, "app", None)
-        if app is not None and hasattr(app, "action_toggle_permission"):
-            app.action_toggle_permission()
-
-
-# ── ContextBar ──────────────────────────────────────────────────────────────
-
-class ContextBar(Static):
-    """Context progress bar and clickable permission mode indicator."""
-
-    context_percent: reactive[int] = reactive(0)
-    permission_mode: reactive[str] = reactive("workspace-write")
-    token_label: reactive[str] = reactive("0K/0K")
-    compact_percent: reactive[int] = reactive(85)
-
-    def render(self) -> Text:
-        pct = self.context_percent
-        bar_width = 20
-        filled = int(bar_width * min(pct, 100) / 100)
-        bar = "▓" * filled + "░" * (bar_width - filled)
-
-        if pct >= self.compact_percent:
-            bar_color = "#bf616a"
-        elif pct >= max(0, self.compact_percent - 10):
-            bar_color = "#ebcb8b"
-        else:
-            bar_color = "#a3be8c"
-
-        if self.permission_mode == "danger-full-access":
-            perm_color = "#bf616a"
-        elif self.permission_mode == "llm-auto":
-            perm_color = "#ebcb8b"
-        else:
-            perm_color = "#a3be8c"
-
-        text = Text()
-        text.append(f" context ", style="dim")
-        text.append(bar, style=bar_color)
-        text.append(f" {pct}%", style=f"bold {bar_color}")
-        text.append(f" {self.token_label}", style="dim")
-        text.append(f" auto-compact @{self.compact_percent}%", style="dim")
-        text.append(f" │ ", style="dim")
-        text.append(f"mode: {self.permission_mode}", style=f"bold {perm_color}")
-        text.append(" (click)", style="dim")
-        return text
-
-    def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
-        if snap.context_window_tokens > 0:
-            self.context_percent = min(999, int(round(snap.context_tokens * 100 / snap.context_window_tokens)))
-        else:
-            self.context_percent = 0
-        self.token_label = f"{snap.context_tokens // 1000}K/{snap.context_window_tokens // 1000}K"
-        self.permission_mode = snap.permission_mode
-        if snap.context_window_tokens > 0 and snap.context_compact_threshold > 0:
-            self.compact_percent = int(round(snap.context_compact_threshold * 100 / snap.context_window_tokens))
-        else:
-            self.compact_percent = 85
 
     def on_click(self) -> None:
         app = getattr(self, "app", None)
@@ -497,6 +460,7 @@ class InputArea(Vertical):
 
     def on_mount(self) -> None:
         self.query_one("#cmd-palette", CommandPalette).display = False
+        self._resize_composer(self.query_one("#input-text", SubmitTextArea))
 
     def on_key(self, event) -> None:
         """Handle keys for palette navigation and selection."""
@@ -594,7 +558,16 @@ class InputArea(Vertical):
     @on(TextArea.Changed, "#input-text")
     def _on_text_changed(self, event: TextArea.Changed) -> None:
         text = event.text_area.text
+        self._resize_composer(event.text_area)
         self._update_completions(text)
+
+    def _resize_composer(self, text_area: TextArea) -> None:
+        """Keep a roomy composer and grow it for longer multiline prompts."""
+        line_count = max(3, min(7, text_area.text.count("\n") + 2))
+        text_area.styles.height = line_count
+        prompt_row = self.query_one("#prompt-row")
+        prompt_row.styles.height = line_count
+        self.query_one("#input-prompt").styles.height = line_count
 
     def _update_completions(self, text: str) -> None:
         palette = self.query_one("#cmd-palette", CommandPalette)

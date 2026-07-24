@@ -132,6 +132,15 @@ class TuiState:
             # Calculate elapsed time
             start_time = self._pending_tools.pop(tool, None)
             elapsed = time.time() - start_time if start_time else 0.0
+            if tool == "update_plan_state" and status == "success":
+                return TranscriptBlock(
+                    "plan",
+                    "Plan",
+                    _format_plan_steps(self.plan_steps),
+                    "updated",
+                    turn=self.snapshot.turn,
+                    detail=False,
+                )
             # Build summary
             output = str(payload.get("output") or "")
             error = str(payload.get("error") or "")
@@ -313,6 +322,15 @@ def _payload_summary(payload: dict[str, Any]) -> str:
             text = text[:157] + "..."
         parts.append(f"{key}={text}")
     return ", ".join(parts)
+
+
+def _format_plan_steps(steps: list[PlanStep]) -> str:
+    markers = {
+        "completed": "✓",
+        "current": "›",
+        "pending": "○",
+    }
+    return "\n".join(f"{markers.get(step.status, '○')} {step.text}" for step in steps)
 
 
 def _payload_turn(payload: dict[str, Any], default: int) -> int:

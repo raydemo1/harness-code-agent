@@ -1,4 +1,4 @@
-"""Textual-based TUI for Harness Code Agent."""
+"""Textual-based TUI for VeriForge."""
 from __future__ import annotations
 
 import logging
@@ -9,7 +9,6 @@ from pathlib import Path
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import TextArea
@@ -29,9 +28,7 @@ from .question import TuiQuestionProvider
 from .screens import ApprovalResult, QuestionResult
 from .state import SessionStatusSnapshot, TranscriptBlock, TuiState
 from .widgets import (
-    ContextBar,
     InputArea,
-    PlanPanel,
     StatusBar,
     TranscriptView,
 )
@@ -84,9 +81,9 @@ class OutputEvent(Message):
 # ── TuiApp ──────────────────────────────────────────────────────────────────
 
 class TuiApp(App):
-    """Full-screen Textual TUI for Harness Code Agent."""
+    """Full-screen Textual TUI for VeriForge."""
 
-    TITLE = "Harness Code Agent"
+    TITLE = "VeriForge"
     SUB_TITLE = "Local coding workspace"
 
     BINDINGS = [
@@ -117,43 +114,30 @@ class TuiApp(App):
     CSS = """
     Screen {
         layout: vertical;
-        background: #020617;
-        color: #e2e8f0;
-    }
-
-    #main-area {
-        height: 1fr;
+        background: $background;
+        color: $text;
     }
 
     #transcript {
         width: 1fr;
-        height: 100%;
-        padding: 1 2;
-        background: #020617;
+        height: 1fr;
+        padding: 1 1;
+        background: $background;
         overflow-x: hidden;
         scrollbar-size-horizontal: 0;
         scrollbar-size-vertical: 1;
     }
 
-    #plan-panel {
-        display: none;
-        width: 30;
-        height: 100%;
-        border-left: solid #1e293b;
-        padding: 1 2;
-        background: #0f172a;
-    }
-
     #input-area {
         height: auto;
-        max-height: 9;
-        margin: 0 2;
-        border: round #334155;
-        background: #0f172a;
+        max-height: 8;
+        margin: 0 1;
+        border: none;
+        background: #262626;
     }
 
     #input-area:focus-within {
-        border: round #3b82f6;
+        background: #303030;
     }
 
     #prompt-row {
@@ -163,8 +147,8 @@ class TuiApp(App):
     #input-prompt {
         width: 3;
         height: 3;
-        padding: 0 0 0 1;
-        color: #60a5fa;
+        padding: 1 0 0 1;
+        color: #fafafa;
         text-style: bold;
     }
 
@@ -180,19 +164,23 @@ class TuiApp(App):
     #input-text {
         height: 3;
         width: 1fr;
-        background: #0f172a;
+        background: #262626;
+        color: #fafafa;
         border: none;
+        padding: 1 1 0 1;
+        overflow-x: hidden;
+        scrollbar-size-horizontal: 0;
+    }
+
+    #input-text:focus {
+        background: #303030;
     }
 
     #status-bar {
         height: 1;
-        margin: 0 2;
-        background: #0f172a;
-        color: #94a3b8;
-    }
-
-    #context-bar {
-        display: none;
+        margin: 0 1;
+        background: $background;
+        color: $text-muted;
     }
 
     /* Approval panel */
@@ -263,7 +251,7 @@ class TuiApp(App):
         self._active_panel: str | None = None  # "approval" or "question"
 
     def run(self, *args, **kwargs) -> int:
-        """Run the Textual app and preserve the hca CLI exit-code contract."""
+        """Run the Textual app and preserve the VeriForge CLI exit-code contract."""
         super().run(*args, **kwargs)
         return 0
 
@@ -273,12 +261,9 @@ class TuiApp(App):
         return True
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="main-area"):
-            yield TranscriptView(id="transcript")
-            yield PlanPanel(id="plan-panel")
+        yield TranscriptView(id="transcript")
         yield InputArea(registry=self.registry, id="input-area")
         yield StatusBar(id="status-bar")
-        yield ContextBar(id="context-bar")
 
     def on_mount(self) -> None:
         """Create session and initialize state."""
@@ -582,6 +567,7 @@ class TuiApp(App):
         """Handle background thread output (compact, permission, etc.)."""
         if msg.title == "__refresh_only__":
             self._refresh_bars()
+            self._redraw_transcript()
             return
         self._output(msg.text, title=msg.title)
         self._refresh_bars()
@@ -795,18 +781,14 @@ class TuiApp(App):
     # ── Helpers ─────────────────────────────────────────────────────────────
 
     def _refresh_bars(self) -> None:
-        """Update StatusBar and ContextBar from current state."""
+        """Update the single terminal-native status line."""
         if self.state is None:
             return
         try:
             self._refresh_context_snapshot()
-            plan_panel = self.query_one("#plan-panel", PlanPanel)
-            plan_panel.update_steps(self.state.plan_steps)
-            plan_panel.display = bool(self.state.plan_steps and self.size.width >= 100)
             self.query_one("#status-bar", StatusBar).update_from_snapshot(self.state.snapshot)
-            self.query_one("#context-bar", ContextBar).update_from_snapshot(self.state.snapshot)
         except NoMatches:
-            log.debug("Status/Context bar not found in _refresh_bars")
+            log.debug("Status bar not found in _refresh_bars")
         except Exception:
             log.warning("Error refreshing bars", exc_info=True)
 

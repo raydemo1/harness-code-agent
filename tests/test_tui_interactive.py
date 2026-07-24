@@ -94,10 +94,8 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test() as pilot:
                 self.assertIsNotNone(app.query_one("#transcript"))
-                self.assertIsNotNone(app.query_one("#plan-panel"))
                 self.assertIsNotNone(app.query_one("#input-area"))
                 self.assertIsNotNone(app.query_one("#status-bar"))
-                self.assertIsNotNone(app.query_one("#context-bar"))
                 self.assertIsNotNone(app.query_one("#input-text"))
                 self.assertIsNotNone(app.query_one("#cmd-palette"))
         _run(_test())
@@ -107,23 +105,42 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
-                plan = app.query_one("#plan-panel")
                 transcript = app.query_one("#transcript")
                 input_text = app.query_one("#input-text", SubmitTextArea)
+                input_prompt = app.query_one("#input-prompt")
 
-                self.assertFalse(plan.display)
                 self.assertGreaterEqual(transcript.region.width, 76)
                 self.assertFalse(input_text.show_line_numbers)
+                self.assertEqual(input_text.size.height, 3)
+                self.assertEqual(input_prompt.size.height, 3)
+                self.assertEqual(input_prompt.content_region.y, input_text.cursor_screen_offset.y)
+                self.assertIn("Ask anything", input_text.render_line(0).text)
 
         _run(_test())
 
-    def test_wide_layout_shows_plan_only_after_plan_exists(self):
+    def test_composer_clears_hint_and_grows_only_for_real_newlines(self):
+        async def _test():
+            app = self._make_app()
+            async with app.run_test(size=(80, 24)) as pilot:
+                text_area = app.query_one("#input-text", SubmitTextArea)
+                await pilot.click("#input-text")
+                await pilot.press("h")
+                await pilot.pause()
+
+                self.assertEqual(text_area.size.height, 3)
+                self.assertNotIn("Ask anything", text_area.render_line(0).text)
+
+                await pilot.press("shift+enter")
+                await pilot.pause()
+                self.assertEqual(text_area.size.height, 3)
+                self.assertEqual(app.query_one("#input-prompt").size.height, 3)
+
+        _run(_test())
+
+    def test_wide_layout_renders_full_plan_update_in_transcript(self):
         async def _test():
             app = self._make_app()
             async with app.run_test(size=(120, 40)) as pilot:
-                plan = app.query_one("#plan-panel")
-                self.assertFalse(plan.display)
-
                 from harness_code_agent.tui.app import SessionEvent
                 event = SimpleNamespace(
                     to_dict=lambda: {
@@ -143,7 +160,12 @@ class TuiInteractiveTests(unittest.TestCase):
                 )
                 app.post_message(SessionEvent(event))
                 await pilot.pause()
-                self.assertTrue(plan.display)
+                self.assertGreaterEqual(app.query_one("#transcript").region.width, 116)
+                plan_blocks = [block for block in app.state.blocks if block.kind == "plan"]
+                self.assertEqual(len(plan_blocks), 1)
+                self.assertIn("inspect", plan_blocks[0].body)
+                self.assertIn("fix", plan_blocks[0].body)
+                self.assertIn("verify", plan_blocks[0].body)
 
         _run(_test())
 
@@ -464,7 +486,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertEqual(app.state.snapshot.status, "running")
         _run(_test())
 
-    def test_plan_panel_updates_from_plan_state_event(self):
+    def test_plan_update_event_contains_every_step(self):
         async def _test():
             app = self._make_app()
             async with app.run_test() as pilot:
@@ -488,10 +510,11 @@ class TuiInteractiveTests(unittest.TestCase):
                 app.post_message(SessionEvent(event))
                 await pilot.pause(0.01)
 
-                text = app.query_one("#plan-panel").render()
-                self.assertIn("write failing test", text.plain)
-                self.assertIn("implement panel", text.plain)
-                self.assertIn("run tests", text.plain)
+                plan_blocks = [block for block in app.state.blocks if block.kind == "plan"]
+                self.assertEqual(len(plan_blocks), 1)
+                self.assertIn("write failing test", plan_blocks[0].body)
+                self.assertIn("implement panel", plan_blocks[0].body)
+                self.assertIn("run tests", plan_blocks[0].body)
         _run(_test())
 
     def test_output_appears_in_transcript(self):

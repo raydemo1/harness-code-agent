@@ -19,7 +19,7 @@ from harness_code_agent.tui.question import TuiQuestionProvider
 from harness_code_agent.tui.commands import default_command_registry
 from harness_code_agent.tui.completion import current_mention_query, mention_candidates, replace_mention_fragment
 from harness_code_agent.tui.state import PlanStep, SessionStatusSnapshot, TranscriptBlock, TuiState
-from harness_code_agent.tui.widgets import block_to_rich, ContextBar, PlanPanel, StatusBar
+from harness_code_agent.tui.widgets import block_to_rich, StatusBar
 
 
 class TuiTests(unittest.TestCase):
@@ -849,6 +849,22 @@ class TuiRichRenderTests(unittest.TestCase):
         self.assertIn("Reading", str(rendered))
         self.assertNotIn("read_file", str(rendered))
 
+    def test_primary_transcript_content_is_not_dimmed(self):
+        user = block_to_rich(TranscriptBlock("user", "user turn 1", "fix the bug"))
+        tool = block_to_rich(
+            TranscriptBlock("tool", "run_bash(command=pytest)", "48 passed", "success")
+        )
+
+        self.assertNotIn("dim", str(user.renderables[1].style))
+        result_start = tool.plain.index("48 passed")
+        result_styles = [
+            span.style
+            for span in tool.spans
+            if span.end > result_start
+        ]
+        self.assertTrue(result_styles)
+        self.assertTrue(all("dim" not in str(style) for style in result_styles))
+
     def test_thought_block_renders_with_purple_border(self):
         block = TranscriptBlock("thought", "thinking", "thought for 12.3s", "thought")
         rendered = block_to_rich(block)
@@ -872,77 +888,30 @@ class TuiRichRenderTests(unittest.TestCase):
         plain = text.plain
         self.assertIn("coding-agent", plain)
         self.assertIn("gpt-4", plain)
-        self.assertIn("turn 3", plain)
+        self.assertIn("context left", plain)
+        self.assertNotIn("workspace-write", plain)
+        self.assertNotIn("turn 3", plain)
 
-    def test_context_bar_color_thresholds(self):
-        from rich.text import Text
-        bar = ContextBar()
-
-        # Green below the warning band.
-        bar.context_percent = 50
-        bar.permission_mode = "workspace-write"
-        text = bar.render()
-        self.assertIsInstance(text, Text)
-        self.assertIn("auto-compact @85%", text.plain)
-        self.assertIn("mode: workspace-write", text.plain)
-        self.assertTrue(any("50%" in text.plain[span.start:span.end] and "#a3be8c" in str(span.style) for span in text.spans))
-        bar.permission_mode = "llm-auto"
-        text = bar.render()
-        self.assertIn("mode: llm-auto", text.plain)
-        self.assertTrue(any("llm-auto" in text.plain[span.start:span.end] and "#ebcb8b" in str(span.style) for span in text.spans))
-        self.assertNotIn("Ctrl+P", text.plain)
-
-        # Yellow near the single 85% auto-compact trigger.
-        bar.context_percent = 80
-        text = bar.render()
-        self.assertIn("80%", text.plain)
-        self.assertTrue(any("80%" in text.plain[span.start:span.end] and "#ebcb8b" in str(span.style) for span in text.spans))
-
-        # Red at or above 85%.
-        bar.context_percent = 85
-        text = bar.render()
-        self.assertIn("85%", text.plain)
-        self.assertTrue(any("85%" in text.plain[span.start:span.end] and "#bf616a" in str(span.style) for span in text.spans))
-
-    def test_context_bar_uses_configured_compaction_threshold_label(self):
-        bar = ContextBar()
-        snapshot = SessionStatusSnapshot(
-            profile="coding-agent",
-            model="gpt-4o",
-            provider="auto",
-            permission_mode="workspace-write",
-            session_id="s1",
-            cwd=self.root,
-            context_tokens=10_000,
-            context_window_tokens=100_000,
-            context_compact_threshold=80_000,
+    def test_plan_update_block_renders_full_colored_progress(self):
+        rendered = block_to_rich(
+            TranscriptBlock(
+                "plan",
+                "Plan",
+                "✓ inspect the bug\n› implement the fix\n○ run tests",
+                "updated",
+            )
         )
 
-        bar.update_from_snapshot(snapshot)
-
-        self.assertIn("auto-compact @80%", bar.render().plain)
-
-    def test_plan_panel_renders_completed_steps_with_strike_style(self):
-        panel = PlanPanel()
-        panel.update_steps(
-            [
-                PlanStep("write failing test", "completed"),
-                PlanStep("implement panel", "current"),
-                PlanStep("run tests", "pending"),
-            ]
-        )
-
-        text = panel.render()
-        self.assertIn("write failing test", text.plain)
-        self.assertIn("implement panel", text.plain)
-        self.assertIn("run tests", text.plain)
-
-        struck_segments = [
-            text.plain[span.start:span.end]
-            for span in text.spans
+        lines = rendered.renderables[1]
+        self.assertIn("inspect the bug", lines.plain)
+        self.assertIn("implement the fix", lines.plain)
+        self.assertIn("run tests", lines.plain)
+        struck = [
+            lines.plain[span.start:span.end]
+            for span in lines.spans
             if "strike" in str(span.style)
         ]
-        self.assertIn("write failing test", struck_segments)
+        self.assertIn("inspect the bug", struck)
 
 
 class TuiAppTests(unittest.TestCase):
@@ -1004,7 +973,9 @@ class TuiAppTests(unittest.TestCase):
 
         plain = "\n".join(renderable.plain for renderable in welcome_rich(snapshot).renderables)
 
-        self.assertIn("session session-123", plain)
+        self.assertNotIn("gpt-4o", plain)
+        self.assertIn("workspace-write", plain)
+        self.assertIn(self.root.name, plain)
         self.assertIn("general", plain)
         self.assertNotIn("None", plain)
 
