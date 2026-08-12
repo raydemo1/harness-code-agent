@@ -38,8 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "Wrote eval ledger: "
         f"{summary['passed']}/{summary['total_tasks']} passed "
-        f"({summary['pass_rate'] * 100:.1f}%), "
-        f"{summary['fallback_2_0_tasks']} fallback from 2.0."
+        f"({summary['pass_rate'] * 100:.1f}%)."
     )
     return 0
 
@@ -51,7 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-include-jobs",
         action="store_true",
-        help="Do not scan the top-level jobs root for legacy Harbor job summaries.",
+        help="Do not scan the top-level jobs root for Harbor job summaries.",
     )
     parser.add_argument(
         "--apply-retention",

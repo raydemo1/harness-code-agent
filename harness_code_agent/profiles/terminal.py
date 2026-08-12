@@ -1,5 +1,5 @@
 """
-Terminal task profile — optimized for Terminal-Bench-2.
+Terminal task profile — optimized for Terminal-Bench 2.1.
 
 Key constraints:
   - 30 min (1800s) hard timeout per task
@@ -49,7 +49,7 @@ class TerminalProfile(BaseProfile):
         return "terminal"
 
     def description(self) -> str:
-        return "Solve terminal/CLI tasks (Terminal-Bench-2 style)"
+        return "Solve terminal/CLI tasks (Terminal-Bench 2.1)"
 
     def main_agent(self) -> AgentConfig:
         return AgentConfig(

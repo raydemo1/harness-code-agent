@@ -422,18 +422,13 @@ def select_final_results(attempts: list[Attempt]) -> list[TaskFinal]:
     for task in tasks:
         task_attempts = [attempt for attempt in attempts if attempt.task == task]
         v21 = [attempt for attempt in task_attempts if attempt.benchmark_version == "2.1"]
-        candidates = v21 or [attempt for attempt in task_attempts if attempt.benchmark_version == "2.0"]
-        if not candidates:
+        if not v21:
             continue
-        selected = _select_best_attempt(candidates)
+        selected = _select_best_attempt(v21)
         reason = (
             "latest_success_2.1"
-            if selected.benchmark_version == "2.1" and selected.status == "passed"
-            else "latest_failure_2.1"
-            if selected.benchmark_version == "2.1"
-            else "fallback_2.0_latest_success"
             if selected.status == "passed"
-            else "fallback_2.0_latest_failure"
+            else "latest_failure_2.1"
         )
         finals.append(
             TaskFinal(
@@ -514,7 +509,6 @@ def build_summary(
         "main_passed": main_passed,
         "main_failed": len(failed),
         "source_versions": dict(sorted(source_versions.items())),
-        "fallback_2_0_tasks": sum(1 for item in finals if item.source_version == "2.0"),
         "excluded_task_count": len(excluded_finals),
         "configured_excluded_task_count": len(configured_excluded_tasks),
         "excluded_with_results_count": len(excluded_finals),
@@ -663,7 +657,6 @@ def render_summary_markdown(ledger: dict[str, Any]) -> str:
         f"- Pass rate: **{_percent(summary.get('pass_rate'))}**",
         f"- Main task results recorded: **{summary.get('evaluated_main_tasks', 0)}**",
         f"- Source versions: {_source_version_line(summary.get('source_versions') or {})}",
-        f"- 2.0 fallback tasks: **{summary.get('fallback_2_0_tasks', 0)}**",
         f"- Terminal-Bench 2.1 attempted main tasks: **{summary.get('terminal_bench_2_1_attempted_tasks', 0)}**",
         f"- Terminal-Bench 2.1 attempted tasks including excluded: **{summary.get('terminal_bench_2_1_attempted_tasks_including_excluded', 0)}**",
         f"- Strong-vision tasks counted as failures: **{summary.get('configured_excluded_task_count', summary.get('excluded_task_count', 0))}**",
@@ -727,22 +720,6 @@ def render_summary_markdown(ledger: dict[str, Any]) -> str:
         "| --- | --- | ---: | --- |",
     ])
     lines.extend(_coverage_rows(attempts, version="2.1"))
-    fallback_rows = [item for item in finals if item.get("source_version") == "2.0"]
-    lines.extend([
-        "",
-        "## 2.0 Fallback Tasks",
-        "",
-        "| Task | Status | Selection | Run |",
-        "| --- | --- | --- | --- |",
-    ])
-    if fallback_rows:
-        for item in fallback_rows:
-            lines.append(
-                f"| {_cell(item.get('task'))} | {_cell(item.get('status'))} | "
-                f"{_cell(item.get('selection_reason'))} | {_cell(item.get('run_name'))} |"
-            )
-    else:
-        lines.append("| none |  |  |  |")
     lines.extend([
         "",
         "## Failed Task Trajectories",
@@ -796,8 +773,6 @@ def _benchmark_version(name: str, dirname: str, payload: dict[str, Any] | None) 
     text = f"{name} {dirname} {json.dumps(payload or {}, ensure_ascii=False)[:2000]}".lower()
     if "2.1" in text or "2-1" in text or "tbench21" in text or "terminal-bench-2-1" in text:
         return "2.1"
-    if "2.0" in text or "terminal-bench-2" in text or "terminal_bench_2" in text:
-        return "2.0"
     if "tbench" in text or "terminal-bench" in text or "terminal_bench" in text:
         return "2.1"
     return "unknown"
@@ -806,13 +781,11 @@ def _benchmark_version(name: str, dirname: str, payload: dict[str, Any] | None) 
 def _benchmark_name_from_version(version: str) -> str:
     if version == "2.1":
         return "Terminal-Bench 2.1"
-    if version == "2.0":
-        return "Terminal-Bench 2.0"
     return "Terminal-Bench"
 
 
 def _is_terminal_bench_version(version: str) -> bool:
-    return version in {"2.0", "2.1"}
+    return version == "2.1"
 
 
 def _run_timestamp(run_name: str, summary_path: Path) -> str:
@@ -1081,7 +1054,6 @@ def _results_json(ledger: dict[str, Any]) -> dict[str, Any]:
         "main_passed": summary.get("main_passed", 0),
         "main_failed": summary.get("main_failed", 0),
         "source_versions": summary.get("source_versions") or {},
-        "fallback_2_0_tasks": summary.get("fallback_2_0_tasks", 0),
         "excluded_task_count": summary.get("excluded_task_count", 0),
         "configured_excluded_task_count": summary.get("configured_excluded_task_count", 0),
         "excluded_with_results_count": summary.get("excluded_with_results_count", 0),

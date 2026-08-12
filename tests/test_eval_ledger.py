@@ -17,50 +17,6 @@ class EvalLedgerTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_uses_2_1_when_same_task_exists_in_2_0_and_2_1(self):
-        from eval.scripts.eval_ledger import rebuild_eval_ledger
-
-        self._write_summary(
-            "2026-06-27_100000_tbench_old",
-            benchmark_name="Terminal-Bench 2.0 24-task subset",
-            task_set="24task",
-            task_results=[self._task("same-task", "passed", reward=1.0, tool_calls=3)],
-        )
-        self._write_summary(
-            "2026-06-28_100000_tbench_new",
-            benchmark_name="Terminal-Bench 2.1 24-task subset",
-            task_set="24task",
-            task_results=[self._task("same-task", "failed", reward=0.0, tool_calls=9)],
-        )
-
-        ledger = rebuild_eval_ledger(results_root=self.results, jobs_root=self.jobs)
-
-        final = ledger["final_results"][0]
-        self.assertEqual(final["task"], "same-task")
-        self.assertEqual(final["source_version"], "2.1")
-        self.assertEqual(final["status"], "failed")
-        self.assertEqual(final["selection_reason"], "latest_failure_2.1")
-        self.assertEqual(ledger["summary"]["passed"], 0)
-
-    def test_falls_back_to_2_0_when_task_has_no_2_1_attempts(self):
-        from eval.scripts.eval_ledger import rebuild_eval_ledger
-
-        self._write_summary(
-            "2026-06-27_100000_tbench_old",
-            benchmark_name="Terminal-Bench 2.0 24-task subset",
-            task_set="24task",
-            task_results=[self._task("old-only", "passed", reward=1.0, tool_calls=2)],
-        )
-
-        ledger = rebuild_eval_ledger(results_root=self.results, jobs_root=self.jobs)
-
-        final = ledger["final_results"][0]
-        self.assertEqual(final["task"], "old-only")
-        self.assertEqual(final["source_version"], "2.0")
-        self.assertEqual(final["selection_reason"], "fallback_2.0_latest_success")
-        self.assertEqual(ledger["summary"]["fallback_2_0_tasks"], 1)
-        self.assertEqual(ledger["summary"]["passed"], 1)
-
     def test_raw_harbor_result_without_summary_is_scanned(self):
         from eval.scripts.eval_ledger import rebuild_eval_ledger
 
