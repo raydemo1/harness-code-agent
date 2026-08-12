@@ -2,21 +2,19 @@
 
 VeriForge — Verifiable Coding-Agent Runtime
 
-VeriForge 是一个面向真实本地仓库工作的 autonomous coding agent 框架，重点是把 agent 的执行过程做成可治理、可验证、可复盘的工程化运行时。
+VeriForge 是一个面向真实代码仓库的 coding-agent runtime。它把 profile、工具权限、会话记录、上下文管理、失败恢复、验收检查和 benchmark adapter 放在同一套运行时里，让 agent 的每一步都有记录，也有验证入口。
 
-它不是一组 prompt，也不是把 shell 随便交给模型。VeriForge 更像是给模型装了一套工程化运行时：它知道什么时候该问、什么时候该读代码、什么时候能改文件、什么时候必须验证、什么时候该承认卡住，以及如何把整个过程记录成可以复盘的证据。
-
-VeriForge 基于 OpenAI-compatible Chat Completions API，可以接 DeepSeek、OpenAI 或其他兼容服务。它把 profile、工具权限、会话记录、上下文压缩、恢复策略、验收检查、浏览器验证和 benchmark 适配组合成一个本地 coding agent runtime。日常可以用它修 bug、重构、写测试、做 review、生成计划、构建小型 Web 应用；评测时也可以用同一套 runtime 跑 Terminal-Bench / Claw-SWE-Bench 风格任务。
+项目基于 OpenAI-compatible Chat Completions API，可接入 DeepSeek、OpenAI 等兼容服务。平时可以用它修 bug、补测试、做 review、写计划或构建小型 Web 应用；需要评测时，仍然使用同一套 runtime 跑 Terminal-Bench 和 Claw-SWE-Bench 风格任务。
 
 ## TUI 预览
 
 ![VeriForge TUI：计划进度、对话区、输入框与运行状态](https://raw.githubusercontent.com/raydemo1/veriforge-agent/main/docs/images/veriforge-tui.png)
 
-终端界面将任务计划直接呈现在对话流中，并持续展示当前 Profile、剩余上下文与模型状态；工具执行、恢复过程和验证结果都保留在同一条可复盘的运行轨迹里。
+终端界面会把任务计划、当前 profile 和运行状态放在对话流里。工具调用、恢复过程和验收结果则写进同一条 session 轨迹，之后可以继续运行或回看。
 
 ## 为什么做这个
 
-真实软件任务里，模型本身强不强只是一部分。很多失败并不是因为模型完全不会，而是因为 agent loop 不够稳：
+真实软件任务里，失败经常来自 agent loop 本身，而不只是模型能力：
 
 - 没读清楚代码就开始改。
 - 读到旧输出后不知道它已经失效。
@@ -25,24 +23,20 @@ VeriForge 基于 OpenAI-compatible Chat Completions API，可以接 DeepSeek、O
 - 一次 Docker、代理或依赖波动被误记成能力失败。
 - 长任务跑完后没有成本、tokens、工具调用和失败轨迹的可靠台账。
 
-VeriForge 解决的是这些“模型外面”的问题。它给模型提供一个更可靠的执行环境，让模型的能力真正落到仓库、测试和评测结果上。
+VeriForge 把这些边界放进 runtime：什么时候读代码、什么时候改文件、什么时候重试、什么时候验收，都有对应的工具和 middleware 负责。
 
-## 当前效果
-
-我更愿意把这个结果看成一件事：VeriForge 不是靠换一个更大的模型来变强，而是在 `deepseek-v4-flash` 这个更轻的模型上，把 agent runtime 该做的事情补齐了。
-
-当前本地 Terminal-Bench 2.1 ledger 用完整 89 个任务做分母，强视觉任务也计入失败：
+## 一次完整评测
 
 | 对比项 | 口径 | 结果 |
 | --- | --- | ---: |
-| VeriForge 本地结果 | Terminal-Bench 2.1 task ledger，`deepseek-v4-flash`，high reasoning，不是 Pro/Max | `55/89` passed，`61.8%` |
-| DeepSeek 官方参考 | [DeepSeek-V4-Flash model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) 中的 Terminal Bench 2.0 Acc，V4-Flash-Max | `56.9%` |
+| VeriForge 本地结果 | `DeepSeek-V4-Flash-Preview` + VeriForge，Terminal-Bench 2.1 task ledger | `56/89` passed，`62.9%` |
+| DeepSeek 官方参考 | `DeepSeek-V4-Flash-Preview` + 官方 DeepSeek Harness，Terminal-Bench 2.1，Max reasoning | `61.8%` |
 
-和 DeepSeek 官方 V4-Flash-Max 的 `56.9%` 相比，VeriForge 当前结果高出 `4.9` 个百分点。这里没有把它包装成严格同场 leaderboard 复现：我们的结果来自本地 Terminal-Bench 2.1 ledger，官方数字来自 DeepSeek 模型卡里的 Terminal Bench 2.0 口径。但这个对比仍然很有意义，因为 VeriForge 用的是 Flash high reasoning，不是 Flash Max，也不是 Pro/Max，却把完整 task 分母上的完成率推到了更高的位置。
+本地结果来自 VeriForge，官方参考来自 DeepSeek Harness；两者使用同一个模型版本和 Terminal-Bench 2.1 评测集，但推理强度按各自运行配置记录。
 
-这正是这个框架想证明的东西：模型能力只是起点，真正决定长任务能不能落地的，是 profile、工具治理、恢复策略、缓存友好上下文和可复盘的 eval ledger。VeriForge 做的是把这些工程层补上，让同一个模型系列在真实终端任务里更少卡死、更少误判、更稳定地走到可验证结果。
+我在这个项目里更关心模型之外的部分：profile、工具治理、失败恢复、上下文管理，以及一份能从原始产物复盘出来的评测账本。
 
-其他已记录的运行时收益：
+其他运行记录：
 
 | 方向 | 结果 |
 | --- | --- |
@@ -50,15 +44,15 @@ VeriForge 解决的是这些“模型外面”的问题。它给模型提供一�
 | Memory A/B suite | tool calls `-50.0%`，elapsed `-18.8%`，tokens `-44.7%` |
 | Latency smoke | turn p95 `22542ms`，LLM response p95 `7983ms`，TTFT p95 `3348ms` |
 
-当前人类可读评估结果见 [eval/results/SUMMARY.md](eval/results/SUMMARY.md)。重新从 raw artifacts 汇总：
+人类可读的评估摘要在 [eval/results/SUMMARY.md](eval/results/SUMMARY.md)。需要重新汇总时运行：
 
 ```bash
 python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-root jobs
 ```
 
-## 它适合做什么
+## 能拿来做什么
 
-VeriForge 适合需要 agent 真正在本地项目里工作的场景：
+它主要用于这些场景：
 
 - 自动修 bug、补测试、跑验证，并解释改动。
 - 读仓库后回答架构、调用链、配置和行为问题。
@@ -70,7 +64,7 @@ VeriForge 适合需要 agent 真正在本地项目里工作的场景：
 
 ## 核心设计
 
-VeriForge 的核心不是“让模型更自由”，而是“让模型在正确边界里更自主”。
+模型负责判断和生成，runtime 负责把工具、权限、状态和验收串起来。
 
 | 组件 | 作用 |
 | --- | --- |
@@ -81,7 +75,7 @@ VeriForge 的核心不是“让模型更自由”，而是“让模型在正确�
 | Session log | 记录事件、观察、工具结果、LLM usage 和 checkpoint，方便复盘 |
 | Eval ledger | 从 raw 结果重建 task-level 真相，避免单次中断或环境波动污染总结果 |
 
-一句话概括：模型负责判断和生成，VeriForge 负责给它一个可治理、可验证、可复盘的工作现场。
+一句话概括：让 agent 在真实仓库里工作，同时把过程留下来、把结果验出来。
 
 ## 项目结构
 
@@ -263,7 +257,7 @@ Skills 采用渐进式披露。VeriForge 不会把所有长规则常驻塞进 pr
 - 面向 agent 的工程纪律只放 name、description、path，相关时再按需加载正文。
 - 文件和历史 session 用 `@file:`、`@session:` 明确引用。
 
-这样既保留了专业工作流，又不会把上下文窗口浪费在暂时用不上的长文档上。
+这样专业工作流可以复用，常驻 prompt 也不会被暂时用不上的长文档占满。
 
 ## 会话、快照和复盘
 
@@ -304,7 +298,7 @@ veriforge session show latest
 
 ## 工具运行时
 
-VeriForge 的工具不是简单丢给模型自由调用，而是经过权限、lane、审批和 middleware 管理。
+工具调用统一经过权限、lane、审批和 middleware 管理。
 
 内置工具包括：
 
@@ -319,7 +313,7 @@ VeriForge 的工具不是简单丢给模型自由调用，而是经过权限、l
 - 可选浏览器验证
 - MCP server 暴露的 tools
 
-Runtime 还会注入循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。这部分是 VeriForge 的关键价值之一：模型可以尝试，但尝试必须留下证据，也必须能被运行时纠偏。
+Runtime 还会处理循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。模型可以尝试，运行时会记录这些尝试，并在必要时纠偏。
 
 ## 权限模式
 
