@@ -160,7 +160,7 @@ def _exit(session: Any, args: list[str], registry: SlashCommandRegistry) -> Comm
 
 def _sessions(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     _no_args(args, "Usage: /sessions")
-    from ..core.interactive import format_sessions
+    from ..core.formatters import format_sessions
 
     return CommandResult(format_sessions(session.session_store))
 
@@ -179,7 +179,7 @@ def _resume(session: Any, args: list[str], registry: SlashCommandRegistry) -> Co
 
 def _fork(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     _require_arg(args, "Usage: /fork <session-id>")
-    from ..core.interactive import format_fork
+    from ..core.formatters import format_fork
 
     return CommandResult(format_fork(session.session_store, args[0]))
 
@@ -187,14 +187,14 @@ def _fork(session: Any, args: list[str], registry: SlashCommandRegistry) -> Comm
 def _rollback(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     if len(args) != 2:
         raise ValueError("Usage: /rollback <session-id> <path>")
-    from ..core.interactive import format_rollback_session_file
+    from ..core.formatters import format_rollback_session_file
 
     return CommandResult(format_rollback_session_file(session.session_store, args[0], args[1]))
 
 
 def _profiles(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     _no_args(args, "Usage: /profiles")
-    from ..core.interactive import format_profiles
+    from ..core.formatters import format_profiles
 
     return CommandResult(format_profiles())
 
@@ -213,7 +213,7 @@ def _checkpoint(session: Any, args: list[str], registry: SlashCommandRegistry) -
 
 def _doctor(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     _no_args(args, "Usage: /doctor")
-    from ..core.interactive import format_doctor
+    from ..core.formatters import format_doctor
 
     text, _failures = format_doctor(session.cwd, mcp_manager=getattr(session, "mcp_manager", None))
     return CommandResult(text)
@@ -232,7 +232,7 @@ def _mcp(session: Any, args: list[str], registry: SlashCommandRegistry) -> Comma
 def _config(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     if args != ["show"]:
         raise ValueError("Usage: /config show")
-    from ..core.interactive import format_config_show
+    from ..core.formatters import format_config_show
 
     return CommandResult(format_config_show(session.cwd))
 

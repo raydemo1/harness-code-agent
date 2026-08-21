@@ -211,12 +211,6 @@ class SessionStore:
         summary_path.write_text(summary + "\n", encoding="utf-8")
         return summary
 
-    def read_summary(self, session_id: str) -> str:
-        summary_path = self._summary_path(session_id)
-        if not summary_path.exists():
-            raise FileNotFoundError(f"Session summary not found: {session_id}")
-        return summary_path.read_text(encoding="utf-8")
-
     def read_lineage(self, session_id: str) -> list[dict[str, Any]]:
         lineage = []
         seen = set()

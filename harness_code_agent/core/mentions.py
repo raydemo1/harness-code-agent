@@ -9,9 +9,6 @@ from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
 
 
-FILE_CONTEXT_LIMIT = 60_000
-
-
 @dataclass(frozen=True)
 class Mention:
     raw: str
@@ -140,13 +137,6 @@ def render_mention_context(resolved: list[ResolvedMention]) -> str:
         parts.append(item.content)
         parts.append("```")
     return "\n".join(parts)
-
-
-def format_turn_with_mentions(user_text: str, resolved: list[ResolvedMention]) -> str:
-    context = render_mention_context(resolved)
-    if not context:
-        return user_text
-    return f"{context}\n\nUser turn:\n{user_text}"
 
 
 def _resolve_file_mention(mention: Mention, root: Path) -> ResolvedMention:

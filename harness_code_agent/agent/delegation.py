@@ -513,9 +513,31 @@ def _tool_path(tool_name: str, tool_args: dict) -> str:
     return str(tool_args.get("path") or ".")
 
 
+def _normalize_relative_path(path: str) -> str:
+    """Collapse '.', '..' and duplicate separators without touching the filesystem."""
+    parts: list[str] = []
+    for part in path.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
 def _path_allowed(path: str, allowed_paths: list[str]) -> bool:
-    normalized = path.replace("\\", "/").lstrip("./")
-    return any(normalized == allowed.strip("./") or normalized.startswith(allowed.strip("./").rstrip("/") + "/") for allowed in allowed_paths)
+    normalized = _normalize_relative_path(path)
+    if not normalized:
+        return False
+    for allowed in allowed_paths:
+        allowed_norm = _normalize_relative_path(allowed)
+        if not allowed_norm:
+            continue
+        if normalized == allowed_norm or normalized.startswith(allowed_norm + "/"):
+            return True
+    return False
 
 
 def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:

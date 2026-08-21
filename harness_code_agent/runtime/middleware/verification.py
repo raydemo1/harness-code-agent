@@ -182,10 +182,6 @@ class PreExitVerificationMiddleware(AgentMiddleware):
         return None
 
 
-VERDICT_PASS = 0
-VERDICT_WARN = 1
-VERDICT_BLOCK = 2
-
 
 class StaticVerifierMiddleware(AgentMiddleware):
     """Pre-exit lint gate for Python files changed in the current turn.

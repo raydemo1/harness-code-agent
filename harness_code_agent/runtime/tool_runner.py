@@ -34,7 +34,6 @@ def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
 
         # Absolute path → make relative to workspace
         if path.startswith("/"):
-            import re
             # Strip common workspace prefixes
             for prefix in ["/app/", "/home/user/", "/workspace/"]:
                 if path.startswith(prefix):
@@ -66,7 +65,6 @@ def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
             return arguments, "[auto-fix] Empty command. You must specify a command to run."
 
         # Detect interactive commands that will hang
-        import re
         interactive_cmds = ["vim", "nano", "vi", "less", "more", "top", "htop"]
         first_word = command.strip().split()[0] if command.strip() else ""
         if first_word in interactive_cmds:
@@ -298,19 +296,6 @@ def _invoke_registered_tool(
         if key not in kwargs and (key in parameters or accepts_kwargs):
             kwargs[key] = value
     return fn(**kwargs)
-
-
-def _finalize_tool_result(
-    tool_result: ToolResult,
-    *,
-    tool_context: ToolContext | None,
-    agent_name: str | None,
-) -> str:
-    return _finalize_tool_result_object(
-        tool_result,
-        tool_context=tool_context,
-        agent_name=agent_name,
-    ).to_text()
 
 
 def _finalize_tool_result_object(

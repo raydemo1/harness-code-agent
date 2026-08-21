@@ -32,7 +32,7 @@ from .builtins.interaction import ask_user
 from .builtins.memory_tools import memory_search, read_memory_file, remember_memory
 from .builtins.parallel import parallel_agents, parallel_commands
 from .builtins.planning import update_plan_state
-from .builtins.registry import BUILTIN_TOOL_REGISTRY, TOOL_DISPATCH, TOOL_SCHEMAS
+from .builtins.registry import BUILTIN_TOOL_REGISTRY, TOOL_SCHEMAS
 from .builtins.schemas import BROWSER_TOOL_SCHEMAS, CORE_TOOL_SCHEMAS
 from .builtins.shell import (
     _build_shell_output,

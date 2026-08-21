@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
@@ -17,6 +18,8 @@ log = logging.getLogger("harness.tui")
 
 _STREAM_FLUSH_DELAY_SECONDS = 0.005
 _STREAM_FLUSH_MAX_CHARS = 4_096
+_CONTEXT_SNAPSHOT_MIN_INTERVAL_SECONDS = 1.0
+_SPINNER_INTERVAL_SECONDS = 0.12
 
 from .. import config
 from ..agent.cancellation import CancelledError, CancellationToken
@@ -58,7 +61,6 @@ class SubmitComplete(Message):
 
 
 class SubmitCancelled(Message):
-    """Submit was cancelled by user."""
     def __init__(self) -> None:
         super().__init__()
 
@@ -88,8 +90,6 @@ class TuiApp(App):
 
     BINDINGS = [
         Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
-        Binding("ctrl+t", "toggle_thought", "Toggle thought", show=False, priority=True),
-        Binding("ctrl+d", "toggle_details", "Details", show=False, priority=True),
         Binding("ctrl+o", "observe", "Observe", show=False, priority=True),
         # Panel keys: check_action guards these to only fire when a panel is active.
         # priority=True ensures they are checked before widget-level handlers so
@@ -133,11 +133,11 @@ class TuiApp(App):
         max-height: 8;
         margin: 0 1;
         border: none;
-        background: #262626;
+        background: $surface;
     }
 
     #input-area:focus-within {
-        background: #303030;
+        background: $panel;
     }
 
     #prompt-row {
@@ -148,7 +148,7 @@ class TuiApp(App):
         width: 3;
         height: 3;
         padding: 1 0 0 1;
-        color: #fafafa;
+        color: $text;
         text-style: bold;
     }
 
@@ -156,16 +156,16 @@ class TuiApp(App):
         display: none;
         height: auto;
         max-height: 10;
-        background: #111827;
-        border-bottom: solid #334155;
+        background: $panel;
+        border-bottom: solid $border-blurred;
         padding: 0 1;
     }
 
     #input-text {
         height: 3;
         width: 1fr;
-        background: #262626;
-        color: #fafafa;
+        background: $surface;
+        color: $text;
         border: none;
         padding: 1 1 0 1;
         overflow-x: hidden;
@@ -173,7 +173,7 @@ class TuiApp(App):
     }
 
     #input-text:focus {
-        background: #303030;
+        background: $panel;
     }
 
     #status-bar {
@@ -186,7 +186,7 @@ class TuiApp(App):
     /* Approval panel */
     .approval-panel {
         height: auto;
-        border: solid #b16286;
+        border: solid $accent;
         padding: 1;
     }
 
@@ -202,7 +202,7 @@ class TuiApp(App):
     /* Question panel */
     .question-panel {
         height: auto;
-        border: solid #3874cb;
+        border: solid $primary;
         padding: 1;
     }
 
@@ -242,6 +242,7 @@ class TuiApp(App):
         self._submitting = False
         self._pending_submissions: deque[str] = deque()
         self._cancellation_token = CancellationToken()
+        self._last_context_refresh = 0.0
 
         # Approval/question state
         self._approval_event: threading.Event | None = None
@@ -303,7 +304,7 @@ class TuiApp(App):
         )
         # Process any events that arrived before state was ready
         for event in self._pending_events:
-            self._handle_event(event)
+            self._process_session_event(event)
         self._pending_events.clear()
 
         # Wire up input area
@@ -316,6 +317,9 @@ class TuiApp(App):
 
         # Update status/context bars
         self._refresh_bars()
+
+        # Animate the status spinner while a turn is active
+        self.set_interval(_SPINNER_INTERVAL_SECONDS, self._advance_spinner)
 
         # Focus input
         input_area.focus_input()
@@ -362,25 +366,6 @@ class TuiApp(App):
                 return False
         return False
 
-    def _handle_event(self, event) -> None:
-        """Process a raw session event (not a Textual Message). Used in on_mount."""
-        data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
-        event_type = data.get("type")
-        if event_type == "turn_started":
-            self._clear_pending_stream_deltas()
-            self._streaming_current_response = False
-            self._stream_header_printed = False
-
-        block = self.state.apply_event(event)
-        render_block = None if event_type == "assistant_message" and self._streaming_current_response else block
-
-        added = self._add_block_if_new(block)
-        if render_block is not None and added:
-            transcript = self.query_one("#transcript", TranscriptView)
-            transcript.append_block(render_block)
-
-        self._refresh_bars()
-
     # ── Async submit ────────────────────────────────────────────────────────
 
     def _submit_async(self, text: str) -> bool:
@@ -390,7 +375,7 @@ class TuiApp(App):
             return False
         if self._submitting:
             self._pending_submissions.append(text)
-            self._output(f"queued: {_preview_submission(text)}", title="queued")
+            self._output(_preview_submission(text), title="queued")
             return True
         return self._start_submission(text)
 
@@ -457,65 +442,11 @@ class TuiApp(App):
 
     def on_session_event(self, msg: SessionEvent) -> None:
         """Handle session event from background thread."""
-        data = msg.event.to_dict() if hasattr(msg.event, "to_dict") else dict(msg.event)
-        event_type = data.get("type")
-        if event_type == "turn_started":
-            self._clear_pending_stream_deltas()
-            self._streaming_current_response = False
-            self._stream_header_printed = False
-
-        if (
-            self._streaming_current_response
-            and self._pending_stream_chars
-            and event_type not in {"thought_started", "thought_finished"}
-        ):
-            self._flush_streaming_pending(drain_all=True)
-
-        if (
-            self._streaming_current_response
-            and event_type not in {"assistant_message", "thought_started", "thought_finished"}
-        ):
-            transcript = self.query_one("#transcript", TranscriptView)
-            active_block = transcript.flush_streaming()
-            self._add_block_if_new(active_block)
-            self._streaming_current_response = False
-            self._stream_header_printed = False
-            self._redraw_transcript()
-
-        block = self.state.apply_event(msg.event)
-        render_block = block
-
-        # If we streamed the response, flush the buffered text as a complete block
-        streamed_assistant_message = False
-        if event_type == "assistant_message" and self._streaming_current_response:
-            transcript = self.query_one("#transcript", TranscriptView)
-            transcript.flush_streaming()
-            render_block = None
-            streamed_assistant_message = True
-            self._streaming_current_response = False
-            self._stream_header_printed = False
-
-        added = self._add_block_if_new(block)
-        if streamed_assistant_message:
-            self._redraw_transcript()
-        elif render_block is not None and added:
-            transcript = self.query_one("#transcript", TranscriptView)
-            transcript.append_block(render_block)
-
-        self._refresh_bars()
+        self._process_session_event(msg.event)
 
     def on_submit_complete(self, msg: SubmitComplete) -> None:
         """Handle submit completion."""
-        # Flush any remaining streaming buffer
-        try:
-            self._flush_streaming_pending(drain_all=True)
-            transcript = self.query_one("#transcript", TranscriptView)
-            block = transcript.flush_streaming()
-            self._streaming_current_response = False
-            self._stream_header_printed = False
-            if self._add_block_if_new(block):
-                self._redraw_transcript()
-        except NoMatches:
+        if not self._finalize_streaming():
             self._submitting = False
             return
         result = msg.result
@@ -529,33 +460,19 @@ class TuiApp(App):
 
     def on_submit_cancelled(self, msg: SubmitCancelled) -> None:
         """Handle submit cancellation."""
-        try:
-            self._flush_streaming_pending(drain_all=True)
-            transcript = self.query_one("#transcript", TranscriptView)
-            block = transcript.flush_streaming()
-            self._streaming_current_response = False
-            self._stream_header_printed = False
-            self._add_block_if_new(block)
-        except NoMatches:
+        if not self._finalize_streaming():
             self._submitting = False
             return
         block = TranscriptBlock("status", "turn cancelled", "Ctrl-C pressed", "cancelled")
         self.state.add_block(block)
-        transcript.append_block(block)
+        self._append_block(block)
         self._submitting = False
         self._input_enabled(True)
         self._drain_pending_submissions()
 
     def on_submit_error(self, msg: SubmitError) -> None:
         """Handle submit error."""
-        try:
-            self._flush_streaming_pending(drain_all=True)
-            transcript = self.query_one("#transcript", TranscriptView)
-            block = transcript.flush_streaming()
-            self._streaming_current_response = False
-            self._stream_header_printed = False
-            self._add_block_if_new(block)
-        except NoMatches:
+        if not self._finalize_streaming():
             self._submitting = False
             return
         self._output(f"Error: {msg.error}", title="error")
@@ -589,8 +506,7 @@ class TuiApp(App):
         """Write a status block to the transcript."""
         block = TranscriptBlock("status", title, text)
         self.state.add_block(block)
-        transcript = self.query_one("#transcript", TranscriptView)
-        transcript.append_block(block)
+        self._append_block(block)
 
     def _schedule_stream_flush(self) -> None:
         if self._stream_flush_scheduled:
@@ -615,7 +531,6 @@ class TuiApp(App):
             transcript.begin_streaming()
             self._stream_header_printed = True
         self._streaming_current_response = True
-        self.state.append_streaming_text(delta)
         transcript.append_streaming(delta)
         self._redraw_transcript()
         if self._pending_stream_chars:
@@ -659,16 +574,6 @@ class TuiApp(App):
                 self.session.interrupt_current_shell()
             except Exception:
                 log.debug("Failed to interrupt shell during cancel", exc_info=True)
-
-    def action_toggle_thought(self) -> None:
-        """Toggle thought detail visibility."""
-        if self.state:
-            self.state.toggle_thought_details()
-
-    def action_toggle_details(self) -> None:
-        """Toggle the most recent folded turn details."""
-        if self.state and self.state.toggle_latest_turn_details():
-            self._redraw_transcript()
 
     def action_observe(self) -> None:
         """Open the temporary observability dashboard."""
@@ -780,6 +685,92 @@ class TuiApp(App):
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 
+    def _process_session_event(self, event) -> None:
+        """Apply one session event to state and transcript.
+
+        Handles both pre-mount buffered events and live events.
+        """
+        data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        event_type = data.get("type")
+        if event_type == "turn_started":
+            self._clear_pending_stream_deltas()
+            self._streaming_current_response = False
+            self._stream_header_printed = False
+
+        if (
+            self._streaming_current_response
+            and self._pending_stream_chars
+            and event_type not in {"thought_started", "thought_finished"}
+        ):
+            self._flush_streaming_pending(drain_all=True)
+
+        if (
+            self._streaming_current_response
+            and event_type not in {"assistant_message", "thought_started", "thought_finished"}
+        ):
+            try:
+                transcript = self.query_one("#transcript", TranscriptView)
+            except NoMatches:
+                transcript = None
+            if transcript is not None:
+                active_block = transcript.flush_streaming()
+                self._add_block_if_new(active_block)
+                self._streaming_current_response = False
+                self._stream_header_printed = False
+                self._redraw_transcript()
+
+        block = self.state.apply_event(event)
+        render_block = block
+
+        # If we streamed the response, flush the buffered text as a complete block
+        streamed_assistant_message = False
+        if event_type == "assistant_message" and self._streaming_current_response:
+            try:
+                transcript = self.query_one("#transcript", TranscriptView)
+            except NoMatches:
+                transcript = None
+            if transcript is not None:
+                transcript.flush_streaming()
+            render_block = None
+            streamed_assistant_message = True
+            self._streaming_current_response = False
+            self._stream_header_printed = False
+
+        added = self._add_block_if_new(block)
+        if streamed_assistant_message:
+            self._redraw_transcript()
+        elif render_block is not None and added:
+            self._append_block(render_block)
+
+        self._refresh_bars()
+
+    def _append_block(self, block: TranscriptBlock) -> None:
+        try:
+            transcript = self.query_one("#transcript", TranscriptView)
+        except NoMatches:
+            return
+        transcript.append_block(block)
+
+    def _finalize_streaming(self) -> bool:
+        """Flush any pending streaming output. Returns False if UI is gone."""
+        try:
+            self._flush_streaming_pending(drain_all=True)
+            transcript = self.query_one("#transcript", TranscriptView)
+            block = transcript.flush_streaming()
+            self._streaming_current_response = False
+            self._stream_header_printed = False
+            if self._add_block_if_new(block):
+                self._redraw_transcript()
+        except NoMatches:
+            return False
+        return True
+
+    def _advance_spinner(self) -> None:
+        try:
+            self.query_one("#status-bar", StatusBar).advance_spinner()
+        except NoMatches:
+            pass
+
     def _refresh_bars(self) -> None:
         """Update the single terminal-native status line."""
         if self.state is None:
@@ -793,28 +784,29 @@ class TuiApp(App):
             log.warning("Error refreshing bars", exc_info=True)
 
     def _refresh_context_snapshot(self) -> None:
-        """Refresh context token counts."""
+        """Refresh context token counts (throttled; full recount is costly)."""
         if not getattr(self.session, "is_bound", True) or self.session.conversation is None:
             self.state.snapshot.context_tokens = 0
             self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
             return
+        now = time.monotonic()
+        if self.state.snapshot.context_tokens and now - self._last_context_refresh < _CONTEXT_SNAPSHOT_MIN_INTERVAL_SECONDS:
+            return
+        self._last_context_refresh = now
         from ..agent import context
-        from ..agent.compaction import get_thresholds
-        thresholds = get_thresholds()
         tool_schemas = getattr(getattr(self.session, "agent", None), "tool_schemas", None)
         self.state.snapshot.context_tokens = context.count_request_tokens(
             self.session.conversation.messages,
             tool_schemas=tool_schemas,
         )
         self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
-        self.state.snapshot.context_compact_threshold = thresholds.compact
 
     def _redraw_transcript(self) -> None:
         try:
             transcript = self.query_one("#transcript", TranscriptView)
             transcript.clear()
             transcript.show_welcome(self.state.snapshot)
-            for block in self.state.visible_blocks():
+            for block in self.state.blocks:
                 transcript.append_block(block)
             streaming_block = transcript.streaming_block()
             if streaming_block is not None:

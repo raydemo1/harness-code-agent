@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 
 from . import config
-from .core.interactive import InteractiveSession, PRODUCT_DEFAULT_PROFILE, print_session, print_turn_result
+from .core.formatters import print_session
+from .core.interactive import PRODUCT_DEFAULT_PROFILE, InteractiveSession, print_turn_result
 from .core.mentions import MentionResolutionError
 from .sessions.store import SessionStore
 from .tui import TuiApp
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(verbose=args.verbose)
 
     if args.list_profiles:
-        from .core.interactive import print_profiles
+        from .core.formatters import print_profiles
         print_profiles()
         return 0
 

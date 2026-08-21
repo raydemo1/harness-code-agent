@@ -7,8 +7,6 @@ import shlex
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from pprint import pformat
-from textwrap import fill
 from typing import TYPE_CHECKING, Callable
 
 from ..runtime.approvals import ApprovalRequest, ApprovalResult
@@ -176,14 +174,3 @@ def _first_python_token_index(tokens: list[str]) -> int | None:
 
 def _normalize_token(token: object) -> str:
     return str(token).strip().strip("\"'").lower()
-
-
-def _prefix_display(prefix: list[str]) -> str:
-    return " ".join(prefix)
-
-
-def _summarize_args(args: dict) -> dict:
-    summary = dict(args or {})
-    if "content" in summary:
-        summary["content"] = f"[{len(str(summary['content']))} chars]"
-    return summary

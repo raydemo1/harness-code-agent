@@ -120,21 +120,6 @@ _SUCCESS = "#86efac"
 _WARNING = "#fde68a"
 _ERROR = "#fca5a5"
 
-_KIND_BORDER_COLORS = {
-    "user": _ACCENT,
-    "assistant": _SUCCESS,
-    "tool": _ACCENT,
-    "thought": "#d8b4fe",
-    "failure": _ERROR,
-    "approval": "#f0abfc",
-    "plan": _ACCENT,
-    "summary": _SUCCESS,
-    "profile": _ACCENT,
-    "file": _WARNING,
-    "session": _MUTED,
-    "status": _MUTED,
-}
-
 _ASSISTANT_MARKDOWN_CHAR_LIMIT = 12_000
 _ASSISTANT_DISPLAY_HEAD_CHARS = 4_000
 _ASSISTANT_DISPLAY_TAIL_CHARS = 4_000
@@ -143,58 +128,66 @@ _ASSISTANT_STREAM_TAIL_CHARS = 12_000
 
 def block_to_rich(block: TranscriptBlock):
     """Convert a TranscriptBlock to a Rich renderable."""
-    border = _KIND_BORDER_COLORS.get(block.kind, "#555555")
-    status = f" [{block.status}]" if block.status else ""
-
     if block.kind == "user":
-        header = Text(f"› You{status}", style=f"bold {border}")
+        header = Text("› You", style=f"bold {_ACCENT}")
         body = Text(block.body, style=_INK)
         return Group(header, body, Text(""))
     if block.kind == "assistant":
-        header = Text(f"• Assistant{status}", style=f"bold {border}")
+        header = Text("• Assistant", style=f"bold {_SUCCESS}")
         body = _assistant_body_renderable(block.body, streaming=block.status == "streaming")
         return Group(header, body, Text(""))
     if block.kind == "tool":
-        marker = "·"
-        marker_color = _MUTED
-        if block.status == "success":
-            marker = "✓"
-            marker_color = _SUCCESS
-        elif block.status == "failed":
-            marker = "×"
-            marker_color = _ERROR
-        elif block.status == "running":
-            marker = "›"
-            marker_color = _ACCENT
-        text = Text()
-        text.append(f"  {marker} ", style=f"bold {marker_color}")
-        text.append(_humanize_tool_title(block.title, block.status), style=f"bold {_INK}")
-        if block.body:
-            text.append(f"  {block.body}", style=_MUTED)
-        return text
+        return _tool_line(block)
     if block.kind == "thought":
-        return Text(f"  thinking {block.body or ''}", style=border)
+        return Text(f"  · thought {block.body}", style=f"italic {_SUBTLE}")
     if block.kind == "failure":
-        title = f"Error{status}"
-        return Panel(Text(block.body or ""), title=title, border_style=border)
-    if block.kind == "approval":
-        title = f"Approval{status}"
-        return Panel(Text(block.body or ""), title=title, border_style=border)
+        return Panel(
+            Text(block.body or "", style=_INK),
+            title=Text(block.title or "Error", style=f"bold {_ERROR}"),
+            border_style=_ERROR,
+        )
     if block.kind == "plan":
         return _plan_update_renderable(block.body)
-    if block.kind == "summary":
-        title = f"Turn Summary{status}"
-        return Panel(Markdown(block.body) if block.body else Text(""), title=title, border_style=border)
-    if block.kind == "profile":
-        title = f"Profile{status}"
-        return Panel(Text(block.body or ""), title=title, border_style=border)
     if block.kind == "file":
-        title = f"File{status}"
-        return Panel(Text(block.body or ""), title=title, border_style=border)
+        line = Text()
+        line.append("  ✎ ", style=f"bold {_WARNING}")
+        line.append(block.body or block.title, style=_MUTED)
+        return line
+    if block.kind == "profile":
+        line = Text()
+        line.append("  ⇄ ", style=f"bold {_ACCENT}")
+        line.append(block.title, style=_MUTED)
+        if block.body:
+            line.append(f"  {block.body}", style=_MUTED)
+        return line
     text = Text()
-    text.append(f"  {block.title}{status}", style=border)
+    text.append(f"  {block.title}", style=_MUTED)
     if block.body:
-        text.append(f"  {block.body}", style=_MUTED)
+        text.append(f"  {block.body}", style=_SUBTLE)
+    return text
+
+
+def _tool_line(block: TranscriptBlock) -> Text:
+    marker = "·"
+    marker_color = _MUTED
+    if block.status == "success":
+        marker = "✓"
+        marker_color = _SUCCESS
+    elif block.status == "failed":
+        marker = "×"
+        marker_color = _ERROR
+    elif block.status == "running":
+        marker = "›"
+        marker_color = _ACCENT
+    text = Text()
+    text.append(f"  {marker} ", style=f"bold {marker_color}")
+    text.append(_humanize_tool_title(block.title, block.status), style=f"bold {_INK}")
+    if block.body:
+        first, _, rest = block.body.partition("\n")
+        text.append(f"  {first}", style=_SUBTLE)
+        if rest:
+            text.append("\n")
+            text.append(f"    {rest}", style=f"italic {_ERROR}")
     return text
 
 
@@ -254,11 +247,10 @@ def _assistant_body_excerpt(body: str) -> str:
     tail = body[-_ASSISTANT_DISPLAY_TAIL_CHARS:].lstrip()
     omitted = max(0, len(body) - len(head) - len(tail))
     return (
-        "[display truncated: showing first "
-        f"{len(head)} and last {len(tail)} of {len(body)} chars; "
-        "full response is stored in the session]\n\n"
+        f"[response truncated: showing first {len(head)} and last {len(tail)} "
+        f"of {len(body)} characters]\n\n"
         f"{head}\n\n"
-        f"... [omitted {omitted} chars] ...\n\n"
+        f"... [omitted {omitted} characters] ...\n\n"
         f"{tail}"
     )
 
@@ -268,11 +260,10 @@ def _streaming_body_excerpt(body: str) -> str:
         return body
     tail = body[-_ASSISTANT_STREAM_TAIL_CHARS:].lstrip()
     omitted = len(body) - len(tail)
-    return (
-        f"[streaming: showing latest {len(tail)} chars; "
-        f"{omitted} earlier chars buffered]\n\n"
-        f"{tail}"
-    )
+    return f"[showing latest {len(tail)} of {len(body)} characters]\n\n{tail}"
+
+
+_WELCOME_KEY_HINTS = "  / commands  ·  @ files  ·  ctrl+o observability  ·  ctrl+c interrupt"
 
 
 def welcome_rich(snapshot: SessionStatusSnapshot) -> Group:
@@ -280,15 +271,18 @@ def welcome_rich(snapshot: SessionStatusSnapshot) -> Group:
     brand = Text("VeriForge", style=f"bold {_INK}")
     meta = Text()
     meta.append(snapshot.profile, style=f"bold {_ACCENT}")
-    if snapshot.permission_mode:
-        meta.append("  ·  ", style=_SUBTLE)
-        permission_color = _ERROR if snapshot.permission_mode == "danger-full-access" else _MUTED
-        meta.append(snapshot.permission_mode, style=permission_color)
+    meta.append("  ·  ", style=_SUBTLE)
+    permission_color = _ERROR if snapshot.permission_mode == "danger-full-access" else _MUTED
+    meta.append(snapshot.permission_mode, style=permission_color)
     meta.append("  ·  ", style=_SUBTLE)
     workspace_path = Path(snapshot.cwd)
     workspace_name = workspace_path.name or str(workspace_path)
     meta.append(workspace_name, style=_MUTED)
-    return Group(brand, meta, Text(""))
+    if snapshot.model:
+        meta.append("  ·  ", style=_SUBTLE)
+        meta.append(snapshot.model, style=_MUTED)
+    hints = Text(_WELCOME_KEY_HINTS, style=_SUBTLE)
+    return Group(brand, meta, hints, Text(""))
 
 
 class TranscriptView(RichLog):
@@ -341,36 +335,72 @@ class TranscriptView(RichLog):
 
 # ── StatusBar ───────────────────────────────────────────────────────────────
 
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+_STATUS_LABELS = {
+    "running": "working",
+    "tool": "running tool",
+    "thinking": "thinking",
+    "compacting context": "compacting context",
+    "needs attention": "needs attention",
+    "plan ready": "plan ready",
+    "blocked": "stopped",
+}
+
+_PERMISSION_LABELS = {
+    "workspace-write": "ws-write",
+    "danger-full-access": "full-access",
+    "llm-auto": "auto",
+}
+
+
 class StatusBar(Static):
-    """Bottom status bar showing the active model and run state."""
+    """Bottom status bar: activity spinner, profile, context budget, model."""
 
     profile: reactive[str] = reactive("")
     model: reactive[str] = reactive("")
     turn: reactive[int] = reactive(0)
     status: reactive[str] = reactive("idle")
+    spinner_frame: reactive[int] = reactive(0)
     context_percent: reactive[int] = reactive(0)
     permission_mode: reactive[str] = reactive("workspace-write")
     dirty_count: reactive[int] = reactive(0)
 
     def render(self) -> Text:
         active = self.status not in {"idle", "ready"}
-        status_style = _WARNING if self.status in ("running", "tool", "thinking") else _ERROR
         text = Text()
         if active:
-            text.append(f" {self.status}", style=f"bold {status_style}")
+            frame = _SPINNER_FRAMES[self.spinner_frame % len(_SPINNER_FRAMES)]
+            label = _STATUS_LABELS.get(self.status, self.status)
+            busy_style = _WARNING if self.status in {"running", "tool", "thinking", "compacting context"} else _ERROR
+            text.append(f" {frame} ", style=f"bold {busy_style}")
+            text.append(label, style=f"bold {busy_style}")
             text.append("  ·  ", style=_SUBTLE)
         else:
             text.append(" ")
         text.append(self.profile, style=f"bold {_ACCENT}")
         text.append("  ·  ", style=_SUBTLE)
+        permission_label = _PERMISSION_LABELS.get(self.permission_mode, self.permission_mode)
+        permission_color = _ERROR if self.permission_mode == "danger-full-access" else _MUTED
+        text.append(permission_label, style=permission_color)
+        text.append("  ·  ", style=_SUBTLE)
         remaining = max(0, 100 - self.context_percent)
-        text.append(f"{remaining}% context left", style=_MUTED)
+        context_style = _MUTED
+        if remaining <= 20:
+            context_style = _ERROR
+        elif remaining <= 40:
+            context_style = _WARNING
+        text.append(f"{remaining}% context left", style=context_style)
         if self.dirty_count and (not self.size.width or self.size.width >= 70):
             text.append(f"  ·  {self.dirty_count} changed", style=_WARNING)
         if self.model:
             text.append("  ·  ", style=_SUBTLE)
             text.append(self.model, style=f"bold {_INK}")
         return text
+
+    def advance_spinner(self) -> None:
+        if self.status not in {"idle", "ready"}:
+            self.spinner_frame = self.spinner_frame + 1
 
     def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
         self.profile = snap.profile
@@ -412,11 +442,19 @@ class CommandPalette(Static):
             self.update("")
             return
         self.display = True
-        lines = []
+        text = Text()
         for i, (name, desc) in enumerate(self.candidates):
-            marker = "▶" if i == self.selected_index else " "
-            lines.append(f"{marker} {name}  {desc}")
-        self.update("\n".join(lines))
+            if i:
+                text.append("\n")
+            if i == self.selected_index:
+                text.append(f" {name}", style=f"bold reverse {_INK}")
+                if desc:
+                    text.append(f"  {desc}", style=_SUBTLE)
+            else:
+                text.append(f" {name}", style=f"bold {_ACCENT}")
+                if desc:
+                    text.append(f"  {desc}", style=_SUBTLE)
+        self.update(text)
 
     def move_up(self) -> None:
         if self.candidates:

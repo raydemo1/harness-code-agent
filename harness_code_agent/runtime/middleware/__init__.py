@@ -6,7 +6,7 @@ from .error_guidance import ErrorGuidanceMiddleware
 from .loop_detection import LoopDetectionMiddleware
 from .memory import MemoryMiddleware
 from .recovery import RecoveryStrategyMiddleware
-from .task_tracking import TaskTrackingEnforcementMiddleware, TaskTrackingMiddleware
+from .task_tracking import TaskTrackingEnforcementMiddleware
 from .acceptance_review import AcceptanceReviewMiddleware
 from .terminal_shell_edit import TerminalShellEditPolicyMiddleware
 from .time_budget import TimeBudgetMiddleware
@@ -15,9 +15,6 @@ from .verification import (
     ExitIntentDecision,
     StaticVerifierMiddleware,
     PreExitVerificationMiddleware,
-    VERDICT_BLOCK,
-    VERDICT_PASS,
-    VERDICT_WARN,
     _check_py_compile,
     _check_ruff_diff,
     _git_diff_changed_py_files,
@@ -32,7 +29,6 @@ __all__ = [
     "MemoryMiddleware",
     "RecoveryStrategyMiddleware",
     "TaskTrackingEnforcementMiddleware",
-    "TaskTrackingMiddleware",
     "AcceptanceReviewMiddleware",
     "TerminalShellEditPolicyMiddleware",
     "TimeBudgetMiddleware",
@@ -40,9 +36,6 @@ __all__ = [
     "ExitIntentDecision",
     "StaticVerifierMiddleware",
     "PreExitVerificationMiddleware",
-    "VERDICT_BLOCK",
-    "VERDICT_PASS",
-    "VERDICT_WARN",
     "_check_py_compile",
     "_check_ruff_diff",
     "_git_diff_changed_py_files",

@@ -82,10 +82,10 @@ class Agent:
                  middlewares: list | None = None,
                  time_budget: float | None = None,
                  tool_schemas: list[dict] | None = None,
-                  tool_context: ToolContext | None = None,
-                  stream_callback=None,
-                  prompt_cache_identity: dict[str, str] | None = None,
-                  initial_planning_mode: str = "unset"):
+                 tool_context: ToolContext | None = None,
+                 stream_callback=None,
+                 prompt_cache_identity: dict[str, str] | None = None,
+                 initial_planning_mode: str = "unset"):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
@@ -898,13 +898,32 @@ class AgentConversation:
     def run_until_idle(self, cancellation_token=None) -> str:
         agent = self.agent
         self.last_run_streamed_text = False
-        self._cancellation_token = cancellation_token
+        run_started = time.monotonic()
 
         for local_iteration in range(1, config.MAX_AGENT_ITERATIONS + 1):
             iteration = self._iteration_offset + local_iteration
 
             # --- Cancellation check ---
             self._check_cancelled(cancellation_token)
+
+            # --- Time budget check ---
+            if agent.time_budget is not None:
+                elapsed = time.monotonic() - run_started
+                if elapsed >= agent.time_budget:
+                    log.warning(
+                        f"[{agent.name}] Time budget exhausted ({elapsed:.0f}s >= {agent.time_budget:.0f}s)."
+                    )
+                    self.runtime_state.fallback.request_stop(
+                        reason="time_budget_exhausted",
+                        limit_type="seconds",
+                        used=int(elapsed),
+                        limit=int(agent.time_budget),
+                        recent_action_summary=self.runtime_state.fallback.recent_action_summary,
+                    )
+                    self._emit_agent_fallback()
+                    self.last_text = self._fallback_text()
+                    self.trace.finish("time_budget", iteration)
+                    break
 
             # --- Middleware: per-iteration hooks ---
             for mw in agent.middlewares:
@@ -1125,10 +1144,6 @@ class AgentConversation:
             self.runtime_state.shell_job_manager.close()
 
 
-def _truncate(s: str, n: int) -> str:
-    return s[:n] + "..." if len(s) > n else s
-
-
 def _safe_tool_summary(tool_name: str, tool_args: dict) -> str:
     return f"{tool_name}({_safe_args_preview(tool_args)})"
 
@@ -1175,20 +1190,6 @@ def _normalize_initial_planning_mode(value: str) -> str:
     return mode
 
 
-def _tool_result_from_before_tool_block(tool_name: str, message: str) -> ToolResult:
-    status_source = "approval" if message.startswith("[approval_denied]") else "permission"
-    return ToolResult(
-        tool=tool_name,
-        status="failed",
-        output=message,
-        error=message,
-        metadata={"status_source": status_source},
-    )
-
-
 def _assistant_message_from_response(msg) -> dict:
     return current_adapter().assistant_message_from_response(msg)
 
-
-def _requires_reasoning_content_roundtrip() -> bool:
-    return current_adapter().requires_reasoning_content_roundtrip

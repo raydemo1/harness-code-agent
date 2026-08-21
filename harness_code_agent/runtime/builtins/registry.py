@@ -108,4 +108,3 @@ def _build_builtin_tool_registry() -> ToolRegistry:
 
 BUILTIN_TOOL_REGISTRY = _build_builtin_tool_registry()
 TOOL_SCHEMAS = CORE_TOOL_SCHEMAS
-TOOL_DISPATCH = BUILTIN_TOOL_REGISTRY.dispatch()

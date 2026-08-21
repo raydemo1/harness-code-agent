@@ -22,7 +22,7 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-from harness_code_agent.agent.loop import Agent, AgentConversation
+from harness_code_agent.agent.conversation import Agent, AgentConversation
 from harness_code_agent.runtime import tools
 from harness_code_agent.runtime.middlewares import AgentMiddleware, RecoveryStrategyMiddleware
 from harness_code_agent.runtime.permissions import PermissionPolicy

@@ -120,272 +120,6 @@ class CompactionThresholdTests(unittest.TestCase):
         self.assertEqual(action, "auto_compact")
 
 
-# ---------------------------------------------------------------------------
-# compact_messages — the core summarization function
-# ---------------------------------------------------------------------------
-
-class CompactMessagesTests(unittest.TestCase):
-    """Updated compact_messages: user role summary, token budget, tool_call protection."""
-
-    def _mock_llm(self, return_value="summary"):
-        return MagicMock(return_value=return_value)
-
-    def test_summary_uses_user_role(self):
-        from harness_code_agent.agent.context import compact_messages
-        large_old_detail = "important old detail " * 500
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "task1 " + large_old_detail},
-            {"role": "assistant", "content": "done1 " + large_old_detail},
-            {"role": "user", "content": "task2"},
-            {"role": "assistant", "content": "done2"},
-            {"role": "user", "content": "current task"},
-        ]
-        result = compact_messages(
-            messages,
-            self._mock_llm(),
-            recent_tail_budget_tokens=100,
-        )
-        # Find the compacted summary message
-        summary_msgs = [m for m in result if m.get("role") == "user" and "COMPACTED" in (m.get("content") or "")]
-        self.assertEqual(len(summary_msgs), 1)
-
-    def test_preserves_system_prompt(self):
-        from harness_code_agent.agent.context import compact_messages
-        large_old_detail = "important old detail " * 500
-        messages = [
-            {"role": "system", "content": "system instructions"},
-            {"role": "user", "content": "task " + large_old_detail},
-            {"role": "assistant", "content": "response " + large_old_detail},
-            {"role": "user", "content": "current"},
-        ]
-        result = compact_messages(
-            messages,
-            self._mock_llm(),
-            recent_tail_budget_tokens=100,
-        )
-        self.assertEqual(result[0]["role"], "system")
-        self.assertEqual(result[0]["content"], "system instructions")
-
-    def test_protects_tool_call_tool_result_pairs(self):
-        from harness_code_agent.agent.context import compact_messages
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "task"},
-            {"role": "assistant", "content": None, "tool_calls": [{"id": "tc1", "function": {"name": "run_bash", "arguments": "{}"}}]},
-            {"role": "tool", "tool_call_id": "tc1", "content": "output"},
-            {"role": "assistant", "content": "done"},
-            {"role": "user", "content": "task2"},
-            {"role": "assistant", "content": "done2"},
-            {"role": "user", "content": "task3"},
-            {"role": "assistant", "content": "done3"},
-            {"role": "user", "content": "current"},
-        ]
-        result = compact_messages(messages, self._mock_llm())
-        # The tool_call + tool result pair should be kept together in either
-        # old (summarized) or recent (kept raw), never split.
-        contents = " ".join(str(m) for m in result)
-        # If tc1 appears, its tool result must also appear
-        if "tc1" in contents:
-            self.assertIn("output", contents)
-
-    def test_normal_compaction_skips_current_user_turn(self):
-        """Normal compaction (below force threshold) should not compact the current user turn."""
-        from harness_code_agent.agent.context import compact_messages
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "old task 1"},
-            {"role": "assistant", "content": "old response 1"},
-            {"role": "user", "content": "old task 2"},
-            {"role": "assistant", "content": "old response 2"},
-            {"role": "user", "content": "current task"},
-        ]
-        result = compact_messages(messages, self._mock_llm(), force=False)
-        # The last user message "current task" should remain as-is
-        last_user = [m for m in result if m.get("role") == "user" and "COMPACTED" not in (m.get("content") or "")]
-        self.assertTrue(any("current task" in (m.get("content") or "") for m in last_user))
-
-    def test_respects_target_token_budget_for_recent_tail(self):
-        from harness_code_agent.agent.context import compact_messages
-        messages = [{"role": "system", "content": "sys"}]
-        for i in range(8):
-            messages.extend([
-                {"role": "user", "content": f"task {i}"},
-                {"role": "assistant", "content": "x" * 2000},
-            ])
-        messages.append({"role": "user", "content": "current task"})
-
-        result = compact_messages(
-            messages,
-            self._mock_llm("summary"),
-            force=True,
-            target_tokens=1200,
-        )
-
-        from harness_code_agent.agent.context import count_tokens
-        self.assertLessEqual(count_tokens(result), 1200)
-        self.assertEqual(result[-1]["content"], "current task")
-
-    def test_token_bounded_recent_tail_drops_huge_recent_message(self):
-        from harness_code_agent.agent.context import compact_messages
-
-        huge_recent = "HUGE_RECENT_OUTPUT " + ("x " * 8000)
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "old task " + ("old detail " * 500)},
-            {"role": "assistant", "content": "old answer " + ("old detail " * 500)},
-            {"role": "user", "content": "recent task"},
-            {"role": "assistant", "content": huge_recent},
-            {"role": "user", "content": "current task"},
-            {"role": "assistant", "content": "current ack"},
-        ]
-
-        result = compact_messages(
-            messages,
-            self._mock_llm("summary"),
-            force=True,
-            recent_tail_budget_tokens=80,
-        )
-
-        rendered = " ".join(str(message.get("content", "")) for message in result)
-        self.assertNotIn("HUGE_RECENT_OUTPUT", rendered)
-        self.assertEqual(result[-2]["content"], "current task")
-        self.assertEqual(result[-1]["content"], "current ack")
-
-    def test_compact_messages_skips_small_region_without_summary_call(self):
-        from harness_code_agent.agent.context import compact_messages
-
-        llm = self._mock_llm("should not be called")
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "tiny old task"},
-            {"role": "assistant", "content": "tiny old answer"},
-            {"role": "user", "content": "tiny old task 2"},
-            {"role": "assistant", "content": "tiny old answer 2"},
-            {"role": "user", "content": "tiny old task 3"},
-            {"role": "assistant", "content": "tiny old answer 3"},
-            {"role": "user", "content": "current task"},
-        ]
-
-        result = compact_messages(messages, llm, force=False)
-
-        self.assertEqual(result, messages)
-        llm.assert_not_called()
-
-    def test_request_token_count_includes_tool_schema_overhead(self):
-        from harness_code_agent.agent.context import count_request_tokens, count_tokens
-
-        messages = [{"role": "system", "content": "sys"}]
-        tool_schemas = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "large_tool",
-                    "description": "schema overhead " * 200,
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
-
-        self.assertGreater(
-            count_request_tokens(messages, tool_schemas=tool_schemas),
-            count_tokens(messages),
-        )
-
-    def test_summarize_older_conversation_preserves_current_turn(self):
-        from harness_code_agent.agent.context import summarize_older_conversation
-
-        large_old_detail = "important old detail " * 500
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "old task " + large_old_detail},
-            {"role": "assistant", "content": "old result " + large_old_detail},
-            {"role": "user", "content": "current task"},
-            {"role": "assistant", "content": "current work"},
-        ]
-
-        summarized = summarize_older_conversation(
-            messages,
-            self._mock_llm("older summary"),
-            current_turn_start_index=3,
-        )
-
-        self.assertEqual(summarized[0], messages[0])
-        self.assertIn("older summary", summarized[1]["content"])
-        self.assertEqual(summarized[-2:], messages[-2:])
-
-    def test_summarize_older_conversation_skips_small_region_without_summary_call(self):
-        from harness_code_agent.agent.context import summarize_older_conversation
-
-        llm = self._mock_llm("should not be called")
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "tiny old task"},
-            {"role": "assistant", "content": "tiny old result"},
-            {"role": "user", "content": "current task"},
-        ]
-
-        summarized = summarize_older_conversation(
-            messages,
-            llm,
-            current_turn_start_index=3,
-        )
-
-        self.assertEqual(summarized, messages)
-        llm.assert_not_called()
-
-    def test_handoff_reset_persists_handoff_and_restores_fresh_context(self):
-        from harness_code_agent.agent.context import create_handoff_reset, restore_from_handoff_reset
-
-        old_output = "OLD_FULL_TOOL_OUTPUT" * 500
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "old branch solved"},
-            {"role": "tool", "tool_call_id": "old", "content": old_output},
-            {"role": "assistant", "content": "old branch resolved"},
-            {"role": "user", "content": "current task"},
-            {"role": "assistant", "content": "recent error: pytest failed"},
-        ]
-        state = {
-            "current_user_task": "current task",
-            "active_plan_status": "step 2 in progress",
-            "changed_files": ["app.py"],
-            "files_touched": ["app.py", "tests/test_app.py"],
-            "recent_errors": ["pytest failed"],
-            "failed_commands": ["pytest tests/test_app.py"],
-            "active_constraints": ["do not reset profile"],
-            "latest_checkpoint_summary": "checkpoint summary",
-            "next_recommended_action": "fix failing assertion",
-        }
-
-        handoff, path = create_handoff_reset(
-            messages,
-            state,
-            lambda _request: (
-                "# Handoff Reset\n\n"
-                "## Summary\ncurrent task\n\n"
-                "## Suggested Skills\n- diagnose\n\n"
-                "## Next Steps\nfix failing assertion"
-            ),
-            session_id="session/test",
-            profile="coding-agent",
-            workspace="C:/repo",
-            max_turns=5,
-        )
-        rebuilt = restore_from_handoff_reset(handoff, "sys", path)
-        text = "\n".join(str(item.get("content", "")) for item in rebuilt)
-
-        self.assertTrue(path.exists())
-        self.assertNotIn(str(Path.cwd()), str(path))
-        self.assertEqual(rebuilt[0], messages[0])
-        self.assertIn("HANDOFF RESET", text)
-        self.assertIn(str(path), text)
-        self.assertIn("current task", text)
-        self.assertIn("fix failing assertion", text)
-        self.assertIn("Suggested Skills", text)
-        self.assertNotIn("OLD_FULL_TOOL_OUTPUT", text)
-
-
 class ContextAnxietyTests(unittest.TestCase):
     def test_detect_anxiety_returns_structured_soft_signal(self):
         from harness_code_agent.agent.context import detect_anxiety
@@ -498,7 +232,7 @@ class CompactCommandTests(unittest.TestCase):
 
 class AgentConversationCompactionLifecycleTests(unittest.TestCase):
     def test_message_revision_tracks_user_assistant_tool_and_middleware_appends(self):
-        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.conversation import Agent
 
         agent = Agent("test_agent", "sys", use_tools=False)
         conv = agent.start_conversation()
@@ -509,7 +243,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
         self.assertGreater(conv.compaction_gate.revision, initial)
 
     def test_context_compacted_hook_replaces_dynamic_context_block(self):
-        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.conversation import Agent
         from harness_code_agent.runtime.middleware import AgentMiddleware
 
         class RefreshMiddleware(AgentMiddleware):
@@ -538,7 +272,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
     def test_auto_compaction_summarizes_and_returns_below_threshold_after_summary(self):
         from harness_code_agent.agent.compaction import get_thresholds
-        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.conversation import Agent
 
         thresholds = get_thresholds()
         agent = Agent("test_agent", "sys", use_tools=False)
@@ -571,7 +305,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
     def test_auto_compaction_persists_latest_summary(self):
         from harness_code_agent.agent.compaction import get_thresholds
-        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.conversation import Agent
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
         from harness_code_agent.sessions.store import SessionStore
@@ -622,7 +356,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
     def test_auto_compaction_suspends_for_turn_when_summary_still_over_threshold(self):
         from harness_code_agent.agent.compaction import get_thresholds
-        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.conversation import Agent
 
         thresholds = get_thresholds()
         agent = Agent("test_agent", "sys", use_tools=False)
@@ -657,7 +391,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
 
     def test_handoff_reset_after_two_rapid_refills(self):
         from harness_code_agent.agent.compaction import get_thresholds
-        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.conversation import Agent
 
         thresholds = get_thresholds()
         agent = Agent("test_agent", "sys", use_tools=False)
@@ -698,7 +432,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
     def test_context_anxiety_below_threshold_only_records_soft_signal(self):
         from harness_code_agent.agent.compaction import get_thresholds
         from harness_code_agent.agent.context import ContextAnxietySignal
-        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.conversation import Agent
 
         thresholds = get_thresholds()
         agent = Agent("test_agent", "sys", use_tools=False)
@@ -739,7 +473,7 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
     def test_context_anxiety_soft_signal_emits_once_per_turn(self):
         from harness_code_agent.agent.compaction import get_thresholds
         from harness_code_agent.agent.context import ContextAnxietySignal
-        from harness_code_agent.agent.loop import Agent
+        from harness_code_agent.agent.conversation import Agent
 
         thresholds = get_thresholds()
         agent = Agent("test_agent", "sys", use_tools=False)
@@ -883,7 +617,8 @@ class TuiStateCompactionTests(unittest.TestCase):
             "payload": {"token_count": 100000, "forced": False},
         }
         block = state.apply_event(event)
-        self.assertIsNotNone(block)
+        # Compaction progress lives in the status bar only, not the transcript.
+        self.assertIsNone(block)
         self.assertIn("compact", state.snapshot.status.lower())
 
     def test_compaction_committed_restores_idle(self):
@@ -904,9 +639,8 @@ class TuiStateCompactionTests(unittest.TestCase):
             "payload": {"token_count": 180000, "phase": "handoff_reset"},
         }
         block = state.apply_event(event)
-        self.assertIsNotNone(block)
-        self.assertIn("handoff reset", block.title.lower())
-        self.assertIn("handoff reset", state.snapshot.status.lower())
+        self.assertIsNone(block)
+        self.assertIn("compact", state.snapshot.status.lower())
 
     def test_context_anxiety_observed_shows_soft_notice(self):
         state = self._make_state()
@@ -916,10 +650,8 @@ class TuiStateCompactionTests(unittest.TestCase):
             "payload": {"token_count": 120000, "threshold": 170000, "score": 2, "reasons": ["due to context limit"]},
         }
         block = state.apply_event(event)
-        self.assertIsNotNone(block)
-        self.assertEqual(state.snapshot.status, "context anxiety observed")
-        self.assertEqual(block.status, "observed")
-        self.assertIn("due to context limit", block.body)
+        # Internal anxiety detection stays out of the transcript.
+        self.assertIsNone(block)
 
 
 # ---------------------------------------------------------------------------

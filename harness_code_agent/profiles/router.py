@@ -44,7 +44,7 @@ def route_profile_for_turn(
 ) -> RouteDecision:
     """Conservatively route a turn using local semantic prototypes only."""
     started_at = time.perf_counter()
-    current = current_profile if current_profile in LOCAL_ROUTE_PROFILES else current_profile
+    current = current_profile
     if current not in LOCAL_ROUTE_PROFILES:
         return _with_elapsed(
             started_at,

@@ -12,59 +12,6 @@ from .base import AgentMiddleware, MAIN_AGENT_NAMES
 log = logging.getLogger("harness")
 
 
-class TaskTrackingMiddleware(AgentMiddleware):
-    """
-    Encourages the agent to maintain explicit task tracking for multi-step work.
-
-    After the agent has made several tool calls without writing any tracking
-    artifact, injects a reminder to decompose and track progress.
-
-    Inspired by ForgeCode's todo_write enforcement, which was their single
-    biggest improvement (38% → 66% on TB2).
-
-    This is a softer version — it nudges rather than hard-blocks, since
-    not all tasks need decomposition. But for complex multi-step tasks,
-    the nudge is enough to trigger the behavior.
-    """
-
-    def __init__(self, nudge_after_n_tools: int = 8):
-        self.nudge_after_n_tools = nudge_after_n_tools
-        self.tool_call_count = 0
-        self._nudged = False
-
-    def post_tool(self, tool_name: str, tool_args: dict, result: str,
-                  messages: list[dict], runtime_state=None,
-                  agent_name: str | None = None) -> str | None:
-        self.tool_call_count += 1
-
-        if self._nudged or self.tool_call_count < self.nudge_after_n_tools:
-            return None
-
-        # Check if agent has already written any tracking/progress notes
-        for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str) and "progress" in content.lower():
-                # Agent seems to be tracking already
-                return None
-            # Check if agent wrote to a tracking file
-            if msg.get("role") == "assistant":
-                for tc in msg.get("tool_calls", []):
-                    fn = tc.get("function", {})
-                    if fn.get("name") == "write_file":
-                        args_str = fn.get("arguments", "")
-                        if any(kw in args_str.lower() for kw in ["todo", "progress", "checklist", "tracker"]):
-                            return None
-
-        self._nudged = True
-        log.info("Task tracking: nudging agent to track progress")
-        return (
-            "[SYSTEM] You have made several tool calls. For complex tasks, "
-            "tracking your progress helps avoid skipping steps or repeating work.\n"
-            "Consider: What steps remain? What have you completed? What still needs verification?\n"
-            "Keep a mental checklist and verify each requirement before finishing."
-        )
-
-
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
     """Hard-require planning updates for tracked mode."""
 

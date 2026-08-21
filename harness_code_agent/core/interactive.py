@@ -44,14 +44,12 @@ from ..workspace.shell_session import docker_cli_path, docker_info_check, docker
 from .mentions import MentionResolutionError, ResolvedMention, render_mention_context, resolve_mentions
 
 
-GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 PRODUCT_DEFAULT_PROFILE = "general"
 DIRECT_ANSWER_TURN_INSTRUCTION = (
     "Turn handling instruction: answer this turn directly and briefly. "
     "Do not create or edit files, run commands, launch browsers, or continue prior implementation work "
     "unless the user explicitly asks for that in this turn."
 )
-CHECKPOINT_EXCLUDES = [".harness", "global_plan", config.PROGRESS_FILE]
 TURN_INLINE_CHAR_LIMIT = 40_000
 TURN_EXCERPT_CHARS = 2_000
 PROFILE_SLASH_ALIASES = {
@@ -123,6 +121,7 @@ class InteractiveSession:
         self.enable_turn_summary = enable_turn_summary
         self.checkpoint_init_error: str = ""
         self.skill_registry = SkillRegistry()
+        self._slash_registry = None
         self.session_store = SessionStore(self.cwd / ".harness")
         self.session_store.root.mkdir(parents=True, exist_ok=True)
         self.resume_session_id = resume_session_id
@@ -816,7 +815,9 @@ class InteractiveSession:
     def handle_slash_command(self, line: str) -> bool:
         from ..tui.commands import default_command_registry
 
-        result = default_command_registry(skill_registry=self.skill_registry).execute(line, self)
+        if self._slash_registry is None:
+            self._slash_registry = default_command_registry(skill_registry=self.skill_registry)
+        result = self._slash_registry.execute(line, self)
         if result.text:
             self.output_sink(result.text)
         return result.should_continue
@@ -1241,25 +1242,7 @@ def print_turn_result(result: TurnResult) -> None:
     if result.checkpoint:
         print(result.checkpoint)
 
-
-from .formatters import (
-    _build_resume_context,
-    _event_summary,
-    format_config_show,
-    format_doctor,
-    format_fork,
-    format_profiles,
-    format_rollback_session_file,
-    format_sessions,
-    print_config_show,
-    print_fork,
-    print_help,
-    print_profiles,
-    print_session,
-    print_sessions,
-    rollback_session_file,
-    run_doctor,
-)
+from .formatters import _build_resume_context
 from .git_helpers import (
     _ensure_git_repository,
     git_add_paths,
@@ -1269,5 +1252,4 @@ from .git_helpers import (
     git_has_committable_changes,
     git_has_staged_changes,
     git_staged_paths,
-    runtime_excluded_git_command,
 )

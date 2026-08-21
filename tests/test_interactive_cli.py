@@ -29,13 +29,11 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent import config
-from harness_code_agent.core.interactive import (
-    InteractiveSession,
-    git_dirty_paths,
-)
+from harness_code_agent.core.git_helpers import git_dirty_paths
+from harness_code_agent.core.interactive import InteractiveSession
 from harness_code_agent.core.mentions import (
     MentionResolutionError,
-    format_turn_with_mentions,
+    render_mention_context,
     resolve_mentions,
 )
 from harness_code_agent.sessions.events import FileChangeEvent, ToolResultEvent
@@ -932,14 +930,13 @@ class InteractiveCliTests(unittest.TestCase):
             workspace_root=self.temp_dir,
             session_store=store,
         )
-        formatted = format_turn_with_mentions("use @file:README.md please", resolved)
+        formatted = render_mention_context(resolved)
 
         self.assertIn("Mention context:", formatted)
         self.assertIn("resolved as file", formatted)
         self.assertIn("README.md", formatted)
         self.assertIn("Use read_file to inspect this file if needed.", formatted)
         self.assertNotIn("hello docs", formatted)
-        self.assertIn("User turn:\nuse @file:README.md please", formatted)
 
     def test_bare_at_file_text_is_not_resolved_as_mention(self):
         Path(self.temp_dir, "README.md").write_text("hello docs\n", encoding="utf-8")
@@ -962,7 +959,7 @@ class InteractiveCliTests(unittest.TestCase):
             workspace_root=self.temp_dir,
             session_store=store,
         )
-        formatted = format_turn_with_mentions("inspect @file:docs", resolved)
+        formatted = render_mention_context(resolved)
 
         self.assertEqual(resolved[0].kind, "directory")
         self.assertIn("resolved as directory", formatted)
@@ -1068,7 +1065,7 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertIn("session_started", resolved[0].content)
 
     def test_print_session_uses_human_readable_summary(self):
-        from harness_code_agent.core.interactive import print_session
+        from harness_code_agent.core.formatters import print_session
 
         store = SessionStore(Path(self.temp_dir) / ".harness")
         session = store.create(
@@ -1537,7 +1534,7 @@ class InteractiveCliTests(unittest.TestCase):
             self.assertIsNone(cli._build_stream_callback())
 
     def test_config_show_includes_runtime_settings(self):
-        from harness_code_agent.core.interactive import format_config_show
+        from harness_code_agent.core.formatters import format_config_show
 
         with (
             patch.object(config, "SANDBOX_MODE", "docker"),
@@ -1557,7 +1554,7 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertIn(f"max_agent_total_tokens: {config.MAX_AGENT_TOTAL_TOKENS}", text)
 
     def test_doctor_docker_mode_reports_daemon_status(self):
-        from harness_code_agent.core.interactive import format_doctor
+        from harness_code_agent.core.formatters import format_doctor
 
         cases = [
             ((True, "Docker 27.0.3"), 0, "Docker 27.0.3"),

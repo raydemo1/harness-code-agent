@@ -51,6 +51,32 @@ class CapturingAgent:
         })
 
 
+class DelegatePathAllowlistTests(unittest.TestCase):
+    """Lexical path checks for delegated tool calls."""
+
+    def test_dot_dot_escape_outside_allowed_root_is_rejected(self):
+        from harness_code_agent.agent.delegation import _path_allowed
+
+        self.assertFalse(_path_allowed("src/../../etc/passwd", ["src"]))
+        self.assertFalse(_path_allowed("../../workspace/secret", ["docs"]))
+        self.assertFalse(_path_allowed("a/../..", ["a"]))
+
+    def test_normal_relative_paths_inside_allowed_root_are_accepted(self):
+        from harness_code_agent.agent.delegation import _path_allowed
+
+        self.assertTrue(_path_allowed("src/app.py", ["src"]))
+        self.assertTrue(_path_allowed("src/a/../app.py", ["src"]))
+        self.assertTrue(_path_allowed(".\\src\\app.py", ["src"]))
+        self.assertTrue(_path_allowed("./src", ["src"]))
+        self.assertTrue(_path_allowed("docs", ["docs"]))
+
+    def test_sibling_prefix_directory_is_not_confused_for_allowed_root(self):
+        from harness_code_agent.agent.delegation import _path_allowed
+
+        self.assertFalse(_path_allowed("docs2/x.md", ["docs"]))
+        self.assertFalse(_path_allowed("src_private/app.py", ["src"]))
+
+
 class DelegateAgentTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(os.getcwd(), "workspace", "test-delegate-agent")

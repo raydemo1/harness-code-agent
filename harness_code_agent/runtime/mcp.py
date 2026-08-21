@@ -237,9 +237,14 @@ class McpClientManager:
         task = asyncio.create_task(self._connection_worker(server, request_queue, ready))
         try:
             bindings = await asyncio.wait_for(asyncio.shield(ready), timeout=self.timeout_seconds)
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise
+        except Exception:
+            task.cancel()
+            with contextlib.suppress(Exception):
                 await task
             raise
         return _McpConnection(config=server, request_queue=request_queue, task=task), bindings

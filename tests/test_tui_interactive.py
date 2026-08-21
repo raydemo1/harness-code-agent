@@ -111,8 +111,8 @@ class TuiInteractiveTests(unittest.TestCase):
 
                 self.assertGreaterEqual(transcript.region.width, 76)
                 self.assertFalse(input_text.show_line_numbers)
-                self.assertEqual(input_text.size.height, 3)
-                self.assertEqual(input_prompt.size.height, 3)
+                self.assertEqual(input_text.region.height, 3)
+                self.assertEqual(input_prompt.region.height, 3)
                 self.assertEqual(input_prompt.content_region.y, input_text.cursor_screen_offset.y)
                 self.assertIn("Ask anything", input_text.render_line(0).text)
 
@@ -127,13 +127,13 @@ class TuiInteractiveTests(unittest.TestCase):
                 await pilot.press("h")
                 await pilot.pause()
 
-                self.assertEqual(text_area.size.height, 3)
+                self.assertEqual(text_area.region.height, 3)
                 self.assertNotIn("Ask anything", text_area.render_line(0).text)
 
                 await pilot.press("shift+enter")
                 await pilot.pause()
-                self.assertEqual(text_area.size.height, 3)
-                self.assertEqual(app.query_one("#input-prompt").size.height, 3)
+                self.assertEqual(text_area.region.height, 3)
+                self.assertEqual(app.query_one("#input-prompt").region.height, 3)
 
         _run(_test())
 

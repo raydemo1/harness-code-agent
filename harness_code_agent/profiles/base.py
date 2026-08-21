@@ -136,7 +136,6 @@ class ProfileConfig:
     # --- Middleware thresholds ---
     loop_file_edit_threshold: int | None = None      # edits before loop warning
     loop_command_repeat_threshold: int | None = None  # repeats before loop warning
-    task_tracking_nudge_after: int | None = None      # tool calls before tracking nudge
     require_start_after_n_actions: int | None = None  # action tools before tracked start is required
     acceptance_review_timeout: float | None = None    # fast-model acceptance review timeout
     time_warn_threshold: float | None = None          # fraction of budget for warning
@@ -224,21 +223,6 @@ class BaseProfile(ABC):
             ),
         )
         return AgentConfig(system_prompt=prompt)
-
-    def subagent_policy(self) -> dict:
-        """Policy for delegated sub-agents."""
-        return {
-            "allowed_scopes": [
-                "codebase_investigation",
-                "test_design",
-                "review",
-                "verify",
-                "patch",
-            ],
-            "read_only": "except isolated patch proposals",
-            "may_modify_files": False,
-            "may_decide_completion": False,
-        }
 
     def acceptance_criteria(self) -> list[str]:
         """High-level completion criteria for the main agent."""

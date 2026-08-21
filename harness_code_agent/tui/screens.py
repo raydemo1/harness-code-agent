@@ -57,7 +57,7 @@ class ApprovalPanel(Vertical):
     DEFAULT_CSS = """
     ApprovalPanel {
         height: auto;
-        border: solid #b16286;
+        border: solid $accent;
         padding: 0 1;
         background: $surface;
     }
@@ -76,9 +76,8 @@ class ApprovalPanel(Vertical):
     def _format_body(self) -> str:
         req = self._request
         lines = [
-            f"[bold]⚠ Approval required[/]",
-            f"tool: {req.tool_name}",
-            f"risk: {req.risk}",
+            "[bold]⚠ Approval required[/]",
+            f"tool: {req.tool_name}    risk: {req.risk}",
         ]
         if req.reason:
             lines.append(f"reason: {req.reason}")
@@ -86,19 +85,35 @@ class ApprovalPanel(Vertical):
             cmd = req.args.get("command", "")
             lines.append(f"$ {cmd}")
         else:
-            for key, value in (req.args or {}).items():
-                val_str = str(value)
+            priority = ("path", "file_path", "command", "url", "task", "query")
+            keys = sorted(
+                (req.args or {}).keys(),
+                key=lambda key: (priority.index(key) if key in priority else len(priority), key),
+            )
+            for key in keys:
+                val_str = str((req.args or {}).get(key, ""))
                 if len(val_str) > 200:
                     val_str = val_str[:197] + "..."
                 lines.append(f"  {key}: {val_str}")
+        lines.append("[dim]←→ or 1-3 select · enter approve · esc deny[/]")
         return "\n".join(lines)
 
-    def _format_choices(self) -> str:
+    def _format_choices(self) -> Text:
         parts = []
         for i, label in enumerate(_APPROVAL_LABELS):
             marker = "▶" if i == self._selected_index else " "
-            parts.append(f"{marker} [{i + 1}] {label}")
-        return "   ".join(parts)
+            parts.append((f"{marker} [{i + 1}] {label}", i == self._selected_index))
+        text = Text()
+        for i, (part, selected) in enumerate(parts):
+            if i:
+                text.append("   ", style="dim")
+            if selected:
+                text.append(part, style="bold")
+            elif part.endswith("Deny"):
+                text.append(part, style="red")
+            else:
+                text.append(part)
+        return text
 
     def _refresh_choices(self) -> None:
         try:
@@ -177,7 +192,7 @@ class QuestionPanel(Vertical):
     DEFAULT_CSS = """
     QuestionPanel {
         height: auto;
-        border: solid #3874cb;
+        border: solid $primary;
         padding: 0 1;
         background: $surface;
     }
@@ -318,14 +333,14 @@ class ObservabilityScreen(ModalScreen[None]):
     #observability-panel {
         width: 96;
         height: 80%;
-        border: solid #4f6f8f;
+        border: solid $border-blurred;
         background: $surface;
         padding: 1 2;
     }
 
     #observability-title {
         height: 1;
-        color: #8ec07c;
+        color: $accent;
     }
 
     #observability-body {

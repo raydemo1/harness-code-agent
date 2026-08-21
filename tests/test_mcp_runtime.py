@@ -357,7 +357,7 @@ class McpRuntimeTests(unittest.TestCase):
         self.assertEqual(names, ["mcp__alpha__search", "mcp__zeta__search"])
 
     def test_doctor_reports_mcp_config_errors_without_starting_a_session(self):
-        from harness_code_agent.core.interactive import format_doctor
+        from harness_code_agent.core.formatters import format_doctor
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

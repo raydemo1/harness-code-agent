@@ -257,7 +257,6 @@ class TuiTests(unittest.TestCase):
 
         self.assertEqual(state.snapshot.profile, "coding-agent")
         self.assertFalse(state.snapshot.pending_plan)
-        self.assertEqual(state.snapshot.checkpoint, "checkpoint created: abc")
         self.assertEqual(state.snapshot.running_tool, "")
         self.assertGreaterEqual(len(state.blocks), 4)
 
@@ -351,7 +350,7 @@ class TuiTests(unittest.TestCase):
         )
 
         self.assertIsNone(block)
-        self.assertEqual(state.pending_approval["tool"], "run_bash")
+        self.assertEqual(state.snapshot.status, "idle")
 
     def test_python_command_does_not_persist_bare_prefix(self):
         self.assertIsNone(_derive_persistent_prefix("python"))
@@ -593,7 +592,7 @@ class TuiNoiseReductionTests(unittest.TestCase):
         )
         block = state.apply_event(call_event)
 
-        self.assertEqual(block.title, "parallel_agents(同时执行了3个工具)")
+        self.assertEqual(block.title, "parallel_agents(3 tools)")
 
     def test_parallel_tool_result_shows_nested_success_counts(self):
         state = self._make_state()
@@ -626,11 +625,11 @@ class TuiNoiseReductionTests(unittest.TestCase):
         state.apply_event(call_event)
         block = state.apply_event(result_event)
 
-        self.assertIn("同时执行了2个工具", block.body)
-        self.assertIn("success=1", block.body)
-        self.assertIn("failed=1", block.body)
+        self.assertIn("2 tools", block.body)
+        self.assertIn("1 ok", block.body)
+        self.assertIn("1 failed", block.body)
 
-    def test_profile_route_decision_shows_elapsed_time(self):
+    def test_profile_route_decision_shows_clean_summary(self):
         state = self._make_state()
 
         block = state.apply_event({
@@ -647,9 +646,10 @@ class TuiNoiseReductionTests(unittest.TestCase):
         })
 
         self.assertEqual(block.title, "profile route")
-        self.assertIn("profile=coding-agent", block.body)
-        self.assertIn("confidence=0.91", block.body)
-        self.assertIn("elapsed=123ms", block.body)
+        self.assertIn("coding-agent", block.body)
+        # Internal routing metrics stay out of the transcript.
+        self.assertNotIn("confidence", block.body)
+        self.assertNotIn("elapsed", block.body)
         self.assertNotIn("direct_answer", block.body)
         self.assertNotIn("mode=", block.body)
 
@@ -697,14 +697,14 @@ class TuiNoiseReductionTests(unittest.TestCase):
         self.assertEqual(stored_result.payload["output"], large_output)
         self.assertNotIn(large_output, state.blocks[-1].body)
 
-    def test_turn_summary_is_hidden_and_does_not_collapse_details(self):
+    def test_turn_summary_and_internal_events_stay_out_of_transcript(self):
         state = self._make_state()
         events = [
             {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
             {"type": "turn_started", "payload": {"turn": 1}},
             {"type": "tool_call", "payload": {"tool": "run_bash", "args": {"command": "pytest"}}},
             {"type": "tool_result", "payload": {"tool": "run_bash", "status": "success", "output": "ok"}},
-            {"type": "file_change", "payload": {"path": "app.py"}},
+            {"type": "file_change", "payload": {"path": "app.py", "operation": "write"}},
             {"type": "assistant_message", "payload": {"turn": 1, "text": "done"}},
             {"type": "turn_summary", "payload": {"turn": 1, "summary": "- done", "fold_details": True}},
         ]
@@ -712,42 +712,27 @@ class TuiNoiseReductionTests(unittest.TestCase):
         for event in events:
             state.add_block(state.apply_event(event))
 
-        visible = state.visible_blocks()
-        self.assertNotIn(1, state.collapsed_turns)
-        self.assertFalse(any(block.kind == "summary" for block in visible))
-        self.assertTrue(any(block.kind == "user" for block in visible))
-        self.assertTrue(any(block.kind == "assistant" for block in visible))
-        self.assertTrue(any(block.kind == "tool" for block in visible))
-        self.assertTrue(any(block.kind == "file" for block in visible))
+        kinds = [block.kind for block in state.blocks]
+        self.assertTrue(any(kind == "user" for kind in kinds))
+        self.assertTrue(any(kind == "assistant" for kind in kinds))
+        self.assertTrue(any(kind == "tool" for kind in kinds))
+        self.assertTrue(any(kind == "file" for kind in kinds))
+        self.assertNotIn("summary", kinds)
+        self.assertNotIn("session", kinds)
 
-    def test_toggle_latest_turn_details_noops_without_folded_summary(self):
-        state = self._make_state()
-        for event in [
-            {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
-            {"type": "tool_result", "payload": {"tool": "run_bash", "status": "success"}},
-            {"type": "turn_summary", "payload": {"turn": 1, "summary": "- done", "fold_details": True}},
-        ]:
-            state.add_block(state.apply_event(event))
-
-        self.assertTrue(any(block.kind == "tool" for block in state.visible_blocks()))
-        self.assertFalse(state.toggle_latest_turn_details())
-        self.assertTrue(any(block.kind == "tool" for block in state.visible_blocks()))
-
-    def test_failure_remains_visible_while_approval_and_summary_are_hidden(self):
+    def test_failure_remains_visible_while_approval_stays_hidden(self):
         state = self._make_state()
         for event in [
             {"type": "user_input", "payload": {"turn": 1, "text": "fix it"}},
             {"type": "failure", "payload": {"category": "runtime_error", "message": "failed"}},
             {"type": "approval_requested", "payload": {"tool": "run_bash", "risk": "shell_risky"}},
             {"type": "agent_fallback", "payload": {"reason": "max_iterations"}},
-            {"type": "turn_summary", "payload": {"turn": 1, "summary": "- blocked", "fold_details": True}},
         ]:
             state.add_block(state.apply_event(event))
 
-        visible_kinds = [block.kind for block in state.visible_blocks()]
-        self.assertIn("failure", visible_kinds)
-        self.assertNotIn("approval", visible_kinds)
-        self.assertNotIn("summary", visible_kinds)
+        kinds = [block.kind for block in state.blocks]
+        self.assertIn("failure", kinds)
+        self.assertNotIn("approval", kinds)
 
 
 class TuiThoughtTests(unittest.TestCase):
@@ -782,8 +767,9 @@ class TuiThoughtTests(unittest.TestCase):
 
         self.assertIsNotNone(block)
         self.assertEqual(block.kind, "thought")
-        self.assertIn("thought for", block.body)
-        self.assertIn("12", block.body)
+        self.assertIn("12.3s", block.body)
+        # Internal source identifiers stay out of the transcript.
+        self.assertNotIn("source", block.body)
 
     def test_thought_block_does_not_contain_reasoning_text(self):
         """Thought block should never contain actual reasoning content."""
@@ -797,17 +783,6 @@ class TuiThoughtTests(unittest.TestCase):
         )
         block = state.apply_event(event)
         self.assertNotIn("reasoning", block.body.lower())
-
-    def test_thought_toggle_stores_state(self):
-        """Ctrl+T should toggle thought metadata visibility."""
-        state = self._make_state()
-        self.assertFalse(state.show_thought_details)
-
-        state.toggle_thought_details()
-        self.assertTrue(state.show_thought_details)
-
-        state.toggle_thought_details()
-        self.assertFalse(state.show_thought_details)
 
 
 
@@ -840,7 +815,7 @@ class TuiRichRenderTests(unittest.TestCase):
 
         body = rendered.renderables[1]
         self.assertEqual(body.__class__.__name__, "Text")
-        self.assertIn("display truncated", body.plain)
+        self.assertIn("response truncated", body.plain)
 
     def test_tool_block_renders_with_yellow_border(self):
         block = TranscriptBlock("tool", "read_file(path=x.py)", "", "running")
@@ -865,16 +840,16 @@ class TuiRichRenderTests(unittest.TestCase):
         self.assertTrue(result_styles)
         self.assertTrue(all("dim" not in str(style) for style in result_styles))
 
-    def test_thought_block_renders_with_purple_border(self):
-        block = TranscriptBlock("thought", "thinking", "thought for 12.3s", "thought")
+    def test_thought_block_renders_dim(self):
+        block = TranscriptBlock("thought", "thinking", "for 12.3s", "thought")
         rendered = block_to_rich(block)
         self.assertNotEqual(rendered.__class__.__name__, "Panel")
-        self.assertIn("thinking", str(rendered))
+        self.assertIn("thought", str(rendered))
 
     def test_failure_block_renders_with_red_border(self):
         block = TranscriptBlock("failure", "failure", "something went wrong", "failed")
         rendered = block_to_rich(block)
-        self.assertIn("Error", rendered.title)
+        self.assertIn("failure", rendered.title)
 
     def test_status_bar_renders_from_snapshot(self):
         from rich.text import Text
@@ -973,7 +948,7 @@ class TuiAppTests(unittest.TestCase):
 
         plain = "\n".join(renderable.plain for renderable in welcome_rich(snapshot).renderables)
 
-        self.assertNotIn("gpt-4o", plain)
+        self.assertIn("gpt-4o", plain)
         self.assertIn("workspace-write", plain)
         self.assertIn(self.root.name, plain)
         self.assertIn("general", plain)

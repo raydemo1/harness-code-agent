@@ -35,7 +35,6 @@ class TerminalProfile(BaseProfile):
         "task_budget": 1800,
         "loop_file_edit_threshold": 4,
         "loop_command_repeat_threshold": 3,
-        "task_tracking_nudge_after": 8,
         "time_warn_threshold": 0.45,
         "time_critical_threshold": 0.75,
         "acceptance_review_timeout": 10.0,

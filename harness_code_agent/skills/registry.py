@@ -71,11 +71,6 @@ class SkillRegistry:
             if skill.disable_model_invocation
         ]
 
-    @property
-    def catalog(self) -> list[dict[str, str | bool]]:
-        """Compatibility alias for the model-visible catalog."""
-        return self.model_catalog
-
     def _discover(self) -> None:
         if not self.skills_dir.is_dir():
             log.info("No skills directory found at %s", self.skills_dir)

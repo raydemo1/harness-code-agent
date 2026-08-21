@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from harness_code_agent import config
 from harness_code_agent.agent import context
-from harness_code_agent.agent.loop import Agent
+from harness_code_agent.agent.conversation import Agent
 from harness_code_agent.agent.providers import current_adapter, get_client
 from harness_code_agent.agent.utils import (
     _usage_to_dict,
