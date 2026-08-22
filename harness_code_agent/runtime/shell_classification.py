@@ -1,10 +1,52 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Literal
 
 
 SafeShellCommandKind = Literal["read", "verify", "unsafe"]
+
+
+@dataclass(frozen=True)
+class ShellAnalysis:
+    """One-pass shell command analysis shared by executor, policy and middlewares."""
+
+    command: str
+    risk: str                     # "shell_safe" | "shell_risky" | "shell_blocked"
+    long_running: bool
+    safe_kind: SafeShellCommandKind
+
+
+_BLOCKED_PATTERNS = (
+    r"\brm\s+-[^\n;|&]*[rf][^\n;|&]*(?:\s+--[^\n;|&]+)*\s+(?:/|/\*|~|~/\*|\.|\./\*|\*)\s*$",
+    r"\bremove-item\b(?=.*-recurse\b)(?=.*(?:\bc:\\(?:\s|$)|\$home\b|~|(?:^|\s)\.(?:\s|$)|(?:^|\s)\*))",
+    r"\bdel\b(?=.*(?:/[^\s]*s|-recurse\b))(?=.*(?:\bc:\\\*|\$home\b|~|(?:^|\s)\*))",
+    r"\bmkfs(?:\.[\w-]+)?\b",
+    r"(?:^|[;&|]\s*)format(?:\.com)?(?:\s|$)",
+    r"\bdiskpart\b",
+    r"\bdd\b.*\bof=/dev/",
+)
+
+
+@lru_cache(maxsize=1024)
+def analyze_shell_command(command: str) -> ShellAnalysis:
+    """Analyze a command once; every consumer shares this cached result."""
+    lowered = str(command or "").strip().lower()
+    if not lowered:
+        return ShellAnalysis(lowered, "shell_safe", False, "unsafe")
+    blocked = any(re.search(pattern, lowered) for pattern in _BLOCKED_PATTERNS) or all(
+        fragment in lowered for fragment in (":(){", ":|:&", "};:")
+    )
+    safe_kind = classify_safe_shell_command(lowered)
+    risk = "shell_blocked" if blocked else ("shell_safe" if safe_kind in {"read", "verify"} else "shell_risky")
+    return ShellAnalysis(
+        command=lowered,
+        risk=risk,
+        long_running=is_long_running_shell_command(lowered),
+        safe_kind=safe_kind,
+    )
 
 
 _READ_COMMAND_PREFIXES = (

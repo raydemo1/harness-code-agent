@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..runtime.permissions import PermissionPolicy
+from ..runtime.shell_classification import analyze_shell_command
 from ..runtime.tool_result import ToolResult
 
 
@@ -57,7 +57,6 @@ class FactTracker:
         self.file_generation: dict[str, int] = {}
         self.workspace_generation = 0
         self.invalidation_notices: list[str] = []
-        self._policy = PermissionPolicy()
 
     def resource_keys_for(self, tool: str, args: dict[str, Any]) -> list[str]:
         if tool in {"read_file", "write_file", "apply_patch"} and args.get("path"):
@@ -128,7 +127,7 @@ class FactTracker:
         return False
 
     def _shell_may_mutate(self, command: str) -> bool:
-        return self._policy.classify_shell_command(command) != "shell_safe"
+        return analyze_shell_command(command).risk != "shell_safe"
 
 
 class ObservationStore:

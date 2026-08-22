@@ -1196,30 +1196,6 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIsNone(runtime_state.shell_session)
         self.assertTrue(result.metadata["shell_session_reset"])
 
-    def test_run_bash_direct_call_detects_long_running_command(self):
-        from harness_code_agent.runtime import tools
-
-        class FakeJobs:
-            def start(self, command, *, early_exit_seconds=0.5):
-                self.request = (command, early_exit_seconds)
-                return SimpleNamespace(
-                    job_id="shell-job-direct",
-                    command=command,
-                    pid=789,
-                    status="running",
-                    exit_code=None,
-                    output_tail="",
-                )
-
-        fake_jobs = FakeJobs()
-        runtime_state = SimpleNamespace(shell_session=None, shell_job_manager=fake_jobs)
-
-        result = tools.run_bash("npm run dev", runtime_state=runtime_state)
-
-        self.assertEqual(result.status, "success")
-        self.assertEqual(fake_jobs.request, ("npm run dev", 0.5))
-        self.assertIn("shell-job-direct", result.output)
-
     def test_shell_job_tools_handle_list_read_stop(self):
         from harness_code_agent.runtime import tools
 

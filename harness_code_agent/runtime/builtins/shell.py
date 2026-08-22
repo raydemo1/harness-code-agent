@@ -5,7 +5,6 @@ import json
 
 from ... import config
 from ...workspace.shell_jobs import ShellJobNotFound
-from ..shell_classification import is_long_running_shell_command
 from ..tool_registry import ToolExecutionLane, _coerce_tool_lane
 from ..tool_result import ToolResult
 
@@ -19,12 +18,8 @@ def run_bash(
     execution_lane: ToolExecutionLane | str | None = None,
 ) -> ToolResult:
     """Run a shell command inside the agent's persistent shell session."""
-    if execution_lane is not None:
-        lane = _coerce_tool_lane(execution_lane)
-    elif is_long_running_shell_command(command):
-        lane = ToolExecutionLane.SHELL_LONG_RUNNING
-    else:
-        lane = ToolExecutionLane.SHELL_SERIAL
+    # Lane classification is the executor's job; a missing lane means serial.
+    lane = _coerce_tool_lane(execution_lane) if execution_lane is not None else ToolExecutionLane.SHELL_SERIAL
     if lane == ToolExecutionLane.SHELL_LONG_RUNNING:
         manager = _shell_job_manager(runtime_state)
         if manager is None:

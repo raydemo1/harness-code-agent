@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import config
-from ..runtime.permissions import PermissionPolicy
 from ..runtime import shell_classification
 from ..runtime.tool_registry import ToolExecutionLane, tool_schemas_for_profile
 from ..runtime.tool_runner import (
@@ -75,7 +74,6 @@ class ToolExecutor:
         self.agent = conversation.agent
         self.runtime_state = conversation.runtime_state
         self.cancellation_token = cancellation_token
-        self._shell_policy = PermissionPolicy()
         self._tool_calls: list = []
         self._block_remaining_after_index: int | None = None
         self._executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -200,18 +198,9 @@ class ToolExecutor:
         lane = registry.lane_for(name) or ToolExecutionLane.CONTROL_SERIAL
         if name != "run_bash":
             return lane, None
-        command = str(args.get("command", ""))
-        shell_risk = self._shell_policy.classify_shell_command(command)
-        if shell_risk == "shell_blocked":
-            output = "[blocked] blacklisted shell command is never allowed"
-            return ToolExecutionLane.BLOCKED, ToolResult(
-                tool=name,
-                status="failed",
-                output=output,
-                error=output.removeprefix("[blocked] "),
-                metadata={"status_source": "permission", "risk": "shell_blocked"},
-            )
-        return classify_shell_lane(command), None
+        # Blacklist enforcement lives in PermissionMiddleware; the executor
+        # only decides the execution lane.
+        return classify_shell_lane(str(args.get("command", ""))), None
 
     def _execute_group(self, group: ExecutionGroup) -> list[ExecutedToolCall]:
         ready: list[PreparedToolCall] = []
@@ -498,15 +487,14 @@ def _build_groups(calls: list[PreparedToolCall]) -> list[ExecutionGroup]:
 
 
 def classify_shell_lane(command: str) -> ToolExecutionLane:
-    lowered = " ".join(str(command or "").strip().lower().split())
-    if not lowered:
+    analysis = shell_classification.analyze_shell_command(command)
+    if not analysis.command:
         return ToolExecutionLane.SHELL_SERIAL
-    if shell_classification.is_long_running_shell_command(lowered):
+    if analysis.long_running:
         return ToolExecutionLane.SHELL_LONG_RUNNING
-    safe_kind = shell_classification.classify_safe_shell_command(lowered)
-    if safe_kind == "verify":
+    if analysis.safe_kind == "verify":
         return ToolExecutionLane.SHELL_VERIFY
-    if safe_kind == "read":
+    if analysis.safe_kind == "read":
         return ToolExecutionLane.SHELL_READ
     return ToolExecutionLane.SHELL_SERIAL
 
