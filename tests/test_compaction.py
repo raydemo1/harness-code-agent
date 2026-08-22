@@ -294,8 +294,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=summarized_messages) as summarize,
             patch.object(
-                conv,
-                "_request_assistant_message",
+                conv.llm,
+                "request_assistant_message",
                 return_value=({"role": "assistant", "content": "done"}, "stop"),
             ),
         ):
@@ -343,8 +343,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
                 patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=False),
                 patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=summarized_messages),
                 patch.object(
-                    conv,
-                    "_request_assistant_message",
+                    conv.llm,
+                    "request_assistant_message",
                     return_value=({"role": "assistant", "content": "done"}, "stop"),
                 ),
             ):
@@ -375,8 +375,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation", return_value=conv.messages) as summarize,
             patch("harness_code_agent.agent.conversation.context.create_handoff_reset") as handoff_reset,
             patch.object(
-                conv,
-                "_request_assistant_message",
+                conv.llm,
+                "request_assistant_message",
                 side_effect=[
                     ({"role": "assistant", "content": "continue"}, None),
                     ({"role": "assistant", "content": "done"}, "stop"),
@@ -415,8 +415,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
                 return_value=("# Handoff\n\n## Suggested Skills\n- diagnose", "C:/tmp/handoff.md"),
             ) as handoff_reset,
             patch.object(
-                conv,
-                "_request_assistant_message",
+                conv.llm,
+                "request_assistant_message",
                 return_value=({"role": "assistant", "content": "done"}, "stop"),
             ),
         ):
@@ -443,7 +443,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             def emit_event(self, event):
                 observed.append(event.to_event().to_dict())
 
-        conv._event_bus = Bus()
+        conv.event_bus = Bus()
+        conv.emitter.event_bus = Bus()
         signal = ContextAnxietySignal(
             detected=True,
             score=2,
@@ -456,8 +457,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             patch("harness_code_agent.agent.conversation.context.summarize_older_conversation") as summarize,
             patch("harness_code_agent.agent.conversation.context.create_handoff_reset") as handoff_reset,
             patch.object(
-                conv,
-                "_request_assistant_message",
+                conv.llm,
+                "request_assistant_message",
                 return_value=({"role": "assistant", "content": "done"}, "stop"),
             ),
         ):
@@ -484,7 +485,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             def emit_event(self, event):
                 observed.append(event.to_event().to_dict())
 
-        conv._event_bus = Bus()
+        conv.event_bus = Bus()
+        conv.emitter.event_bus = Bus()
         signal = ContextAnxietySignal(
             detected=True,
             score=2,
@@ -495,8 +497,8 @@ class AgentConversationCompactionLifecycleTests(unittest.TestCase):
             patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=thresholds.compact - 1),
             patch("harness_code_agent.agent.conversation.context.detect_anxiety", return_value=signal),
             patch.object(
-                conv,
-                "_request_assistant_message",
+                conv.llm,
+                "request_assistant_message",
                 side_effect=[
                     ({"role": "assistant", "content": "continue"}, None),
                     ({"role": "assistant", "content": "done"}, "stop"),

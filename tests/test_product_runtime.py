@@ -310,7 +310,7 @@ class ProductRuntimeTests(unittest.TestCase):
             conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=lambda _: None))
 
         with patch.object(conversation.trace, "error") as trace_error:
-            completion = conversation._request_assistant_message(
+            completion = conversation.llm.request_assistant_message(
                 conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10)
             )
 
@@ -350,7 +350,7 @@ class ProductRuntimeTests(unittest.TestCase):
         fake_client = FakeClient()
         with patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client):
             conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=deltas.append))
-            completion = conversation._request_assistant_message(
+            completion = conversation.llm.request_assistant_message(
                 conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10)
             )
 
@@ -483,7 +483,7 @@ class ProductRuntimeTests(unittest.TestCase):
         fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
         with (
-            patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client),
+            patch("harness_code_agent.agent.llm_channel.get_client", return_value=fake_client),
             patch.object(loop.config, "BASE_URL", "https://api.deepseek.com"),
         ):
             result = loop.llm_call_simple([{"role": "user", "content": "summarize"}])
@@ -931,7 +931,8 @@ class ProductRuntimeTests(unittest.TestCase):
         events = []
         with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
             conversation = AgentConversation(Agent("test", "system", use_tools=False))
-        conversation._event_bus = EventBus(listener=events.append)
+        conversation.event_bus = EventBus(listener=events.append)
+        conversation.emitter.event_bus = conversation.event_bus
 
         with (
             patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 1),
@@ -985,7 +986,8 @@ class ProductRuntimeTests(unittest.TestCase):
         agent = Agent("test", "system", use_tools=True, tool_schemas=[read_schema])
         with patch("harness_code_agent.agent.conversation.get_client", return_value=FakeClient()):
             conversation = AgentConversation(agent)
-        conversation._event_bus = EventBus(listener=events.append)
+        conversation.event_bus = EventBus(listener=events.append)
+        conversation.emitter.event_bus = conversation.event_bus
 
         with (
             patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 1),

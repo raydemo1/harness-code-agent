@@ -95,7 +95,7 @@ class ToolExecutor:
                     if item.stop_after_tool_loop or self.runtime_state.fallback.stop_requested:
                         stop_after_group = True
                 if stop_after_group:
-                    self.conversation._emit_agent_fallback()
+                    self.conversation.emitter.emit_agent_fallback(self.runtime_state.fallback)
                     self.conversation.last_text = self.conversation._fallback_text()
                     if self._block_remaining_after_index is not None:
                         self.conversation._append_blocked_tool_results(

@@ -12,6 +12,8 @@ from .. import config
 from . import context
 from .cancellation import CancelledError
 from .compaction import CompactionGate, compaction_action, get_thresholds
+from .llm_channel import LlmChannel, llm_call_simple
+from .session_emitter import SessionEmitter
 from .observations import FactTracker, ObservationStore
 from .providers import ProviderAdapter, current_adapter, get_client
 from .runtime_state import AgentFallbackState, AgentRuntimeState, RecoveryState, TaskBoard
@@ -20,7 +22,6 @@ from .trace import TraceWriter
 from .utils import (
     _prompt_cache_key,
     _short_hash,
-    _usage_to_dict,
     capture_prompt_cache_shape,
     compare_prompt_cache_shapes,
 )
@@ -35,31 +36,6 @@ log = logging.getLogger("harness")
 DYNAMIC_CONTEXT_MARKER = "[HARNESS_DYNAMIC_CONTEXT:"
 
 
-def llm_call_simple(messages: list[dict]) -> str:
-    """Simple LLM call without tools — used for summarization.
-    Retries on rate limits to avoid crashing the agent during context compaction."""
-    import random
-    profile = config.resolve_model_profile("fast")
-    adapter = ProviderAdapter(profile.provider)
-    for attempt in range(4):
-        try:
-            resp = get_client().chat.completions.create(**adapter.chat_kwargs(
-                profile=profile,
-                messages=messages,
-                max_tokens=10000,
-            ))
-            return resp.choices[0].message.content or ""
-        except Exception as e:
-            err_str = str(e)
-            if ("rate_limit" in err_str.lower() or "429" in err_str) and attempt < 3:
-                wait = min(2 ** (attempt + 1), 30) + random.uniform(0, 3)
-                log.warning(f"llm_call_simple rate limited, waiting {wait:.1f}s (attempt {attempt+1}/4)")
-                time.sleep(wait)
-                continue
-            log.error(f"llm_call_simple failed: {e}")
-            # Return a minimal summary rather than crashing
-            return "[context summarization failed — continuing with truncated context]"
-    return "[context summarization failed after retries]"
 
 
 class Agent:
@@ -160,14 +136,17 @@ class AgentConversation:
         self.messages: list[dict] = [{"role": "system", "content": agent.system_prompt}]
         self.client = get_client()
         self.provider: ProviderAdapter = current_adapter()
+        self.emitter = SessionEmitter(None, agent.name, self.provider.name)
+        self.llm = LlmChannel(self)
         self.consecutive_errors = 0
         self.last_text = ""
         self.last_run_streamed_text = False
         self._closed = False
         self._iteration_offset = 0
         self.compaction_gate = CompactionGate()
-        self._event_bus = agent.tool_context.event_bus if agent.tool_context is not None else None
-        self.runtime_state.event_bus = self._event_bus
+        self.event_bus = agent.tool_context.event_bus if agent.tool_context is not None else None
+        self.runtime_state.event_bus = self.event_bus
+        self.emitter.event_bus = self.event_bus
         self.fact_tracker = FactTracker()
         self.observation_store = ObservationStore(self._observation_dir())
         self._cached_prompt_cache_key: str | None = None
@@ -318,52 +297,22 @@ class AgentConversation:
         except OSError as exc:
             log.debug("Failed to persist compacted summary: %s", exc)
 
-    def _emit_compaction_started(self, *, token_count: int, threshold: int, phase: str) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import ContextCompactionStartedEvent
-        self._event_bus.emit_event(
-            ContextCompactionStartedEvent(
-                token_count=token_count,
-                threshold=threshold,
-                forced=False,
-                phase=phase,
-            ).to_event()
-        )
-
     def _emit_compaction_committed(self, *, messages_before: int, token_count_before: int,
                                    summary_chars: int = 0, summary_text: str = "",
                                    phase: str = "compact") -> None:
         if summary_text:
             self._persist_compacted_summary(summary_text, phase=phase)
-        if self._event_bus is None:
+        if self.emitter.event_bus is None:
             return
-        from ..sessions.events import ContextCompactionCommittedEvent
         tokens_after = context.count_request_tokens(
             self.messages,
             tool_schemas=_tool_schemas_for_agent(self.agent),
         )
-        self._event_bus.emit_event(
-            ContextCompactionCommittedEvent(
-                summary_chars=summary_chars,
-                messages_before=messages_before,
-                messages_after=len(self.messages),
-                tokens_saved=max(0, token_count_before - tokens_after),
-            ).to_event()
-        )
-
-    def _emit_context_anxiety_observed(self, *, token_count: int, threshold: int, signal) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import ContextAnxietyObservedEvent
-        self._event_bus.emit_event(
-            ContextAnxietyObservedEvent(
-                token_count=token_count,
-                threshold=threshold,
-                score=getattr(signal, "score", 0),
-                reasons=list(getattr(signal, "reasons", [])),
-                source=getattr(signal, "source", "assistant_recent_messages"),
-            ).to_event()
+        self.emitter.emit_compaction_committed(
+            messages_before=messages_before,
+            messages_after=len(self.messages),
+            tokens_saved=max(0, token_count_before - tokens_after),
+            summary_chars=summary_chars,
         )
 
     def _maybe_auto_compact(self, agent: Agent, *, token_count: int, thresholds) -> None:
@@ -384,7 +333,7 @@ class AgentConversation:
         self._strip_dynamic_context_messages()
 
         # Layer 1 — summarize older conversation via lightweight LLM call
-        self._emit_compaction_started(
+        self.emitter.emit_compaction_started(
             token_count=token_count,
             threshold=thresholds.compact,
             phase="summarizing_history",
@@ -421,7 +370,7 @@ class AgentConversation:
         # Layer 2 — reset context from a persisted handoff document
         state.context_refill_streak += 1
         state.auto_compaction_suspended = True
-        self._emit_compaction_started(
+        self.emitter.emit_compaction_started(
             token_count=tokens_after_summary,
             threshold=thresholds.compact,
             phase="auto_compaction_suspended",
@@ -431,7 +380,7 @@ class AgentConversation:
             self._handoff_reset_context(agent, token_count=tokens_after_summary, thresholds=thresholds)
 
     def _handoff_reset_context(self, agent: Agent, *, token_count: int, thresholds) -> None:
-        self._emit_compaction_started(
+        self.emitter.emit_compaction_started(
             token_count=token_count,
             threshold=thresholds.compact,
             phase="handoff_reset",
@@ -559,164 +508,14 @@ class AgentConversation:
         self.add_user_turn(task)
         return self.run_until_idle(cancellation_token=cancellation_token)
 
+    def next_call_id(self) -> str:
+        return f"{self.agent.name}-{time.time_ns()}"
+
     def _check_cancelled(self, cancellation_token) -> None:
         if cancellation_token is not None:
             cancellation_token.check()
 
-    def _request_assistant_message(self, kwargs: dict, cancellation_token=None) -> tuple[dict, str | None] | None:
-        if self.agent.stream_callback is not None:
-            stream_kwargs = dict(kwargs)
-            stream_kwargs["stream"] = True
-            call_id = self._next_llm_call_id()
-            request_started = time.perf_counter()
-            first_token_ms: int | None = None
-            self._emit_llm_request_started(call_id, streamed=True, kwargs=stream_kwargs)
-            saw_chunk = False
-            thought_start_time: float | None = None
-
-            def on_chunk() -> None:
-                nonlocal saw_chunk
-                saw_chunk = True
-
-            def on_text_delta(delta: str) -> None:
-                nonlocal first_token_ms
-                if first_token_ms is None:
-                    first_token_ms = int((time.perf_counter() - request_started) * 1000)
-                    self._emit_llm_first_token(call_id, first_token_ms, kwargs=stream_kwargs)
-                self.last_run_streamed_text = True
-                self.agent.stream_callback(delta)
-
-            def on_reasoning_start() -> None:
-                nonlocal thought_start_time
-                thought_start_time = time.time()
-                if self._event_bus is not None:
-                    from ..sessions.events import ThoughtStartedEvent
-                    self._event_bus.emit_event(ThoughtStartedEvent().to_event())
-
-            def on_reasoning_delta(delta: str) -> None:
-                pass  # Reasoning content collected silently, not displayed
-
-            try:
-                if self.provider.supports_prompt_cache_key:
-                    stream_kwargs.setdefault("stream_options", {"include_usage": True})
-                stream = self.client.chat.completions.create(**stream_kwargs)
-                result = self.provider.assistant_message_from_stream(
-                    stream,
-                    on_text_delta=on_text_delta,
-                    on_chunk=on_chunk,
-                    on_reasoning_start=on_reasoning_start,
-                    on_reasoning_delta=on_reasoning_delta,
-                    cancellation_token=cancellation_token,
-                )
-                # Emit thought finished event if reasoning was detected
-                if thought_start_time is not None and self._event_bus is not None:
-                    duration = time.time() - thought_start_time
-                    from ..sessions.events import ThoughtFinishedEvent
-                    self._event_bus.emit_event(
-                        ThoughtFinishedEvent(
-                            duration_seconds=duration,
-                            source=self.provider.name,
-                        ).to_event()
-                    )
-                self._emit_llm_response_finished(
-                    call_id,
-                    int((time.perf_counter() - request_started) * 1000),
-                    finish_reason=result.finish_reason,
-                    streamed=True,
-                    first_token_ms=first_token_ms,
-                    kwargs=stream_kwargs,
-                )
-                self._emit_llm_usage(result.usage, kwargs.get("prompt_cache_key"))
-                return result.assistant_message, result.finish_reason
-            except CancelledError:
-                raise
-            except Exception as exc:
-                if saw_chunk:
-                    raise
-                self.trace.error("stream_fallback", str(exc))
-
-        self._check_cancelled(cancellation_token)
-        call_id = self._next_llm_call_id()
-        request_started = time.perf_counter()
-        self._emit_llm_request_started(call_id, streamed=False, kwargs=kwargs)
-        response = self.client.chat.completions.create(**kwargs)
-        self._check_cancelled(cancellation_token)
-        if not response.choices:
-            return None
-        choice = response.choices[0]
-        self._emit_llm_response_finished(
-            call_id,
-            int((time.perf_counter() - request_started) * 1000),
-            finish_reason=choice.finish_reason,
-            streamed=False,
-            first_token_ms=None,
-            kwargs=kwargs,
-        )
-        self._emit_llm_usage(_usage_to_dict(getattr(response, "usage", None)), kwargs.get("prompt_cache_key"))
-
-        return self.provider.assistant_message_from_response(choice.message), choice.finish_reason
-
-    def _next_llm_call_id(self) -> str:
-        return f"{self.agent.name}-{time.time_ns()}"
-
-    def _emit_llm_request_started(self, call_id: str, *, streamed: bool, kwargs: dict) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import LlmRequestStartedEvent
-
-        self._event_bus.emit_event(
-            LlmRequestStartedEvent(
-                call_id=call_id,
-                provider=self.provider.name,
-                model=str(kwargs.get("model") or config.MODEL),
-                streamed=streamed,
-                agent=self.agent.name,
-            ).to_event()
-        )
-
-    def _emit_llm_first_token(self, call_id: str, elapsed_ms: int, *, kwargs: dict) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import LlmFirstTokenEvent
-
-        self._event_bus.emit_event(
-            LlmFirstTokenEvent(
-                call_id=call_id,
-                elapsed_ms=elapsed_ms,
-                provider=self.provider.name,
-                model=str(kwargs.get("model") or config.MODEL),
-                agent=self.agent.name,
-            ).to_event()
-        )
-
-    def _emit_llm_response_finished(
-        self,
-        call_id: str,
-        duration_ms: int,
-        *,
-        finish_reason: str | None,
-        streamed: bool,
-        first_token_ms: int | None,
-        kwargs: dict,
-    ) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import LlmResponseFinishedEvent
-
-        self._event_bus.emit_event(
-            LlmResponseFinishedEvent(
-                call_id=call_id,
-                duration_ms=max(0, int(duration_ms)),
-                provider=self.provider.name,
-                model=str(kwargs.get("model") or config.MODEL),
-                streamed=streamed,
-                finish_reason=finish_reason,
-                first_token_ms=first_token_ms,
-                agent=self.agent.name,
-            ).to_event()
-        )
-
-    def _emit_llm_usage(self, usage: dict | None, prompt_cache_key: str | None) -> None:
+    def record_llm_usage(self, usage: dict | None, prompt_cache_key: str | None) -> None:
         fallback = self.runtime_state.fallback
         fallback.llm_call_count += 1
         if usage:
@@ -731,7 +530,7 @@ class AgentConversation:
                 fallback.total_tokens,
                 config.MAX_AGENT_TOTAL_TOKENS,
             )
-        if not usage or self._event_bus is None:
+        if not usage or self.event_bus is None:
             return
         from ..sessions.events import LlmUsageEvent
 
@@ -750,7 +549,7 @@ class AgentConversation:
         )
         self._last_prompt_cache_shape = cache_shape
         self._pending_prompt_cache_shape = None
-        self._event_bus.emit_event(
+        self.event_bus.emit_event(
             LlmUsageEvent(
                 provider=getattr(self.provider, "name", "unknown"),
                 model=config.MODEL,
@@ -785,11 +584,11 @@ class AgentConversation:
         if used < threshold:
             return
         fallback.budget_warnings.add(limit_type)
-        if self._event_bus is None:
+        if self.event_bus is None:
             return
         from ..sessions.events import AgentBudgetWarningEvent
 
-        self._event_bus.emit_event(
+        self.event_bus.emit_event(
             AgentBudgetWarningEvent(
                 limit_type=limit_type,
                 used=int(used),
@@ -830,28 +629,6 @@ class AgentConversation:
         fallback.record_action(_safe_tool_summary(tool_name, tool_args))
         self._maybe_emit_budget_warning("tool_calls", fallback.tool_call_count, limit)
         return True
-
-    def _emit_agent_fallback(self) -> None:
-        fallback = self.runtime_state.fallback
-        if fallback.fallback_event_emitted or not fallback.stop_requested:
-            return
-        fallback.fallback_event_emitted = True
-        if self._event_bus is None:
-            return
-        from ..sessions.events import AgentFallbackEvent
-
-        self._event_bus.emit_event(
-            AgentFallbackEvent(
-                reason=fallback.stop_reason,
-                limit_type=fallback.stop_limit_type or None,
-                used=fallback.stop_used,
-                limit=fallback.stop_limit,
-                last_tool=fallback.stop_last_tool or None,
-                fingerprint_hash=fallback.stop_fingerprint_hash or None,
-                recent_action_summary=fallback.recent_action_summary,
-                agent=self.agent.name,
-            ).to_event()
-        )
 
     def _fallback_text(self) -> str:
         fallback = self.runtime_state.fallback
@@ -920,7 +697,7 @@ class AgentConversation:
                         limit=int(agent.time_budget),
                         recent_action_summary=self.runtime_state.fallback.recent_action_summary,
                     )
-                    self._emit_agent_fallback()
+                    self.emitter.emit_agent_fallback(self.runtime_state.fallback)
                     self.last_text = self._fallback_text()
                     self.trace.finish("time_budget", iteration)
                     break
@@ -950,7 +727,7 @@ class AgentConversation:
                 self.runtime_state.context_anxiety_turn_start_index = self.runtime_state.current_turn_start_index
                 score = getattr(anxiety, "score", 0)
                 self.trace.context_event("context_anxiety", f"tokens={token_count} score={score}")
-                self._emit_context_anxiety_observed(
+                self.emitter.emit_context_anxiety_observed(
                     token_count=token_count,
                     threshold=thresholds.compact,
                     signal=anxiety,
@@ -983,7 +760,7 @@ class AgentConversation:
             kwargs = self.provider.chat_kwargs(**chat_args)
 
             try:
-                completion = self._request_assistant_message(kwargs, cancellation_token=cancellation_token)
+                completion = self.llm.request_assistant_message(kwargs, cancellation_token=cancellation_token)
             except CancelledError:
                 raise
             except Exception as e:
@@ -1059,7 +836,7 @@ class AgentConversation:
                 break
 
             if self._request_token_budget_stop_if_needed():
-                self._emit_agent_fallback()
+                self.emitter.emit_agent_fallback(self.runtime_state.fallback)
                 self.last_text = self._fallback_text()
                 self._append_blocked_tool_results(tool_calls, self.runtime_state.fallback.stop_reason)
                 self.trace.finish("agent_fallback", iteration)
@@ -1118,7 +895,7 @@ class AgentConversation:
                 limit=config.MAX_AGENT_ITERATIONS,
                 recent_action_summary=self.runtime_state.fallback.recent_action_summary,
             )
-            self._emit_agent_fallback()
+            self.emitter.emit_agent_fallback(self.runtime_state.fallback)
             self.last_text = self._fallback_text()
             self.trace.finish("max_iterations", config.MAX_AGENT_ITERATIONS)
 
