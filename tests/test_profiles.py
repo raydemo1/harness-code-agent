@@ -7,9 +7,15 @@ from harness_code_agent.agent.prompts import (
     GlobalRulesDoc,
     PromptPrefixBuilder,
 )
-from harness_code_agent.profiles import PRODUCT_PROFILES, PROFILES, get_profile, list_profiles
-from harness_code_agent.profiles.terminal import TerminalProfile
+from harness_code_agent.profiles import (
+    PRODUCT_PROFILES,
+    PROFILES,
+    get_profile,
+    list_profiles,
+)
 from harness_code_agent.profiles.router import route_profile_for_turn
+from harness_code_agent.profiles.terminal import TerminalProfile
+from harness_code_agent.runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
 from harness_code_agent.runtime.middleware import (
     AcceptanceReviewMiddleware,
     PreExitVerificationMiddleware,
@@ -17,7 +23,6 @@ from harness_code_agent.runtime.middleware import (
     TaskTrackingEnforcementMiddleware,
     TerminalShellEditPolicyMiddleware,
 )
-from harness_code_agent.runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
 from harness_code_agent.runtime.tool_registry import tool_schemas_for_profile
 
 
@@ -55,6 +60,45 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertEqual(decision.profile_name, "terminal")
         self.assertTrue(decision.fallback_used)
         self.assertEqual(decision.fallback_reason, "profile is sticky")
+
+    def test_profile_router_prefers_explicit_workflow_contracts_over_similarity(self):
+        cases = [
+            ("先给我方案，不要修改代码", "plan"),
+            ("只审查这个实现，不要改动文件", "review"),
+            ("审查后直接修复这个 parser bug", "coding-agent"),
+            ("创建一个响应式网页看板", "app-builder"),
+            ("解释这段代码是什么意思", "general"),
+        ]
+        for prompt, expected in cases:
+            with self.subTest(prompt=prompt):
+                decision = route_profile_for_turn(prompt, current_profile="general")
+                self.assertEqual(decision.profile_name, expected)
+                self.assertEqual(decision.reason, f"Explicit instruction contract matched {expected}.")
+                self.assertEqual(decision.confidence, 1.0)
+
+    def test_profile_router_batch_routes_natural_language_with_local_anchors(self):
+        cases = [
+            ("What is the difference between these two ideas?", "general"),
+            ("The repository checks are red after the last change.", "coding-agent"),
+            ("Lay out the path, assumptions, and validation points.", "plan"),
+            ("A polished workspace with clear visual hierarchy would help.", "app-builder"),
+        ]
+        for prompt, expected in cases:
+            with self.subTest(prompt=prompt):
+                decision = route_profile_for_turn(prompt, current_profile="general")
+                self.assertEqual(decision.profile_name, expected)
+                self.assertFalse(decision.fallback_used)
+                self.assertEqual(
+                    decision.reason,
+                    f"Local semantic prototype matched {expected}.",
+                )
+
+    def test_profile_router_keeps_specialized_profile_sticky_for_general_followup(self):
+        decision = route_profile_for_turn("help me understand this concept", current_profile="coding-agent")
+
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertEqual(decision.action, "direct_answer")
+        self.assertEqual(decision.matched_profile, "general")
 
     def test_shared_identity_precedes_profile_contract_and_has_own_hash(self):
         prefix = PromptPrefixBuilder().build(
@@ -129,7 +173,12 @@ class ProfilePromptTests(unittest.TestCase):
                 self.assertTrue(any(isinstance(mw, AcceptanceReviewMiddleware) for mw in cfg.middlewares))
                 self.assertEqual(len(tracking), 1)
                 self.assertTrue(tracking[0].enforce_acceptance)
-                self.assertIsNotNone(tracking[0].require_start_after_n_actions)
+                self.assertIsNone(tracking[0].require_start_after_n_actions)
+
+                prompt = cfg.system_prompt
+                self.assertIn("does not by itself make a task complex", prompt)
+                self.assertNotIn("at most 2 low-risk actions", prompt)
+                self.assertNotIn("up to 3 files", prompt)
 
     def test_read_only_and_planning_profiles_do_not_get_execution_acceptance_loop(self):
         for name in ("general", "plan", "review"):
