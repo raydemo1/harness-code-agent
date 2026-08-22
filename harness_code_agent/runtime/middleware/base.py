@@ -3,8 +3,36 @@ from __future__ import annotations
 
 from abc import ABC
 
+from ..tool_result import ToolResult
+
 
 MAIN_AGENT_NAMES = {"main_agent"}
+
+# status_source values emitted when a call is intercepted before execution.
+_BLOCKED_SOURCES = {
+    "permission",
+    "approval",
+    "budget",
+    "tool_policy",
+    "delegate_policy",
+    "user_question",
+}
+
+
+def tool_blocked(result: ToolResult) -> bool:
+    """True when the call was intercepted by policy/permissions before running."""
+    source = str((result.metadata or {}).get("status_source") or "")
+    return result.status == "failed" and source in _BLOCKED_SOURCES
+
+
+def tool_failed(result: ToolResult) -> bool:
+    """True when the tool ran and reported a failure (not an interception)."""
+    return result.status == "failed" and not tool_blocked(result)
+
+
+def result_text(result: ToolResult) -> str:
+    """Human-facing text of a result (error first, full output as fallback)."""
+    return result.error or result.output or ""
 
 
 class AgentMiddleware(ABC):
@@ -59,7 +87,7 @@ class AgentMiddleware(ABC):
         """Called after every before_tool gate allows the tool, just before it is queued."""
         return None
 
-    def post_tool(self, tool_name: str, tool_args: dict, result: str,
+    def post_tool(self, tool_name: str, tool_args: dict, result: ToolResult,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
         """Called after each tool execution. Return a message to inject, or None."""

@@ -6,6 +6,7 @@ import json
 import logging
 
 from ..arg_preview import safe_args_preview as _shared_safe_args_preview
+from ..tool_result import ToolResult
 from .base import AgentMiddleware
 
 
@@ -115,7 +116,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
             "or ask for a decision if the task is blocked."
         )
 
-    def post_tool(self, tool_name: str, tool_args: dict, result: str,
+    def post_tool(self, tool_name: str, tool_args: dict, result: ToolResult,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
         # Track file edits
@@ -153,7 +154,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
                     )
 
             # Also detect rapid-fire failed commands (different commands, same error)
-            if "[error]" in result or "command not found" in result.lower():
+            if result.status == "failed":
                 recent_errors = 0
                 for msg in reversed(messages[-8:]):
                     content = msg.get("content", "")

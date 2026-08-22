@@ -38,7 +38,7 @@ class EvalSuiteTests(unittest.TestCase):
 
     def test_terminal_bench_24task_subset_is_fixed_and_bounded(self):
         payload = json.loads(Path("eval/tasks/terminal_bench_24task.json").read_text(encoding="utf-8"))
-        metadata = json.loads(Path("eval/benchmarks/tb2_tasks.json").read_text(encoding="utf-8"))
+        metadata = json.loads(Path("harness_code_agent/profiles/tb2_tasks.json").read_text(encoding="utf-8"))
 
         self.assertEqual(payload["suite"], "terminal_bench_24task")
         self.assertEqual(payload["task_set"], "24task")

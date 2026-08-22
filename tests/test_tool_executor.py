@@ -298,7 +298,9 @@ class ToolExecutorTests(unittest.TestCase):
             ):
                 conversation.run_until_idle()
 
-        self.assertEqual(observer.seen, [("observed_read", "ok")])
+        self.assertEqual(len(observer.seen), 1)
+        self.assertEqual(observer.seen[0][0], "observed_read")
+        self.assertEqual(observer.seen[0][1].output, "ok")
         injected = [
             msg["content"]
             for msg in conversation.messages
@@ -726,6 +728,57 @@ class ToolExecutorTests(unittest.TestCase):
 
         self.assertIs(seen[0], token)
         self.assertIn("slow_observed_cancel", seen)
+
+    def test_cancellation_answers_all_pending_tool_calls(self):
+        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+
+        registry = tools.ToolRegistry()
+        token = CancellationToken()
+
+        def slow_tool(cancellation_token=None):
+            while not cancellation_token.is_cancelled:
+                time.sleep(0.01)
+            return ToolResult(tool="slow_read", status="failed", output="slow cancelled")
+
+        def cancel_tool(cancellation_token=None):
+            token.cancel()
+            return ToolResult(tool="cancel_read", status="success", output="cancelled")
+
+        def third_tool(cancellation_token=None):
+            return ToolResult(tool="third_read", status="success", output="third done")
+
+        registry.register(_schema("slow_read"), slow_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+        registry.register(_schema("cancel_read"), cancel_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+        registry.register(_schema("third_read"), third_tool, permission="read", lane=tools.ToolExecutionLane.WORKSPACE_READ)
+        tool_calls = [
+            _tool_call("tc_slow", "slow_read"),
+            _tool_call("tc_cancel", "cancel_read"),
+            _tool_call("tc_third", "third_read"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation, _context = _conversation_with_registry(Path(tmp), registry, tool_calls)
+            with (
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+            ):
+                with self.assertRaises(CancelledError):
+                    conversation.run_until_idle(cancellation_token=token)
+
+            tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
+            answered_ids = {msg["tool_call_id"] for msg in tool_messages}
+            assistant_calls = [
+                tc["id"]
+                for msg in conversation.messages
+                if msg.get("tool_calls")
+                for tc in msg["tool_calls"]
+            ]
+            self.assertEqual(set(assistant_calls), {"tc_slow", "tc_cancel", "tc_third"})
+            self.assertEqual(answered_ids, set(assistant_calls))
+            cancelled_contents = [
+                msg["content"] for msg in tool_messages if "[cancelled]" in msg["content"]
+            ]
+            self.assertTrue(cancelled_contents, "orphaned calls must be answered with [cancelled]")
 
     def test_long_running_shell_is_serial_barrier_and_returns_job_id(self):
         registry = tools.BUILTIN_TOOL_REGISTRY.copy()

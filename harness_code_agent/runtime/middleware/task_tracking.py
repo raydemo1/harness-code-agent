@@ -6,6 +6,7 @@ import re
 
 from ...agent.acceptance import AcceptanceError
 from ..shell_classification import classify_safe_shell_command
+from ..tool_result import ToolResult
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 
 
@@ -75,12 +76,12 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             )
         return None
 
-    def post_tool(self, tool_name: str, tool_args: dict, result: str,
+    def post_tool(self, tool_name: str, tool_args: dict, result: ToolResult,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
         if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
-        if result.startswith("[error]") or result.startswith("[blocked]"):
+        if result.status == "failed":
             return None
 
         board = runtime_state.task_board

@@ -30,3 +30,7 @@ veriforge = "harness_code_agent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["harness_code_agent*"]
+
+[tool.setuptools.package-data]
+"harness_code_agent.skills" = ["catalog/**/*"]
+"harness_code_agent.profiles" = ["*.json"]

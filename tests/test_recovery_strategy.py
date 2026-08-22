@@ -18,6 +18,17 @@ _install_fake_openai_module()
 
 from harness_code_agent.agent.conversation import AgentRuntimeState
 from harness_code_agent.runtime.middlewares import LoopDetectionMiddleware, RecoveryStrategyMiddleware
+from harness_code_agent.runtime.tool_result import ToolResult
+
+
+def _result(text: str, *, status: str | None = None) -> ToolResult:
+    """Build a ToolResult from the legacy text conventions used in these tests."""
+    if status is None:
+        status = "failed" if text.startswith(("[error]", "[blocked]")) else "success"
+    metadata = {"status_source": "permission"} if text.startswith("[blocked]") else {}
+    error = text.removeprefix("[error] ").removeprefix("[blocked] ") if status == "failed" else None
+    return ToolResult(tool="run_bash", status=status, output=text, error=error, metadata=metadata)
+
 
 
 class RecoveryStrategyTests(unittest.TestCase):
@@ -25,8 +36,8 @@ class RecoveryStrategyTests(unittest.TestCase):
         state = AgentRuntimeState()
         middleware = RecoveryStrategyMiddleware()
 
-        middleware.observe_tool_result("run_bash", {"command": "foo"}, "[error] command not found", state)
-        middleware.observe_tool_result("run_bash", {"command": "foo"}, "[error] command not found", state)
+        middleware.observe_tool_result("run_bash", {"command": "foo"}, _result("[error] command not found"), state)
+        middleware.observe_tool_result("run_bash", {"command": "foo"}, _result("[error] command not found"), state)
 
         self.assertEqual(state.recovery.mode, "ENV_FIX")
 
@@ -119,7 +130,7 @@ class RecoveryStrategyTests(unittest.TestCase):
         guidance = middleware.post_tool(
             "run_bash",
             {"command": "pytest -q"},
-            "1 passed",
+            _result("1 passed"),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -139,7 +150,7 @@ class RecoveryStrategyTests(unittest.TestCase):
         guidance = middleware.post_tool(
             "run_bash",
             {"command": "pytest -q"},
-            "[error] pytest::task_x failed",
+            _result("[error] pytest::task_x failed"),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -168,7 +179,7 @@ class RecoveryStrategyTests(unittest.TestCase):
         middleware.post_tool(
             "run_bash",
             {"command": "cat -n sim.c"},
-            source_output,
+            _result(source_output),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -176,7 +187,7 @@ class RecoveryStrategyTests(unittest.TestCase):
         middleware.post_tool(
             "run_bash",
             {"command": "sed -n '1,100p' sim.c"},
-            source_output,
+            _result(source_output),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -195,7 +206,7 @@ class RecoveryStrategyTests(unittest.TestCase):
         middleware.post_tool(
             "run_bash",
             {"command": "pytest -q"},
-            "FAILED test_task.py::test_output - AssertionError: expected 377 got 104",
+            _result("FAILED test_task.py::test_output - AssertionError: expected 377 got 104"),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -203,7 +214,7 @@ class RecoveryStrategyTests(unittest.TestCase):
         middleware.post_tool(
             "run_bash",
             {"command": "pytest -q"},
-            "FAILED test_task.py::test_output - AssertionError: expected 377 got 104",
+            _result("FAILED test_task.py::test_output - AssertionError: expected 377 got 104"),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -222,7 +233,7 @@ class LoopDetectionMiddlewareTests(unittest.TestCase):
         first = middleware.post_tool(
             "web_search",
             {"query": "agent fallback", "filters": {"b": 2, "a": 1}},
-            "ok",
+            _result("ok"),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -230,7 +241,7 @@ class LoopDetectionMiddlewareTests(unittest.TestCase):
         warning = middleware.post_tool(
             "web_search",
             {"filters": {"a": 1, "b": 2}, "query": "agent fallback"},
-            "ok",
+            _result("ok"),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -238,7 +249,7 @@ class LoopDetectionMiddlewareTests(unittest.TestCase):
         stop = middleware.post_tool(
             "web_search",
             {"query": "agent fallback", "filters": {"b": 2, "a": 1}},
-            "ok",
+            _result("ok"),
             [],
             runtime_state=state,
             agent_name="main_agent",
@@ -258,9 +269,9 @@ class LoopDetectionMiddlewareTests(unittest.TestCase):
         secret = "SECRET_PAYLOAD_" * 200
         args = {"path": "note.txt", "content": secret}
 
-        middleware.post_tool("custom_tool", args, "ok", [], runtime_state=state, agent_name="main_agent")
-        middleware.post_tool("custom_tool", args, "ok", [], runtime_state=state, agent_name="main_agent")
-        middleware.post_tool("custom_tool", args, "ok", [], runtime_state=state, agent_name="main_agent")
+        middleware.post_tool("custom_tool", args, _result("ok"), [], runtime_state=state, agent_name="main_agent")
+        middleware.post_tool("custom_tool", args, _result("ok"), [], runtime_state=state, agent_name="main_agent")
+        middleware.post_tool("custom_tool", args, _result("ok"), [], runtime_state=state, agent_name="main_agent")
 
         self.assertTrue(state.fallback.stop_requested)
         summary = "\n".join(state.fallback.recent_action_summary)

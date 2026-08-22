@@ -8,6 +8,17 @@ from io import StringIO
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
+from harness_code_agent.runtime.tool_result import ToolResult
+
+
+def _result(text: str, *, status: str | None = None) -> ToolResult:
+    """Build a ToolResult from the legacy text conventions used in these tests."""
+    if status is None:
+        status = "failed" if text.startswith(("[error]", "[blocked]")) else "success"
+    metadata = {"status_source": "permission"} if text.startswith("[blocked]") else {}
+    error = text.removeprefix("[error] ").removeprefix("[blocked] ") if status == "failed" else None
+    return ToolResult(tool="run_bash", status=status, output=text, error=error, metadata=metadata)
+
 
 
 class ProductRuntimeTests(unittest.TestCase):
@@ -3355,16 +3366,16 @@ class ProductRuntimeTests(unittest.TestCase):
         mw.begin_turn("task 1", [])
         self.assertEqual(len(mw._file_warned), 0)
 
-        mw.post_tool("write_file", {"path": "a.py", "content": "x"}, "ok", [])
-        mw.post_tool("write_file", {"path": "a.py", "content": "y"}, "ok", [])
+        mw.post_tool("write_file", {"path": "a.py", "content": "x"}, _result("ok"), [])
+        mw.post_tool("write_file", {"path": "a.py", "content": "y"}, _result("ok"), [])
         self.assertIn("a.py", mw._file_warned)
 
         # Next turn — _file_warned is cleared, same file triggers warning again
         mw.begin_turn("task 2", [])
         self.assertEqual(len(mw._file_warned), 0)
 
-        mw.post_tool("write_file", {"path": "a.py", "content": "z"}, "ok", [])
-        mw.post_tool("write_file", {"path": "a.py", "content": "w"}, "ok", [])
+        mw.post_tool("write_file", {"path": "a.py", "content": "z"}, _result("ok"), [])
+        mw.post_tool("write_file", {"path": "a.py", "content": "w"}, _result("ok"), [])
         self.assertIn("a.py", mw._file_warned)
 
 

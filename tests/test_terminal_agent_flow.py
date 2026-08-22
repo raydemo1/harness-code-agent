@@ -19,6 +19,17 @@ _install_fake_openai_module()
 from harness_code_agent.agent.conversation import Agent
 from harness_code_agent.runtime.middlewares import TaskTrackingEnforcementMiddleware
 from harness_code_agent.profiles.terminal import TerminalProfile
+from harness_code_agent.runtime.tool_result import ToolResult
+
+
+def _result(text: str, *, status: str | None = None) -> ToolResult:
+    """Build a ToolResult from the legacy text conventions used in these tests."""
+    if status is None:
+        status = "failed" if text.startswith(("[error]", "[blocked]")) else "success"
+    metadata = {"status_source": "permission"} if text.startswith("[blocked]") else {}
+    error = text.removeprefix("[error] ").removeprefix("[blocked] ") if status == "failed" else None
+    return ToolResult(tool="run_bash", status=status, output=text, error=error, metadata=metadata)
+
 
 
 class AgentRuntimeStateTests(unittest.TestCase):
@@ -99,7 +110,7 @@ class AgentRuntimeStateTests(unittest.TestCase):
                 middleware.post_tool(
                     "run_bash",
                     {"command": "pytest"},
-                    "ok",
+                    _result("ok"),
                     messages=[],
                     runtime_state=state,
                     agent_name="main_agent",
@@ -108,7 +119,7 @@ class AgentRuntimeStateTests(unittest.TestCase):
         reminder = middleware.post_tool(
             "run_bash",
             {"command": "pytest"},
-            "ok",
+            _result("ok"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",

@@ -540,7 +540,7 @@ def build_summary(
 
 
 def _terminal_bench_task_inventory() -> set[str]:
-    path = Path(__file__).resolve().parents[1] / "benchmarks" / "tb2_tasks.json"
+    path = Path(__file__).resolve().parents[2] / "harness_code_agent" / "profiles" / "tb2_tasks.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

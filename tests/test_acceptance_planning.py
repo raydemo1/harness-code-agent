@@ -13,6 +13,17 @@ from harness_code_agent.runtime.middleware.acceptance_review import (
 )
 from harness_code_agent.runtime.tools import execute_tool_result
 from harness_code_agent.sessions.events import EventBus
+from harness_code_agent.runtime.tool_result import ToolResult
+
+
+def _result(text: str, *, status: str | None = None) -> ToolResult:
+    """Build a ToolResult from the legacy text conventions used in these tests."""
+    if status is None:
+        status = "failed" if text.startswith(("[error]", "[blocked]")) else "success"
+    metadata = {"status_source": "permission"} if text.startswith("[blocked]") else {}
+    error = text.removeprefix("[error] ").removeprefix("[blocked] ") if status == "failed" else None
+    return ToolResult(tool="run_bash", status=status, output=text, error=error, metadata=metadata)
+
 
 
 class AcceptancePlanningTests(unittest.TestCase):
@@ -313,7 +324,7 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             self._args(),
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -338,7 +349,7 @@ class AcceptancePlanningTests(unittest.TestCase):
             middleware.post_tool(
                 "read_file",
                 {"path": "target.py"},
-                "contents",
+                _result("contents"),
                 messages=[],
                 runtime_state=state,
                 agent_name="main_agent",
@@ -360,7 +371,7 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             self._args(),
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -391,7 +402,7 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             self._args(),
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -431,7 +442,7 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             start_args,
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -471,7 +482,7 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             self._args(),
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",

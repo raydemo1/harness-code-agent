@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from ..tool_result import ToolResult
 from .base import AgentMiddleware, MAIN_AGENT_NAMES
 
 
@@ -87,7 +88,7 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
         self,
         tool_name: str,
         tool_args: dict,
-        result: str,
+        result: ToolResult,
         messages: list[dict],
         runtime_state=None,
         agent_name: str | None = None,
@@ -99,7 +100,7 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
         if (
             tool_name == "update_plan_state"
             and str(tool_args.get("update_kind") or "").strip().lower() == "start"
-            and not result.startswith(("[error]", "[blocked]"))
+            and result.status == "success"
         ):
             self._start_review(runtime_state)
             return None

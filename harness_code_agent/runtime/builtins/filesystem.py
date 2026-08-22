@@ -382,19 +382,18 @@ def read_file(
 
 
 def read_skill_file(path: str) -> ToolResult:
-    """Read a file from the skills directory (outside workspace). Path must be relative to project root."""
-    project_root = Path(__file__).resolve().parents[3]
-    p = (project_root / path).resolve()
-    # Must stay within the skills directory
-    skills_dir = (project_root / "skills").resolve()
+    """Read a file from the packaged skills catalog (outside workspace)."""
+    skills_root = Path(__file__).resolve().parents[2] / "skills"
+    catalog_root = (skills_root / "catalog").resolve()
+    p = (skills_root / path).resolve()
     try:
-        p.relative_to(skills_dir)
+        p.relative_to(catalog_root)
     except ValueError:
         return ToolResult(
             tool="read_skill_file",
             status="failed",
-            output=f"[error] Path must be inside skills/ directory: {path}",
-            error=f"Path must be inside skills/ directory: {path}",
+            output=f"[error] Path must be inside skills/catalog/: {path}",
+            error=f"Path must be inside skills/catalog/: {path}",
             metadata={"path": path, "status_source": "validation"},
         )
     if not p.exists():

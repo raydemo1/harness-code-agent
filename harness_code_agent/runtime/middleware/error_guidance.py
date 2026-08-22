@@ -5,6 +5,7 @@ import logging
 import os
 
 from ... import config
+from ..tool_result import ToolResult
 from .base import AgentMiddleware
 
 
@@ -177,18 +178,13 @@ class ErrorGuidanceMiddleware(AgentMiddleware):
         }
         return powershell_guidance.get(guidance_type, default)
 
-    def post_tool(self, tool_name: str, tool_args: dict, result: str,
+    def post_tool(self, tool_name: str, tool_args: dict, result: ToolResult,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
-        if tool_name != "run_bash":
+        if tool_name != "run_bash" or result.status != "failed":
             return None
 
-        result_lower = result.lower()
-
-        # Skip if no error indicators
-        if "[error]" not in result_lower and "error" not in result_lower and "not found" not in result_lower:
-            self._last_guidance_type = None
-            return None
+        result_lower = (result.error or result.output or "").lower()
 
         for pattern, guidance_type, suggestion in self.ERROR_PATTERNS:
             if pattern in result_lower:

@@ -11,6 +11,17 @@ from harness_code_agent.runtime.builtins.filesystem import list_files, read_file
 from harness_code_agent.runtime.middleware.error_guidance import ErrorGuidanceMiddleware
 from harness_code_agent.runtime.middleware.tool_policy import ToolPolicyMiddleware
 from harness_code_agent.runtime.middleware.terminal_shell_edit import TerminalShellEditPolicyMiddleware
+from harness_code_agent.runtime.tool_result import ToolResult
+
+
+def _result(text: str, *, status: str | None = None) -> ToolResult:
+    """Build a ToolResult from the legacy text conventions used in these tests."""
+    if status is None:
+        status = "failed" if text.startswith(("[error]", "[blocked]")) else "success"
+    metadata = {"status_source": "permission"} if text.startswith("[blocked]") else {}
+    error = text.removeprefix("[error] ").removeprefix("[blocked] ") if status == "failed" else None
+    return ToolResult(tool="run_bash", status=status, output=text, error=error, metadata=metadata)
+
 
 
 class RepositoryToolPolicyTests(unittest.TestCase):
@@ -171,8 +182,8 @@ class ShellPolicyTests(unittest.TestCase):
         args = {"path": "eval/benchmarks/run_terminal_bench.py", "max_lines": 40}
         result = "parser.add_argument('--task-wall-timeout', type=int, default=7200)\n"
 
-        first = middleware.post_tool("read_file", args, result, [], runtime_state=state)
-        second = middleware.post_tool("read_file", args, result, [], runtime_state=state)
+        first = middleware.post_tool("read_file", args, _result(result), [], runtime_state=state)
+        second = middleware.post_tool("read_file", args, _result(result), [], runtime_state=state)
 
         self.assertIsNone(first)
         self.assertIsNone(second)
@@ -186,7 +197,7 @@ class ErrorGuidanceTests(unittest.TestCase):
         guidance = middleware.post_tool(
             "run_bash",
             {"command": "python app.py"},
-            "[error] No such file or directory: missing.py",
+            _result("[error] No such file or directory: missing.py"),
             [],
             runtime_state=AgentRuntimeState(),
         )
@@ -204,7 +215,7 @@ class ErrorGuidanceTests(unittest.TestCase):
             guidance = middleware.post_tool(
                 "run_bash",
                 {"command": "missing-tool"},
-                "[error] command not found: missing-tool",
+                _result("[error] command not found: missing-tool"),
                 [],
                 runtime_state=AgentRuntimeState(),
             )
@@ -223,7 +234,7 @@ class ErrorGuidanceTests(unittest.TestCase):
             guidance = middleware.post_tool(
                 "run_bash",
                 {"command": "missing-tool"},
-                "[error] command not found: missing-tool",
+                _result("[error] command not found: missing-tool"),
                 [],
                 runtime_state=AgentRuntimeState(),
             )

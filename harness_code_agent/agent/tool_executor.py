@@ -19,6 +19,7 @@ from ..runtime.tool_runner import (
 )
 from ..runtime.tool_result import ToolResult
 from ..workspace.shell_session import PersistentShellSession
+from .cancellation import CancelledError
 
 log = logging.getLogger("harness")
 
@@ -107,9 +108,37 @@ class ToolExecutor:
                     return True
             self._flush_deferred_user_messages()
             return False
+        except CancelledError:
+            # The assistant message with tool_calls is already in history;
+            # answer every call the API still expects so the next request
+            # is not rejected with a 400.
+            self._repair_orphaned_tool_calls()
+            raise
         finally:
             self.conversation.compaction_gate.end_tool_call()
             self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _repair_orphaned_tool_calls(self) -> None:
+        answered = {
+            message.get("tool_call_id")
+            for message in self.conversation.messages
+            if message.get("role") == "tool"
+        }
+        orphans = [
+            tc
+            for tc in self._tool_calls
+            if tc.get("id") and tc.get("id") not in answered
+        ]
+        if not orphans:
+            return
+        log.info("[%s] Answering %d cancelled tool calls", self.agent.name, len(orphans))
+        self.conversation.trace.error("cancelled_tool_calls", f"{len(orphans)} unanswered")
+        for tc in orphans:
+            self.conversation._append_message({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": "[cancelled] Execution cancelled before this tool produced a result.",
+            })
 
     def _prepare_calls(self, tool_calls: list) -> tuple[list[PreparedToolCall], bool]:
         prepared: list[PreparedToolCall] = []
@@ -387,7 +416,7 @@ class ToolExecutor:
             inject = mw.post_tool(
                 prepared.name,
                 prepared.args,
-                result,
+                tool_result,
                 self.conversation.messages,
                 runtime_state=self.runtime_state,
                 agent_name=self.agent.name,
