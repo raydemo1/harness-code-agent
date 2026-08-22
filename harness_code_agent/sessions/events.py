@@ -129,6 +129,7 @@ class FileChangeEvent:
     path: str
     operation: str | None = None
     snapshot_path: str | None = None
+    diff: str | None = None
     agent: str | None = "main_agent"
 
     def to_event(self) -> StructuredEvent:
@@ -137,6 +138,8 @@ class FileChangeEvent:
             payload["operation"] = self.operation
         if self.snapshot_path:
             payload["snapshot_path"] = self.snapshot_path
+        if self.diff:
+            payload["diff"] = self.diff
         return StructuredEvent("file_change", payload, self.agent)
 
 

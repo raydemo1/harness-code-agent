@@ -76,20 +76,13 @@ class TuiState:
             operation = str(payload.get("operation") or "changed")
             path = str(payload.get("path") or "")
             verb = _FILE_OPERATION_LABELS.get(operation, operation)
-            return TranscriptBlock("file", "file changed", f"{verb} {path}", "changed", turn=self.snapshot.turn)
+            diff = str(payload.get("diff") or "")
+            return TranscriptBlock("file", f"{verb} {path}", diff, "changed", turn=self.snapshot.turn)
         if event_type == "failure":
             self.snapshot.status = "needs attention"
             return self._apply_failure(payload)
         if event_type == "agent_budget_warning":
-            self.snapshot.status = "needs attention"
-            used = _coerce_int(payload.get("used"))
-            limit = _coerce_int(payload.get("limit"))
-            limit_type = str(payload.get("limit_type") or "budget").replace("_", " ")
-            if used is not None and limit:
-                body = f"{used}/{limit} {limit_type} used"
-            else:
-                body = f"{limit_type} budget warning"
-            return TranscriptBlock("status", "budget", body, "warning", turn=self.snapshot.turn)
+            return None
         if event_type == "agent_fallback":
             self.snapshot.status = "blocked"
             self.snapshot.running_tool = ""
@@ -260,7 +253,9 @@ class TuiState:
 
 _FILE_OPERATION_LABELS = {
     "write": "wrote",
+    "write_file": "wrote",
     "edit": "edited",
+    "apply_patch": "edited",
     "delete": "deleted",
     "create": "created",
     "rename": "renamed",

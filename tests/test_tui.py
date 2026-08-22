@@ -281,8 +281,8 @@ class TuiTests(unittest.TestCase):
             "payload": {"reason": "loop_detected", "limit_type": "tool_fingerprint"},
         })
 
-        self.assertEqual(warning.kind, "status")
-        self.assertEqual(warning.status, "warning")
+        # Budget warnings stay out of the transcript entirely.
+        self.assertIsNone(warning)
         self.assertEqual(fallback.kind, "failure")
         self.assertEqual(fallback.status, "blocked")
         self.assertEqual(state.snapshot.status, "blocked")
@@ -733,6 +733,72 @@ class TuiNoiseReductionTests(unittest.TestCase):
         kinds = [block.kind for block in state.blocks]
         self.assertIn("failure", kinds)
         self.assertNotIn("approval", kinds)
+
+    def test_file_change_carries_diff_for_transcript(self):
+        state = self._make_state()
+
+        block = state.apply_event({
+            "type": "file_change",
+            "payload": {
+                "path": "src/app.py",
+                "operation": "apply_patch",
+                "diff": "@@ -1,2 +1,2 @@\n context\n-old line\n+new line",
+            },
+        })
+
+        self.assertEqual(block.title, "edited src/app.py")
+        self.assertIn("-old line", block.body)
+        self.assertIn("+new line", block.body)
+
+    def test_file_change_without_diff_stays_single_line(self):
+        state = self._make_state()
+
+        block = state.apply_event({
+            "type": "file_change",
+            "payload": {"path": "src/new.py", "operation": "write_file"},
+        })
+
+        self.assertEqual(block.title, "wrote src/new.py")
+        self.assertEqual(block.body, "")
+
+    def test_write_file_tool_emits_file_change_with_diff(self):
+        from harness_code_agent.runtime import tools
+        from harness_code_agent.runtime.permissions import PermissionPolicy
+        from harness_code_agent.runtime.tool_context import ToolContext
+        from harness_code_agent.sessions.events import EventBus
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = []
+            bus = EventBus(listener=events.append)
+            context = ToolContext(
+                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
+                permission_policy=PermissionPolicy(mode="workspace-write"),
+                event_bus=bus,
+            )
+            context.workspace.write_text("app.py", "line1\nline2\n")
+
+            tools.execute_tool_result(
+                "write_file",
+                {"path": "app.py", "content": "line1\nline2 changed\n"},
+                tool_context=context,
+            )
+            tools.execute_tool_result(
+                "write_file",
+                {"path": "new.py", "content": "fresh\n"},
+                tool_context=context,
+            )
+
+            changes = [event for event in events if event.type == "file_change"]
+            self.assertEqual(len(changes), 2)
+            edit_change = changes[0].payload
+            self.assertIn("-line2", edit_change["diff"])
+            self.assertIn("+line2 changed", edit_change["diff"])
+            self.assertEqual(edit_change["operation"], "write_file")
+            new_change = changes[1].payload
+            self.assertIn("+fresh", new_change["diff"])
+            self.assertNotIn("-", new_change["diff"].splitlines()[0])
 
 
 class TuiThoughtTests(unittest.TestCase):

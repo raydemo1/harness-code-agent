@@ -393,6 +393,7 @@ def _emit_file_change_events(
                 path=str(path),
                 operation=change.get("operation"),
                 snapshot_path=change.get("snapshot_path"),
+                diff=change.get("diff"),
                 agent=agent_name,
             ).to_event()
         )

@@ -1,6 +1,7 @@
 """Workspace filesystem tools."""
 from __future__ import annotations
 
+import difflib
 import os
 import subprocess
 from pathlib import Path
@@ -29,6 +30,30 @@ DEFAULT_EXCLUDE_PARTS = {
 DEFAULT_EXCLUDE_PATHS = {
     ("eval", "results"),
 }
+
+# Bound the diff attached to file-change events so a single huge rewrite
+# cannot bloat the session JSONL or the transcript.
+_DIFF_MAX_LINES = 200
+
+
+def _change_diff(old: str | None, new: str) -> str:
+    """Compact unified diff between two file versions (old=None means new file)."""
+    if old is None:
+        lines = new.splitlines()
+        body = ["+" + line for line in lines]
+    else:
+        body = [
+            line
+            for line in difflib.unified_diff(
+                old.splitlines(), new.splitlines(), lineterm="", n=1
+            )
+            if not line.startswith(("---", "+++"))
+        ]
+    if len(body) > _DIFF_MAX_LINES:
+        omitted = len(body) - _DIFF_MAX_LINES
+        kept = "\n".join(body[:_DIFF_MAX_LINES])
+        return kept + "\n… " + str(omitted) + " more diff lines"
+    return "\n".join(body)
 
 
 def _resolve(path: str) -> Path:
@@ -403,17 +428,24 @@ def write_file(
         )
     metadata = {"path": path, "status_source": "native"}
     if tool_context is not None:
-        write_result = tool_context.workspace.write_text(path, content)
-        rel = write_result.path.relative_to(tool_context.workspace.root)
+        workspace = tool_context.workspace
+        try:
+            old = workspace.read_text(path)
+        except (OSError, ValueError):
+            old = None
+        write_result = workspace.write_text(path, content)
+        rel = write_result.path.relative_to(workspace.root)
         metadata["file_changes"] = [
             {
                 "path": str(rel),
                 "operation": "write_file",
                 "snapshot_path": str(write_result.snapshot_path) if write_result.snapshot_path else None,
+                "diff": _change_diff(old, content),
             }
         ]
     else:
         p = _resolve(path)
+        old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else None
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
     return ToolResult(
@@ -439,12 +471,18 @@ def apply_patch(
             metadata={"path": path, "status_source": "validation"},
         )
     if tool_context is not None:
-        patch_result = tool_context.workspace.apply_text_patch(
+        workspace = tool_context.workspace
+        try:
+            old = workspace.read_text(path)
+        except (OSError, ValueError):
+            old = None
+        patch_result = workspace.apply_text_patch(
             path,
             search=search,
             replace=replace,
         )
-        rel = patch_result.path.relative_to(tool_context.workspace.root)
+        rel = patch_result.path.relative_to(workspace.root)
+        new = workspace.read_text(path)
         return ToolResult(
             tool="apply_patch",
             status="success",
@@ -458,6 +496,7 @@ def apply_patch(
                         "path": str(rel),
                         "operation": "apply_patch",
                         "snapshot_path": str(patch_result.snapshot_path) if patch_result.snapshot_path else None,
+                        "diff": _change_diff(old, new),
                     }
                 ],
             },

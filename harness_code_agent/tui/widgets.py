@@ -149,10 +149,12 @@ def block_to_rich(block: TranscriptBlock):
     if block.kind == "plan":
         return _plan_update_renderable(block.body)
     if block.kind == "file":
-        line = Text()
-        line.append("  ✎ ", style=f"bold {_WARNING}")
-        line.append(block.body or block.title, style=_MUTED)
-        return line
+        header = Text()
+        header.append("  ✎ ", style=f"bold {_WARNING}")
+        header.append(block.title or "file changed", style=f"bold {_MUTED}")
+        if not block.body:
+            return header
+        return Group(header, _diff_renderable(block.body), Text(""))
     if block.kind == "profile":
         line = Text()
         line.append("  ⇄ ", style=f"bold {_ACCENT}")
@@ -164,6 +166,24 @@ def block_to_rich(block: TranscriptBlock):
     text.append(f"  {block.title}", style=_MUTED)
     if block.body:
         text.append(f"  {block.body}", style=_SUBTLE)
+    return text
+
+
+def _diff_renderable(diff_text: str) -> Text:
+    """Colorize a unified diff: red removals, green additions, dim context."""
+    text = Text()
+    lines = diff_text.splitlines()
+    for index, line in enumerate(lines):
+        if index:
+            text.append("\n")
+        if line.startswith("+"):
+            text.append(line, style="green")
+        elif line.startswith("-"):
+            text.append(line, style=_ERROR)
+        elif line.startswith("@@") or line.startswith("…"):
+            text.append(line, style=_SUBTLE)
+        else:
+            text.append(line, style=_MUTED)
     return text
 
 
