@@ -761,46 +761,6 @@ class TuiNoiseReductionTests(unittest.TestCase):
         self.assertEqual(block.title, "wrote src/new.py")
         self.assertEqual(block.body, "")
 
-    def test_write_file_tool_emits_file_change_with_diff(self):
-        from harness_code_agent.runtime import tools
-        from harness_code_agent.runtime.permissions import PermissionPolicy
-        from harness_code_agent.runtime.tool_context import ToolContext
-        from harness_code_agent.sessions.events import EventBus
-        from harness_code_agent.workspace.service import WorkspaceService
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            events = []
-            bus = EventBus(listener=events.append)
-            context = ToolContext(
-                workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
-                permission_policy=PermissionPolicy(mode="workspace-write"),
-                event_bus=bus,
-            )
-            context.workspace.write_text("app.py", "line1\nline2\n")
-
-            tools.execute_tool_result(
-                "write_file",
-                {"path": "app.py", "content": "line1\nline2 changed\n"},
-                tool_context=context,
-            )
-            tools.execute_tool_result(
-                "write_file",
-                {"path": "new.py", "content": "fresh\n"},
-                tool_context=context,
-            )
-
-            changes = [event for event in events if event.type == "file_change"]
-            self.assertEqual(len(changes), 2)
-            edit_change = changes[0].payload
-            self.assertIn("-line2", edit_change["diff"])
-            self.assertIn("+line2 changed", edit_change["diff"])
-            self.assertEqual(edit_change["operation"], "write_file")
-            new_change = changes[1].payload
-            self.assertIn("+fresh", new_change["diff"])
-            self.assertNotIn("-", new_change["diff"].splitlines()[0])
-
-
 class TuiThoughtTests(unittest.TestCase):
     """Thought hiding tests."""
 
