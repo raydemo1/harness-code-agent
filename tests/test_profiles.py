@@ -13,7 +13,10 @@ from harness_code_agent.profiles import (
     get_profile,
     list_profiles,
 )
-from harness_code_agent.profiles.router import route_profile_for_turn
+from harness_code_agent.profiles.router import (
+    ROUTING_MODE_PINNED,
+    route_profile_for_turn,
+)
 from harness_code_agent.profiles.terminal import TerminalProfile
 from harness_code_agent.runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
 from harness_code_agent.runtime.middleware import (
@@ -82,6 +85,43 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertEqual(decision.profile_name, "coding-agent")
         self.assertEqual(decision.action, "direct_answer")
         self.assertEqual(decision.matched_profile, "general")
+
+    def test_pinned_profile_never_changes_from_semantic_similarity(self):
+        decision = route_profile_for_turn(
+            "先给我一个完整实施方案，不要修改代码",
+            current_profile="coding-agent",
+            routing_mode=ROUTING_MODE_PINNED,
+        )
+
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertEqual(decision.action, "stay")
+        self.assertEqual(decision.source, "pinned")
+        self.assertEqual(decision.decisive_signal, "pinned")
+
+    def test_semantic_routing_does_not_jump_between_specialized_profiles(self):
+        decision = route_profile_for_turn(
+            "refactor parser",
+            current_profile="plan",
+        )
+
+        self.assertEqual(decision.profile_name, "plan")
+        self.assertTrue(decision.fallback_used)
+
+    def test_explicit_mode_can_transition_and_pins_at_session_layer(self):
+        decision = route_profile_for_turn(
+            "切换到编码模式",
+            current_profile="plan",
+        )
+
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertEqual(decision.decisive_signal, "explicit_mode")
+        self.assertEqual(decision.action, "switch_profile")
+
+    def test_low_evidence_route_keeps_non_unit_confidence(self):
+        decision = route_profile_for_turn("嗯", current_profile="general")
+
+        self.assertLess(decision.confidence, 1.0)
+        self.assertTrue(decision.fallback_used)
 
     def test_shared_identity_precedes_profile_contract_and_has_own_hash(self):
         prefix = PromptPrefixBuilder().build(

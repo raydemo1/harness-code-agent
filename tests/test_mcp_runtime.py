@@ -1,10 +1,10 @@
-import json
 import asyncio
+import json
 import socket
 import subprocess
 import sys
-import time
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,6 +80,40 @@ class McpRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(McpConfigError, "permission"):
                 load_mcp_config(root)
 
+    def test_mcp_manager_toggles_raw_enabled_flag_without_expanding_placeholders(self):
+        from harness_code_agent.runtime.mcp import McpClientManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / ".harness"
+            config_dir.mkdir()
+            path = config_dir / "mcp.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "servers": {
+                            "docs": {
+                                "enabled": False,
+                                "transport": "streamable_http",
+                                "url": "https://example.test/mcp",
+                                "headers": {"Authorization": "Bearer ${DOCS_TOKEN}"},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = McpClientManager.from_workspace(root)
+
+            self.assertEqual(manager.configured_server_names(), ["docs"])
+            manager.set_server_enabled("docs", True)
+            enabled = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("enabled", enabled["servers"]["docs"])
+            self.assertIn("${DOCS_TOKEN}", enabled["servers"]["docs"]["headers"]["Authorization"])
+            manager.set_server_enabled("docs", False)
+            disabled = json.loads(path.read_text(encoding="utf-8"))
+            self.assertFalse(disabled["servers"]["docs"]["enabled"])
+
     def test_mcp_tools_register_only_on_session_registry_and_execute_via_context(self):
         from harness_code_agent.runtime import tools
         from harness_code_agent.runtime.mcp import McpToolBinding
@@ -115,13 +149,14 @@ class McpRuntimeTests(unittest.TestCase):
             root = Path(tmp)
             registry = tools.BUILTIN_TOOL_REGISTRY.copy()
             manager = FakeMcpManager()
-            manager.register_tools = lambda target: [
-                target.register(binding.schema(), lambda **kwargs: manager.call_tool(
-                    binding.exposed_name,
-                    {k: v for k, v in kwargs.items() if k not in {"runtime_state", "agent_name", "tool_context"}},
-                ), permission=binding.permission)
-                for binding in manager.tool_bindings
-            ]
+            def register_forwarders(target):
+                for binding in manager.tool_bindings:
+                    def forward(binding=binding, **kwargs):
+                        clean = {k: v for k, v in kwargs.items() if k not in {"runtime_state", "agent_name", "tool_context"}}
+                        return manager.call_tool(binding.exposed_name, clean)
+                    target.register(binding.schema(), forward, permission=binding.permission)
+
+            manager.register_tools = register_forwarders
             manager.register_tools(registry)
             context = ToolContext(
                 workspace=WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots"),
@@ -166,7 +201,9 @@ class McpRuntimeTests(unittest.TestCase):
 
     def test_permission_middleware_uses_session_registry_for_mcp_tool_permissions(self):
         from harness_code_agent.runtime import tools
-        from harness_code_agent.runtime.permission_middleware import PermissionMiddleware
+        from harness_code_agent.runtime.permission_middleware import (
+            PermissionMiddleware,
+        )
         from harness_code_agent.runtime.permissions import PermissionPolicy
         from harness_code_agent.runtime.tool_context import ToolContext
         from harness_code_agent.sessions.events import EventBus
@@ -409,17 +446,7 @@ class McpRuntimeTests(unittest.TestCase):
             (root / ".harness").mkdir()
             server = root / "stdio_server.py"
             server.write_text(
-                "\n".join(
-                    [
-                        "from mcp.server.fastmcp import FastMCP",
-                        "mcp = FastMCP('stdio-test', log_level='ERROR')",
-                        "@mcp.tool()",
-                        "def echo(text: str) -> str:",
-                        "    return 'echo:' + text",
-                        "if __name__ == '__main__':",
-                        "    mcp.run()",
-                    ]
-                ),
+                "from mcp.server.fastmcp import FastMCP\nmcp = FastMCP('stdio-test', log_level='ERROR')\n@mcp.tool()\ndef echo(text: str) -> str:\n    return 'echo:' + text\nif __name__ == '__main__':\n    mcp.run()",
                 encoding="utf-8",
             )
             (root / ".harness" / "mcp.json").write_text(

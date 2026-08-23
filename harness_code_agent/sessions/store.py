@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .events import EventBus
 
@@ -172,6 +173,16 @@ class SessionStore:
         metadata["profile"] = profile
         if profile_source:
             metadata["profile_source"] = profile_source
+        metadata_path = self._session_root(session_id) / "session.json"
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return metadata
+
+    def update_routing_mode(self, session_id: str, routing_mode: str) -> dict[str, Any]:
+        metadata = self.read_metadata(session_id)
+        metadata["routing_mode"] = routing_mode
         metadata_path = self._session_root(session_id) / "session.json"
         metadata_path.write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",

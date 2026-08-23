@@ -56,6 +56,8 @@ class FakeConversation:
 
     def submit(self, task, cancellation_token=None):
         self.submissions.append(task)
+        self.messages.append({"role": "user", "content": task})
+        self.messages.append({"role": "assistant", "content": self.response_text})
         return self.response_text
 
     def close(self):
@@ -315,11 +317,10 @@ class InteractiveCliTests(unittest.TestCase):
 
     def test_first_task_routes_inside_existing_general_session(self):
         general_conversation = FakeConversation()
-        plan_conversation = FakeConversation()
         with (
             patch(
                 "harness_code_agent.agent.conversation.Agent.start_conversation",
-                side_effect=[general_conversation, plan_conversation],
+                return_value=general_conversation,
             ),
         ):
             session = InteractiveSession(cwd=self.temp_dir)
@@ -337,7 +338,8 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertEqual(metadata["profile"], "plan")
                 self.assertEqual(metadata["initial_profile"], "general")
                 self.assertEqual(metadata["profile_source"], "auto route")
-                self.assertEqual(plan_conversation.submissions[-1], "Task:\n先给我一个实现方案，不要改代码")
+                self.assertEqual(general_conversation.submissions[-1], "Task:\n先给我一个实现方案，不要改代码")
+                self.assertIs(session.conversation, general_conversation)
                 route_events = [event for event in session.event_bus.events if event.type == "profile_route_decision"]
                 self.assertTrue(route_events)
                 self.assertEqual(route_events[-1].payload["source"], "local")
@@ -363,24 +365,15 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertEqual(session.profile.name(), "coding-agent")
                 self.assertEqual(session.display_profile, "coding-agent")
                 self.assertEqual(start_conversation.call_count, 1)
-                self.assertIn("coding-agent", session.profile_slots)
-                self.assertNotIn("general", session.profile_slots)
+                self.assertIn("coding-agent", session.profile_runtimes)
+                self.assertNotIn("general", session.profile_runtimes)
                 metadata = session.session_store.read_metadata(session.session.id)
                 self.assertEqual(metadata["profile"], "coding-agent")
 
                 submitted = conversation.submissions[-1]
-                self.assertIn("Turn handling instruction: answer this turn directly", submitted)
-                self.assertIn("Do not create or edit files", submitted)
-                self.assertIn("User request:\n你是谁", submitted)
-
+                self.assertEqual(submitted, "Task:\n你是谁")
                 route_events = [event for event in session.event_bus.events if event.type == "profile_route_decision"]
-                self.assertTrue(route_events)
-                payload = route_events[-1].payload
-                self.assertEqual(payload["profile"], "coding-agent")
-                self.assertEqual(payload["matched_profile"], "general")
-                self.assertEqual(payload["action"], "direct_answer")
-                self.assertEqual(payload["turn_mode"], "direct_answer")
-                self.assertFalse(payload["switched"])
+                self.assertFalse(route_events)
             finally:
                 session.close()
 
@@ -390,7 +383,9 @@ class InteractiveCliTests(unittest.TestCase):
             try:
                 self.assertTrue(session.is_bound)
                 self.assertEqual(session.profile.name(), "general")
-                self.assertTrue(session.handle_slash_command("/plan"))
+                self.assertTrue(session.handle_slash_command("/profile"))
+                self.assertEqual(session.last_command_result.action, "profile")
+                session.switch_profile("plan")
 
                 self.assertEqual(session.profile.name(), "plan")
                 self.assertEqual(session.display_profile, "plan")
@@ -432,15 +427,13 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_profile_switch_reuses_profile_slots_without_closing_old_context(self):
-        coding_conversation = FakeConversation()
-        plan_conversation = FakeConversation()
-        coding_conversation.response_text = "coding output"
-        plan_conversation.response_text = "plan output"
+    def test_profile_switch_reuses_one_shared_conversation(self):
+        conversation = FakeConversation()
+        conversation.response_text = "coding output"
 
         with patch(
             "harness_code_agent.agent.conversation.Agent.start_conversation",
-            side_effect=[coding_conversation, plan_conversation],
+            return_value=conversation,
         ):
             session = InteractiveSession(
                 cwd=self.temp_dir,
@@ -449,16 +442,16 @@ class InteractiveCliTests(unittest.TestCase):
             )
             try:
                 session.submit("fix the bug")
-                self.assertIs(session.conversation, coding_conversation)
+                self.assertIs(session.conversation, conversation)
 
-                self.assertTrue(session.handle_slash_command("/plan"))
-                self.assertIs(session.conversation, plan_conversation)
-                self.assertFalse(coding_conversation.closed)
+                session.switch_profile("plan")
+                self.assertIs(session.conversation, conversation)
+                self.assertFalse(conversation.closed)
 
-                self.assertTrue(session.handle_slash_command("/code"))
-                self.assertIs(session.conversation, coding_conversation)
-                self.assertEqual(coding_conversation.submissions, ["Task:\nfix the bug"])
-                self.assertFalse(plan_conversation.closed)
+                session.switch_profile("coding-agent")
+                self.assertIs(session.conversation, conversation)
+                self.assertEqual(conversation.submissions, ["Task:\nfix the bug"])
+                self.assertEqual(len(session.profile_runtimes), 2)
             finally:
                 session.close()
 
@@ -680,7 +673,7 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_mcp_slash_commands_show_status_list_and_reload(self):
+    def test_mcp_slash_command_opens_management_panel(self):
         class FakeMcpManager:
             instances: ClassVar[list] = []
 
@@ -717,16 +710,9 @@ class InteractiveCliTests(unittest.TestCase):
                 out = StringIO()
                 session.output_sink = lambda text: print(text, file=out)
 
-                self.assertTrue(session.handle_slash_command("/mcp status"))
-                self.assertTrue(session.handle_slash_command("/mcp list"))
-                self.assertTrue(session.handle_slash_command("/mcp reload"))
-
-                text = out.getvalue()
-                self.assertIn("server docs: connected", text)
-                self.assertIn("mcp__docs__search", text)
-                self.assertIn("MCP reloaded", text)
-                self.assertTrue(FakeMcpManager.instances[0].closed)
-                self.assertGreaterEqual(len(FakeMcpManager.instances), 2)
+                self.assertTrue(session.handle_slash_command("/mcp"))
+                self.assertEqual(session.last_command_result.action, "mcp")
+                self.assertEqual(out.getvalue(), "")
             finally:
                 session.close()
 
@@ -800,34 +786,27 @@ class InteractiveCliTests(unittest.TestCase):
                 session.close()
 
     def test_plan_continue_switches_to_coding_agent_and_injects_markdown(self):
-        plan_conversation = FakeConversation()
-        coding_conversation = FakeConversation()
-        plan_conversation.response_text = "# Title\n\n## Summary\n\nPlan body"
-        coding_conversation.response_text = "implemented"
+        conversation = FakeConversation()
+        conversation.response_text = "# Title\n\n## Summary\n\nPlan body"
 
         with patch(
             "harness_code_agent.agent.conversation.Agent.start_conversation",
-            side_effect=[plan_conversation, coding_conversation],
+            return_value=conversation,
         ):
             session = InteractiveSession(cwd=self.temp_dir, profile_name="plan")
             try:
                 session.submit("plan the parser fix")
+                conversation.response_text = "implemented"
                 result = session.submit("继续")
 
                 self.assertEqual(result.text, "implemented")
                 self.assertEqual(session.profile.name(), "coding-agent")
                 self.assertIsNone(session.pending_plan_markdown)
                 self.assertEqual(session.pending_plan_revision, 0)
-                self.assertEqual(len(coding_conversation.submissions), 1)
-                task = coding_conversation.submissions[0]
+                self.assertEqual(len(conversation.submissions), 2)
+                task = conversation.submissions[-1]
                 self.assertIn("Execute the approved implementation plan", task)
-                self.assertNotIn("# Title\n\n## Summary\n\nPlan body", task)
-                self.assertEqual(coding_conversation.messages[1]["role"], "user")
-                self.assertIn("Profile handoff context:", coding_conversation.messages[1]["content"])
-                self.assertIn("Previous profile: plan", coding_conversation.messages[1]["content"])
-                self.assertIn("Current profile: coding-agent", coding_conversation.messages[1]["content"])
-                self.assertIn("Approved Markdown plan:", coding_conversation.messages[1]["content"])
-                self.assertIn("# Title\n\n## Summary\n\nPlan body", coding_conversation.messages[1]["content"])
+                self.assertIn("Approved plan:\n# Title\n\n## Summary\n\nPlan body", task)
             finally:
                 session.close()
 
@@ -852,35 +831,48 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_short_slash_commands_switch_profiles(self):
-        conversations = [FakeConversation() for _ in range(6)]
+    def test_profile_command_opens_picker_and_direct_selection_pins_mode(self):
+        conversation = FakeConversation()
         with patch(
             "harness_code_agent.agent.conversation.Agent.start_conversation",
-            side_effect=conversations,
+            return_value=conversation,
         ):
             session = InteractiveSession(cwd=self.temp_dir)
             try:
-                cases = [
-                    ("/general", "general"),
-                    ("/plan", "plan"),
-                    ("/code", "coding-agent"),
-                    ("/app", "app-builder"),
-                    ("/review", "review"),
-                ]
-                for command, expected in cases:
-                    with self.subTest(command=command):
-                        self.assertTrue(session.handle_slash_command(command))
-                        self.assertEqual(session.profile.name(), expected)
+                self.assertTrue(session.handle_slash_command("/profile"))
+                self.assertEqual(session.last_command_result.action, "profile")
+                session.switch_profile("plan")
+                self.assertEqual(session.profile.name(), "plan")
+                self.assertEqual(session.display_routing_mode, "pinned")
             finally:
                 session.close()
 
-    def test_profile_switch_uses_handoff_context_without_copying_old_messages(self):
-        coding_conversation = FakeConversation()
-        plan_conversation = FakeConversation()
-        coding_conversation.response_text = "analysis output"
+    def test_fork_current_session_keeps_live_conversation_and_enters_branch(self):
+        conversation = FakeConversation()
         with patch(
             "harness_code_agent.agent.conversation.Agent.start_conversation",
-            side_effect=[coding_conversation, plan_conversation],
+            return_value=conversation,
+        ):
+            session = InteractiveSession(cwd=self.temp_dir)
+            try:
+                session.submit("inspect the parser")
+                source_id = session.session.id
+                result = session.fork_current_session()
+
+                self.assertIn("已进入会话分支", result)
+                self.assertNotEqual(session.session.id, source_id)
+                self.assertIs(session.conversation, conversation)
+                metadata = session.session_store.read_metadata(session.session.id)
+                self.assertEqual(metadata["forked_from"], source_id)
+                self.assertEqual(metadata["profile"], session.profile.name())
+            finally:
+                session.close()
+
+    def test_profile_switch_keeps_full_message_history(self):
+        conversation = FakeConversation()
+        with patch(
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
+            return_value=conversation,
         ):
             session = InteractiveSession(
                 cwd=self.temp_dir,
@@ -890,19 +882,12 @@ class InteractiveCliTests(unittest.TestCase):
             try:
                 session.submit("inspect the auth bug")
 
-                self.assertTrue(session.handle_slash_command("/plan"))
+                session.switch_profile("plan")
 
                 self.assertEqual(session.profile.name(), "plan")
-                self.assertEqual(len(plan_conversation.messages), 2)
-                handoff = plan_conversation.messages[1]["content"]
-                self.assertIn("Profile handoff context:", handoff)
-                self.assertIn("Previous profile: coding-agent", handoff)
-                self.assertIn("Current profile: plan", handoff)
-                self.assertIn("Most recent user task:", handoff)
-                self.assertIn("inspect the auth bug", handoff)
-                self.assertIn("Most recent assistant summary:", handoff)
-                self.assertIn("analysis output", handoff)
-                self.assertNotIn(coding_conversation.submissions[0], handoff)
+                self.assertIs(session.conversation, conversation)
+                self.assertGreaterEqual(len(conversation.messages), 3)
+                self.assertIn("inspect the auth bug", conversation.messages[1]["content"])
                 self.assertEqual(session.profile_history[-1].previous, "coding-agent")
                 self.assertEqual(session.profile_history[-1].current, "plan")
             finally:
@@ -920,7 +905,7 @@ class InteractiveCliTests(unittest.TestCase):
                 session.submit("plan the parser fix")
                 self.assertIsNotNone(session.pending_plan_markdown)
 
-                self.assertTrue(session.handle_slash_command("/code"))
+                session.switch_profile("coding-agent")
 
                 self.assertEqual(session.profile.name(), "coding-agent")
                 self.assertIsNone(session.pending_plan_markdown)
@@ -1345,15 +1330,14 @@ class InteractiveCliTests(unittest.TestCase):
         finally:
             session.close()
 
-    def test_profiles_slash_command_hides_eval_only_terminal_profile(self):
+    def test_removed_profiles_slash_command_is_not_available(self):
         session = InteractiveSession(cwd=self.temp_dir)
         output = StringIO()
         session.output_sink = lambda text: print(text, file=output)
         try:
             self.assertTrue(session.handle_slash_command("/profiles"))
             text = output.getvalue()
-            self.assertIn("coding-agent", text)
-            self.assertNotIn("terminal", text)
+            self.assertIn("未知的斜杠命令", text)
         finally:
             session.close()
 
@@ -1532,12 +1516,12 @@ class InteractiveCliTests(unittest.TestCase):
             result = cli.run_batch(
                 cwd=root,
                 profile_name="coding-agent",
-                first_task="/doctor",
+                first_task="/profile",
             )
 
         self.assertEqual(result, 0)
-        self.assertIn(("slash", "/doctor"), calls)
-        self.assertNotIn(("submit", "/doctor"), calls)
+        self.assertIn(("slash", "/profile"), calls)
+        self.assertNotIn(("submit", "/profile"), calls)
 
     def test_stream_callback_auto_respects_tty(self):
         from harness_code_agent import cli

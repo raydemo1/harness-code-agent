@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 DEFAULT_PROFILE = "general"
+ROUTING_MODE_AUTO = "auto"
+ROUTING_MODE_PINNED = "pinned"
 LOCAL_ROUTE_MIN_CONFIDENCE = 0.10
 LOCAL_ROUTE_MIN_MARGIN = 0.035
 LOCAL_ROUTE_BM25_K1 = 1.2
@@ -34,18 +36,30 @@ class RouteDecision:
     action: str = ROUTE_ACTION_STAY
     turn_mode: str = TURN_MODE_NORMAL
     matched_profile: str = ""
+    routing_mode: str = ROUTING_MODE_AUTO
+    decisive_signal: str = ""
 
 
 def route_profile_for_turn(
     user_prompt: str,
     *,
     current_profile: str,
+    routing_mode: str = ROUTING_MODE_AUTO,
     confidence_threshold: float = LOCAL_ROUTE_MIN_CONFIDENCE,
     margin_threshold: float = LOCAL_ROUTE_MIN_MARGIN,
 ) -> RouteDecision:
-    """Conservatively route a turn using local semantic prototypes only."""
+    """Route one turn with explicit contracts and sticky automatic routing.
+
+    The router is deliberately state-light: callers own the current profile and
+    routing mode, while this module decides whether the next turn may switch.
+    Pinned profiles never enter the classifier. Automatic routing can enter a
+    specialised profile from ``general``; specialised-to-specialised changes
+    require an explicit workflow contract and semantic guesses never fall back
+    to ``general``.
+    """
     started_at = time.perf_counter()
     current = current_profile
+    mode = routing_mode if routing_mode in {ROUTING_MODE_AUTO, ROUTING_MODE_PINNED} else ROUTING_MODE_AUTO
     if current not in LOCAL_ROUTE_PROFILES:
         return _with_elapsed(
             started_at,
@@ -57,15 +71,38 @@ def route_profile_for_turn(
                 fallback_reason="profile is sticky",
                 source="local",
                 matched_profile=current,
+                routing_mode=mode,
             ),
         )
 
-    explicit_profile = _explicit_route_profile(user_prompt)
+    if mode == ROUTING_MODE_PINNED:
+        return _with_elapsed(
+            started_at,
+            RouteDecision(
+                profile_name=current,
+                confidence=1.0,
+                margin=1.0,
+                reason="Profile is pinned by the user.",
+                source="pinned",
+                action=ROUTE_ACTION_STAY,
+                matched_profile=current,
+                routing_mode=mode,
+                decisive_signal="pinned",
+            ),
+        )
+
+    explicit_mode = _explicit_mode_profile(user_prompt)
+    explicit_profile = explicit_mode or _explicit_route_profile(user_prompt)
     if explicit_profile is not None:
         best_profile = explicit_profile
         best_score = 1.0
         margin = 1.0
-        route_reason = f"Explicit instruction contract matched {best_profile}."
+        route_reason = (
+            f"Explicit mode selection matched {best_profile}."
+            if explicit_mode is not None
+            else f"Explicit instruction contract matched {best_profile}."
+        )
+        decisive_signal = "explicit_mode" if explicit_mode is not None else "explicit_contract"
     else:
         scores = _local_route_scores(user_prompt)
         if not scores:
@@ -76,10 +113,53 @@ def route_profile_for_turn(
         second_score = ranked[1][1] if len(ranked) > 1 else 0.0
         margin = max(0.0, best_score - second_score)
         route_reason = f"Local BM25 prototype matched {best_profile}."
+        decisive_signal = "semantic"
 
-    if best_score < confidence_threshold or margin < margin_threshold:
+    if decisive_signal == "semantic" and (
+        best_score < confidence_threshold or margin < margin_threshold
+    ):
         decision = _local_fallback(current, "low local route confidence")
-        return _with_elapsed(started_at, _replace_route_scores(decision, best_score, margin))
+        return _with_elapsed(
+            started_at,
+            _replace_route_scores(decision, best_score, margin, routing_mode=mode),
+        )
+
+    # Natural-language explanations are not a request to abandon the current
+    # specialised workflow. Keep the profile and suppress tools for this turn.
+    if explicit_mode is not None and explicit_mode != current:
+        return _with_elapsed(
+            started_at,
+            RouteDecision(
+                profile_name=explicit_mode,
+                confidence=best_score,
+                margin=margin,
+                reason=route_reason,
+                source="local",
+                action=ROUTE_ACTION_SWITCH_PROFILE,
+                matched_profile=explicit_mode,
+                routing_mode=mode,
+                decisive_signal=decisive_signal,
+            ),
+        )
+
+    # A natural-language explanation is a direct-answer turn, not an implicit
+    # request to leave a specialised workflow.
+    if explicit_profile == "general" and current != "general":
+        return _with_elapsed(
+            started_at,
+            RouteDecision(
+                profile_name=current,
+                confidence=best_score,
+                margin=margin,
+                reason="The user asked for a general answer in the current workflow.",
+                source="local",
+                action=ROUTE_ACTION_DIRECT_ANSWER,
+                turn_mode=TURN_MODE_DIRECT_ANSWER,
+                matched_profile="general",
+                routing_mode=mode,
+                decisive_signal=decisive_signal,
+            ),
+        )
 
     if current == "general" and best_profile != "general":
         return _with_elapsed(
@@ -92,6 +172,8 @@ def route_profile_for_turn(
                 source="local",
                 action=ROUTE_ACTION_SWITCH_PROFILE,
                 matched_profile=best_profile,
+                routing_mode=mode,
+                decisive_signal=decisive_signal,
             ),
         )
 
@@ -107,12 +189,38 @@ def route_profile_for_turn(
                 action=ROUTE_ACTION_DIRECT_ANSWER,
                 turn_mode=TURN_MODE_DIRECT_ANSWER,
                 matched_profile=best_profile,
+                routing_mode=mode,
+                decisive_signal=decisive_signal,
             ),
         )
 
     if current != "general" and best_profile != current:
+        # A semantic guess must never move between specialised workflows. An
+        # explicit contract may do so, but only for an unambiguous phase change.
+        if decisive_signal in {"explicit_contract", "explicit_mode"} and _explicit_transition_allowed(
+            user_prompt,
+            current_profile=current,
+            target_profile=best_profile,
+        ):
+            return _with_elapsed(
+                started_at,
+                RouteDecision(
+                    profile_name=best_profile,
+                    confidence=best_score,
+                    margin=margin,
+                    reason=route_reason,
+                    source="local",
+                    action=ROUTE_ACTION_SWITCH_PROFILE,
+                    matched_profile=best_profile,
+                    routing_mode=mode,
+                    decisive_signal=decisive_signal,
+                ),
+            )
         decision = _local_fallback(current, f"specialized profile sticky; local best was {best_profile}")
-        return _with_elapsed(started_at, _replace_route_scores(decision, best_score, margin))
+        return _with_elapsed(
+            started_at,
+            _replace_route_scores(decision, best_score, margin, routing_mode=mode),
+        )
 
     return _with_elapsed(
         started_at,
@@ -124,6 +232,8 @@ def route_profile_for_turn(
             source="local",
             action=ROUTE_ACTION_STAY,
             matched_profile=best_profile,
+            routing_mode=mode,
+            decisive_signal=decisive_signal,
         ),
     )
 
@@ -138,10 +248,17 @@ def _local_fallback(profile_name: str, fallback_reason: str) -> RouteDecision:
         source="local",
         action=ROUTE_ACTION_STAY,
         matched_profile=profile_name,
+        routing_mode=ROUTING_MODE_AUTO,
     )
 
 
-def _replace_route_scores(decision: RouteDecision, confidence: float, margin: float) -> RouteDecision:
+def _replace_route_scores(
+    decision: RouteDecision,
+    confidence: float,
+    margin: float,
+    *,
+    routing_mode: str = ROUTING_MODE_AUTO,
+) -> RouteDecision:
     return RouteDecision(
         profile_name=decision.profile_name,
         confidence=confidence,
@@ -153,6 +270,8 @@ def _replace_route_scores(decision: RouteDecision, confidence: float, margin: fl
         action=decision.action,
         turn_mode=decision.turn_mode,
         matched_profile=decision.matched_profile,
+        routing_mode=routing_mode,
+        decisive_signal=decision.decisive_signal,
     )
 
 
@@ -169,6 +288,8 @@ def _with_elapsed(started_at: float, decision: RouteDecision) -> RouteDecision:
         action=decision.action,
         turn_mode=decision.turn_mode,
         matched_profile=decision.matched_profile,
+        routing_mode=decision.routing_mode,
+        decisive_signal=decision.decisive_signal,
     )
 
 
@@ -203,8 +324,8 @@ def _bm25_route_scores(query: Counter[str]) -> dict[str, float]:
 
     The corpus is tiny and immutable, so building an Elasticsearch index or a
     package-backed retriever would add startup latency without improving route
-    quality. Scores are normalized per query so the existing confidence and
-    margin thresholds remain meaningful.
+    quality. Scores are bounded to keep confidence and margin thresholds
+    comparable across turns.
     """
     documents, document_frequency, average_length = _prototype_bm25_stats()
     if not documents or average_length <= 0:
@@ -232,10 +353,15 @@ def _bm25_route_scores(query: Counter[str]) -> dict[str, float]:
             )
         raw_scores[profile] = score
 
-    maximum = max(raw_scores.values(), default=0.0)
-    if maximum <= 0:
+    if max(raw_scores.values(), default=0.0) <= 0:
         return {profile: 0.0 for profile in LOCAL_ROUTE_PROFILES}
-    return {profile: score / maximum for profile, score in raw_scores.items()}
+    # Do not normalise by the best candidate in this query: that makes every
+    # non-empty query look maximally confident. A fixed saturation keeps the
+    # score comparable across turns and leaves the margin meaningful.
+    return {
+        profile: score / (score + 1.0) if score > 0 else 0.0
+        for profile, score in raw_scores.items()
+    }
 
 
 def _explicit_route_profile(user_prompt: str) -> str | None:
@@ -342,6 +468,52 @@ def _explicit_route_profile(user_prompt: str) -> str | None:
     if web_app and not terminal_ui:
         return "app-builder"
     return None
+
+
+def _explicit_mode_profile(user_prompt: str) -> str | None:
+    """Recognise a direct request to pin a workflow mode.
+
+    Task wording such as ``审查这个改动`` remains an auto-routing contract;
+    only explicit mode-selection language changes the routing mode in the
+    caller. This keeps normal user requests from accidentally pinning a mode.
+    """
+    value = " ".join(str(user_prompt or "").lower().split())
+    if not value:
+        return None
+    patterns = {
+        "general": (r"(?:切换|回到|固定|使用).{0,8}(?:通用|普通|general)",),
+        "coding-agent": (r"(?:切换|固定|使用).{0,8}(?:编码|coding|开发)模式",),
+        "plan": (r"(?:切换|固定|使用).{0,8}(?:规划|计划|plan)模式",),
+        "review": (r"(?:切换|固定|使用).{0,8}(?:审查|审阅|review)模式",),
+        "app-builder": (r"(?:切换|固定|使用).{0,8}(?:应用构建|app|web)模式",),
+    }
+    for profile, profile_patterns in patterns.items():
+        if _matches_any(value, profile_patterns):
+            return profile
+    return None
+
+
+def _explicit_transition_allowed(
+    user_prompt: str,
+    *,
+    current_profile: str,
+    target_profile: str,
+) -> bool:
+    """Allow only explicit phase changes between specialised workflows."""
+    value = " ".join(str(user_prompt or "").lower().split())
+    if _explicit_mode_profile(value) == target_profile:
+        return True
+    if target_profile == "plan":
+        return _matches_any(value, (r"先.{0,12}(?:方案|计划|规划)", r"不要(?:实现|修改|执行)"))
+    if target_profile == "review":
+        return _matches_any(value, (r"只(?:审查|审阅|检查)", r"不要(?:修改|改动|写文件)", r"read[ -]?only"))
+    if target_profile == "app-builder":
+        return _matches_any(value, (r"网页|网站|前端|页面|浏览器|响应式|web app|frontend|react"))
+    if target_profile == "coding-agent":
+        if current_profile == "app-builder":
+            return _matches_any(value, (r"后端|命令行|cli|服务端|非(?:网页|前端|界面)"))
+        return _matches_any(value, (r"直接(?:修复|实现|修改)", r"开始(?:实现|执行)", r"修复|改代码|写代码|implement|fix"))
+    return False
 
 
 def _matches_any(value: str, patterns: tuple[str, ...]) -> bool:

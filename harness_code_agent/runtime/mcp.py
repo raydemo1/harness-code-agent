@@ -7,14 +7,14 @@ import json
 import os
 import re
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .permissions import TOOL_PERMISSION_DANGEROUS, VALID_TOOL_PERMISSIONS
 from .tool_result import ToolResult
-
 
 MCP_CONFIG_RELATIVE_PATH = Path(".harness") / "mcp.json"
 MCP_TOOL_PREFIX = "mcp__"
@@ -177,7 +177,7 @@ class McpClientManager:
         self._loop_thread: _AsyncLoopThread | None = None
 
     @classmethod
-    def from_workspace(cls, workspace: str | Path) -> "McpClientManager":
+    def from_workspace(cls, workspace: str | Path) -> McpClientManager:
         try:
             config = load_mcp_config(workspace)
             return cls(workspace=workspace, config=config)
@@ -230,7 +230,7 @@ class McpClientManager:
             self.tool_bindings.extend(bindings)
             self._bindings_by_exposed_name.update({binding.exposed_name: binding for binding in bindings})
 
-    async def _connect_one(self, server: McpServerConfig) -> tuple["_McpConnection", list[McpToolBinding]]:
+    async def _connect_one(self, server: McpServerConfig) -> tuple[_McpConnection, list[McpToolBinding]]:
         """Connect to a single server with a per-server timeout."""
         request_queue: asyncio.Queue = asyncio.Queue()
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -321,6 +321,76 @@ class McpClientManager:
                 f"permission={binding.permission} disclosure=deferred"
             )
         return "\n".join(lines)
+
+    def configured_server_names(self) -> list[str]:
+        """Return server names from the raw config, including disabled ones."""
+        if not self.config.path.exists():
+            return sorted(self.config.servers)
+        try:
+            data = json.loads(self.config.path.read_text(encoding="utf-8"))
+            servers = data.get("servers", {}) if isinstance(data, dict) else {}
+            return sorted(str(name) for name in servers if isinstance(name, str))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return sorted(self.config.servers)
+
+    def reload_server(self, server_name: str) -> str:
+        """Reconnect the requested MCP server without requiring a new TUI session.
+
+        The connection loop is deliberately rebuilt as a small, deterministic
+        operation. This keeps tool bindings in sync and avoids leaving stale
+        handlers behind after a failed reconnect.
+        """
+        if server_name not in self.config.servers:
+            return f"MCP 服务不存在或未启用：{server_name}"
+        self.close()
+        self.statuses.clear()
+        self.tool_bindings.clear()
+        self._bindings_by_exposed_name.clear()
+        self.connect_all()
+        return f"MCP 服务已重新连接：{server_name}"
+
+    async def _connect_one_and_store(self, server: McpServerConfig) -> None:
+        try:
+            connection, bindings = await self._connect_one(server)
+        except Exception as exc:
+            self.statuses[server.name] = McpServerStatus(
+                name=server.name,
+                transport=server.transport,
+                state="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        self._connections[server.name] = connection
+        self.statuses[server.name] = McpServerStatus(
+            name=server.name,
+            transport=server.transport,
+            state="connected",
+            tool_count=len(bindings),
+        )
+        self.tool_bindings.extend(bindings)
+        self._bindings_by_exposed_name.update({item.exposed_name: item for item in bindings})
+
+    def set_server_enabled(self, server_name: str, enabled: bool) -> str:
+        """Toggle one raw config entry while preserving environment placeholders."""
+        path = self.config.path
+        if not path.exists():
+            return f"MCP 配置不存在：{path}"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise McpConfigError(f"无法读取 MCP 配置：{exc}") from exc
+        servers = data.get("servers") if isinstance(data, dict) else None
+        if not isinstance(servers, dict) or server_name not in servers:
+            return f"MCP 服务不存在：{server_name}"
+        entry = servers[server_name]
+        if not isinstance(entry, dict):
+            return f"MCP 服务配置无效：{server_name}"
+        if enabled:
+            entry.pop("enabled", None)
+        else:
+            entry["enabled"] = False
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return f"MCP 服务已{'启用' if enabled else '停用'}：{server_name}"
 
     def doctor_status(self) -> tuple[bool, str]:
         if self.config_error:
@@ -591,7 +661,7 @@ def _exposed_tool_name(server_name: str, tool_name: str, used_names: set[str]) -
     safe_tool = _safe_name_segment(tool_name)
     base = f"{MCP_TOOL_PREFIX}{safe_server}__{safe_tool}"
     if len(base) > MCP_TOOL_NAME_LIMIT:
-        digest = hashlib.sha256(f"{server_name}/{tool_name}".encode("utf-8")).hexdigest()[:8]
+        digest = hashlib.sha256(f"{server_name}/{tool_name}".encode()).hexdigest()[:8]
         server_budget = min(len(safe_server), 20)
         tool_budget = max(1, MCP_TOOL_NAME_LIMIT - len(MCP_TOOL_PREFIX) - server_budget - len("__") - len("__") - 8)
         base = f"{MCP_TOOL_PREFIX}{safe_server[:server_budget]}__{safe_tool[:tool_budget]}__{digest}"
@@ -657,10 +727,8 @@ class _AsyncLoopThread:
                 self._queue.put_nowait((None, future))
 
             self.loop.call_soon_threadsafe(submit_stop)
-            try:
+            with contextlib.suppress(Exception):
                 future.result(timeout=5)
-            except Exception:
-                pass
         self.loop.call_soon_threadsafe(self.loop.stop)
         self._thread.join(timeout=5)
         self.loop.close()

@@ -1,6 +1,5 @@
 """Tests for context compaction strategy (PLAN.md)."""
 import os
-import shutil
 import sys
 import tempfile
 import types
@@ -24,7 +23,6 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-from harness_code_agent import config
 
 
 # ---------------------------------------------------------------------------
@@ -106,15 +104,19 @@ class CompactionThresholdTests(unittest.TestCase):
             self.assertEqual(thresholds.compact, 85000)          # 85%
 
     def test_below_compact_threshold_no_action(self):
-        from harness_code_agent.agent.compaction import compaction_action
-        from harness_code_agent.agent.compaction import get_thresholds
+        from harness_code_agent.agent.compaction import (
+            compaction_action,
+            get_thresholds,
+        )
         thresholds = get_thresholds(128000)
         action = compaction_action(thresholds.compact - 1, thresholds)
         self.assertEqual(action, "none")
 
     def test_at_compact_threshold_triggers_auto_compact(self):
-        from harness_code_agent.agent.compaction import compaction_action
-        from harness_code_agent.agent.compaction import get_thresholds
+        from harness_code_agent.agent.compaction import (
+            compaction_action,
+            get_thresholds,
+        )
         thresholds = get_thresholds(128000)
         action = compaction_action(thresholds.compact, thresholds)
         self.assertEqual(action, "auto_compact")
@@ -178,56 +180,41 @@ class CompactCommandTests(unittest.TestCase):
         ]
         return session
 
-    def test_compact_command_is_registered_for_summary_view(self):
-        """`/compact show` is the only slash-command compaction surface."""
+    def test_compact_command_is_registered_for_manual_compaction(self):
         from harness_code_agent.tui.commands import default_command_registry
         registry = default_command_registry()
         spec = registry._by_name.get("/compact")
         self.assertIsNotNone(spec, "/compact command should be registered")
-        self.assertEqual(spec.usage, "/compact show")
+        self.assertEqual(spec.usage, "/compact")
+        self.assertEqual(registry.execute("/compact", self._make_session(".")).action, "compact")
 
-    def test_compact_show_reads_latest_summary(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            from harness_code_agent.tui.commands import default_command_registry
-
-            session = self._make_session(tmpdir)
-            session.conversation.messages.insert(1, {
-                "role": "user",
-                "content": "[COMPACTED CONTEXT — summary of older conversation]\nLatest summary text",
-            })
-            registry = default_command_registry()
-
-            show = registry.execute("/compact show", session)
-
-            self.assertIn("Latest summary text", show.text)
-
-    def test_compact_show_prefers_persisted_latest_summary(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            from harness_code_agent.tui.commands import default_command_registry
-
-            compacted_dir = Path(tmpdir) / "compacted"
-            compacted_dir.mkdir()
-            (compacted_dir / "latest.md").write_text("Persisted summary text\n", encoding="utf-8")
-            session = self._make_session(tmpdir)
-            session.session = MagicMock(compacted_dir=compacted_dir)
-            session.conversation.messages.insert(1, {
-                "role": "user",
-                "content": "[COMPACTED CONTEXT]\nMessage summary text",
-            })
-
-            show = default_command_registry().execute("/compact show", session)
-
-            self.assertIn("Persisted summary text", show.text)
-            self.assertNotIn("Message summary text", show.text)
-
-    def test_compact_rejects_manual_status_and_history_commands(self):
+    def test_compact_requires_a_plain_command(self):
         from harness_code_agent.tui.commands import default_command_registry
         registry = default_command_registry()
         session = MagicMock()
 
-        self.assertIn("Usage: /compact show", registry.execute("/compact", session).text)
-        self.assertIn("Usage: /compact show", registry.execute("/compact status", session).text)
-        self.assertIn("Usage: /compact show", registry.execute("/compact history", session).text)
+        self.assertIn("用法：/compact", registry.execute("/compact status", session).text)
+        self.assertIn("用法：/compact", registry.execute("/compact history", session).text)
+
+    def test_manual_compact_runs_without_waiting_for_threshold(self):
+        from harness_code_agent.agent.conversation import Agent
+
+        conv = Agent("test_agent", "sys", use_tools=False).start_conversation()
+        conv.add_user_turn("older task")
+        conv.messages.append({"role": "assistant", "content": "older answer"})
+        compacted = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "[COMPACTED CONTEXT]\nolder summary"},
+        ]
+        with patch(
+            "harness_code_agent.agent.conversation.context.summarize_older_conversation",
+            return_value=compacted,
+        ) as summarize:
+            result = conv.compact_now()
+
+        self.assertIn("已压缩对话", result)
+        self.assertEqual(conv.messages, compacted)
+        summarize.assert_called_once()
 
 
 class AgentConversationCompactionLifecycleTests(unittest.TestCase):
@@ -600,7 +587,7 @@ class TuiStateCompactionTests(unittest.TestCase):
     """TUI state.py should handle compaction events."""
 
     def _make_state(self):
-        from harness_code_agent.tui.state import TuiState, SessionStatusSnapshot
+        from harness_code_agent.tui.state import SessionStatusSnapshot, TuiState
         snapshot = SessionStatusSnapshot(
             profile="coding-agent",
             model="test",
@@ -668,6 +655,7 @@ class ContextWindowConfigTests(unittest.TestCase):
             os.environ.pop("HARNESS_CONTEXT_WINDOW_TOKENS", None)
             os.environ.pop("COMPRESS_THRESHOLD", None)
             import importlib
+
             from harness_code_agent import config
             importlib.reload(config)
             self.assertEqual(config.CONTEXT_WINDOW_TOKENS, 200000)
@@ -680,6 +668,7 @@ class ContextWindowConfigTests(unittest.TestCase):
             os.environ.pop("COMPRESS_THRESHOLD", None)
             # Need to reload to pick up env change
             import importlib
+
             from harness_code_agent import config
             importlib.reload(config)
             self.assertEqual(config.CONTEXT_WINDOW_TOKENS, 64000)

@@ -1,22 +1,32 @@
 """Agent and conversation loop implementation."""
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import time
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
+from ..runtime.arg_preview import safe_args_preview
+from ..runtime.builtins.registry import TOOL_SCHEMAS
+from ..runtime.tool_context import ToolContext
+from ..runtime.tool_result import ToolResult
+from ..runtime.tool_runner import finalize_intercepted_tool_result
 from . import context
 from .cancellation import CancelledError
 from .compaction import CompactionGate, compaction_action, get_thresholds
 from .llm_channel import LlmChannel, llm_call_simple
-from .session_emitter import SessionEmitter
 from .observations import FactTracker, ObservationStore
 from .providers import ProviderAdapter, current_adapter, get_client
-from .runtime_state import AgentFallbackState, AgentRuntimeState, RecoveryState, TaskBoard
+from .runtime_state import (
+    AgentFallbackState,
+    AgentRuntimeState,
+    RecoveryState,
+    TaskBoard,
+)
+from .session_emitter import SessionEmitter
 from .tool_executor import ToolExecutor
 from .trace import TraceWriter
 from .utils import (
@@ -25,12 +35,6 @@ from .utils import (
     capture_prompt_cache_shape,
     compare_prompt_cache_shapes,
 )
-from ..runtime.arg_preview import safe_args_preview
-from ..runtime.builtins.registry import TOOL_SCHEMAS
-from ..runtime.tool_context import ToolContext
-from ..runtime.tool_result import ToolResult
-from ..runtime.tool_runner import finalize_intercepted_tool_result
-
 
 log = logging.getLogger("harness")
 DYNAMIC_CONTEXT_MARKER = "[HARNESS_DYNAMIC_CONTEXT:"
@@ -116,7 +120,7 @@ class Agent:
         for conversation in list(self._conversations):
             conversation._cached_prompt_cache_key = None
 
-    def start_conversation(self, initial_task: str | None = None) -> "AgentConversation":
+    def start_conversation(self, initial_task: str | None = None) -> AgentConversation:
         conversation = AgentConversation(self, initial_task)
         self._conversations.add(conversation)
         return conversation
@@ -173,6 +177,63 @@ class AgentConversation:
         are represented as appended messages, not as a regenerated prelude.
         """
         return self.messages
+
+    def rebind_agent(self, agent: Agent) -> None:
+        """Keep this conversation while changing the active profile runtime.
+
+        Profile switching is a session-level policy change, not a new chat.
+        The message history and runtime state stay intact; only the system
+        contract, tool policy and middleware set come from the new agent.
+        """
+        if agent is self.agent:
+            return
+        previous = self.agent
+        conversations = getattr(previous, "_conversations", None)
+        if conversations is not None:
+            conversations.discard(self)
+        new_conversations = getattr(agent, "_conversations", None)
+        if new_conversations is not None:
+            new_conversations.add(self)
+        self.agent = agent
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0] = {"role": "system", "content": agent.system_prompt}
+        self._cached_prompt_cache_key = None
+        self._last_prompt_cache_shape = None
+        self._pending_prompt_cache_shape = None
+
+    def compact_now(self) -> str:
+        """Compact the current conversation on explicit user request.
+
+        Unlike automatic compaction this does not wait for a token threshold;
+        it still uses the existing summarizer and persistence/event pipeline.
+        """
+        if len(self.messages) <= 2:
+            return "当前对话内容还不足以压缩"
+        messages_before = len(self.messages)
+        token_count_before = context.count_request_tokens(
+            self.messages,
+            tool_schemas=_tool_schemas_for_agent(self.agent),
+        )
+        self._strip_dynamic_context_messages()
+        summarized = context.summarize_older_conversation(
+            self.messages,
+            llm_call_simple,
+            current_turn_start_index=max(1, self.runtime_state.current_turn_start_index),
+        )
+        if summarized == self.messages:
+            return "当前对话暂时无需压缩"
+        self._replace_messages(summarized)
+        self.compaction_gate.mark_compacted()
+        summary_text = _first_compacted_summary(summarized)
+        self._emit_compaction_committed(
+            messages_before=messages_before,
+            token_count_before=token_count_before,
+            summary_chars=len(summary_text),
+            summary_text=summary_text,
+            phase="manual",
+        )
+        self._refresh_dynamic_context_after_compaction(phase="manual")
+        return f"已压缩对话：{messages_before} 条消息 → {len(self.messages)} 条"
 
     def add_user_turn(self, task: str) -> None:
         self.runtime_state.current_turn_start_index = len(self.messages)
@@ -565,7 +626,7 @@ class AgentConversation:
             ).to_event()
         )
 
-    def _limit_enabled(self, limit: int | float | None) -> bool:
+    def _limit_enabled(self, limit: float | None) -> bool:
         try:
             return limit is not None and float(limit) > 0
         except (TypeError, ValueError):
@@ -942,8 +1003,7 @@ def _first_compacted_summary(messages: list[dict]) -> str:
     for message in messages:
         content = str(message.get("content") or "")
         if not (
-            content.startswith("[COMPACTED CONTEXT")
-            or content.startswith("[HANDOFF RESET]")
+            content.startswith(("[COMPACTED CONTEXT", "[HANDOFF RESET]"))
         ):
             continue
         _header, _sep, body = content.partition("\n")
