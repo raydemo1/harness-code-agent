@@ -11,6 +11,8 @@ from functools import lru_cache
 DEFAULT_PROFILE = "general"
 LOCAL_ROUTE_MIN_CONFIDENCE = 0.10
 LOCAL_ROUTE_MIN_MARGIN = 0.035
+LOCAL_ROUTE_BM25_K1 = 1.2
+LOCAL_ROUTE_BM25_B = 0.75
 LOCAL_ROUTE_PROFILES = {"general", "coding-agent", "review", "plan", "app-builder"}
 ROUTE_ACTION_STAY = "stay"
 ROUTE_ACTION_SWITCH_PROFILE = "switch_profile"
@@ -73,7 +75,7 @@ def route_profile_for_turn(
         best_profile, best_score = ranked[0]
         second_score = ranked[1][1] if len(ranked) > 1 else 0.0
         margin = max(0.0, best_score - second_score)
-        route_reason = f"Local semantic prototype matched {best_profile}."
+        route_reason = f"Local BM25 prototype matched {best_profile}."
 
     if best_score < confidence_threshold or margin < margin_threshold:
         decision = _local_fallback(current, "low local route confidence")
@@ -100,7 +102,7 @@ def route_profile_for_turn(
                 profile_name=current,
                 confidence=best_score,
                 margin=margin,
-                reason="Local semantic prototype matched general; answer directly in the current profile.",
+                reason="Local BM25 prototype matched general; answer directly in the current profile.",
                 source="local",
                 action=ROUTE_ACTION_DIRECT_ANSWER,
                 turn_mode=TURN_MODE_DIRECT_ANSWER,
@@ -174,20 +176,66 @@ def _local_route_scores(user_prompt: str) -> dict[str, float]:
     query = _text_vector(user_prompt)
     if not query:
         return {}
-    scores = {
+    bm25_scores = _bm25_route_scores(query)
+    cosine_scores = {
         profile: _cosine_similarity(query, vector)
         for profile, vector in _prototype_vectors().items()
     }
-    # Character n-grams are deliberately dependency-free, but they can lose
-    # meaning when a short phrase is split across generic words.  Add a small
-    # set of profile-specific phrase anchors to preserve those high-signal
-    # local cues without turning the router into a second intent grammar.
+    # BM25 provides the primary lexical match. Cosine is deliberately kept as
+    # a small, dependency-free tie-breaker for short or mixed-language turns.
+    scores = {
+        profile: (0.8 * bm25_scores.get(profile, 0.0)) + (0.2 * cosine_scores.get(profile, 0.0))
+        for profile in LOCAL_ROUTE_PROFILES
+    }
+    # Character n-grams can lose meaning when a short phrase is split across
+    # generic words. Keep a few high-signal phrase anchors as a tiny tie-breaker
+    # rather than turning the router into a second intent grammar.
     normalized = " ".join(str(user_prompt or "").lower().split())
     for profile, anchors in _LOCAL_ROUTE_ANCHORS.items():
-        anchor_bonus = sum(weight for phrase, weight in anchors if phrase in normalized)
+        anchor_bonus = sum(weight for phrase, weight in anchors if phrase in normalized) * 0.25
         if anchor_bonus:
             scores[profile] = min(1.0, scores[profile] + anchor_bonus)
     return scores
+
+
+def _bm25_route_scores(query: Counter[str]) -> dict[str, float]:
+    """Score the five static profile prototypes with an in-process BM25 pass.
+
+    The corpus is tiny and immutable, so building an Elasticsearch index or a
+    package-backed retriever would add startup latency without improving route
+    quality. Scores are normalized per query so the existing confidence and
+    margin thresholds remain meaningful.
+    """
+    documents, document_frequency, average_length = _prototype_bm25_stats()
+    if not documents or average_length <= 0:
+        return {profile: 0.0 for profile in LOCAL_ROUTE_PROFILES}
+
+    document_count = len(documents)
+    raw_scores: dict[str, float] = {}
+    for profile, document in documents.items():
+        document_length = sum(document.values())
+        score = 0.0
+        for term in query:
+            term_frequency = document.get(term, 0.0)
+            if term_frequency <= 0:
+                continue
+            frequency = document_frequency.get(term, 0)
+            inverse_document_frequency = math.log(
+                1.0 + (document_count - frequency + 0.5) / (frequency + 0.5)
+            )
+            denominator = term_frequency + LOCAL_ROUTE_BM25_K1 * (
+                1.0 - LOCAL_ROUTE_BM25_B
+                + LOCAL_ROUTE_BM25_B * document_length / average_length
+            )
+            score += inverse_document_frequency * (
+                term_frequency * (LOCAL_ROUTE_BM25_K1 + 1.0) / denominator
+            )
+        raw_scores[profile] = score
+
+    maximum = max(raw_scores.values(), default=0.0)
+    if maximum <= 0:
+        return {profile: 0.0 for profile in LOCAL_ROUTE_PROFILES}
+    return {profile: score / maximum for profile, score in raw_scores.items()}
 
 
 def _explicit_route_profile(user_prompt: str) -> str | None:
@@ -246,11 +294,14 @@ def _explicit_route_profile(user_prompt: str) -> str | None:
         (
             r"网页|网站|前端|页面|浏览器|响应式|组件|看板|小游戏|界面|可视化|工作台|侧边栏|筛选|数据展示",
             r"(?:交互|操作|预览).{0,12}(?:界面|结果|浏览器)",
-            r"\b(?:interact|preview|visual workspace|product surface)\b",
+            r"\b(?:browser|interface|dashboard|interact|preview|visual workspace|product surface)\b",
             r"\b(?:web app|website|react|frontend|landing page|dashboard)\b",
         ),
     )
-    terminal_ui = _matches_any(value, (r"\btui\b", r"终端界面|命令行界面|terminal ui"))
+    terminal_ui = _matches_any(
+        value,
+        (r"\btui\b", r"终端界面|命令行界面|terminal ui", r"command[- ]line|\bcli\b"),
+    )
     review = _matches_any(
         value,
         (
@@ -303,6 +354,18 @@ def _prototype_vectors() -> dict[str, Counter[str]]:
         profile: _text_vector(text)
         for profile, text in _LOCAL_ROUTE_PROTOTYPES.items()
     }
+
+
+@lru_cache(maxsize=1)
+def _prototype_bm25_stats() -> tuple[dict[str, Counter[str]], Counter[str], float]:
+    documents = _prototype_vectors()
+    document_frequency: Counter[str] = Counter()
+    lengths: list[float] = []
+    for vector in documents.values():
+        document_frequency.update(vector.keys())
+        lengths.append(sum(vector.values()))
+    average_length = sum(lengths) / len(lengths) if lengths else 0.0
+    return documents, document_frequency, average_length
 
 
 def _text_vector(text: str) -> Counter[str]:

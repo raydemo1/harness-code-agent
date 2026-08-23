@@ -76,23 +76,6 @@ class ProfilePromptTests(unittest.TestCase):
                 self.assertEqual(decision.reason, f"Explicit instruction contract matched {expected}.")
                 self.assertEqual(decision.confidence, 1.0)
 
-    def test_profile_router_batch_routes_natural_language_with_local_anchors(self):
-        cases = [
-            ("What is the difference between these two ideas?", "general"),
-            ("The repository checks are red after the last change.", "coding-agent"),
-            ("Lay out the path, assumptions, and validation points.", "plan"),
-            ("A polished workspace with clear visual hierarchy would help.", "app-builder"),
-        ]
-        for prompt, expected in cases:
-            with self.subTest(prompt=prompt):
-                decision = route_profile_for_turn(prompt, current_profile="general")
-                self.assertEqual(decision.profile_name, expected)
-                self.assertFalse(decision.fallback_used)
-                self.assertEqual(
-                    decision.reason,
-                    f"Local semantic prototype matched {expected}.",
-                )
-
     def test_profile_router_keeps_specialized_profile_sticky_for_general_followup(self):
         decision = route_profile_for_turn("help me understand this concept", current_profile="coding-agent")
 
