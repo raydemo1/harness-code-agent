@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
+from ..sessions.summary import load_session_summary
 
 
 @dataclass(frozen=True)
@@ -149,9 +149,8 @@ def _resolve_file_mention(mention: Mention, root: Path) -> ResolvedMention:
         candidate = (root / raw_path).resolve()
     if not _is_relative_to(candidate, root):
         raise MentionResolutionError(f"File mention escapes workspace: {mention.raw}")
-    if not candidate.exists() or not candidate.is_file():
-        if not candidate.exists() or not candidate.is_dir():
-            raise MentionResolutionError(f"File mention not found: {mention.raw}")
+    if not candidate.exists() or not (candidate.is_file() or candidate.is_dir()):
+        raise MentionResolutionError(f"File mention not found: {mention.raw}")
     is_dir = candidate.is_dir()
     kind = "directory" if is_dir else "file"
     instruction = (

@@ -1,11 +1,10 @@
 """Structured acceptance state for planned agent work."""
 from __future__ import annotations
 
+import threading
 from copy import deepcopy
 from dataclasses import dataclass, field
-import threading
 from typing import Any
-
 
 MAX_ACTIVE_CHECKS = 10
 MAX_SOURCE_CHARS = 300

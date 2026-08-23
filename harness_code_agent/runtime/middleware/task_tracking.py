@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import ClassVar
 
 from ...agent.acceptance import AcceptanceError
 from ..shell_classification import classify_safe_shell_command
 from ..tool_result import ToolResult
-from .base import AgentMiddleware, MAIN_AGENT_NAMES
-
+from .base import MAIN_AGENT_NAMES, AgentMiddleware
 
 log = logging.getLogger("harness")
 
@@ -16,7 +16,7 @@ log = logging.getLogger("harness")
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
     """Hard-require planning updates for tracked mode."""
 
-    ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
+    ACTION_TOOLS: ClassVar[set] = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
 
     def __init__(
         self,
@@ -42,7 +42,16 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             if not self.enforce_acceptance:
                 return None
             update_kind = str(tool_args.get("update_kind") or "").strip().lower()
-            if update_kind == "start" and not tool_args.get("acceptance_checks"):
+            requested_mode = str(
+                tool_args.get("mode") or runtime_state.task_board.planning_mode or ""
+            ).strip().lower()
+            if requested_mode == "todo":
+                return None
+            if (
+                requested_mode == "tracked"
+                and update_kind == "start"
+                and not tool_args.get("acceptance_checks")
+            ):
                 return (
                     "[blocked] Tracked planning start requires 1-10 acceptance_checks "
                     "with text, source, and verification_command."
@@ -61,7 +70,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
                 "Call update_plan_state with mode=\"tracked\", update_kind=\"start\", "
                 "and concrete acceptance_checks before more edits or commands."
             )
-        if board.planning_mode in {"unset", "skip"}:
+        if board.planning_mode in {"unset", "skip", "todo"}:
             return None
         if board.replan_required:
             reason = f" Reason: {board.replan_reason}" if board.replan_reason else ""

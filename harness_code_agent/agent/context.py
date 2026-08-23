@@ -6,10 +6,10 @@ persisted handoff document. It never rewrites the system prompt or tools schema.
 """
 from __future__ import annotations
 
-import re
 import hashlib
 import json
 import logging
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -47,7 +47,7 @@ def _get_encoder():
     if _encoder is None:
         try:
             _encoder = tiktoken.encoding_for_model(config.MODEL)
-        except Exception:
+        except (KeyError, ValueError, OSError):
             _encoder = tiktoken.get_encoding("cl100k_base")
     return _encoder
 
@@ -365,7 +365,7 @@ def _strip_tool_output_detail(content: str) -> str:
     header_lines: list[str] = []
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("observation:") or stripped.startswith("--- preview ---"):
+        if stripped.startswith(("observation:", "--- preview ---")):
             break
         header_lines.append(line)
     if len(header_lines) < len(lines):

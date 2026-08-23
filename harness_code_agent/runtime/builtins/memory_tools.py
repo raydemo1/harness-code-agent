@@ -4,7 +4,12 @@ import time
 
 from ...memory.dream import run_dream, should_dream
 from ...memory.recall import MemoryRecall
-from ...memory.store import MEMORY_CONTENT_FILES, PROTECTED_FILES, MemoryStore, default_memory_root
+from ...memory.store import (
+    MEMORY_CONTENT_FILES,
+    PROTECTED_FILES,
+    MemoryStore,
+    default_memory_root,
+)
 from ..tool_context import ToolContext
 from ..tool_result import ToolResult
 

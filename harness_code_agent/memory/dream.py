@@ -8,7 +8,6 @@ import time
 from .navigator import rebuild_navigation_from_records
 from .store import MEMORY_CONTENT_FILES, MemoryRecord, MemoryStore, _env_int, _utc_now
 
-
 DEFAULT_INBOX_THRESHOLD = 12
 
 
@@ -27,9 +26,7 @@ def should_dream(store: MemoryStore) -> bool:
         return False
     last = str(manifest.get("last_dream_at") or "")
     interval_seconds = _env_int("HARNESS_MEMORY_DREAM_INTERVAL_HOURS", 24) * 60 * 60
-    if _seconds_since(last) >= interval_seconds:
-        return True
-    return False
+    return _seconds_since(last) >= interval_seconds
 
 
 def run_dream(store: MemoryStore) -> str:

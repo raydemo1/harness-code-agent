@@ -8,7 +8,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from ..runtime.builtins.schemas import CORE_TOOL_SCHEMAS
 from ..runtime.middleware import AgentMiddleware
@@ -18,7 +18,6 @@ from ..runtime.tool_registry import ToolRegistry
 from ..runtime.tool_result import ToolResult
 from ..sessions.events import EventBus
 from ..workspace.service import WorkspaceService
-
 
 DELEGATE_AGENT_PROFILES = {"explore", "test_design", "review", "verify", "patch"}
 READ_ONLY_DELEGATE_PROFILES = {"explore", "test_design", "review", "verify"}
@@ -74,7 +73,7 @@ class DelegateSpec:
 class DelegatePolicyMiddleware(AgentMiddleware):
     """Constrain delegated agents to their declared role."""
 
-    _CONTROL_TOOLS = {
+    _CONTROL_TOOLS: ClassVar[set] = {
         "ask_user",
         "update_plan_state",
         "list_shell_jobs",
@@ -86,7 +85,7 @@ class DelegatePolicyMiddleware(AgentMiddleware):
         "parallel_agents",
         "parallel_commands",
     }
-    _WRITE_TOOLS = {"write_file", "apply_patch", "remember_memory"}
+    _WRITE_TOOLS: ClassVar[set] = {"write_file", "apply_patch", "remember_memory"}
 
     def __init__(self, spec: DelegateSpec, *, allowed_paths: list[str] | None = None):
         self.spec = spec
@@ -361,8 +360,8 @@ def _coerce_delegate_report(spec: DelegateSpec, raw_result: str, *, mode: str) -
         if isinstance(parsed, dict):
             report = parsed
         else:
-            raise ValueError("not an object")
-    except Exception:
+            raise TypeError("not an object")
+    except (ValueError, TypeError):
         report = {
             "status": "completed" if raw_result.strip() else "blocked",
             "agent": spec.name,

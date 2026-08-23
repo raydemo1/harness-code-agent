@@ -8,19 +8,25 @@ benchmark profiles.
 """
 from __future__ import annotations
 
-from .base import BaseProfile, AgentConfig, build_execution_middlewares, build_profile_prompt
-from ..tracking_policy import TASK_TRACKING_POLICY
+from typing import ClassVar
+
 from ..runtime.middleware import (
     PreExitVerificationMiddleware,
+)
+from ..tracking_policy import TASK_TRACKING_POLICY
+from .base import (
+    AgentConfig,
+    BaseProfile,
+    build_execution_middlewares,
+    build_profile_prompt,
 )
 
 
 class CodingAgentProfile(BaseProfile):
-    _DEFAULTS = {
+    _DEFAULTS: ClassVar[dict] = {
         "task_budget": 3600,
         "loop_file_edit_threshold": 5,
         "loop_command_repeat_threshold": 3,
-        "require_start_after_n_actions": 5,
         "acceptance_review_timeout": 10.0,
         "time_warn_threshold": 0.60,
         "time_critical_threshold": 0.85,
@@ -75,7 +81,6 @@ class CodingAgentProfile(BaseProfile):
                 time_warn_threshold=self._get("time_warn_threshold"),
                 time_critical_threshold=self._get("time_critical_threshold"),
                 enforce_acceptance=True,
-                require_start_after_n_actions=self._get("require_start_after_n_actions"),
                 acceptance_review_timeout=self._get("acceptance_review_timeout"),
                 extra_before_time_budget=[
                     PreExitVerificationMiddleware(

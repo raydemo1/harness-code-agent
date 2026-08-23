@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from .shell_classification import analyze_shell_command, classify_safe_shell_command
-
 
 TOOL_PERMISSION_READ = "read"
 TOOL_PERMISSION_NETWORK_READ = "network_read"
@@ -65,7 +65,7 @@ class PermissionPolicy:
     WORKSPACE_WRITE = "workspace-write"
     LLM_AUTO = "llm-auto"
     DANGER_FULL_ACCESS = "danger-full-access"
-    VALID_MODES = {WORKSPACE_WRITE, LLM_AUTO, DANGER_FULL_ACCESS}
+    VALID_MODES: ClassVar[set] = {WORKSPACE_WRITE, LLM_AUTO, DANGER_FULL_ACCESS}
 
     def __init__(self, mode: str = WORKSPACE_WRITE):
         if mode not in self.VALID_MODES:

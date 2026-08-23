@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import threading
@@ -12,8 +13,14 @@ from typing import Literal
 import psutil
 
 from .. import config
-from .shell_session import _docker_user_arg, docker_cli_path, sandbox_mode, validate_shell_configuration, windows_shell_kind, windows_shell_path
-
+from .shell_session import (
+    _docker_user_arg,
+    docker_cli_path,
+    sandbox_mode,
+    validate_shell_configuration,
+    windows_shell_kind,
+    windows_shell_path,
+)
 
 ShellJobStatus = Literal["running", "exited", "stopped", "failed"]
 
@@ -162,10 +169,8 @@ class ShellJobManager:
             try:
                 process.wait(timeout=max(0.1, grace_seconds))
             except subprocess.TimeoutExpired:
-                try:
+                with contextlib.suppress(Exception):
                     process.kill()
-                except Exception:
-                    pass
         job.mark("stopped", exit_code=process.poll() if process is not None else None)
         return job
 
@@ -177,10 +182,8 @@ class ShellJobManager:
             jobs = list(self._jobs.values())
         for job in jobs:
             if job.status == "running":
-                try:
+                with contextlib.suppress(Exception):
                     self.stop(job.job_id)
-                except Exception:
-                    pass
 
     def _store(self, job: ShellJob) -> None:
         with self._lock:
@@ -202,7 +205,7 @@ class ShellJobManager:
             text=True,
             encoding="utf-8",
             errors="replace",
-            preexec_fn=os.setsid,
+            start_new_session=True,
         )
 
     def _start_windows_process(self, command: str) -> subprocess.Popen:
@@ -282,10 +285,8 @@ class ShellJobManager:
                 else:
                     job.output.append(line)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 pipe.close()
-            except Exception:
-                pass
 
     def _monitor(self, job: ShellJob) -> None:
         process = job.process
@@ -321,20 +322,17 @@ class ShellJobManager:
         if job.pid is None:
             return
         if os.name == "nt":
-            try:
+            with contextlib.suppress(Exception):
                 subprocess.run(
                     ["taskkill", "/PID", str(job.pid), "/T", "/F"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=5,
+                    check=False,
                 )
-            except Exception:
-                pass
         else:
-            try:
+            with contextlib.suppress(Exception):
                 os.killpg(job.pid, 15)
-            except Exception:
-                pass
 
     def _stop_docker_container(self, job: ShellJob) -> None:
         if not job.container_name:
@@ -342,29 +340,24 @@ class ShellJobManager:
         docker = docker_cli_path()
         if not docker:
             return
-        try:
+        with contextlib.suppress(Exception):
             subprocess.run(
                 [docker, "rm", "-f", job.container_name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
+                check=False,
             )
-        except Exception:
-            pass
 
 
 def _safe_terminate(process) -> None:
-    try:
+    with contextlib.suppress(Exception):
         process.terminate()
-    except Exception:
-        pass
 
 
 def _safe_kill(process) -> None:
-    try:
+    with contextlib.suppress(Exception):
         process.kill()
-    except Exception:
-        pass
 
 
 def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:

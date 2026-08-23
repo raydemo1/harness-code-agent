@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
-
 SafeShellCommandKind = Literal["read", "verify", "unsafe"]
 
 
@@ -86,14 +85,48 @@ _READ_COMMAND_PREFIXES = (
     "python3 --version",
     "get-content",
     "gc",
+    "get-childitem",
+    "gci",
+    "get-item",
+    "get-location",
+    "get-command",
+    "gcm",
+    "get-process",
+    "gps",
+    "get-service",
+    "test-path",
+    "resolve-path",
     "select-string",
     "sls",
+    "where-object",
+    "where",
     "select-object",
+    "get-member",
+    "gm",
     "sort-object",
     "sort",
     "measure-object",
     "measure",
+    "format-table",
+    "ft",
+    "write-output",
     "out-string",
+    "convertfrom-json",
+    "convertto-json",
+    "split-path",
+    "join-path",
+    "compare-object",
+    "compare",
+    "cut",
+    "uniq",
+    "tr",
+    "basename",
+    "dirname",
+    "realpath",
+    "readlink",
+    "file",
+    "stat",
+    "jq",
 )
 
 _VERIFY_COMMAND_PREFIXES = (
@@ -255,9 +288,7 @@ def _has_unsafe_shell_syntax(command: str) -> bool:
 
         if char in {"'", '"'}:
             quote = char
-        elif char == "`":
-            return True
-        elif char == "$" and index + 1 < len(command) and command[index + 1] == "(":
+        elif char == "`" or char == "$" and index + 1 < len(command) and command[index + 1] == "(":
             return True
         elif char == ";":
             pass
@@ -387,7 +418,7 @@ def _strip_safe_redirections(segment: str) -> str:
     current = segment.strip()
     while previous != current:
         previous = current
-        current = re.sub(r"\s+\d?>\s*/dev/null(?:\s|$)", " ", current).strip()
+        current = re.sub(r"\s+\d?>\s*(?:/dev/null|\$null)(?:\s|$)", " ", current).strip()
         current = re.sub(r"\s+\d?>&\d(?:\s|$)", " ", current).strip()
     return current
 
@@ -400,13 +431,13 @@ def _redirection_at_is_safe(command: str, index: int) -> bool:
     remainder = command[index + 1 :].lstrip()
     if remainder.startswith("&"):
         return bool(re.match(r"&\d(?:\s|[;&|]|$)", remainder)) and operator in {"1>", "2>", ">"}
-    return bool(re.match(r"/dev/null(?:\s|[;&|]|$)", remainder))
+    return bool(re.match(r"(?:/dev/null|\$null)(?:\s|[;&|]|$)", remainder))
 
 
 def _redirection_end_index(command: str, index: int) -> int:
     remainder = command[index + 1 :].lstrip()
     skipped_spaces = len(command[index + 1 :]) - len(remainder)
-    match = re.match(r"(?:&\d|/dev/null)", remainder)
+    match = re.match(r"(?:&\d|/dev/null|\$null)", remainder)
     if not match:
         return index
     return index + skipped_spaces + match.end()

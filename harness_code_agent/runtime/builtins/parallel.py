@@ -12,7 +12,6 @@ from ..shell_classification import classify_safe_shell_command
 from ..tool_context import ToolContext
 from ..tool_result import ToolResult
 
-
 PARALLEL_MAX_ITEMS = 8
 PARALLEL_MAX_OUTPUT_CHARS = 120_000
 

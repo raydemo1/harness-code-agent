@@ -8,10 +8,10 @@ def web_search(query: str, max_results: int = 5) -> ToolResult:
     """Search the web using DuckDuckGo and return text results.
     Uses DDG's lite HTML endpoint — no API key needed, works in any container.
     """
-    import urllib.request
-    import urllib.parse
-    import re
     import html as html_mod
+    import re
+    import urllib.parse
+    import urllib.request
 
     try:
         encoded = urllib.parse.urlencode({"q": query})
@@ -74,8 +74,8 @@ def web_search(query: str, max_results: int = 5) -> ToolResult:
 
 def web_fetch(url: str) -> ToolResult:
     """Fetch the content of a web page and return as text."""
-    import urllib.request
     import re
+    import urllib.request
 
     try:
         req = urllib.request.Request(url, headers={

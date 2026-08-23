@@ -22,16 +22,23 @@ them without touching this file:
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
-from .base import BaseProfile, AgentConfig, build_execution_middlewares, build_profile_prompt
 from ..runtime.middleware import (
     TerminalShellEditPolicyMiddleware,
 )
+from .base import (
+    AgentConfig,
+    BaseProfile,
+    build_execution_middlewares,
+    build_profile_prompt,
+)
+
 
 class TerminalProfile(BaseProfile):
 
     # --- Default values (overridable via ProfileConfig or env vars) ---
-    _DEFAULTS = {
+    _DEFAULTS: ClassVar[dict] = {
         "task_budget": 1800,
         "loop_file_edit_threshold": 4,
         "loop_command_repeat_threshold": 3,

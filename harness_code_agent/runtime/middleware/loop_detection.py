@@ -9,7 +9,6 @@ from ..arg_preview import safe_args_preview as _shared_safe_args_preview
 from ..tool_result import ToolResult
 from .base import AgentMiddleware
 
-
 log = logging.getLogger("harness")
 
 

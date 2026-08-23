@@ -6,7 +6,6 @@ import os
 from ... import config
 from .filesystem import READ_FILE_MAX_LINES
 
-
 CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -208,15 +207,15 @@ CORE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan_state",
-            "description": "Update tracked todo and acceptance state. skip mode does not call this tool. This tool does not create formal plan.md files or approval gates.",
+            "description": "Update lightweight todo progress or tracked acceptance state. skip mode does not call this tool. This tool does not create formal plan.md files or approval gates.",
             "parameters": {
                 "type": "object",
                 "required": ["mode", "update_kind", "goal", "steps", "current_step", "completed_steps", "blockers", "next_action", "requires_approval"],
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "description": "Use tracked for non-trivial work that needs todo/acceptance tracking. skip is the direct execution path and must not call this tool.",
-                        "enum": ["tracked"],
+                        "description": "Use todo for small clear work and tracked only for complex or risky work needing acceptance gates. skip is the direct execution path and must not call this tool.",
+                        "enum": ["todo", "tracked"],
                     },
                     "update_kind": {
                         "type": "string",
@@ -580,6 +579,7 @@ CORE_TOOL_SCHEMAS = [
                     else "On POSIX this runs a shell suitable for standard Bash-style commands. "
                 )
                 + "Use for installing deps, running builds, starting servers, running tests, etc. "
+                "Keep each call to one logical verification whenever practical. For a negative test where a non-zero exit is the expected success condition, set expected_exit_codes instead of letting recovery treat it as a failure. "
                 "Do not use shell for repository search or file listing; use repo_search/list_files/read_file. "
                 "Repository-browsing shell commands such as bare rg, recursive grep/findstr, Get-ChildItem -Recurse, or dir /s may be blocked or rewritten. "
                 "For long-running verification commands (compilation, training), increase the timeout parameter. "
@@ -591,11 +591,18 @@ CORE_TOOL_SCHEMAS = [
                 "type": "object",
                 "required": ["command"],
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command to run; keep inspection commands bounded."},
+                    "command": {"type": "string", "description": "Shell command to run; keep inspection commands bounded and avoid combining unrelated checks."},
                     "timeout": {
                         "type": "integer",
                         "description": "Timeout in seconds (default 300). Increase for long builds/training.",
                         "default": 300,
+                    },
+                    "expected_exit_codes": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "maxItems": 16,
+                        "description": "Exit codes that count as success (default [0]); use this for deliberate negative tests.",
+                        "default": [0],
                     },
                 },
             },

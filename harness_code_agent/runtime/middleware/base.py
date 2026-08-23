@@ -5,7 +5,6 @@ from abc import ABC
 
 from ..tool_result import ToolResult
 
-
 MAIN_AGENT_NAMES = {"main_agent"}
 
 # status_source values emitted when a call is intercepted before execution.
@@ -46,7 +45,7 @@ class AgentMiddleware(ABC):
     def on_conversation_close(self, messages: list[dict], runtime_state=None,
                               agent_name: str | None = None) -> None:
         """Called when a live conversation is closing."""
-        return None
+        return
 
     def on_context_compacted(self, messages: list[dict], runtime_state=None,
                              agent_name: str | None = None,
@@ -85,7 +84,7 @@ class AgentMiddleware(ABC):
         agent_name: str | None = None,
     ) -> None:
         """Called after every before_tool gate allows the tool, just before it is queued."""
-        return None
+        return
 
     def post_tool(self, tool_name: str, tool_args: dict, result: ToolResult,
                   messages: list[dict], runtime_state=None,
@@ -106,4 +105,4 @@ class AgentMiddleware(ABC):
     def begin_turn(self, task: str, messages: list[dict], runtime_state=None,
                    agent_name: str | None = None) -> None:
         """Called before a new user turn is appended in a live conversation."""
-        return None
+        return

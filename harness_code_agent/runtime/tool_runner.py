@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import inspect
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from ..sessions.events import FailureEvent, FileChangeEvent, ToolCallEvent, ToolResultEvent, classify_tool_failure
+from ..sessions.events import (
+    FailureEvent,
+    FileChangeEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    classify_tool_failure,
+)
 from .tool_context import ToolContext
-from .tool_registry import ToolExecutionLane, ToolRegistry, _coerce_tool_lane
+from .tool_registry import ToolExecutionLane, ToolRegistry
 from .tool_result import ToolResult, unstructured_tool_result_from_text
 
 

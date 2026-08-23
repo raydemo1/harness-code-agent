@@ -5,10 +5,20 @@ from typing import TYPE_CHECKING, Any
 
 from ._event_helpers import (
     changed_files as _changed_files,
+)
+from ._event_helpers import (
     count_events as _count_events,
+)
+from ._event_helpers import (
     event_type as _event_type,
+)
+from ._event_helpers import (
     failure_categories as _event_failure_categories,
+)
+from ._event_helpers import (
     payload as _payload,
+)
+from ._event_helpers import (
     tool_counts as _tool_counts,
 )
 
@@ -16,7 +26,7 @@ if TYPE_CHECKING:
     from .store import SessionStore
 
 
-def load_session_summary(store: "SessionStore", session_id: str) -> str:
+def load_session_summary(store: SessionStore, session_id: str) -> str:
     metadata = store.read_metadata(session_id)
     events = store.read_events(session_id)
     return format_session_summary(metadata, events, session_id=session_id)

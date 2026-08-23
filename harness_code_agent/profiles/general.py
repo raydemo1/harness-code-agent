@@ -1,11 +1,11 @@
 """General-purpose default profile for lightweight workspace assistance."""
 from __future__ import annotations
 
-from .base import AgentConfig, BaseProfile, build_profile_prompt
 from ..runtime.permissions import (
     TOOL_PERMISSION_NETWORK_READ,
     TOOL_PERMISSION_READ,
 )
+from .base import AgentConfig, BaseProfile, build_profile_prompt
 
 
 class GeneralProfile(BaseProfile):

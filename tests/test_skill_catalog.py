@@ -18,9 +18,8 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
-from harness_code_agent.skills.registry import SkillRegistry
 from harness_code_agent.runtime.builtins.filesystem import read_skill_file
-
+from harness_code_agent.skills.registry import SkillRegistry
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 

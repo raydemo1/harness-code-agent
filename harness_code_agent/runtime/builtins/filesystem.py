@@ -11,7 +11,6 @@ from ...agent.context import count_text_tokens
 from ..tool_context import ToolContext
 from ..tool_result import ToolResult
 
-
 # Dual limit: lines and tokens, whichever is smaller wins.
 # Aligned with Claude Code (2000 lines / 100K tokens per tool result).
 READ_FILE_MAX_LINES = 2000
@@ -184,6 +183,7 @@ def repo_search(
             text=True,
             capture_output=True,
             timeout=REPO_SEARCH_TIMEOUT_SECONDS,
+            check=False,
         )
     except FileNotFoundError:
         return ToolResult(

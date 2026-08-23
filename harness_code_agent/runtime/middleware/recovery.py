@@ -1,10 +1,18 @@
 """Recovery strategy middleware."""
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..permissions import is_read_only_command
 from ..shell_classification import classify_safe_shell_command
 from ..tool_result import ToolResult
-from .base import AgentMiddleware, MAIN_AGENT_NAMES, result_text, tool_blocked, tool_failed
+from .base import (
+    MAIN_AGENT_NAMES,
+    AgentMiddleware,
+    result_text,
+    tool_blocked,
+    tool_failed,
+)
 
 
 class RecoveryStrategyMiddleware(AgentMiddleware):
@@ -18,7 +26,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         "no module named",
         "modulenotfounderror",
     )
-    ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
+    ACTION_TOOLS: ClassVar[set] = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
     VERIFICATION_FAILURE_PATTERNS = (
         "assert",
         "failed",
@@ -32,6 +40,11 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         self._edit_attempts: dict[str, int] = {}
 
     def _set_mode(self, runtime_state, mode: str) -> None:
+        if runtime_state.task_board.planning_mode == "todo":
+            # Lightweight todo mode must not silently grow into a hard recovery
+            # state machine. The failed result is already visible to the model
+            # and the TUI; it can revise the checklist or escalate explicitly.
+            return
         runtime_state.recovery.mode = mode
         runtime_state.task_board.requires_update = True
         if mode in {"SPEC_RECHECK", "RETHINK"}:

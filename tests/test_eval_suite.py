@@ -1,4 +1,3 @@
-import io
 import json
 import shutil
 import subprocess
@@ -374,7 +373,12 @@ class EvalSuiteTests(unittest.TestCase):
             "unit",
         ])
 
+        real_run = subprocess.run
+
         def fake_run(command, **kwargs):
+            if command[:1] == ["git"]:
+                # Memory seeding resolves the repo key through git; let it run.
+                return real_run(command, **kwargs)
             self.assertEqual(kwargs["env"]["HARNESS_PERMISSION_MODE"], "danger-full-access")
             return subprocess.CompletedProcess(command, 0, stdout="veriforge session: missing\nmarker", stderr="")
 
@@ -410,7 +414,10 @@ class EvalSuiteTests(unittest.TestCase):
         self.assertIn("--no-install-deps", command)
 
     def test_harness_claw_adapter_builds_container_args_and_command(self):
-        from eval.benchmarks.harness_claw_adapter import HarnessCodeAgentAdapter, _agent_command
+        from eval.benchmarks.harness_claw_adapter import (
+            HarnessCodeAgentAdapter,
+            _agent_command,
+        )
 
         adapter = HarnessCodeAgentAdapter(
             model="deepseek-v4-flash",
@@ -444,6 +451,7 @@ class EvalSuiteTests(unittest.TestCase):
                 cwd=Path.cwd(),
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
 

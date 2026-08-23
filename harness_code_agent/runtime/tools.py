@@ -1,3 +1,4 @@
+# ruff: noqa: F401  -- this module is a deliberate re-export facade
 """Compatibility facade for the legacy runtime.tools module.
 
 Production code should import narrower modules such as runtime.tool_registry,
@@ -48,6 +49,7 @@ from .tool_registry import (
     ToolSpec,
     tool_schemas_for_profile,
 )
+from .tool_result import ToolResult
 from .tool_runner import (
     _registry_for_context,
     _validate_and_fix,
@@ -56,4 +58,3 @@ from .tool_runner import (
     finalize_executed_tool_result,
     finalize_intercepted_tool_result,
 )
-from .tool_result import ToolResult

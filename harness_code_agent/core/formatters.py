@@ -7,8 +7,8 @@ from pathlib import Path
 from .. import config
 from ..profiles import list_profiles
 from ..runtime.mcp import McpClientManager, McpConfigError, load_mcp_config
-from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
+from ..sessions.summary import load_session_summary
 from ..workspace.service import WorkspaceService
 from ..workspace.shell_session import (
     docker_cli_path,

@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import logging
 import os
 import queue
 import shutil
-import signal
 import subprocess
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-
-import logging
 
 from .. import config
 
@@ -232,6 +231,7 @@ def docker_info_check() -> tuple[bool, str]:
             text=True,
             encoding="utf-8",
             timeout=15,
+            check=False,
         )
     except FileNotFoundError:
         return False, "Docker CLI not found"
@@ -310,11 +310,11 @@ def _docker_exec_args(container_name: str) -> list[str]:
 
 def _run_docker_checked(args: list[str], action: str) -> None:
     try:
-        completed = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
+        completed = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", check=False)
     except FileNotFoundError as exc:
         raise RuntimeError(
-            f"Docker sandbox requested but docker CLI was not found. "
-            f"Install Docker or set HARNESS_SANDBOX_MODE=host."
+            "Docker sandbox requested but docker CLI was not found. "
+            "Install Docker or set HARNESS_SANDBOX_MODE=host."
         ) from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()
@@ -369,7 +369,7 @@ def validate_shell_configuration() -> None:
         )
 
 
-def _make_windows_shell_backend(cwd: str) -> "_BaseShellBackend":
+def _make_windows_shell_backend(cwd: str) -> _BaseShellBackend:
     validate_shell_configuration()
     path = windows_shell_path()
     assert path is not None
@@ -423,16 +423,15 @@ class _DockerShellBackend(_BaseShellBackend):
     def _cleanup_impl(self) -> None:
         self._stop_exec_process(timeout=5)
         if self._container_started:
-            try:
+            with contextlib.suppress(Exception):
                 subprocess.run(
                     ["docker", "rm", "-f", self.container_name],
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
+                    check=False,
                     timeout=10,
                 )
-            except Exception:
-                pass
             self._container_started = False
 
     def _stop_exec_process(self, *, timeout: int) -> None:
@@ -631,12 +630,16 @@ class _PowerShellBackend(_BaseShellBackend):
             f"$__hca_err = Join-Path ([System.IO.Path]::GetTempPath()) '{marker}.err'; "
             f"$__hca_command = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded_command}')); "
             "$global:LASTEXITCODE = $null; "
+            "$global:__hca_last_success = $null; "
             "try { "
+            "$__hca_command += [Environment]::NewLine + '$global:__hca_last_success = $?'; "
             "$__hca_script = [scriptblock]::Create($__hca_command); "
             "$__hca_error_count = $Error.Count; "
             "& $__hca_script 1> $__hca_out 2> $__hca_err; "
+            "$__hca_pipeline_ok = [bool]$global:__hca_last_success; "
             "$__hca_native_status = $global:LASTEXITCODE; "
-            "if ($__hca_native_status -is [int]) { $__hca_status = $__hca_native_status } "
+            "if ($__hca_pipeline_ok) { $__hca_status = 0 } "
+            "elseif ($__hca_native_status -is [int]) { $__hca_status = $__hca_native_status } "
             "elseif ($Error.Count -eq $__hca_error_count) { $__hca_status = 0 } "
             "else { $__hca_status = 1 } "
             "} catch { $_ | Out-String | Set-Content -LiteralPath $__hca_err -Encoding utf8NoBOM; $__hca_status = 1 }; "
@@ -688,7 +691,7 @@ class _PosixShellBackend(_BaseShellBackend):
             stdout=slave_fd,
             stderr=slave_fd,
             env=env,
-            preexec_fn=os.setsid,
+            start_new_session=True,
             close_fds=True,
         )
         os.close(slave_fd)

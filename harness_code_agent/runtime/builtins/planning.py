@@ -1,6 +1,7 @@
 """Planning-state tool implementation."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -36,7 +37,7 @@ def update_plan_state(
     agent_name: str | None = None,
     tool_context: ToolContext | None = None,
 ) -> ToolResult:
-    """Update tracked todo and acceptance state."""
+    """Update lightweight todo or tracked acceptance state."""
     if runtime_state is None:
         return ToolResult(
             tool="update_plan_state",
@@ -64,7 +65,7 @@ def update_plan_state(
     normalized_step_notes: list[str] = []
     original_update_kind = update_kind
 
-    if board.replan_required:
+    if mode == "tracked" and board.replan_required:
         if update_kind == "start":
             update_kind = "replan"
         if update_kind == "replan" and not replan_reason:
@@ -74,12 +75,12 @@ def update_plan_state(
                 or "Recovery strategy requires a new plan."
             )
 
-    if mode != "tracked":
+    if mode not in {"todo", "tracked"}:
         return ToolResult(
             tool="update_plan_state",
             status="failed",
-            output="[error] mode must be: tracked",
-            error="mode must be: tracked",
+            output="[error] mode must be one of: todo, tracked",
+            error="mode must be one of: todo, tracked",
             metadata={"status_source": "validation"},
         )
     if update_kind not in {"start", "progress", "replan", "final"}:
@@ -90,7 +91,7 @@ def update_plan_state(
             error="update_kind must be one of: start, progress, replan, final",
             metadata={"status_source": "validation"},
         )
-    if board.replan_required and update_kind != "replan":
+    if mode == "tracked" and board.replan_required and update_kind != "replan":
         return ToolResult(
             tool="update_plan_state",
             status="failed",
@@ -169,7 +170,9 @@ def update_plan_state(
     reused_existing_acceptance = False
     acceptance_replaced = False
     try:
-        if original_update_kind == "start" and acceptance_checks is not None:
+        if mode == "todo" and (acceptance_checks or acceptance_operations or check_results):
+            raise AcceptanceError("todo mode does not use acceptance checks")
+        if mode == "tracked" and original_update_kind == "start" and acceptance_checks is not None:
             has_existing = bool(
                 board.acceptance.revision
                 or board.acceptance.checks
@@ -214,13 +217,13 @@ def update_plan_state(
                     acceptance_replaced = True
             else:
                 board.acceptance.initialize(acceptance_checks)
-        elif acceptance_operations:
+        elif mode == "tracked" and acceptance_operations:
             board.acceptance.apply_operations(
                 acceptance_operations,
                 expected_revision=acceptance_revision,
             )
         acceptance_revision_after_update = board.acceptance.revision
-        if update_kind == "final" and board.acceptance.revision:
+        if mode == "tracked" and update_kind == "final" and board.acceptance.revision:
             board.acceptance.validate_final(
                 result_status=result_status,
                 expected_revision=(
@@ -434,10 +437,8 @@ def _atomic_write_json(path: Path, payload: dict) -> tuple[bool, str | None]:
         json.loads(temp_path.read_text(encoding="utf-8"))
         os.replace(temp_path, path)
         return True, None
-    except Exception as exc:
-        try:
+    except OSError as exc:
+        with contextlib.suppress(OSError):
             if temp_path.exists():
                 temp_path.unlink()
-        except Exception:
-            pass
         return False, str(exc)

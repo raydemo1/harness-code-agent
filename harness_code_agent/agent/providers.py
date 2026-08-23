@@ -1,16 +1,15 @@
 """Provider adapters for OpenAI-compatible chat completions."""
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from threading import Lock
-from typing import Callable, Iterable
 
 from openai import OpenAI
 
 from .. import config
 from ..provider_resolution import resolve_provider_name
 from .utils import _get, _usage_to_dict
-
 
 TextDeltaCallback = Callable[[str], None]
 ChunkCallback = Callable[[], None]
@@ -48,7 +47,7 @@ def _current_client_config() -> tuple[str | None, str | None, float, int]:
     return (config.API_KEY, config.BASE_URL, 300.0, 2)
 
 
-def current_adapter() -> "ProviderAdapter":
+def current_adapter() -> ProviderAdapter:
     return ProviderAdapter(
         name=resolve_provider_name(
             provider=config.PROVIDER,

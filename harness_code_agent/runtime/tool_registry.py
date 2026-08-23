@@ -1,12 +1,11 @@
 """Tool registry and schema filtering primitives."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
 
 from .permissions import (
-    TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_EDIT,
     TOOL_PERMISSION_NETWORK_READ,
     TOOL_PERMISSION_READ,
@@ -21,7 +20,7 @@ class ToolSpec:
     schema: dict
     handler: Callable
     permission: str
-    lane: "ToolExecutionLane"
+    lane: ToolExecutionLane
     disclosure: str = "core"
 
 
@@ -106,7 +105,7 @@ class ToolRegistry:
     def dispatch(self) -> dict[str, Callable]:
         return dict(self._handlers)
 
-    def copy(self) -> "ToolRegistry":
+    def copy(self) -> ToolRegistry:
         clone = ToolRegistry()
         clone._schemas = dict(self._schemas)
         clone._handlers = dict(self._handlers)

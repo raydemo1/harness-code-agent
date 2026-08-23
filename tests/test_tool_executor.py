@@ -24,7 +24,10 @@ _install_fake_openai_module()
 
 from harness_code_agent.agent.conversation import Agent, AgentConversation
 from harness_code_agent.runtime import tools
-from harness_code_agent.runtime.middlewares import AgentMiddleware, RecoveryStrategyMiddleware
+from harness_code_agent.runtime.middlewares import (
+    AgentMiddleware,
+    RecoveryStrategyMiddleware,
+)
 from harness_code_agent.runtime.permissions import PermissionPolicy
 from harness_code_agent.runtime.tool_context import ToolContext
 from harness_code_agent.runtime.tool_result import ToolResult
@@ -245,7 +248,7 @@ class ToolExecutorTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmp:
-            conversation, _context = _conversation_with_registry(Path(tmp), registry, tool_calls, middlewares=[NudgeMiddle()])
+            conversation, context = _conversation_with_registry(Path(tmp), registry, tool_calls, middlewares=[NudgeMiddle()])
             with (
                 patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
                 patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
@@ -261,6 +264,16 @@ class ToolExecutorTests(unittest.TestCase):
         tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
         self.assertEqual([msg["tool_call_id"] for msg in tool_messages], ["tc_a", "tc_b"])
         self.assertIn("nudge after a", conversation.messages[-2]["content"])
+        activity = [
+            event.payload
+            for event in context.event_bus.events
+            if event.type == "middleware_activity"
+        ]
+        self.assertEqual([item["tool_call_id"] for item in activity], ["tc_a", "tc_b"])
+        self.assertEqual(activity[0]["outcome"], "guided")
+        self.assertEqual(activity[0]["sources"], ["NudgeMiddle"])
+        self.assertEqual(activity[1]["outcome"], "passed")
+        self.assertEqual(activity[0]["hooks"], 3)
 
     def test_all_post_tool_middlewares_observe_result_when_earlier_one_injects(self):
         registry = tools.ToolRegistry()
@@ -597,7 +610,9 @@ class ToolExecutorTests(unittest.TestCase):
 
     def test_approval_is_requested_only_when_later_serial_tool_is_reached(self):
         from harness_code_agent.runtime.approvals import ApprovalResult
-        from harness_code_agent.runtime.permission_middleware import PermissionMiddleware
+        from harness_code_agent.runtime.permission_middleware import (
+            PermissionMiddleware,
+        )
 
         registry = tools.BUILTIN_TOOL_REGISTRY.copy()
         tool_calls = [
@@ -655,7 +670,10 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertIn("fast:30", tool_messages[1]["content"])
 
     def test_parallel_group_observes_cancellation_while_waiting_for_tools(self):
-        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+        from harness_code_agent.agent.cancellation import (
+            CancellationToken,
+            CancelledError,
+        )
 
         registry = tools.ToolRegistry()
         token = CancellationToken()
@@ -685,15 +703,18 @@ class ToolExecutorTests(unittest.TestCase):
             with (
                 patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
                 patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+                self.assertRaises(CancelledError),
             ):
-                with self.assertRaises(CancelledError):
-                    conversation.run_until_idle(cancellation_token=token)
+                conversation.run_until_idle(cancellation_token=token)
             elapsed = time.perf_counter() - start
 
         self.assertLess(elapsed, 0.25)
 
     def test_parallel_group_passes_cancellation_token_to_tool_handlers(self):
-        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+        from harness_code_agent.agent.cancellation import (
+            CancellationToken,
+            CancelledError,
+        )
 
         registry = tools.ToolRegistry()
         token = CancellationToken()
@@ -722,15 +743,18 @@ class ToolExecutorTests(unittest.TestCase):
             with (
                 patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
                 patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+                self.assertRaises(CancelledError),
             ):
-                with self.assertRaises(CancelledError):
-                    conversation.run_until_idle(cancellation_token=token)
+                conversation.run_until_idle(cancellation_token=token)
 
         self.assertIs(seen[0], token)
         self.assertIn("slow_observed_cancel", seen)
 
     def test_cancellation_answers_all_pending_tool_calls(self):
-        from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
+        from harness_code_agent.agent.cancellation import (
+            CancellationToken,
+            CancelledError,
+        )
 
         registry = tools.ToolRegistry()
         token = CancellationToken()
@@ -761,9 +785,9 @@ class ToolExecutorTests(unittest.TestCase):
             with (
                 patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
                 patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+                self.assertRaises(CancelledError),
             ):
-                with self.assertRaises(CancelledError):
-                    conversation.run_until_idle(cancellation_token=token)
+                conversation.run_until_idle(cancellation_token=token)
 
             tool_messages = [msg for msg in conversation.messages if msg.get("role") == "tool"]
             answered_ids = {msg["tool_call_id"] for msg in tool_messages}

@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 from urllib.parse import urlparse
 
-
 RUNNER_ENV_KEYS = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",

@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 
 @dataclass
@@ -28,7 +29,7 @@ class WorkspaceService:
     provided by the tool executor's group barrier.
     """
 
-    DEFAULT_PROTECTED_NAMES = {".env", ".env.local", ".env.production"}
+    DEFAULT_PROTECTED_NAMES: ClassVar[set] = {".env", ".env.local", ".env.production"}
 
     def __init__(
         self,
@@ -131,7 +132,7 @@ class WorkspaceService:
             shutil.copy2(resolved, snapshot_path)
             return snapshot_path
 
-    _SAFE_ENV_SUFFIXES = {'.example', '.template', '.sample', '.default', '.dist'}
+    _SAFE_ENV_SUFFIXES: ClassVar[set] = {'.example', '.template', '.sample', '.default', '.dist'}
 
     def _ensure_writable(self, path: Path) -> None:
         rel = path.relative_to(self.root)

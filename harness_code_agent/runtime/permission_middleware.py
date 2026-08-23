@@ -38,7 +38,7 @@ class PermissionMiddleware(AgentMiddleware):
         Used to look up the declared permission level for each tool.
     """
 
-    def __init__(self, tool_context: "ToolContext", tool_registry):
+    def __init__(self, tool_context: ToolContext, tool_registry):
         self._ctx = tool_context
         self._registry = tool_registry
 

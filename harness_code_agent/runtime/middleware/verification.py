@@ -1,13 +1,12 @@
 """Pre-exit and static verification middleware."""
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from .base import AgentMiddleware
-
 
 log = logging.getLogger("harness")
 
@@ -273,6 +272,7 @@ def _git_diff_changed_py_files(workspace_root: str | None) -> list[str]:
             ["git", "diff", "--name-only", "--diff-filter=ACMR", "HEAD"],
             capture_output=True, text=True, timeout=10,
             cwd=workspace_root,
+            check=False,
         )
         if result.returncode == 0:
             files.extend(result.stdout.splitlines())
@@ -283,6 +283,7 @@ def _git_diff_changed_py_files(workspace_root: str | None) -> list[str]:
         result = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
             capture_output=True, text=True, timeout=10,
+            check=False,
             cwd=workspace_root,
         )
         if result.returncode == 0:
@@ -316,6 +317,7 @@ def _check_ruff_diff(workspace_root: str | None) -> list[tuple[str, str, str]]:
     try:
         result = subprocess.run(
             ["ruff", "check", "--diff", "--no-fix", "--output-format=text"],
+            check=False,
             capture_output=True, text=True, timeout=30,
             cwd=workspace_root,
         )

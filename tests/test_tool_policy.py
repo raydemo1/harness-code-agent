@@ -7,10 +7,20 @@ from unittest.mock import patch
 
 from harness_code_agent import config
 from harness_code_agent.agent.runtime_state import AgentRuntimeState
-from harness_code_agent.runtime.builtins.filesystem import list_files, read_file, repo_search
+from harness_code_agent.runtime.builtins.filesystem import (
+    list_files,
+    read_file,
+    repo_search,
+)
 from harness_code_agent.runtime.middleware.error_guidance import ErrorGuidanceMiddleware
+from harness_code_agent.runtime.middleware.terminal_shell_edit import (
+    TerminalShellEditPolicyMiddleware,
+)
 from harness_code_agent.runtime.middleware.tool_policy import ToolPolicyMiddleware
-from harness_code_agent.runtime.middleware.terminal_shell_edit import TerminalShellEditPolicyMiddleware
+from harness_code_agent.runtime.shell_classification import (
+    analyze_shell_command,
+    classify_safe_shell_command,
+)
 from harness_code_agent.runtime.tool_result import ToolResult
 
 
@@ -21,6 +31,27 @@ def _result(text: str, *, status: str | None = None) -> ToolResult:
     metadata = {"status_source": "permission"} if text.startswith("[blocked]") else {}
     error = text.removeprefix("[error] ").removeprefix("[blocked] ") if status == "failed" else None
     return ToolResult(tool="run_bash", status=status, output=text, error=error, metadata=metadata)
+
+
+class ShellClassificationTests(unittest.TestCase):
+    def test_powershell_read_pipeline_with_null_redirection_is_safe(self) -> None:
+        command = "Get-ChildItem -Force | Where-Object Name -like '*.py' | Select-Object Name 2>$null"
+        self.assertEqual(classify_safe_shell_command(command), "read")
+        self.assertEqual(analyze_shell_command(command).risk, "shell_safe")
+
+    def test_common_read_only_pipelines_and_compounds_are_safe(self) -> None:
+        for command in (
+            "git status --short; git log --oneline -5 2>$null",
+            "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5",
+            "cat package.json | jq '.scripts'",
+            "git diff --check 2>/dev/null",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(classify_safe_shell_command(command), {"read", "verify"})
+
+    def test_unknown_pipeline_stage_and_write_redirection_remain_unsafe(self) -> None:
+        self.assertEqual(classify_safe_shell_command("Get-ChildItem | Invoke-Expression"), "unsafe")
+        self.assertEqual(classify_safe_shell_command("Get-ChildItem > report.txt"), "unsafe")
 
 
 

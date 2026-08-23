@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import ClassVar
 
 from ... import config
 from ..tool_result import ToolResult
 from .base import AgentMiddleware
-
 
 log = logging.getLogger("harness")
 
@@ -29,102 +29,102 @@ class ErrorGuidanceMiddleware(AgentMiddleware):
 
     # Pattern → (description, recovery suggestion)
     # Patterns are checked in order; first match wins.
-    ERROR_PATTERNS: list[tuple[str, str, str]] = [
+    ERROR_PATTERNS: ClassVar[list[tuple[str, str, str]]] = [
         # --- Command not found ---
         (
             "command not found",
             "command_not_found",
-            "The command is not installed. Try:\n"
+            ("The command is not installed. Try:\n"
             "  apt-get update && apt-get install -y <package>  (for system tools)\n"
             "  pip install <package>  (for Python tools)\n"
             "  which <command> || apt-cache search <keyword>  (to find the right package)\n"
-            "If apt-get fails with permission denied, prefix with sudo.",
+            "If apt-get fails with permission denied, prefix with sudo."),
         ),
         (
             "no such file or directory",
             "file_not_found",
-            "A file or directory doesn't exist. Check:\n"
+            ("A file or directory doesn't exist. Check:\n"
             "  ls -la <parent_directory>  (does the path exist?)\n"
             "  pwd  (are you in the right directory?)\n"
-            "  find . -name '<filename>'  (search for the file)",
+            "  find . -name '<filename>'  (search for the file)"),
         ),
         # --- Permission errors ---
         (
             "permission denied",
             "permission_denied",
-            "Permission denied. Try:\n"
+            ("Permission denied. Try:\n"
             "  chmod +x <file>  (if it needs to be executable)\n"
             "  sudo <command>  (if it needs root)\n"
-            "  ls -la <file>  (check current permissions)",
+            "  ls -la <file>  (check current permissions)"),
         ),
         # --- Python/pip errors ---
         (
             "externally-managed-environment",
             "pip_managed_env",
-            "This Python environment is externally managed (PEP 668). Use:\n"
+            ("This Python environment is externally managed (PEP 668). Use:\n"
             "  pip install --break-system-packages <package>\n"
             "  or: pip install --user <package>\n"
-            "  or: python3 -m venv /tmp/venv && source /tmp/venv/bin/activate",
+            "  or: python3 -m venv /tmp/venv && source /tmp/venv/bin/activate"),
         ),
         (
             "modulenotfounderror",
             "python_import",
-            "A Python module is missing. Install it:\n"
+            ("A Python module is missing. Install it:\n"
             "  pip install <module_name>\n"
             "  pip install --break-system-packages <module_name>  (if managed env)\n"
-            "Check the exact package name — it may differ from the import name.",
+            "Check the exact package name — it may differ from the import name."),
         ),
         (
             "no module named",
             "python_import",
-            "A Python module is missing. Install it:\n"
+            ("A Python module is missing. Install it:\n"
             "  pip install <module_name>\n"
             "Check: the pip package name may differ from the import name "
-            "(e.g. 'import cv2' → 'pip install opencv-python').",
+            "(e.g. 'import cv2' → 'pip install opencv-python')."),
         ),
         # --- Compilation errors ---
         (
             "fatal error:",
             "compilation",
-            "Compilation failed. Check:\n"
+            ("Compilation failed. Check:\n"
             "  1. Read the error — it shows the file and line number.\n"
             "  2. Missing header? Install dev packages: apt-get install -y lib<name>-dev\n"
-            "  3. Use: apt-cache search <header_name> to find the right package.",
+            "  3. Use: apt-cache search <header_name> to find the right package."),
         ),
         (
             "undefined reference to",
             "linker",
-            "Linker error — a symbol is missing. Check:\n"
+            ("Linker error — a symbol is missing. Check:\n"
             "  1. Are you linking all required libraries? (-l<lib> flag)\n"
             "  2. Is the library installed? apt-get install -y lib<name>-dev\n"
-            "  3. Check library search path: ldconfig -p | grep <lib>",
+            "  3. Check library search path: ldconfig -p | grep <lib>"),
         ),
         # --- Git errors ---
         (
             "not a git repository",
             "git",
-            "Not in a git repository. Try:\n"
+            ("Not in a git repository. Try:\n"
             "  git init  (to create one)\n"
             "  cd <correct_directory>  (you may be in the wrong dir)\n"
-            "  find / -name '.git' -type d 2>/dev/null  (find existing repos)",
+            "  find / -name '.git' -type d 2>/dev/null  (find existing repos)"),
         ),
         # --- Disk/resource errors ---
         (
             "no space left on device",
             "disk_full",
-            "Disk is full. Free space:\n"
+            ("Disk is full. Free space:\n"
             "  df -h  (check disk usage)\n"
             "  du -sh /* 2>/dev/null | sort -rh | head  (find large dirs)\n"
             "  apt-get clean  (clear package cache)\n"
-            "  rm -rf /tmp/*  (clear temp files)",
+            "  rm -rf /tmp/*  (clear temp files)"),
         ),
         (
             "killed",
             "oom",
-            "Process was killed (likely out of memory). Try:\n"
+            ("Process was killed (likely out of memory). Try:\n"
             "  free -h  (check available memory)\n"
             "  Reduce memory usage: smaller batch size, fewer workers, etc.\n"
-            "  Use swap: fallocate -l 2G /swapfile && mkswap /swapfile && swapon /swapfile",
+            "  Use swap: fallocate -l 2G /swapfile && mkswap /swapfile && swapon /swapfile"),
         ),
     ]
 

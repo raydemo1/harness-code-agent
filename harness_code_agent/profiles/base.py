@@ -17,7 +17,6 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-from ..tracking_policy import TASK_TRACKING_POLICY
 from ..runtime.middleware import (
     AcceptanceReviewMiddleware,
     ErrorGuidanceMiddleware,
@@ -33,7 +32,7 @@ from ..runtime.permissions import (
     TOOL_PERMISSION_READ,
     TOOL_PERMISSION_SHELL,
 )
-
+from ..tracking_policy import TASK_TRACKING_POLICY
 
 DEFAULT_PROFILE_TOOL_PERMISSIONS = {
     TOOL_PERMISSION_READ,

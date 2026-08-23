@@ -57,7 +57,10 @@ class ShellJobManagerTests(unittest.TestCase):
         self.assertEqual(buffer.read_tail(4), "ijkl")
 
     def test_invalid_job_id_is_reported(self):
-        from harness_code_agent.workspace.shell_jobs import ShellJobManager, ShellJobNotFound
+        from harness_code_agent.workspace.shell_jobs import (
+            ShellJobManager,
+            ShellJobNotFound,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             manager = ShellJobManager(Path(tmp))

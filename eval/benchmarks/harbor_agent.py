@@ -28,7 +28,6 @@ Usage:
 """
 from __future__ import annotations
 
-import os
 import shlex
 import shutil
 import tempfile
@@ -40,7 +39,6 @@ from harbor.models.agent.context import AgentContext
 
 from eval.benchmarks.harbor_env import runner_env_vars
 from eval.benchmarks.usage_metrics import parse_eval_metrics_from_text
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYTHON_STANDALONE_TARBALL = "python-3.12.13-x86_64-unknown-linux-gnu.tar.gz"
@@ -418,7 +416,6 @@ class HarnessAgent(BaseInstalledAgent):
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         """Called after run() completes. Could parse logs if needed."""
-        pass
 
 
 def _copy_repo_snapshot(source: Path, dest: Path) -> None:
@@ -430,23 +427,7 @@ def _copy_repo_snapshot(source: Path, dest: Path) -> None:
         for name in names:
             item = current / name
             rel = item.relative_to(source).as_posix()
-            if name in {".git", ".pytest_cache", "__pycache__"}:
-                ignored.add(name)
-            elif name == ".harbor" and current == source:
-                ignored.add(name)
-            elif name == ".harness" and current == source:
-                ignored.add(name)
-            elif name == "jobs" and current == source:
-                ignored.add(name)
-            elif name == "workspace" and current == source:
-                ignored.add(name)
-            elif rel == "eval/results":
-                ignored.add(name)
-            elif _is_vendored_python_tarball(rel):
-                ignored.add(name)
-            elif name == ".env" or name.startswith(".env."):
-                ignored.add(name)
-            elif name.endswith(".pyc"):
+            if name in {".git", ".pytest_cache", "__pycache__"} or name == ".harbor" and current == source or name == ".harness" and current == source or name == "jobs" and current == source or name == "workspace" and current == source or rel == "eval/results" or _is_vendored_python_tarball(rel) or name == ".env" or name.startswith(".env.") or name.endswith(".pyc"):
                 ignored.add(name)
         return ignored
 

@@ -7,10 +7,11 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+from eval.benchmarks.harbor_env import runner_env_vars
 from eval.benchmarks.run_terminal_bench import (
+    DEFAULT_VERIFIER_NO_PROXY_HOSTS,
     build_harbor_run_command,
     build_launch_environment,
-    DEFAULT_VERIFIER_NO_PROXY_HOSTS,
     default_local_dataset_path,
     docker_daemon_running,
     ensure_local_dataset,
@@ -22,7 +23,6 @@ from eval.benchmarks.run_terminal_bench import (
     resolve_harbor_dataset_path,
     resolve_harbor_executable,
 )
-from eval.benchmarks.harbor_env import runner_env_vars
 
 
 class TerminalBenchLauncherTests(unittest.TestCase):
@@ -271,7 +271,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
 
         previous = sys.modules.pop("eval.benchmarks.harbor_agent", None)
         with patch.dict(sys.modules, fake_modules):
-            import eval.benchmarks.harbor_agent as harbor_agent
+            from eval.benchmarks import harbor_agent
 
         sys.modules.pop("eval.benchmarks.harbor_agent", None)
         if previous is not None:
@@ -418,14 +418,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
-                "\n".join(
-                    [
-                        'version = "1.0"',
-                        "",
-                        "[environment]",
-                        'docker_image = "ghcr.io/laude-institute/terminal-bench/overfull-hbox:2.0"',
-                    ]
-                ),
+                'version = "1.0"\n\n[environment]\ndocker_image = "ghcr.io/laude-institute/terminal-bench/overfull-hbox:2.0"',
                 encoding="utf-8",
             )
 
@@ -451,12 +444,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
-                "\n".join(
-                    [
-                        "[environment]",
-                        'docker_image = "ghcr.io/laude-institute/terminal-bench/fix-git:2.0"',
-                    ]
-                ),
+                '[environment]\ndocker_image = "ghcr.io/laude-institute/terminal-bench/fix-git:2.0"',
                 encoding="utf-8",
             )
 
@@ -511,12 +499,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
-                "\n".join(
-                    [
-                        "[environment]",
-                        'docker_image = "ghcr.io/laude-institute/terminal-bench/overfull-hbox:2.1"',
-                    ]
-                ),
+                '[environment]\ndocker_image = "ghcr.io/laude-institute/terminal-bench/overfull-hbox:2.1"',
                 encoding="utf-8",
             )
 
@@ -542,17 +525,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
-                "\n".join(
-                    [
-                        "[verifier]",
-                        "timeout_sec = 3600.0",
-                        "",
-                        "[verifier.env]",
-                        "",
-                        "[environment]",
-                        'docker_image = "alexgshaw/circuit-fibsqrt:20251031"',
-                    ]
-                )
+                '[verifier]\ntimeout_sec = 3600.0\n\n[verifier.env]\n\n[environment]\ndocker_image = "alexgshaw/circuit-fibsqrt:20251031"'
                 + "\n",
                 encoding="utf-8",
             )
@@ -574,15 +547,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
-                "\n".join(
-                    [
-                        "[verifier.env]",
-                        'NO_PROXY = "localhost,astral.sh"',
-                        "",
-                        "[environment]",
-                        'docker_image = "alexgshaw/circuit-fibsqrt:20251031"',
-                    ]
-                )
+                '[verifier.env]\nNO_PROXY = "localhost,astral.sh"\n\n[environment]\ndocker_image = "alexgshaw/circuit-fibsqrt:20251031"'
                 + "\n",
                 encoding="utf-8",
             )
@@ -613,13 +578,7 @@ class TerminalBenchLauncherTests(unittest.TestCase):
             task_dir.mkdir(parents=True, exist_ok=True)
             task_file = task_dir / "task.toml"
             task_file.write_text(
-                "\n".join(
-                    [
-                        "[verifier.env]",
-                        'NO_PROXY = "localhost,astral.sh"',
-                        'no_proxy = "localhost,astral.sh"',
-                    ]
-                )
+                '[verifier.env]\nNO_PROXY = "localhost,astral.sh"\nno_proxy = "localhost,astral.sh"'
                 + "\n",
                 encoding="utf-8",
             )

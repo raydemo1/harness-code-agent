@@ -58,7 +58,7 @@ class TuiState:
             return None
         if event_type == "user_input":
             self.snapshot.turn = int(payload.get("turn") or self.snapshot.turn)
-            return TranscriptBlock("user", f"user turn {self.snapshot.turn}", str(payload.get("text", "")), turn=self.snapshot.turn)
+            return TranscriptBlock("user", f"第 {self.snapshot.turn} 回合", str(payload.get("text", "")), turn=self.snapshot.turn)
         if event_type == "turn_started":
             self.snapshot.status = "running"
             self.snapshot.turn = int(payload.get("turn") or self.snapshot.turn)
@@ -66,11 +66,13 @@ class TuiState:
         if event_type == "assistant_message":
             self.snapshot.status = "idle"
             turn = _payload_turn(payload, self.snapshot.turn)
-            return TranscriptBlock("assistant", "assistant", str(payload.get("text", "")), turn=turn)
+            return TranscriptBlock("assistant", "助手", str(payload.get("text", "")), turn=turn)
         if event_type == "tool_call":
             return self._apply_tool_call(payload)
         if event_type == "tool_result":
             return self._apply_tool_result(payload)
+        if event_type == "middleware_activity":
+            return self._apply_middleware_activity(payload)
         if event_type == "file_change":
             self.snapshot.dirty_count += 1
             operation = str(payload.get("operation") or "changed")
@@ -87,11 +89,11 @@ class TuiState:
             self.snapshot.status = "blocked"
             self.snapshot.running_tool = ""
             reason = str(payload.get("reason") or "stopped").replace("_", " ")
-            body = f"stopped: {reason}"
+            body = f"已停止：{_FAILURE_LABELS.get(reason, reason)}"
             last_tool = str(payload.get("last_tool") or "")
             if last_tool:
-                body += f" (last tool: {last_tool})"
-            return TranscriptBlock("failure", "agent stopped", body, "blocked", turn=self.snapshot.turn)
+                body += f"（最后工具：{last_tool}）"
+            return TranscriptBlock("failure", "代理已停止", body, "blocked", turn=self.snapshot.turn)
         if event_type == "approval_requested":
             return None
         if event_type == "approval_decided":
@@ -105,15 +107,15 @@ class TuiState:
             body = f"{previous} -> {current}"
             if reason:
                 body += f" ({reason})"
-            return TranscriptBlock("profile", "profile switched", body)
+            return TranscriptBlock("profile", "配置已切换", body)
         if event_type == "profile_route_decision":
             profile = str(payload.get("profile") or "")
             fallback_used = bool(payload.get("fallback_used"))
             reason = str(payload.get("fallback_reason") or "").strip()
-            body = f"routed to {profile}" if profile else "routed"
+            body = f"已路由到 {profile}" if profile else "已路由"
             if fallback_used:
-                body += f" (fallback: {reason or 'unknown'})"
-            return TranscriptBlock("profile", "profile route", body, "fallback" if fallback_used else "", turn=self.snapshot.turn)
+                body += f"（兜底：{reason or '未知'}）"
+            return TranscriptBlock("profile", "配置路由", body, "fallback" if fallback_used else "", turn=self.snapshot.turn)
         if event_type == "permission_mode_switched":
             self.snapshot.permission_mode = str(payload.get("permission_mode") or self.snapshot.permission_mode)
             return None
@@ -125,8 +127,8 @@ class TuiState:
             suffix = f" rev {revision}" if revision is not None else ""
             return TranscriptBlock(
                 "plan",
-                "plan ready",
-                f"{path}{suffix}\n[plan ready]  [to revise: describe the change you want]",
+                "计划已准备",
+                f"{path}{suffix}\n[计划已准备]  [如需修改，请描述要调整的内容]",
                 "pending",
             )
         if event_type == "context_compaction_started":
@@ -135,8 +137,8 @@ class TuiState:
         if event_type == "context_compaction_committed":
             self.snapshot.status = "idle"
             tokens_saved = payload.get("tokens_saved", 0)
-            body = f"saved ~{tokens_saved} tokens" if tokens_saved else "context compacted"
-            return TranscriptBlock("status", "context compacted", body, "success", turn=self.snapshot.turn)
+            body = f"已节省约 {tokens_saved} 个 token" if tokens_saved else "上下文已压缩"
+            return TranscriptBlock("status", "上下文已压缩", body, "success", turn=self.snapshot.turn)
         if event_type == "context_anxiety_observed":
             return None
         if event_type == "turn_summary":
@@ -158,7 +160,7 @@ class TuiState:
             body = f"for {_format_elapsed(duration)}"
             if truncated:
                 body += " (truncated)"
-            return TranscriptBlock("thought", "thought", body, "thought", turn=self.snapshot.turn)
+            return TranscriptBlock("thought", "思考", body, "thought", turn=self.snapshot.turn)
         return None
 
     def add_block(self, block: TranscriptBlock | None) -> None:
@@ -183,7 +185,7 @@ class TuiState:
             self.snapshot.status = "running"
             return TranscriptBlock(
                 "plan",
-                "Plan",
+                "计划",
                 _format_plan_steps(self.plan_steps),
                 "updated",
                 turn=self.snapshot.turn,
@@ -203,20 +205,41 @@ class TuiState:
         if output:
             parts.append(_format_size(len(output)))
         if return_code is not None and status != "success":
-            parts.append(f"exit {return_code}")
+            parts.append(f"退出码 {return_code}")
         body = "  ".join(parts)
         if error:
             body += f"\n{_tail(error, 120)}" if body else _tail(error, 120)
         return TranscriptBlock("tool", tool, body, status, turn=self.snapshot.turn)
 
+    def _apply_middleware_activity(self, payload: dict[str, Any]) -> TranscriptBlock:
+        tool = str(payload.get("tool") or "tool")
+        outcome = str(payload.get("outcome") or "passed")
+        hooks = _coerce_int(payload.get("hooks")) or 0
+        duration_ms = float(payload.get("duration_ms") or 0.0)
+        parts = [tool]
+        if hooks:
+            parts.append(f"{hooks} 个钩子")
+        parts.append("<0.1 毫秒" if duration_ms < 0.1 else f"{duration_ms:.1f} 毫秒")
+        sources = payload.get("sources")
+        if isinstance(sources, list) and sources:
+            labels = [_middleware_source_label(str(source)) for source in sources]
+            parts.append(", ".join(labels))
+        return TranscriptBlock(
+            "middleware",
+            "策略管线",
+            "  ·  ".join(parts),
+            outcome,
+            turn=self.snapshot.turn,
+        )
+
     def _apply_failure(self, payload: dict[str, Any]) -> TranscriptBlock | None:
         category = str(payload.get("category") or "error").replace("_", " ")
         message = str(payload.get("message") or "")
         tool = str(payload.get("tool") or "")
-        body = f"{category}: {message}" if message else category
+        body = f"{_FAILURE_LABELS.get(category, category)}：{message}" if message else _FAILURE_LABELS.get(category, category)
         if tool:
-            body += f"\nwhile running {tool}"
-        return TranscriptBlock("failure", "failure", body, "failed", turn=self.snapshot.turn)
+            body += f"\n执行工具：{tool}"
+        return TranscriptBlock("failure", "错误", body, "failed", turn=self.snapshot.turn)
 
     def _update_plan_steps_from_metadata(self, metadata: Any) -> None:
         if not isinstance(metadata, dict):
@@ -252,14 +275,22 @@ class TuiState:
 
 
 _FILE_OPERATION_LABELS = {
-    "write": "wrote",
-    "write_file": "wrote",
-    "edit": "edited",
-    "apply_patch": "edited",
-    "delete": "deleted",
-    "create": "created",
-    "rename": "renamed",
-    "changed": "changed",
+    "write": "已写入",
+    "write_file": "已写入",
+    "edit": "已编辑",
+    "apply_patch": "已编辑",
+    "delete": "已删除",
+    "create": "已创建",
+    "rename": "已重命名",
+    "changed": "已变更",
+}
+
+_FAILURE_LABELS = {
+    "stopped": "已停止",
+    "time budget exhausted": "超出时间预算",
+    "runtime error": "运行时错误",
+    "api error": "模型接口错误",
+    "error": "错误",
 }
 
 # Tools whose call titles are reduced to their single most useful argument.
@@ -321,6 +352,20 @@ def _tool_call_title(tool: str, args: Any) -> str:
     return f"{tool}({_summarize_tool_args(args)})"
 
 
+def _middleware_source_label(source: str) -> str:
+    label = source.removesuffix("Middleware")
+    aliases = {
+        "Permission": "权限",
+        "ToolPolicy": "工具策略",
+        "RecoveryStrategy": "恢复",
+        "LoopDetection": "循环保护",
+        "TaskTrackingEnforcement": "任务跟踪",
+        "AcceptanceReview": "验收审查",
+        "StaticVerifier": "验证",
+    }
+    return aliases.get(label, label)
+
+
 def _parallel_tool_count_from_args(args: Any) -> int | None:
     if not isinstance(args, dict):
         return None
@@ -349,9 +394,9 @@ def _parallel_result_summary(tool: str, metadata: Any) -> str:
         return ""
     parts = [_format_tool_count(count)]
     if success_count is not None:
-        parts.append(f"{success_count} ok")
+        parts.append(f"{success_count} 成功")
     if failed_count is not None:
-        parts.append(f"{failed_count} failed")
+        parts.append(f"{failed_count} 失败")
     return " ".join(parts)
 
 
@@ -363,7 +408,7 @@ def _coerce_int(value: Any) -> int | None:
 
 
 def _format_tool_count(count: int) -> str:
-    return f"{count} tools"
+    return f"{count} 个工具"
 
 
 def _tail(text: str, limit: int = 1200) -> str:

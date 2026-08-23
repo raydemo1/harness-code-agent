@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from pathlib import Path
 
 from ... import config
 from ..tool_result import ToolResult
@@ -174,7 +175,7 @@ def browser_test(
             if screenshot:
                 ss_path = Path(config.WORKSPACE) / "_screenshot.png"
                 page.screenshot(path=str(ss_path), full_page=False)
-                report_lines.append(f"Screenshot saved to _screenshot.png")
+                report_lines.append("Screenshot saved to _screenshot.png")
 
             browser.close()
 

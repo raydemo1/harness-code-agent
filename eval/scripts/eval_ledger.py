@@ -10,13 +10,12 @@ import json
 import re
 import shutil
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
 from typing import Any
 
 from eval.benchmarks.usage_metrics import parse_eval_metrics_from_text
-
 
 RUN_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{6})")
 HARBOR_JOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}__\d{2}-\d{2}-\d{2}$")
@@ -117,7 +116,7 @@ def rebuild_eval_ledger(
     )
     return {
         "schema_version": 1,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "results_root": str(results_root),
         "jobs_root": str(jobs_root_path) if jobs_root_path else "",
         "summary": summary,
@@ -456,7 +455,7 @@ def select_final_results(attempts: list[Attempt]) -> list[TaskFinal]:
 def _select_best_attempt(attempts: list[Attempt]) -> Attempt:
     passed = [attempt for attempt in attempts if attempt.status == "passed"]
     pool = passed or [attempt for attempt in attempts if attempt.status in {"failed", "incomplete", "unknown"}]
-    return sorted(pool, key=lambda item: (item.run_timestamp, item.run_name, item.attempt_id), reverse=True)[0]
+    return max(pool, key=lambda item: (item.run_timestamp, item.run_name, item.attempt_id))
 
 
 def build_summary(
@@ -564,7 +563,7 @@ def build_retention_plan(
     for attempt in attempts:
         if _is_terminal_bench_version(attempt.benchmark_version):
             task_attempts.setdefault(attempt.task, []).append(attempt)
-    for task, items in task_attempts.items():
+    for items in task_attempts.values():
         selected = [item for item in items if item.attempt_id in final_ids]
         if selected and selected[0].status == "passed":
             keep_attempt_ids.add(selected[0].attempt_id)
@@ -727,7 +726,7 @@ def render_summary_markdown(ledger: dict[str, Any]) -> str:
         "| Task | Failure Kind | Kept Paths |",
         "| --- | --- | --- |",
     ])
-    failed_ids = {item.get("attempt_id") for item in finals if item.get("status") != "passed"}
+    {item.get("attempt_id") for item in finals if item.get("status") != "passed"}
     kept_by_id = {
         item.get("attempt_id"): item.get("paths") or []
         for item in retention.get("kept_attempts") or []
@@ -793,7 +792,7 @@ def _run_timestamp(run_name: str, summary_path: Path) -> str:
     if match:
         return f"{match.group(1)}_{match.group(2)}"
     try:
-        return datetime.fromtimestamp(summary_path.stat().st_mtime).strftime("%Y-%m-%d_%H%M%S")
+        return datetime.fromtimestamp(summary_path.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d_%H%M%S")
     except OSError:
         return "0000-00-00_000000"
 
@@ -1252,7 +1251,7 @@ def _coverage_rows(attempts: list[dict[str, Any]], *, version: str) -> list[str]
         return ["| none |  | 0 |  |"]
     rows: list[str] = []
     for task, items in sorted(grouped.items()):
-        latest = sorted(items, key=lambda item: (item.get("run_timestamp") or "", item.get("run_name") or ""), reverse=True)[0]
+        latest = max(items, key=lambda item: (item.get("run_timestamp") or "", item.get("run_name") or ""))
         rows.append(
             f"| {_cell(task)} | {_cell(latest.get('status'))} | {len(items)} | {_cell(latest.get('run_name'))} |"
         )

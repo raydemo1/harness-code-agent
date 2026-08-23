@@ -34,3 +34,36 @@ include = ["harness_code_agent*"]
 [tool.setuptools.package-data]
 "harness_code_agent.skills" = ["catalog/**/*"]
 "harness_code_agent.profiles" = ["*.json"]
+
+[tool.ruff.lint.per-file-ignores]
+# These files sit on deliberate failure boundaries: any exception from a tool
+# handler, LLM/network call, plugin resolver, worker thread or UI bridge is
+# converted into a failed result, a log line, or a graceful degradation
+# instead of crashing the agent loop.
+"harness_code_agent/agent/conversation.py" = ["BLE001"]
+"harness_code_agent/agent/llm_channel.py" = ["BLE001"]
+"harness_code_agent/agent/tool_executor.py" = ["BLE001"]
+"cli.py" = ["BLE001"]
+"harness_code_agent/core/interactive.py" = ["BLE001"]
+"harness_code_agent/runtime/approvals.py" = ["BLE001"]
+"harness_code_agent/runtime/builtins/browser.py" = ["BLE001"]
+"harness_code_agent/runtime/builtins/parallel.py" = ["BLE001"]
+"harness_code_agent/runtime/builtins/shell.py" = ["BLE001"]
+"harness_code_agent/runtime/builtins/web.py" = ["BLE001"]
+"harness_code_agent/runtime/mcp.py" = ["BLE001"]
+"harness_code_agent/runtime/middleware/acceptance_review.py" = ["BLE001"]
+"harness_code_agent/runtime/middleware/memory.py" = ["BLE001"]
+"harness_code_agent/runtime/middleware/verification.py" = ["BLE001"]
+"harness_code_agent/runtime/tool_runner.py" = ["BLE001"]
+"harness_code_agent/sessions/events.py" = ["BLE001"]
+"harness_code_agent/sessions/turn_summary.py" = ["BLE001"]
+"harness_code_agent/tui/app.py" = ["BLE001"]
+"harness_code_agent/tui/approval.py" = ["BLE001"]
+"harness_code_agent/tui/question.py" = ["BLE001"]
+"harness_code_agent/workspace/shell_jobs.py" = ["BLE001"]
+"harness_code_agent/workspace/shell_session.py" = ["BLE001"]
+# Benchmark entrypoints must record arbitrary agent/runtime failures as failed
+# trials. The terminal runner also catches BaseException to preserve partial
+# artifacts when the benchmark process is interrupted.
+"eval/benchmarks/hca_claw_runner.py" = ["BLE001"]
+"eval/benchmarks/hca_terminal_runner.py" = ["BLE001"]

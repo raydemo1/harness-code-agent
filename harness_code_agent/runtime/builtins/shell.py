@@ -1,7 +1,11 @@
 """Shell execution and background shell job tools."""
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import re
+import subprocess
 
 from ... import config
 from ...workspace.shell_jobs import ShellJobNotFound
@@ -12,12 +16,14 @@ from ..tool_result import ToolResult
 def run_bash(
     command: str,
     timeout: int = 300,
+    expected_exit_codes: list[int] | None = None,
     runtime_state=None,
     agent_name: str | None = None,
     tool_context=None,
     execution_lane: ToolExecutionLane | str | None = None,
 ) -> ToolResult:
     """Run a shell command inside the agent's persistent shell session."""
+    expected_codes = _normalize_expected_exit_codes(expected_exit_codes)
     # Lane classification is the executor's job; a missing lane means serial.
     lane = _coerce_tool_lane(execution_lane) if execution_lane is not None else ToolExecutionLane.SHELL_SERIAL
     if lane == ToolExecutionLane.SHELL_LONG_RUNNING:
@@ -45,6 +51,18 @@ def run_bash(
             )
             return ToolResult(tool="run_bash", status="success", output=output, metadata=metadata)
         tail = job.output_tail
+        if job.exit_code in expected_codes:
+            return ToolResult(
+                tool="run_bash",
+                status="success",
+                output=tail or f"Command exited with expected code {job.exit_code}.",
+                return_code=job.exit_code,
+                metadata={
+                    **metadata,
+                    "expected_exit_codes": sorted(expected_codes),
+                    "exit_code_expected": True,
+                },
+            )
         output = f"[error] Long-running command exited immediately as {job.status}."
         if tail:
             output += f"\n\nRecent output:\n{tail}"
@@ -76,7 +94,10 @@ def run_bash(
             metadata={"status_source": "runtime"},
         )
     try:
-        shell_result = shell_session.run(command, timeout=timeout)
+        if _requires_one_shot_powershell(command):
+            shell_result = _run_one_shot_powershell(command, timeout, tool_context)
+        else:
+            shell_result = shell_session.run(command, timeout=timeout)
         if shell_result.timed_out:
             output = (
                 f"[error] Command timed out after {timeout}s. "
@@ -93,14 +114,19 @@ def run_bash(
             )
         output = _build_shell_output(shell_result.stdout, shell_result.stderr)
         output = output or "(no output)"
-        ok = shell_result.exit_code == 0
+        ok = shell_result.exit_code in expected_codes
         return ToolResult(
             tool="run_bash",
             status="success" if ok else "failed",
             output=output,
             error=None if ok else f"Command exited with code {shell_result.exit_code}",
             return_code=shell_result.exit_code,
-            metadata={"timed_out": False, "status_source": "shell"},
+            metadata={
+                "timed_out": False,
+                "status_source": "shell",
+                "expected_exit_codes": sorted(expected_codes),
+                "exit_code_expected": ok,
+            },
         )
     except Exception as e:
         metadata = {"status_source": "exception"}
@@ -119,6 +145,46 @@ def run_bash(
     finally:
         if owns_shell and shell_session is not None:
             shell_session.close()
+
+
+def _requires_one_shot_powershell(command: str) -> bool:
+    """Keep PowerShell's ``exit`` from terminating the persistent shell host."""
+    if os.name != "nt" or not re.search(r"(?i)(?:^|[;|&]\s*)exit(?:\s|$)", command):
+        return False
+    from ...workspace.shell_session import sandbox_mode, windows_shell_kind
+
+    return sandbox_mode() == "host" and windows_shell_kind() == "pwsh"
+
+
+def _run_one_shot_powershell(command: str, timeout: int, tool_context):
+    from ...workspace.shell_session import ShellResult, windows_shell_path
+
+    executable = windows_shell_path()
+    if executable is None:
+        raise RuntimeError("PowerShell 7 (pwsh) was not found")
+    try:
+        completed = subprocess.run(
+            [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+            cwd=_workspace_root(tool_context),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return ShellResult(
+            stdout=str(exc.stdout or ""),
+            stderr=str(exc.stderr or ""),
+            exit_code=130,
+            timed_out=True,
+        )
+    return ShellResult(
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        exit_code=completed.returncode,
+    )
 
 
 def list_shell_jobs(runtime_state=None) -> ToolResult:
@@ -228,6 +294,17 @@ def _shell_job_manager(runtime_state):
     return getattr(runtime_state, "shell_job_manager", None) if runtime_state is not None else None
 
 
+def _normalize_expected_exit_codes(values: list[int] | None) -> set[int]:
+    if values is None:
+        return {0}
+    normalized = {
+        int(value)
+        for value in values[:16]
+        if not isinstance(value, bool) and isinstance(value, int)
+    }
+    return normalized or {0}
+
+
 def _workspace_root(tool_context=None) -> str:
     if tool_context is not None:
         return str(tool_context.workspace.root)
@@ -263,9 +340,7 @@ def _reset_runtime_shell_session(runtime_state, shell_session) -> bool:
         return False
     if getattr(runtime_state, "shell_session", None) is not shell_session:
         return False
-    try:
+    with contextlib.suppress(Exception):
         shell_session.close()
-    except Exception:
-        pass
     runtime_state.shell_session = None
     return True

@@ -3,7 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from eval.benchmarks.hca_terminal_runner import export_session_artifacts, parse_args, write_session_manifest
+from eval.benchmarks.hca_terminal_runner import (
+    export_session_artifacts,
+    parse_args,
+    write_session_manifest,
+)
 
 
 class TerminalRunnerArtifactTests(unittest.TestCase):

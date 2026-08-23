@@ -1,12 +1,11 @@
 """Completion logic for slash commands and @mentions (UI-agnostic)."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from .commands import SlashCommandRegistry
-
 
 EXCLUDED_DIRS = {
     ".git",
@@ -211,8 +210,7 @@ def iter_workspace_paths(root: Path, *, limit: int = 2000) -> Iterable[tuple[str
 
     walk(root)
     results.sort(key=lambda item: item[0].lower())
-    for rel, is_dir in results[:limit]:
-        yield rel, is_dir
+    yield from results[:limit]
 
 
 def quote_mention_path(path: str) -> str:

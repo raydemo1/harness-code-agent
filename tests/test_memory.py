@@ -1,6 +1,6 @@
-import json
-import inspect
 import builtins
+import inspect
+import json
 import shutil
 import tempfile
 import unittest
@@ -289,7 +289,10 @@ class MemoryMiddlewareTests(unittest.TestCase):
 
     def test_memory_index_injection_is_marked_and_truncated(self):
         from harness_code_agent.memory.store import MemoryRecord, MemoryStore
-        from harness_code_agent.runtime.middleware.memory import MEMORY_INDEX_MARKER, MemoryMiddleware
+        from harness_code_agent.runtime.middleware.memory import (
+            MEMORY_INDEX_MARKER,
+            MemoryMiddleware,
+        )
 
         store = MemoryStore(self.temp_dir / "memory", workspace=self.temp_dir)
         store.ensure_initialized()
@@ -419,7 +422,9 @@ class MemoryToolTests(unittest.TestCase):
 
 class MemoryPromptTests(unittest.TestCase):
     def test_turn_format_order_is_mentions_memory_user_turn(self):
-        from harness_code_agent.core.interactive import _format_turn_with_mentions_and_memory
+        from harness_code_agent.core.interactive import (
+            _format_turn_with_mentions_and_memory,
+        )
         from harness_code_agent.core.mentions import ResolvedMention
 
         resolved = [

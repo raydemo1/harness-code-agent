@@ -17,7 +17,10 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent.agent.conversation import AgentRuntimeState
-from harness_code_agent.runtime.middlewares import LoopDetectionMiddleware, RecoveryStrategyMiddleware
+from harness_code_agent.runtime.middlewares import (
+    LoopDetectionMiddleware,
+    RecoveryStrategyMiddleware,
+)
 from harness_code_agent.runtime.tool_result import ToolResult
 
 

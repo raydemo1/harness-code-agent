@@ -17,6 +17,7 @@ PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT_BOOTSTRAP) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT_BOOTSTRAP))
 
+from eval.benchmarks.usage_metrics import aggregate_usage
 from eval.scripts.eval_common import (
     PROJECT_ROOT,
     TBENCH_TASK_FILES,
@@ -31,7 +32,6 @@ from eval.scripts.eval_common import (
     write_eval_reports,
     write_suite_summary,
 )
-from eval.benchmarks.usage_metrics import aggregate_usage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -183,6 +183,7 @@ def _run_tbench_task(
             capture_output=True,
             text=True,
             timeout=args.task_wall_timeout,
+            check=False,
         )
         returncode = completed.returncode
         stdout = completed.stdout

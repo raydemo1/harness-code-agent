@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-
 INTENT_KEYWORDS = {
     "debug": ("debug", "bug", "error", "exception", "failure", "失败", "报错", "调试"),
     "test": ("test", "unittest", "assert", "测试", "用例"),

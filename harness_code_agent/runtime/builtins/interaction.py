@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import json
 
-from ..questions import ConsoleQuestionProvider, QuestionRequest, normalize_question_options
+from ..questions import (
+    ConsoleQuestionProvider,
+    QuestionRequest,
+    normalize_question_options,
+)
 from ..tool_context import ToolContext
 from ..tool_result import ToolResult
 

@@ -7,7 +7,6 @@ from pathlib import Path
 from .. import config
 from ..sessions._event_helpers import is_ignored_changed_file
 
-
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 CHECKPOINT_EXCLUDES = [".harness", "global_plan", config.PROGRESS_FILE]
 
@@ -115,6 +114,7 @@ def git_has_staged_changes(workspace: Path) -> bool:
         cwd=workspace,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=False,
     )
     return result.returncode == 1
 

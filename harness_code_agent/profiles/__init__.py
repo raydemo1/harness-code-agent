@@ -1,7 +1,7 @@
 # Profile registry
 
-from .base import BaseProfile, AgentConfig, ProfileConfig
 from .app_builder import AppBuilderProfile
+from .base import BaseProfile, ProfileConfig
 from .coding_agent import CodingAgentProfile
 from .general import GeneralProfile
 from .plan import PlanProfile

@@ -18,7 +18,7 @@ class TuiQuestionProvider:
     def __init__(
         self,
         *,
-        app_tui: "TuiApp | None" = None,
+        app_tui: TuiApp | None = None,
     ):
         self.app_tui = app_tui
 

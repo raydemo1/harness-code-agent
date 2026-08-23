@@ -10,7 +10,6 @@ from typing import Any
 from ..runtime.shell_classification import analyze_shell_command
 from ..runtime.tool_result import ToolResult
 
-
 FRESH_DETAIL_LIMIT = 12_000
 _OBS_ID_PREFIX = "[OBS "
 

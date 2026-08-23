@@ -8,7 +8,6 @@ import shlex
 from ..tool_result import ToolResult
 from .base import AgentMiddleware, tool_blocked
 
-
 REPEATED_FAILURE_THRESHOLD = 2
 SEARCH_TIMEOUT_SECONDS = 15
 BROAD_REPO_SEARCH_BUDGET = 4
@@ -390,8 +389,7 @@ def _is_broad_recursive_grep(command: str) -> bool:
 
     for index, token in enumerate(tokens):
         executable = token.strip("\"'").lower()
-        if executable.endswith(".exe"):
-            executable = executable[:-4]
+        executable = executable.removesuffix(".exe")
         if executable != "grep":
             continue
 
@@ -506,8 +504,7 @@ def _looks_like_shell_search_without_path(command: str) -> bool:
     if not tokens:
         return False
     executable = tokens[0].strip("\"'").lower()
-    if executable.endswith(".exe"):
-        executable = executable[:-4]
+    executable = executable.removesuffix(".exe")
     if executable == "grep":
         non_options = [token for token in tokens[1:] if not str(token).startswith("-")]
         return len(non_options) < 2
@@ -538,7 +535,7 @@ def _args_shape(tool_name: str, tool_args: dict) -> str:
         return _command_family(str((tool_args or {}).get("command") or ""))
     if tool_name in {"read_file", "list_files", "repo_search"}:
         return _shape_path(str((tool_args or {}).get("path") or (tool_args or {}).get("directory") or "."))
-    return ",".join(sorted(str(key) for key in (tool_args or {}).keys()))
+    return ",".join(sorted(str(key) for key in (tool_args or {})))
 
 
 def _command_family(command: str) -> str:
@@ -546,8 +543,7 @@ def _command_family(command: str) -> str:
     if not tokens:
         return "empty"
     executable = tokens[0].strip("\"'").lower()
-    if executable.endswith(".exe"):
-        executable = executable[:-4]
+    executable = executable.removesuffix(".exe")
     return executable
 
 

@@ -1,7 +1,8 @@
 """Review profile for read-only code review tasks."""
 from __future__ import annotations
 
-from .base import AgentConfig, BaseProfile, build_profile_prompt
+from typing import ClassVar
+
 from ..runtime.middleware import AgentMiddleware
 from ..runtime.permissions import (
     TOOL_PERMISSION_NETWORK_READ,
@@ -10,6 +11,7 @@ from ..runtime.permissions import (
     is_read_only_command,
 )
 from ..runtime.tool_result import ToolResult
+from .base import AgentConfig, BaseProfile, build_profile_prompt
 
 
 class ReviewOnlyMiddleware(AgentMiddleware):
@@ -18,7 +20,7 @@ class ReviewOnlyMiddleware(AgentMiddleware):
     def __init__(self, *, profile_label: str = "review profile"):
         self._profile_label = profile_label
 
-    _WRITE_OR_CONTROL_TOOLS = {
+    _WRITE_OR_CONTROL_TOOLS: ClassVar[set] = {
         "write_file",
         "apply_patch",
         "update_plan_state",

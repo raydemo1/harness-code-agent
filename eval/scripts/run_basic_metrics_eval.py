@@ -33,12 +33,10 @@ from eval.scripts.eval_common import (
     write_eval_reports,
     write_suite_summary,
 )
-
 from harness_code_agent.memory.dream import run_dream
 from harness_code_agent.memory.store import MemoryStore
 from harness_code_agent.sessions.observability import build_session_observability
 from harness_code_agent.sessions.store import SessionStore
-
 
 LOCAL_SUITES = {"cache", "memory", "latency"}
 
@@ -201,6 +199,7 @@ def _run_hca_case(
             capture_output=True,
             text=True,
             timeout=timeout,
+            check=False,
         )
         stdout = completed.stdout
         stderr = completed.stderr
@@ -220,7 +219,7 @@ def _run_hca_case(
     metrics = _session_metrics(session_id) if session_id else {}
     combined = f"{stdout}\n{stderr}".lower()
     marker_success = all(str(marker).lower() in combined for marker in success_markers)
-    fallback_reason = str(((metrics.get("audit") or {}).get("latest_fallback") or "")).strip()
+    fallback_reason = str((metrics.get("audit") or {}).get("latest_fallback") or "").strip()
     bad_fallbacks = {
         "max_iterations",
         "token_budget_exceeded",
@@ -369,9 +368,9 @@ def _metric_values(payload: Any, *, fallback_ms: float | None = None) -> list[in
         for key in ("p50", "p95", "p99"):
             value = payload.get(key)
             if value is not None:
-                values.append(int(round(float(value))))
+                values.append(round(float(value)))
     if not values and fallback_ms is not None:
-        values.append(int(round(fallback_ms)))
+        values.append(round(fallback_ms))
     return values
 
 

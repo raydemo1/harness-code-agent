@@ -6,9 +6,9 @@ Both kinds keep their full instructions on disk until a turn needs them.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..tracking_policy import TASK_TRACKING_CATALOG_POLICY
@@ -109,9 +109,9 @@ class SkillRegistry:
 
         lines = [
             "\n## Available Skills",
-            "The following model-invoked skills are available. If one is relevant, "
+            ("The following model-invoked skills are available. If one is relevant, "
             "load its SKILL.md with read_skill_file. User-invoked `/name` skills are "
-            "intentionally absent from this catalog.\n",
+            "intentionally absent from this catalog.\n"),
             "Skill routing policy:",
             "- If PRD.md exists in the workspace, read it first and use it as the product requirements source of truth.",
             "- If the task starts a new or fuzzy project/major feature, read `skills/catalog/prd/SKILL.md` before implementation and create or update PRD.md as the requirements artifact.",
@@ -145,8 +145,8 @@ class SkillRegistry:
                 f"User explicitly invoked `/{skill.name}`.",
                 f"Skill source: `{skill.path}`",
                 f"Arguments: {arguments or '(none)'}",
-                "Follow the skill instructions below for this turn. "
-                "Do not treat the frontmatter description as model-routing guidance.",
+                ("Follow the skill instructions below for this turn. "
+                "Do not treat the frontmatter description as model-routing guidance."),
                 "",
                 "<invoked-skill>",
                 body,

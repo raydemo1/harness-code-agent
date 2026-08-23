@@ -9,8 +9,8 @@ Usage:
 """
 import json
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 
 def classify_failure(trial_dir: Path) -> str:
@@ -52,8 +52,6 @@ def analyze_job(job_dir: Path, failed_only: bool = False):
     if not result_file.exists():
         print(f"No result.json in {job_dir}")
         return
-
-    job_result = json.loads(result_file.read_text())
 
     # Find all trial directories
     trials = []
@@ -140,15 +138,15 @@ def generate_retry_cmd(trials: list, job_dir: Path):
 
     task_args = " \\\n  ".join(f"--task-name {t['name']}" for t in retryable)
     print(f"RETRY COMMAND ({len(retryable)} tasks, excluding timeouts):\n")
-    print(f"harbor run -d \"terminal-bench@2.1\" \\")
-    print(f"  --agent-import-path benchmarks.harbor_agent:HarnessAgent \\")
-    print(f"  -k 1 \\")
-    print(f"  --n-concurrent 1 \\")
-    print(f"  --agent-setup-timeout-multiplier 2 \\")
-    print(f"  --max-retries 3 \\")
-    print(f"  --retry-include DaytonaError \\")
-    print(f"  --retry-include AgentSetupTimeoutError \\")
-    print(f"  --retry-include AddTestsDirError \\")
+    print("harbor run -d \"terminal-bench@2.1\" \\")
+    print("  --agent-import-path benchmarks.harbor_agent:HarnessAgent \\")
+    print("  -k 1 \\")
+    print("  --n-concurrent 1 \\")
+    print("  --agent-setup-timeout-multiplier 2 \\")
+    print("  --max-retries 3 \\")
+    print("  --retry-include DaytonaError \\")
+    print("  --retry-include AgentSetupTimeoutError \\")
+    print("  --retry-include AddTestsDirError \\")
     print(f"  {task_args}")
     print()
 

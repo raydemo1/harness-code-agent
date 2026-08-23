@@ -23,9 +23,12 @@ _install_fake_openai_module()
 
 from harness_code_agent import config
 from harness_code_agent.agent.conversation import AgentRuntimeState
-from harness_code_agent.runtime.middlewares import RecoveryStrategyMiddleware, TaskTrackingEnforcementMiddleware
-from harness_code_agent.runtime.tools import execute_tool, execute_tool_result
+from harness_code_agent.runtime.middlewares import (
+    RecoveryStrategyMiddleware,
+    TaskTrackingEnforcementMiddleware,
+)
 from harness_code_agent.runtime.tool_result import ToolResult
+from harness_code_agent.runtime.tools import execute_tool, execute_tool_result
 
 
 def _result(text: str, *, status: str | None = None) -> ToolResult:
@@ -89,6 +92,36 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertFalse(data["requires_approval"])
         self.assertFalse(Path(self.temp_dir, "global_plan", "current", "plan.md").exists())
 
+    def test_todo_mode_writes_lightweight_state_without_acceptance(self):
+        state = AgentRuntimeState(session_id="todo-session")
+        result = execute_tool_result(
+            "update_plan_state",
+            self._base_args(mode="todo", steps=["write", "test"], current_step="write"),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(state.task_board.planning_mode, "todo")
+        self.assertEqual(state.task_board.acceptance.revision, 0)
+        data = json.loads(self._state_path("todo-session").read_text(encoding="utf-8"))
+        self.assertEqual(data["mode"], "todo")
+
+    def test_todo_progress_ignores_tracked_replan_flag(self):
+        state = AgentRuntimeState(session_id="todo-recovery")
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "previous check failed"
+
+        result = execute_tool_result(
+            "update_plan_state",
+            self._base_args(mode="todo", update_kind="progress"),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(state.task_board.planning_mode, "todo")
+
     def test_plan_state_tool_result_exposes_planning_state_metadata(self):
         state = AgentRuntimeState(session_id="test-session")
 
@@ -123,7 +156,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         )
 
         self.assertIn("[error]", result)
-        self.assertIn("mode must be: tracked", result)
+        self.assertIn("mode must be one of: todo, tracked", result)
         self.assertFalse(self._state_path().exists())
         self.assertFalse(Path(self.temp_dir, "global_plan").exists())
 
@@ -137,7 +170,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         )
 
         self.assertIn("[error]", result)
-        self.assertIn("mode must be: tracked", result)
+        self.assertIn("mode must be one of: todo, tracked", result)
         self.assertFalse(self._state_path().exists())
         self.assertFalse(Path(self.temp_dir, "global_plan").exists())
 
@@ -582,6 +615,31 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIsNotNone(blocked)
         self.assertIn("acceptance_checks", blocked)
         self.assertNotIn("Terminal", blocked)
+
+    def test_todo_mode_has_no_acceptance_or_replan_gate(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "todo"
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "a verification failed"
+
+        final_update = middleware.before_tool(
+            "update_plan_state",
+            {"mode": "todo", "update_kind": "final", "acceptance_checks": []},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        next_action = middleware.before_tool(
+            "run_bash",
+            {"command": "python -m unittest"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(final_update)
+        self.assertIsNone(next_action)
 
     def test_unset_mode_allows_small_skip_path_before_start_threshold(self):
         middleware = TaskTrackingEnforcementMiddleware(

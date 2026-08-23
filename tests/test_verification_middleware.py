@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 class PreExitVerificationMiddlewareTests(unittest.TestCase):
     def test_allows_plain_identity_question_without_tool_work(self):
-        from harness_code_agent.runtime.middleware import ExitIntentDecision, PreExitVerificationMiddleware
+        from harness_code_agent.runtime.middleware import (
+            ExitIntentDecision,
+            PreExitVerificationMiddleware,
+        )
 
         middleware = PreExitVerificationMiddleware()
         messages = [
@@ -24,7 +27,10 @@ class PreExitVerificationMiddlewareTests(unittest.TestCase):
         classify.assert_called_once()
 
     def test_still_requires_tools_for_actionable_coding_task(self):
-        from harness_code_agent.runtime.middleware import ExitIntentDecision, PreExitVerificationMiddleware
+        from harness_code_agent.runtime.middleware import (
+            ExitIntentDecision,
+            PreExitVerificationMiddleware,
+        )
 
         middleware = PreExitVerificationMiddleware()
         messages = [
@@ -45,7 +51,10 @@ class PreExitVerificationMiddlewareTests(unittest.TestCase):
         self.assertNotIn("write_file", result)
 
     def test_low_confidence_continue_is_allowed_to_exit(self):
-        from harness_code_agent.runtime.middleware import ExitIntentDecision, PreExitVerificationMiddleware
+        from harness_code_agent.runtime.middleware import (
+            ExitIntentDecision,
+            PreExitVerificationMiddleware,
+        )
 
         middleware = PreExitVerificationMiddleware()
         messages = [
@@ -62,7 +71,9 @@ class PreExitVerificationMiddlewareTests(unittest.TestCase):
             self.assertIsNone(middleware.pre_exit(messages, runtime_state=runtime_state))
 
     def test_classifier_failure_defaults_to_exit(self):
-        from harness_code_agent.runtime.middleware.verification import classify_exit_intent
+        from harness_code_agent.runtime.middleware.verification import (
+            classify_exit_intent,
+        )
 
         with patch("harness_code_agent.agent.providers.get_client", side_effect=RuntimeError("offline")):
             decision = classify_exit_intent(user_task="你是谁")

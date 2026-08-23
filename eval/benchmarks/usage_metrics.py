@@ -9,7 +9,6 @@ from typing import Any
 from harness_code_agent.sessions.observability import build_session_observability
 from harness_code_agent.sessions.store import SessionStore
 
-
 EVAL_METRICS_PREFIX = "HCA_EVAL_METRICS:"
 
 # Official DeepSeek API prices, per 1M tokens, checked from:

@@ -153,5 +153,5 @@ def _parse_json_object(raw: str) -> dict:
         text = "\n".join(lines).strip()
     data = json.loads(text)
     if not isinstance(data, dict):
-        raise ValueError("approval response must be a JSON object")
+        raise TypeError("approval response must be a JSON object")
     return data

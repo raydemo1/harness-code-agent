@@ -7,7 +7,6 @@ from pathlib import Path
 
 from .base import AgentMiddleware
 
-
 log = logging.getLogger("harness")
 
 MEMORY_INDEX_MARKER = "[HARNESS_DYNAMIC_CONTEXT:memory-index]"

@@ -14,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = PROJECT_ROOT / "eval" / "results"
 TASK_CONFIG = PROJECT_ROOT / "eval" / "tasks" / "claw_swe_bench_lite80.json"
@@ -50,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     from claw_swebench import config as claw_config
     from claw_swebench.orchestrator import run_batch
     from claw_swebench.workspace import ExecResult, SWEBenchWorkspace
+
     from eval.benchmarks.harness_claw_adapter import HarnessCodeAgentAdapter
 
     install_container_timeout_guard(SWEBenchWorkspace, ExecResult)
@@ -220,7 +220,7 @@ def ensure_claw_instance_images(instances: list[dict[str, Any]]) -> None:
             continue
         image = _sweagent_image_name(instance_id)
         print(f"Pulling missing SWE-bench image: {image}")
-        completed = subprocess.run(["docker", "pull", image])
+        completed = subprocess.run(["docker", "pull", image], check=False)
         if completed.returncode != 0:
             raise RuntimeError(
                 f"Failed to pull required SWE-bench image {image}. "
@@ -238,6 +238,7 @@ def _docker_image_exists(image: str) -> bool:
         ["docker", "image", "inspect", image],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=False,
     ).returncode == 0
 
 
@@ -267,6 +268,7 @@ def install_container_timeout_guard(workspace_cls: Any, exec_result_cls: Any) ->
                 capture_output=True,
                 text=True,
                 timeout=int(timeout) + 30,
+                check=False,
             )
             return exec_result_cls(
                 stdout=result.stdout,
@@ -368,7 +370,7 @@ def _dry_run_plan(args: argparse.Namespace, task_config: dict[str, Any]) -> dict
 
 
 def _make_run_dir(args: argparse.Namespace) -> Path:
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H%M%S")
     suffix = f"_{_safe_name(args.run_name)}" if args.run_name else ""
     run_dir = Path(args.output_root) / f"{timestamp}_claw_swe_bench{suffix}"
     run_dir.mkdir(parents=True, exist_ok=False)

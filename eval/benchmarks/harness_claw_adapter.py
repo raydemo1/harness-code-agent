@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 try:
     from claw_swebench.claws.base import BaseClawAdapter
     from claw_swebench.types import AgentResult
@@ -141,6 +140,7 @@ class HarnessCodeAgentAdapter(BaseClawAdapter):
             ["docker", "cp", str(prompt_path), f"{container_name}:{CONTAINER_PROMPT}"],
             capture_output=True,
             text=True,
+            check=False,
         )
         if copy.returncode != 0:
             stderr_path.write_text(copy.stderr, encoding="utf-8")
@@ -162,6 +162,7 @@ class HarnessCodeAgentAdapter(BaseClawAdapter):
                 capture_output=True,
                 text=True,
                 timeout=self.timeout + 120,
+                check=False,
             )
             exit_code = completed.returncode
             stdout = completed.stdout
@@ -204,6 +205,7 @@ class HarnessCodeAgentAdapter(BaseClawAdapter):
         subprocess.run(
             ["docker", "cp", f"{workspace.container_name}:/testbed/.harness", str(state_dest)],
             capture_output=True,
+            check=False,
         )
         if usage:
             (artifact_dir / "harness_usage.json").write_text(

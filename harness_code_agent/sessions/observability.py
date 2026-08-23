@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +30,7 @@ class TokenMetrics:
             return 0.0
         return self.cached_tokens / self.prompt_tokens
 
-    def add(self, other: "TokenMetrics") -> None:
+    def add(self, other: TokenMetrics) -> None:
         self.llm_calls += other.llm_calls
         self.prompt_tokens += other.prompt_tokens
         self.cached_tokens += other.cached_tokens
@@ -62,7 +62,7 @@ class ToolBreakdown:
     def pending_calls(self) -> int:
         return max(0, self.calls - self.results)
 
-    def add(self, other: "ToolBreakdown") -> None:
+    def add(self, other: ToolBreakdown) -> None:
         self.calls += other.calls
         self.results += other.results
         self.successes += other.successes
@@ -99,7 +99,7 @@ class ToolMetrics:
             return 0.0
         return self.successes / self.tool_results
 
-    def add(self, other: "ToolMetrics") -> None:
+    def add(self, other: ToolMetrics) -> None:
         self.tool_calls += other.tool_calls
         self.tool_results += other.tool_results
         self.successes += other.successes
@@ -158,17 +158,17 @@ class DistributionMetrics:
     def p99(self) -> int:
         return _percentile(self.values, 0.99)
 
-    def add_value(self, value: int | float | None) -> None:
+    def add_value(self, value: float | None) -> None:
         if value is None:
             return
         try:
-            numeric = int(round(float(value)))
+            numeric = round(float(value))
         except (TypeError, ValueError):
             return
         if numeric >= 0:
             self.values.append(numeric)
 
-    def add(self, other: "DistributionMetrics") -> None:
+    def add(self, other: DistributionMetrics) -> None:
         self.values.extend(other.values)
 
     def to_dict(self) -> dict[str, Any]:
@@ -189,7 +189,7 @@ class PerformanceMetrics:
     llm_first_token_ms: DistributionMetrics = field(default_factory=DistributionMetrics)
     turn_duration_ms: DistributionMetrics = field(default_factory=DistributionMetrics)
 
-    def add(self, other: "PerformanceMetrics") -> None:
+    def add(self, other: PerformanceMetrics) -> None:
         self.llm_response_latency_ms.add(other.llm_response_latency_ms)
         self.llm_first_token_ms.add(other.llm_first_token_ms)
         self.turn_duration_ms.add(other.turn_duration_ms)
@@ -217,7 +217,7 @@ class AuditMetrics:
     approvals_denied: int = 0
     changed_files: list[str] = field(default_factory=list)
 
-    def add(self, other: "AuditMetrics") -> None:
+    def add(self, other: AuditMetrics) -> None:
         self.failures += other.failures
         self.failure_categories.update(other.failure_categories)
         self.fallbacks += other.fallbacks
@@ -401,7 +401,7 @@ def build_session_observability(metadata: dict[str, Any], events: list[dict[str,
     return snapshot
 
 
-def build_project_observability(store: "SessionStore") -> ProjectObservability:
+def build_project_observability(store: SessionStore) -> ProjectObservability:
     project = ProjectObservability()
     sessions: list[SessionObservability] = []
     for metadata in store.list_sessions():
@@ -438,13 +438,13 @@ def build_project_observability(store: "SessionStore") -> ProjectObservability:
     return project
 
 
-def format_session_observability(store: "SessionStore", session_id: str) -> str:
+def format_session_observability(store: SessionStore, session_id: str) -> str:
     metadata = store.read_metadata(session_id)
     events = store.read_events(session_id)
     return render_session_observability(build_session_observability(metadata, events))
 
 
-def format_project_observability(store: "SessionStore") -> str:
+def format_project_observability(store: SessionStore) -> str:
     return render_project_observability(build_project_observability(store))
 
 
@@ -503,7 +503,7 @@ def render_project_observability(snapshot: ProjectObservability) -> str:
 
 
 def export_observability_report(
-    store: "SessionStore",
+    store: SessionStore,
     *,
     mode: str,
     session_id: str | None = None,

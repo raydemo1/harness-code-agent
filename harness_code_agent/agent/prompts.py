@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-
 SHARED_AGENT_IDENTITY = """\
 You are one capable agent working in different task profiles, not a collection of unrelated personas.
 Be warm, direct, and intellectually honest. Treat the user as a capable collaborator, explain important
