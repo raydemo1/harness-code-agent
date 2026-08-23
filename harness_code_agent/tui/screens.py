@@ -39,6 +39,31 @@ class QuestionResult(Message, bubble=True):
         self.payload = payload
 
 
+class ProfileSelectionResult(Message, bubble=True):
+    """A profile was selected in the profile picker."""
+
+    def __init__(self, profile_name: str | None) -> None:
+        super().__init__()
+        self.profile_name = profile_name
+
+
+class CheckpointActionResult(Message, bubble=True):
+    """A checkpoint action was selected."""
+
+    def __init__(self, action: str) -> None:
+        super().__init__()
+        self.action = action
+
+
+class McpActionResult(Message, bubble=True):
+    """An MCP management action was selected."""
+
+    def __init__(self, action: str, server_name: str | None = None) -> None:
+        super().__init__()
+        self.action = action
+        self.server_name = server_name
+
+
 class ResumeSessionScreen(ModalScreen[dict | None]):
     """Searchable in-app picker for local history sessions.
 
@@ -211,6 +236,175 @@ class ResumeSessionLoadFailed(Message):
     def __init__(self, error: str) -> None:
         super().__init__()
         self.error = error
+
+
+# ── Workflow panels ────────────────────────────────────────────────────────
+
+class ProfileSelectorScreen(ModalScreen[None]):
+    """Clickable profile selector; one conversation is shared by all modes."""
+
+    DEFAULT_CSS = """
+    ProfileSelectorScreen { align: center middle; }
+    #profile-panel { width: 66; height: auto; max-height: 70%; border: solid $border-blurred; background: $surface; padding: 1 2; }
+    #profile-title { height: 2; color: $accent; }
+    #profile-options { height: auto; max-height: 16; border: none; background: $background; }
+    #profile-footer { height: 1; margin-top: 1; color: $text-muted; }
+    """
+
+    _PROFILES = (
+        (None, "自动路由", "根据当前任务选择工作模式"),
+        ("general", "通用", "问答、分析与轻量任务"),
+        ("coding-agent", "编码", "修改代码、运行测试与验证"),
+        ("plan", "规划", "拆解方案与实施步骤"),
+        ("app-builder", "应用构建", "端到端构建应用界面"),
+        ("review", "审查", "只读检查与风险分析"),
+    )
+
+    def __init__(self, session: Any, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._session = session
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="profile-panel"):
+            yield Static("工作模式", id="profile-title")
+            yield OptionList(id="profile-options")
+            yield Static("选择后会固定模式；再次选择自动路由即可恢复自动判断。", id="profile-footer")
+
+    def on_mount(self) -> None:
+        options = self.query_one("#profile-options", OptionList)
+        current = getattr(self._session, "display_profile", "")
+        if getattr(self._session, "display_routing_mode", "") == "auto":
+            current = "auto"
+        for profile_name, label, description in self._PROFILES:
+            marker = "●" if (profile_name or "auto") == current else "○"
+            options.add_option(
+                Option(f"{marker}  {label}  ·  {description}", id=f"profile:{profile_name or 'auto'}")
+            )
+        options.focus()
+
+    @on(OptionList.OptionSelected, "#profile-options")
+    def _on_selected(self, event: OptionList.OptionSelected) -> None:
+        if not event.option_id or not event.option_id.startswith("profile:"):
+            return
+        value = event.option_id.removeprefix("profile:")
+        self.post_message(ProfileSelectionResult(None if value == "auto" else value))
+        self.dismiss()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
+class CheckpointScreen(ModalScreen[None]):
+    """Small checkpoint control panel."""
+
+    DEFAULT_CSS = """
+    CheckpointScreen { align: center middle; }
+    #checkpoint-panel { width: 66; height: auto; border: solid $border-blurred; background: $surface; padding: 1 2; }
+    #checkpoint-title { height: 2; color: $accent; }
+    #checkpoint-options { height: auto; border: none; background: $background; }
+    #checkpoint-status { height: auto; margin-top: 1; color: $text-muted; }
+    """
+
+    def __init__(self, session: Any, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._session = session
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="checkpoint-panel"):
+            yield Static("检查点", id="checkpoint-title")
+            yield OptionList(
+                Option("立即创建检查点", id="create"),
+                Option("自动检查点：开启", id="auto_on"),
+                Option("自动检查点：关闭", id="auto_off"),
+                Option("每轮创建", id="every_turn"),
+                id="checkpoint-options",
+            )
+            yield Static("", id="checkpoint-status")
+
+    def on_mount(self) -> None:
+        checkpoint = getattr(self._session, "checkpoint", None)
+        if checkpoint is not None:
+            status = f"当前：自动{'开启' if checkpoint.auto else '关闭'} · 每 {checkpoint.every_turns} 轮"
+            self.query_one("#checkpoint-status", Static).update(status)
+        self.query_one("#checkpoint-options", OptionList).focus()
+
+    @on(OptionList.OptionSelected, "#checkpoint-options")
+    def _on_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id:
+            self.post_message(CheckpointActionResult(event.option_id))
+        self.dismiss()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
+class McpManagerScreen(ModalScreen[None]):
+    """Runtime MCP dashboard with reconnect/reload and config toggles."""
+
+    DEFAULT_CSS = """
+    McpManagerScreen { align: center middle; }
+    #mcp-panel { width: 88; height: 76%; border: solid $border-blurred; background: $surface; padding: 1 2; }
+    #mcp-title { height: 2; color: $accent; }
+    #mcp-options { height: 1fr; border: none; background: $background; }
+    #mcp-status { height: 2; margin-top: 1; color: $text-muted; }
+    """
+
+    def __init__(self, session: Any, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._session = session
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="mcp-panel"):
+            yield Static("MCP 管理", id="mcp-title")
+            yield OptionList(id="mcp-options")
+            yield Static("", id="mcp-status")
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        options = self.query_one("#mcp-options", OptionList)
+        options.clear_options()
+        options.add_option(Option("重新加载全部 MCP 服务", id="reload"))
+        manager = getattr(self._session, "mcp_manager", None)
+        statuses = getattr(manager, "statuses", {}) if manager is not None else {}
+        names = set(getattr(manager, "configured_server_names", list)())
+        names.update(name for name in statuses if name != "config")
+        for name in sorted(names):
+            status = statuses.get(name)
+            if status is None:
+                state = "已停用"
+            else:
+                state = "已连接" if status.state == "connected" else "连接失败"
+            options.add_option(Option(f"重新连接：{name}  ·  {state}", id=f"reconnect:{name}"))
+            options.add_option(Option(f"切换启用：{name}", id=f"toggle:{name}"))
+        if manager is not None:
+            options.add_option(Option("打开 mcp.json", id="open_config"))
+            self.query_one("#mcp-status", Static).update(_mcp_summary(manager))
+        else:
+            self.query_one("#mcp-status", Static).update("尚未加载 MCP 配置")
+        options.focus()
+
+    @on(OptionList.OptionSelected, "#mcp-options")
+    def _on_selected(self, event: OptionList.OptionSelected) -> None:
+        if not event.option_id:
+            return
+        if ":" in event.option_id:
+            action, name = event.option_id.split(":", 1)
+        else:
+            action, name = event.option_id, None
+        self.post_message(McpActionResult(action, name))
+        self.dismiss()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
+def _mcp_summary(manager: Any) -> str:
+    statuses = list(getattr(manager, "statuses", {}).values())
+    connected = sum(item.state == "connected" for item in statuses)
+    tools = len(getattr(manager, "tool_bindings", []))
+    return f"已连接 {connected} 个服务 · 已注册 {tools} 个工具"
 
 
 # ── ApprovalPanel ───────────────────────────────────────────────────────────

@@ -42,7 +42,18 @@ from ..core.mentions import MentionResolutionError
 from .approval import TuiApprovalProvider
 from .commands import default_command_registry
 from .question import TuiQuestionProvider
-from .screens import ApprovalResult, QuestionResult, ResumeSessionScreen
+from .screens import (
+    ApprovalResult,
+    CheckpointActionResult,
+    CheckpointScreen,
+    McpActionResult,
+    McpManagerScreen,
+    ObservabilityScreen,
+    ProfileSelectionResult,
+    ProfileSelectorScreen,
+    QuestionResult,
+    ResumeSessionScreen,
+)
 from .state import SessionStatusSnapshot, TranscriptBlock, TuiState
 from .widgets import (
     InputArea,
@@ -99,9 +110,10 @@ class ResumeSessionComplete(Message):
 class SlashCommandComplete(Message):
     """A local slash command finished outside the UI thread."""
 
-    def __init__(self, should_continue: bool):
+    def __init__(self, should_continue: bool, result=None):
         super().__init__()
         self.should_continue = should_continue
+        self.result = result
 
 
 class SessionReady(Message):
@@ -622,10 +634,11 @@ class TuiApp(App):
     def _slash_command_worker(self, text: str) -> None:
         try:
             should_continue = self.session.handle_slash_command(text)
+            result = getattr(self.session, "last_command_result", None)
         except Exception as exc:
             self.post_message(SubmitError(str(exc)))
             return
-        self.post_message(SlashCommandComplete(should_continue))
+        self.post_message(SlashCommandComplete(should_continue, result=result))
 
     def on_slash_command_complete(self, msg: SlashCommandComplete) -> None:
         self._submitting = False
@@ -635,7 +648,97 @@ class TuiApp(App):
         if not msg.should_continue:
             self.exit()
             return
+        result = msg.result
+        action = getattr(result, "action", None)
+        if action:
+            if action == "compact":
+                self._begin_command_action()
+                self._run_command_action(self.session.compact_current_context, title="上下文")
+                self._drain_pending_submissions()
+                return
+            self._open_command_panel(action)
         self._drain_pending_submissions()
+
+    def _open_command_panel(self, action: str) -> None:
+        if self.session is None:
+            return
+        if action == "fork":
+            self._begin_command_action()
+            self._run_command_action(self.session.fork_current_session, title="会话分支")
+            return
+        panels = {
+            "profile": ProfileSelectorScreen(self.session),
+            "checkpoint": CheckpointScreen(self.session),
+            "mcp": McpManagerScreen(self.session),
+            "observe": ObservabilityScreen(self.session),
+        }
+        panel = panels.get(action)
+        if panel is not None:
+            self.push_screen(panel)
+
+    @on(ProfileSelectionResult)
+    def _on_profile_selection(self, message: ProfileSelectionResult) -> None:
+        if self.session is None:
+            return
+        self._begin_command_action()
+        self._run_command_action(
+            lambda: self.session.enable_auto_profile_routing()
+            if message.profile_name is None
+            else self.session.switch_profile(message.profile_name),
+            title="工作模式",
+        )
+
+    @on(CheckpointActionResult)
+    def _on_checkpoint_action(self, message: CheckpointActionResult) -> None:
+        if self.session is None:
+            return
+        self._begin_command_action()
+        def action():
+            if message.action == "create":
+                return self.session.create_checkpoint(manual=True)
+            if message.action == "auto_on":
+                self.session.checkpoint.auto = True
+                return "自动检查点已开启"
+            if message.action == "auto_off":
+                self.session.checkpoint.auto = False
+                return "自动检查点已关闭"
+            self.session.checkpoint.auto = True
+            self.session.checkpoint.every_turns = 1
+            return "检查点频率已设为每轮"
+        self._run_command_action(action, title="检查点")
+
+    @on(McpActionResult)
+    def _on_mcp_action(self, message: McpActionResult) -> None:
+        if self.session is None:
+            return
+        self._begin_command_action()
+        def action():
+            if message.action == "reload":
+                return self.session.reload_mcp()
+            if message.action == "reconnect" and message.server_name:
+                return self.session.reload_mcp_server(message.server_name)
+            if message.action == "toggle" and message.server_name:
+                return self.session.toggle_mcp_server(message.server_name)
+            if message.action == "open_config":
+                path = self.session.mcp_manager.config.path
+                return f"MCP 配置：{path}"
+            return ""
+        self._run_command_action(action, title="MCP")
+
+    @work(thread=True, exclusive=False, exit_on_error=False)
+    def _run_command_action(self, action, *, title: str) -> None:
+        try:
+            result = action()
+        except Exception as exc:
+            self.post_message(OutputEvent(f"{type(exc).__name__}: {exc}", title="操作失败"))
+            return
+        self.post_message(OutputEvent(str(result or ""), title=title))
+
+    def _begin_command_action(self) -> None:
+        self._submitting = True
+        self.state.snapshot.status = "running command"
+        self._input_enabled(False)
+        self._refresh_bars()
 
     def _drain_pending_submissions(self) -> None:
         while not self._submitting and self._pending_submissions:
@@ -707,7 +810,17 @@ class TuiApp(App):
             self._redraw_transcript()
             return
         self._output(msg.text, title=msg.title)
+        if msg.title == "会话分支" and self.session is not None:
+            self.state.snapshot.session_id = getattr(
+                getattr(self.session, "session", None), "id", None
+            )
+        if msg.title in {"工作模式", "检查点", "MCP", "会话分支", "上下文", "操作失败"}:
+            self._submitting = False
+            self.state.snapshot.status = "idle"
+            self._input_enabled(True)
         self._refresh_bars()
+        if msg.title in {"工作模式", "检查点", "MCP", "会话分支", "上下文", "操作失败"}:
+            self._drain_pending_submissions()
 
     # ── Callbacks for InteractiveSession ────────────────────────────────────
 

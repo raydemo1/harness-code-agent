@@ -181,11 +181,15 @@ veriforge
 常用命令：
 
 ```text
-/doctor       检查本地配置
-/config show  查看当前解析后的运行时配置
-/profiles     查看产品可见 profile
-/help         查看命令和可用 workflow
+/profile      选择工作模式
+/checkpoint   管理检查点
+/mcp          管理 MCP 服务与工具
+/compact      压缩当前对话上下文
+/fork         从当前会话创建分支
+/observe      打开运行观察
 ```
+
+输入 `/` 会打开扁平命令面板，左侧显示命令，右侧显示作用。历史会话和新会话使用界面右上角的时钟、加号图标；profile 选择使用 `/profile` 面板完成。
 
 也可以启动时直接提交任务：
 
@@ -201,7 +205,7 @@ veriforge --print "Fix the failing tests"
 echo "Review this repo for obvious bugs" | veriforge
 ```
 
-常用 TUI 快捷键：
+常用 TUI 操作：
 
 ```text
 Enter         提交输入
@@ -209,7 +213,8 @@ Shift+Enter   插入换行
 Tab           接受补全
 Esc           关闭补全
 Ctrl-C        取消当前 turn
-Ctrl-O        打开可观测性
+右上角时钟    打开历史会话
+右上角加号    开始新会话
 ```
 
 ## Profiles
@@ -235,17 +240,7 @@ veriforge --profile review "Review the current branch"
 veriforge --profile terminal "Fix the broken symlinks in /tmp"
 ```
 
-TUI 中可用短命令：
-
-```text
-/general
-/code
-/plan
-/app
-/review
-```
-
-`plan` profile 有显式 handoff：它写完计划后会停住。用户回复“继续”“执行”“开始”这类短确认时，VeriForge 会切换到 `coding-agent`，并把刚才的 Markdown 计划注入为 approved plan。
+`/profile` 面板提供自动路由、通用、编码、规划、应用构建和审查模式。选择具体模式后会固定当前工作模式；再次选择自动路由即可交回本地路由器判断。规划完成后，仍可在当前对话中继续执行已确认的计划。
 
 ## Skills
 
@@ -270,10 +265,10 @@ Skills 采用渐进式披露。常驻 prompt 保留精简 catalog，任务需要
 相关命令：
 
 ```text
-/sessions
-/checkpoint status
-/checkpoint auto off
-/compact show
+/checkpoint
+/compact
+/fork
+/observe
 ```
 
 非交互入口：
@@ -372,10 +367,7 @@ VeriForge 可以连接 MCP server，把 server tools 暴露给当前 profile。�
 MCP tools 会命名为 `mcp__{server}__{tool}`，避免和内置工具冲突。
 
 ```text
-/mcp status
-/mcp list
-/mcp reload
-/doctor
+/mcp
 ```
 
 ## Evaluation

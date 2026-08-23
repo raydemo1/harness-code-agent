@@ -531,17 +531,14 @@ class CommandPalette(Static):
             return
         self.display = True
         text = Text()
+        name_width = max((len(name) for name, _desc in self.candidates), default=0)
         for i, (name, desc) in enumerate(self.candidates):
             if i:
                 text.append("\n")
-            if i == self.selected_index:
-                text.append(f" {name}", style=f"bold reverse {_INK}")
-                if desc:
-                    text.append(f"  {desc}", style=_SUBTLE)
-            else:
-                text.append(f" {name}", style=f"bold {_ACCENT}")
-                if desc:
-                    text.append(f"  {desc}", style=_SUBTLE)
+            name_style = f"bold reverse {_INK}" if i == self.selected_index else f"bold {_ACCENT}"
+            text.append(f" {name:<{name_width}}", style=name_style)
+            if desc:
+                text.append(f"  {desc}", style=_SUBTLE)
         self.update(text)
 
     def move_up(self) -> None:
@@ -706,7 +703,7 @@ class InputArea(Vertical):
             if self._registry:
                 from .completion import fuzzy_command_candidates
                 candidates = [
-                    (spec.name, f"{spec.group} - {spec.description}")
+                    (spec.name, spec.description)
                     for spec in fuzzy_command_candidates(self._registry, stripped)
                 ]
                 palette.update_candidates(candidates)

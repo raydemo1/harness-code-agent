@@ -38,28 +38,24 @@ class TuiTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_command_registry_groups_commands_and_switches_profile(self):
+    def test_command_registry_is_flat_and_exposes_workflow_entries(self):
         registry = default_command_registry()
-        calls = []
-        session = SimpleNamespace(switch_profile=lambda name: calls.append(name) or f"switched {name}")
-
         help_text = registry.format_help()
-        result = registry.execute("/code", session)
-        review_result = registry.execute("/review", session)
+        result = registry.execute("/profile", SimpleNamespace())
 
-        self.assertIn("配置:", help_text)
+        self.assertNotIn("配置:", help_text)
         self.assertNotIn("/swe", help_text)
-        self.assertIn("/review", help_text)
+        self.assertIn("/profile", help_text)
         self.assertIn("/checkpoint", help_text)
-        self.assertEqual(result.text, "switched coding-agent")
-        self.assertEqual(review_result.text, "switched review")
-        self.assertEqual(calls, ["coding-agent", "review"])
+        self.assertEqual(result.action, "profile")
+        self.assertNotIn("/code", help_text)
+        self.assertNotIn("/review", help_text)
 
     def test_command_registry_reports_validation_errors(self):
         registry = default_command_registry()
-        result = registry.execute("/config nope", SimpleNamespace())
+        result = registry.execute("/profile nope", SimpleNamespace())
 
-        self.assertIn("用法：/config show", result.text)
+        self.assertIn("用法：/profile", result.text)
         self.assertTrue(result.should_continue)
 
     def test_user_skills_are_dynamic_agent_commands(self):
@@ -86,7 +82,7 @@ class TuiTests(unittest.TestCase):
         self.assertEqual(calls, ["/triage 42"])
         self.assertIn("/triage <issue>", registry.format_help())
 
-    def test_skill_command_collision_fails_fast(self):
+    def test_removed_builtin_name_can_be_used_by_a_user_skill(self):
         skill_registry = SimpleNamespace(
             user_commands=[
                 {
@@ -98,8 +94,8 @@ class TuiTests(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(ValueError, "conflicts with built-in command"):
-            default_command_registry(skill_registry=skill_registry)
+        registry = default_command_registry(skill_registry=skill_registry)
+        self.assertTrue(registry.is_agent_command("/help"))
 
     def test_observe_command_formats_and_exports_current_session(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
@@ -119,13 +115,9 @@ class TuiTests(unittest.TestCase):
         )
         registry = default_command_registry()
 
-        report = registry.execute("/observe current", session)
-        exported = registry.execute("/observe export current", session)
+        report = registry.execute("/observe", session)
 
-        self.assertIn("Observability dashboard", report.text)
-        self.assertIn("cache hit ratio: 80.0%", report.text)
-        self.assertIn("observability_export_markdown:", exported.text)
-        self.assertIn("observability_export_json:", exported.text)
+        self.assertEqual(report.action, "observe")
 
     def test_observe_command_formats_project_overview(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
@@ -142,10 +134,9 @@ class TuiTests(unittest.TestCase):
         registry = default_command_registry()
         session = SimpleNamespace(session_store=store, session=SimpleNamespace(id=session_record.id))
 
-        report = registry.execute("/observe project", session)
+        report = registry.execute("/observe", session)
 
-        self.assertIn("Project observability", report.text)
-        self.assertIn("sessions: 1", report.text)
+        self.assertEqual(report.action, "observe")
 
     def test_observability_screen_handles_pending_current_session(self):
         from harness_code_agent.tui.screens import ObservabilityScreen
