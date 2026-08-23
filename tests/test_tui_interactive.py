@@ -92,12 +92,19 @@ class TuiInteractiveTests(unittest.TestCase):
     def test_app_mounts_all_widgets(self):
         async def _test():
             app = self._make_app()
-            async with app.run_test():
+            async with app.run_test() as pilot:
                 self.assertIsNotNone(app.query_one("#transcript"))
                 self.assertIsNotNone(app.query_one("#input-area"))
                 self.assertIsNotNone(app.query_one("#status-bar"))
                 self.assertIsNotNone(app.query_one("#input-text"))
                 self.assertIsNotNone(app.query_one("#cmd-palette"))
+                self.assertEqual(app.query_one("#resume-button").label.plain, "◷")
+                self.assertEqual(app.query_one("#new-session-button").label.plain, "＋")
+                await pilot.click("#resume-button")
+                await pilot.pause(0.05)
+                from harness_code_agent.tui.screens import ResumeSessionScreen
+
+                self.assertIsInstance(app.screen, ResumeSessionScreen)
         _run(_test())
 
     def test_slow_session_initialization_does_not_block_first_frame(self):
@@ -164,38 +171,85 @@ class TuiInteractiveTests(unittest.TestCase):
 
         _run(_test())
 
-    def test_resuming_session_shows_history_loading_status(self):
+    def test_history_icon_opens_picker_and_resumes_selected_session(self):
         async def _test():
             ready_session = _mock_session(self.root)
+            previous = ready_session.session_store.create(
+                profile="plan",
+                cwd=self.root,
+                model="model-a",
+                permission_mode="workspace-write",
+            )
+            ready_session.session_store.event_bus(previous).emit(
+                "user_input",
+                payload={"text": "整理旧任务"},
+            )
+            resumed = []
+            resume_started = threading.Event()
+            resume_release = threading.Event()
 
-            def slow_resume(**kwargs):
-                kwargs["startup_sink"]("loading history")
-                time.sleep(0.2)
-                kwargs["startup_sink"]("history loaded")
-                return ready_session
+            def resume_from_session(session_id):
+                resumed.append(session_id)
+                resume_started.set()
+                resume_release.wait(2)
 
-            with patch(
-                "harness_code_agent.tui.app.InteractiveSession",
-                side_effect=slow_resume,
-            ):
-                app = TuiApp(
-                    cwd=self.root,
-                    profile_name="coding-agent",
-                    resume_session_id="old-session",
-                )
+            ready_session.resume_from_session = resume_from_session
+
+            with patch("harness_code_agent.tui.app.InteractiveSession", return_value=ready_session):
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
                 async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.click("#resume-button")
+                    await pilot.pause(0.1)
+
+                    from textual.widgets import OptionList
+
+                    from harness_code_agent.tui.screens import ResumeSessionScreen
+
+                    self.assertIsInstance(app.screen, ResumeSessionScreen)
+                    options = app.screen.query_one("#resume-options", OptionList)
+                    self.assertGreaterEqual(options.option_count, 1)
+                    rendered = "\n".join(
+                        getattr(options.get_option_at_index(index).prompt, "plain", str(options.get_option_at_index(index).prompt))
+                        for index in range(options.option_count)
+                    )
+                    self.assertIn("整理旧任务", rendered)
+                    self.assertNotIn(previous.id, rendered)
+
+                    options.highlighted = 0
+                    options.action_select()
                     for _ in range(20):
-                        if app.state.snapshot.status == "loading history":
+                        if resume_started.is_set():
                             break
                         await pilot.pause(0.01)
-
                     status_bar = app.query_one("#status-bar").render().plain
                     self.assertEqual(app.state.snapshot.status, "loading history")
                     self.assertIn("加载历史会话", status_bar)
                     self.assertIn(status_bar.strip()[:1], "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                    self.assertIn("加载历史会话", app.state.blocks[0].body)
+                    resume_release.set()
+                    for _ in range(50):
+                        if resumed and not app._submitting:
+                            break
+                        await pilot.pause(0.01)
+                    self.assertEqual(resumed, [previous.id])
+                    self.assertEqual(app.state.snapshot.status, "idle")
 
-                    await pilot.pause(0.35)
+        _run(_test())
+
+    def test_new_session_icon_restarts_workspace_session(self):
+        async def _test():
+            with patch(
+                "harness_code_agent.tui.app.InteractiveSession",
+                return_value=_mock_session(self.root),
+            ):
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.click("#new-session-button")
+                    for _ in range(50):
+                        if not app._new_session_in_flight and app.session is not None:
+                            break
+                        await pilot.pause(0.01)
+                    self.assertFalse(app._new_session_in_flight)
+                    self.assertIsNotNone(app.session)
                     self.assertEqual(app.state.snapshot.status, "idle")
 
         _run(_test())
@@ -460,40 +514,6 @@ class TuiInteractiveTests(unittest.TestCase):
                         "next",
                     )
                     command_release.set()
-
-        _run(_test())
-
-    def test_resume_command_shows_history_loading_status(self):
-        async def _test():
-            command_started = threading.Event()
-            command_release = threading.Event()
-            mock = _mock_session(self.root)
-
-            def handle_resume(line):
-                command_started.set()
-                command_release.wait(2)
-                return True
-
-            mock.handle_slash_command = handle_resume
-            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
-                MockSession.return_value = mock
-                app = TuiApp(cwd=self.root, profile_name="coding-agent")
-                async with app.run_test() as pilot:
-                    self.assertTrue(app._submit_async("/resume old-session"))
-                    for _ in range(20):
-                        if command_started.is_set():
-                            break
-                        await pilot.pause(0.01)
-
-                    self.assertEqual(app.state.snapshot.status, "loading history")
-                    self.assertIn("加载历史会话", app.query_one("#status-bar").render().plain)
-                    command_release.set()
-                    for _ in range(50):
-                        if app.state.snapshot.status == "idle":
-                            break
-                        await pilot.pause(0.01)
-
-                    self.assertEqual(app.state.snapshot.status, "idle")
 
         _run(_test())
 

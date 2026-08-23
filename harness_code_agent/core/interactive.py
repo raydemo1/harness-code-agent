@@ -114,7 +114,6 @@ class InteractiveSession:
         *,
         cwd: str | Path,
         profile_name: str = PRODUCT_DEFAULT_PROFILE,
-        resume_session_id: str | None = None,
         stream_sink: Callable[[str], None] | None = None,
         event_listener: Callable[[object], None] | None = None,
         approval_provider: ApprovalProvider | None = None,
@@ -146,24 +145,12 @@ class InteractiveSession:
         self._slash_registry = None
         self.session_store = SessionStore(self.cwd / ".harness")
         self.session_store.root.mkdir(parents=True, exist_ok=True)
-        self.resume_session_id = resume_session_id
+        self.resume_session_id: str | None = None
         self.resume_context: str | None = None
         inferred_explicit = profile_name != PRODUCT_DEFAULT_PROFILE
         self.profile_explicit = inferred_explicit if profile_explicit is None else profile_explicit
         self._pending_profile_name = profile_name
         self._profile_source = "explicit" if self.profile_explicit else "default"
-        if resume_session_id:
-            self._report_startup("loading history")
-            metadata = self.session_store.read_metadata(resume_session_id)
-            self.cwd = Path(metadata["cwd"]).resolve()
-            config.WORKSPACE = str(self.cwd)
-            self.session_store = SessionStore(self.cwd / ".harness")
-            self.session_store.root.mkdir(parents=True, exist_ok=True)
-            self._pending_profile_name = metadata.get("profile") or profile_name
-            self._profile_source = "resume"
-            self.resume_context = _build_resume_context(self.session_store, resume_session_id)
-            self._report_startup("history loaded")
-
         self.profile = get_profile(self._pending_profile_name)
         self._report_startup("preparing checkpoints")
         try:
@@ -957,19 +944,19 @@ class InteractiveSession:
             )
         return "MCP reloaded\n" + self.mcp_manager.status_report()
 
-    def _inject_resume_context(self, session_id: str) -> str:
+    def resume_from_session(self, session_id: str) -> None:
+        """Load a selected history session into the active conversation."""
         context_text = _build_resume_context(self.session_store, session_id)
         self.resume_session_id = session_id
         self.resume_context = context_text
         if not self.is_bound:
-            return f"Resume context queued for session: {session_id}"
+            return
         if self.session is not None:
             self.session_store.update_resumed_from(self.session.id, session_id)
         self._append_conversation_message({
             "role": "user",
             "content": f"Resume context:\n{context_text}",
         })
-        return f"Resumed context injected for session: {session_id}"
 
     def _externalize_large_turn_text(self, label: str, text: str, *, intro: str) -> str:
         limit = _env_int("HARNESS_TURN_INLINE_CHAR_LIMIT", TURN_INLINE_CHAR_LIMIT)

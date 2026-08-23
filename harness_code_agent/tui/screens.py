@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.text import Text
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Input, Static
+from textual.widgets import Input, OptionList, Static
+from textual.widgets.option_list import Option
 
 if TYPE_CHECKING:
     from ..runtime.approvals import ApprovalRequest
@@ -36,13 +39,200 @@ class QuestionResult(Message, bubble=True):
         self.payload = payload
 
 
+class ResumeSessionScreen(ModalScreen[dict | None]):
+    """Searchable in-app picker for local history sessions.
+
+    The picker deliberately owns the human-facing flow. Session identifiers are
+    kept only as option metadata so users choose a readable session entry
+    instead of having to remember or type an internal id.
+    """
+
+    BINDINGS: ClassVar[list] = [
+        Binding("escape", "close", "关闭", show=False, priority=True),
+        Binding("ctrl+c", "close", "关闭", show=False, priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    ResumeSessionScreen {
+        align: center middle;
+    }
+
+    #resume-panel {
+        width: 84;
+        height: 68%;
+        min-height: 12;
+        border: solid $border-blurred;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #resume-search {
+        height: 3;
+        margin-bottom: 1;
+    }
+
+    #resume-options {
+        height: 1fr;
+        border: solid $border-blurred;
+        background: $background;
+    }
+
+    #resume-status {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(
+        self,
+        load_sessions: Callable[[], list[dict[str, Any]]],
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._load_sessions_fn = load_sessions
+        self._sessions: list[dict[str, Any]] = []
+        self._filtered_sessions: list[dict[str, Any]] = []
+        self._spinner_index = 0
+        self._loading = True
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="resume-panel"):
+            yield Input(placeholder="⌕  搜索会话…", id="resume-search")
+            yield OptionList(id="resume-options")
+            yield Static("⠋", id="resume-status")
+
+    def on_mount(self) -> None:
+        self.set_interval(0.12, self._advance_spinner)
+        self.query_one("#resume-search", Input).focus()
+        self._load_sessions()
+
+    @work(thread=True, exclusive=True, exit_on_error=False)
+    def _load_sessions(self) -> None:
+        try:
+            sessions = list(self._load_sessions_fn())
+        except Exception as exc:  # noqa: BLE001 - picker must surface loader failures
+            self.post_message(ResumeSessionLoadFailed(f"{type(exc).__name__}: {exc}"))
+            return
+        self.post_message(ResumeSessionListLoaded(sessions))
+
+    def _advance_spinner(self) -> None:
+        if not self._loading:
+            return
+        frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self._spinner_index = (self._spinner_index + 1) % len(frames)
+        try:
+            self.query_one("#resume-status", Static).update(
+                frames[self._spinner_index]
+            )
+        except NoMatches:
+            return
+
+    def on_resume_session_list_loaded(self, message: ResumeSessionListLoaded) -> None:
+        self._loading = False
+        self._sessions = message.sessions
+        self._apply_filter("")
+        self.query_one("#resume-options", OptionList).focus()
+        status = "暂无历史会话" if not self._sessions else ""
+        self.query_one("#resume-status", Static).update(status)
+        self.query_one("#resume-status", Static).display = not bool(self._sessions)
+
+    def on_resume_session_load_failed(self, message: ResumeSessionLoadFailed) -> None:
+        self._loading = False
+        self.query_one("#resume-status", Static).update("⚠")
+        self.query_one("#resume-options", OptionList).clear_options()
+
+    @on(Input.Changed, "#resume-search")
+    def _on_search_changed(self, event: Input.Changed) -> None:
+        self._apply_filter(event.value)
+
+    @on(Input.Submitted, "#resume-search")
+    def _on_search_submitted(self) -> None:
+        options = self.query_one("#resume-options", OptionList)
+        if options.option_count:
+            options.focus()
+            options.action_select()
+
+    @on(OptionList.OptionSelected, "#resume-options")
+    def _on_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option_id
+        if not option_id or not option_id.startswith("session:"):
+            return
+        session_id = option_id.removeprefix("session:")
+        selected = next(
+            (item for item in self._filtered_sessions if str(item.get("id")) == session_id),
+            None,
+        )
+        if selected is not None:
+            self.dismiss(selected)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def _apply_filter(self, query: str) -> None:
+        normalized = " ".join(str(query or "").lower().split())
+        if not normalized:
+            self._filtered_sessions = list(self._sessions)
+        else:
+            self._filtered_sessions = [
+                item
+                for item in self._sessions
+                if normalized in str(item.get("search_text", "")).lower()
+            ]
+        options = self.query_one("#resume-options", OptionList)
+        options.clear_options()
+        for item in self._filtered_sessions:
+            options.add_option(
+                Option(
+                    _session_option_prompt(item),
+                    id=f"session:{item.get('id', '')}",
+                )
+            )
+
+
+def _session_option_prompt(item: dict[str, Any]) -> Text:
+    """Render a quiet title + relative age row, keeping ids out of the UI."""
+    title = str(item.get("label") or "未命名")
+    age = str(item.get("age") or "")
+    prompt = Text(title, style="#f5f5f5")
+    if age:
+        prompt.append("    ")
+        prompt.append(age, style="#9a9a9a")
+    return prompt
+
+
+class ResumeSessionListLoaded(Message):
+    def __init__(self, sessions: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self.sessions = sessions
+
+
+class ResumeSessionLoadFailed(Message):
+    def __init__(self, error: str) -> None:
+        super().__init__()
+        self.error = error
+
+
 # ── ApprovalPanel ───────────────────────────────────────────────────────────
 
 _APPROVE = 0
 _PERSIST = 1
 _DENY = 2
 
-_APPROVAL_LABELS = ["Approve", "Persist", "Deny"]
+_APPROVAL_LABELS = ["仅本次允许", "信任此前缀", "拒绝"]
+_RISK_LABELS = {
+    "shell_safe": "Shell 安全",
+    "shell_risky": "Shell 有风险",
+    "shell_blocked": "Shell 已拦截",
+}
+_ARG_LABELS = {
+    "path": "路径",
+    "file_path": "文件路径",
+    "command": "命令",
+    "url": "地址",
+    "task": "任务",
+    "query": "查询",
+}
 
 
 class ApprovalPanel(Vertical):
@@ -66,6 +256,8 @@ class ApprovalPanel(Vertical):
     def __init__(self, request: ApprovalRequest, **kwargs):
         super().__init__(**kwargs)
         self._request = request
+        from .approval import _persistent_prefix_for_request
+        self._persist_available = _persistent_prefix_for_request(request) is not None
         self._selected_index = _APPROVE
         self._armed_key: str | None = None
 
@@ -76,14 +268,14 @@ class ApprovalPanel(Vertical):
     def _format_body(self) -> str:
         req = self._request
         lines = [
-            "[bold]⚠ Approval required[/]",
-            f"tool: {req.tool_name}    risk: {req.risk}",
+            "[bold]⚠ 需要确认[/]",
+            f"工具：{req.tool_name}    风险：{_RISK_LABELS.get(req.risk, req.risk)}",
         ]
         if req.reason:
-            lines.append(f"reason: {req.reason}")
+            lines.append(f"原因：{_localize_approval_reason(req.reason)}")
         if req.tool_name == "run_bash":
             cmd = req.args.get("command", "")
-            lines.append(f"$ {cmd}")
+            lines.append(f"命令：$ {cmd}")
         else:
             priority = ("path", "file_path", "command", "url", "task", "query")
             keys = sorted(
@@ -94,13 +286,15 @@ class ApprovalPanel(Vertical):
                 val_str = str((req.args or {}).get(key, ""))
                 if len(val_str) > 200:
                     val_str = val_str[:197] + "..."
-                lines.append(f"  {key}: {val_str}")
-        lines.append("[dim]←→ or 1-3 select · enter approve · esc deny[/]")
+                lines.append(f"  {_ARG_LABELS.get(key, key)}：{val_str}")
+        lines.append("[dim]←→ 或 1-3 选择 · 回车确认 · Esc 拒绝[/]")
         return "\n".join(lines)
 
     def _format_choices(self) -> Text:
         parts = []
         for i, label in enumerate(_APPROVAL_LABELS):
+            if i == _PERSIST and not self._persist_available:
+                label = "无法信任"
             marker = "▶" if i == self._selected_index else " "
             parts.append((f"{marker} [{i + 1}] {label}", i == self._selected_index))
         text = Text()
@@ -109,7 +303,9 @@ class ApprovalPanel(Vertical):
                 text.append("   ", style="dim")
             if selected:
                 text.append(part, style="bold")
-            elif part.endswith("Deny"):
+            elif i == _PERSIST and not self._persist_available:
+                text.append(part, style="dim")
+            elif part.endswith("拒绝"):
                 text.append(part, style="red")
             else:
                 text.append(part)
@@ -135,6 +331,8 @@ class ApprovalPanel(Vertical):
         if key.isdigit() and 1 <= int(key) <= 3:
             num = int(key)
             target = num - 1
+            if target == _PERSIST and not self._persist_available:
+                return True
             if self._selected_index == target and self._armed_key == key:
                 self._submit()
                 return True
@@ -145,12 +343,16 @@ class ApprovalPanel(Vertical):
 
         # Arrow keys
         if key == "left":
-            self._selected_index = (self._selected_index - 1) % 3
+            choices = [_APPROVE, _PERSIST, _DENY] if self._persist_available else [_APPROVE, _DENY]
+            current = choices.index(self._selected_index)
+            self._selected_index = choices[(current - 1) % len(choices)]
             self._armed_key = None
             self._refresh_choices()
             return True
         elif key == "right":
-            self._selected_index = (self._selected_index + 1) % 3
+            choices = [_APPROVE, _PERSIST, _DENY] if self._persist_available else [_APPROVE, _DENY]
+            current = choices.index(self._selected_index)
+            self._selected_index = choices[(current + 1) % len(choices)]
             self._armed_key = None
             self._refresh_choices()
             return True
@@ -208,7 +410,7 @@ class QuestionPanel(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(self._format_body(), id="q-body", classes="body")
         yield Static(self._format_choices(), id="q-choices")
-        yield Input(placeholder="Other...", id="q-other-input")
+        yield Input(placeholder="其他说明…", id="q-other-input")
 
     def on_mount(self) -> None:
         other = self.query_one("#q-other-input", Input)
@@ -318,11 +520,11 @@ class QuestionPanel(Vertical):
 class ObservabilityScreen(ModalScreen[None]):
     """Temporary observability dashboard opened by keyboard shortcut."""
 
-    BINDINGS = [
-        Binding("escape", "close", "Close", show=False, priority=True),
-        Binding("tab", "toggle_mode", "Toggle mode", show=False, priority=True),
-        Binding("r", "refresh", "Refresh", show=False, priority=True),
-        Binding("e", "export", "Export", show=False, priority=True),
+    BINDINGS: ClassVar[list] = [
+        Binding("escape", "close", "关闭", show=False, priority=True),
+        Binding("tab", "toggle_mode", "切换范围", show=False, priority=True),
+        Binding("r", "refresh", "刷新", show=False, priority=True),
+        Binding("e", "export", "导出", show=False, priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -378,15 +580,18 @@ class ObservabilityScreen(ModalScreen[None]):
         self._refresh()
 
     def action_refresh(self) -> None:
-        self._message = "refreshed"
+        self._message = "已刷新"
         self._refresh()
 
     def action_export(self) -> None:
-        from ..sessions.observability import export_observability_report, format_export_result
+        from ..sessions.observability import (
+            export_observability_report,
+            format_export_result,
+        )
 
         session_id = self._current_session_id() if self._mode == "current" else None
         if self._mode == "current" and not session_id:
-            self._message = "No active session yet. Submit a task first."
+            self._message = "当前还没有会话，请先提交任务。"
             self._refresh()
             return
         result = export_observability_report(
@@ -398,20 +603,24 @@ class ObservabilityScreen(ModalScreen[None]):
         self._refresh()
 
     def _refresh(self) -> None:
-        from ..sessions.observability import format_project_observability, format_session_observability
+        from ..sessions.observability import (
+            format_project_observability,
+            format_session_observability,
+        )
 
         if self._mode == "project":
-            title = "Observability - project overview"
+            title = "可观测性 · 项目概览"
             body = format_project_observability(self._session.session_store)
         else:
-            title = "Observability - current session"
+            title = "可观测性 · 当前会话"
             session_id = self._current_session_id()
             body = (
                 format_session_observability(self._session.session_store, session_id)
                 if session_id
                 else self._current_session_body()
             )
-        footer = "Tab: mode  r: refresh  e: export  Esc: close"
+        body = _localize_observability_text(body)
+        footer = "Tab：切换范围  R：刷新  E：导出  Esc：关闭"
         if self._message:
             footer += f"\n{self._message}"
         self.query_one("#observability-title", Static).update(title)
@@ -424,4 +633,58 @@ class ObservabilityScreen(ModalScreen[None]):
         return str(session_id) if session_id else None
 
     def _current_session_body(self) -> str:
-        return "No active session yet. Submit a task first."
+        return "当前还没有会话，请先提交任务。"
+
+
+def _localize_observability_text(text: str) -> str:
+    """Translate the observability formatter for the Chinese TUI surface."""
+    replacements = {
+        "Observability dashboard": "可观测性面板",
+        "Project observability": "项目可观测性",
+        "session:": "会话：",
+        "profile:": "配置：",
+        "model:": "模型：",
+        "status:": "状态：",
+        "created_at:": "创建时间：",
+        "tokens:": "令牌：",
+        "tools:": "工具：",
+        "performance:": "性能：",
+        "audit:": "审计：",
+        "tool breakdown:": "工具明细：",
+        "recent audit events:": "最近审计事件：",
+        "top token sessions:": "令牌消耗最多的会话：",
+        "top failure sessions:": "失败最多的会话：",
+        "low cache sessions:": "缓存命中率较低的会话：",
+        "sessions:": "会话数：",
+        "calls=": "调用=",
+        "results=": "结果=",
+        "success=": "成功=",
+        "failed=": "失败=",
+        "unknown=": "未知=",
+        "pending=": "待处理=",
+        "cache hit ratio:": "缓存命中率：",
+        "success rate:": "成功率：",
+        "缓存命中率： ": "缓存命中率：",
+        "成功率： ": "成功率：",
+        "llm_调用=": "模型调用=",
+        "llm_response=": "模型响应=",
+        "ttft=": "首 token=",
+        "turn=": "回合=",
+        "pending: ": "待处理：",
+    }
+    localized = str(text or "")
+    for source, target in replacements.items():
+        localized = localized.replace(source, target)
+    return localized
+
+
+def _localize_approval_reason(reason: str) -> str:
+    replacements = {
+        "workspace-write mode requires user approval for non-whitelisted commands and tools": "工作区可写模式下，未在白名单中的命令和工具需要用户确认",
+        "workspace-write mode requires user approval": "工作区可写模式需要用户确认",
+        "permission policy denied": "权限策略拒绝了此次执行",
+    }
+    localized = str(reason or "")
+    for source, target in replacements.items():
+        localized = localized.replace(source, target)
+    return localized

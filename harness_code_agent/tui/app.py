@@ -6,15 +6,17 @@ import os
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import TextArea
+from textual.widgets import Button, TextArea
 
 log = logging.getLogger("harness.tui")
 
@@ -40,7 +42,7 @@ from ..core.mentions import MentionResolutionError
 from .approval import TuiApprovalProvider
 from .commands import default_command_registry
 from .question import TuiQuestionProvider
-from .screens import ApprovalResult, QuestionResult
+from .screens import ApprovalResult, QuestionResult, ResumeSessionScreen
 from .state import SessionStatusSnapshot, TranscriptBlock, TuiState
 from .widgets import (
     InputArea,
@@ -88,6 +90,10 @@ class SubmitError(Message):
     def __init__(self, error: str) -> None:
         super().__init__()
         self.error = error
+
+
+class ResumeSessionComplete(Message):
+    """A history session was loaded through the picker."""
 
 
 class SlashCommandComplete(Message):
@@ -236,6 +242,30 @@ class TuiApp(App):
         background: $panel;
     }
 
+    #session-actions {
+        height: 3;
+        width: 1fr;
+        align: right middle;
+        padding-right: 1;
+        background: $background;
+    }
+
+    #session-actions Button {
+        width: 4;
+        height: 3;
+        margin: 0;
+        border: none;
+        background: $background;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #session-actions Button:hover,
+    #session-actions Button:focus {
+        background: $panel;
+        color: $accent;
+    }
+
     #status-bar {
         height: 1;
         margin: 0 1;
@@ -282,14 +312,12 @@ class TuiApp(App):
         cwd: str | Path,
         profile_name: str,
         profile_explicit: bool = False,
-        resume_session_id: str | None = None,
         first_task: str = "",
     ):
         super().__init__()
         self.cwd = Path(cwd).resolve()
         self.profile_name = profile_name
         self.profile_explicit = profile_explicit
-        self.resume_session_id = resume_session_id
         self.first_task = first_task
         self._session_factory = InteractiveSession
         self.registry = default_command_registry()
@@ -327,6 +355,9 @@ class TuiApp(App):
         return True
 
     def compose(self) -> ComposeResult:
+        with Horizontal(id="session-actions"):
+            yield Button("◷", id="resume-button", variant="default", tooltip="历史会话")
+            yield Button("＋", id="new-session-button", variant="default", tooltip="新会话")
         yield TranscriptView(id="transcript")
         yield InputArea(registry=self.registry, id="input-area")
         yield StatusBar(id="status-bar")
@@ -376,7 +407,6 @@ class TuiApp(App):
                 cwd=self.cwd,
                 profile_name=self.profile_name,
                 profile_explicit=self.profile_explicit,
-                resume_session_id=self.resume_session_id,
                 stream_sink=self._stream_delta,
                 event_listener=self._event_listener,
                 approval_provider=approval_provider,
@@ -431,6 +461,7 @@ class TuiApp(App):
         self.state.snapshot.session_id = session_id
         self.state.snapshot.cwd = Path(self.session.cwd)
         self.state.snapshot.status = "idle" if is_bound else "pending"
+        self._new_session_in_flight = False
 
         for event in self._pending_events:
             self._process_session_event(event)
@@ -445,6 +476,7 @@ class TuiApp(App):
         self.state.blocks = [block for block in self.state.blocks if block.title != "starting"]
         self._redraw_transcript()
         self._refresh_bars()
+        self._input_enabled(True)
         if hasattr(self.session, "warm_mcp_tools"):
             self._warm_mcp_tools()
         self._drain_pending_submissions()
@@ -462,6 +494,8 @@ class TuiApp(App):
         self.state.blocks = [block for block in self.state.blocks if block.title != "starting"]
         self._output(msg.error, title="startup failed")
         self._refresh_bars()
+        self._new_session_in_flight = False
+        self._input_enabled(True)
 
     def on_context_snapshot_ready(self, msg: ContextSnapshotReady) -> None:
         """Apply a context snapshot without blocking the UI thread."""
@@ -480,6 +514,14 @@ class TuiApp(App):
         """Update completion palette based on input text."""
         input_area = self.query_one("#input-area", InputArea)
         input_area._update_completions(event.text_area.text)
+
+    @on(Button.Pressed, "#resume-button")
+    def _on_resume_button_pressed(self, _event: Button.Pressed) -> None:
+        self.action_resume()
+
+    @on(Button.Pressed, "#new-session-button")
+    def _on_new_session_button_pressed(self, _event: Button.Pressed) -> None:
+        self.action_new_session()
 
     def on_key(self, event) -> None:
         """Route keys to active inline panels even if terminal focus drifts."""
@@ -535,9 +577,7 @@ class TuiApp(App):
         """Dispatch one accepted submission. Non-blocking for agent turns."""
         if self._is_local_slash_command(text):
             self._submitting = True
-            self.state.snapshot.status = (
-                "loading history" if self._is_resume_command(text) else "running command"
-            )
+            self.state.snapshot.status = "running command"
             self._refresh_bars()
             self._slash_command_worker(text)
             return True
@@ -570,10 +610,6 @@ class TuiApp(App):
             self.registry is not None and self.registry.is_agent_command(text)
         )
 
-    @staticmethod
-    def _is_resume_command(text: str) -> bool:
-        return str(text or "").strip().split(maxsplit=1)[:1] == ["/resume"]
-
     @work(thread=True, group="turn", exclusive=True, exit_on_error=False)
     def _slash_command_worker(self, text: str) -> None:
         try:
@@ -585,6 +621,7 @@ class TuiApp(App):
 
     def on_slash_command_complete(self, msg: SlashCommandComplete) -> None:
         self._submitting = False
+        self._new_session_in_flight = False
         self.state.snapshot.status = "idle"
         self._refresh_bars()
         if not msg.should_continue:
@@ -767,6 +804,139 @@ class TuiApp(App):
 
         if hasattr(self, "session"):
             self.push_screen(ObservabilityScreen(self.session))
+
+    def action_resume(self) -> None:
+        """Open the readable history picker instead of asking for a session id."""
+        if self._submitting or self._new_session_in_flight:
+            return
+        self.push_screen(
+            ResumeSessionScreen(self._load_resume_sessions),
+            self._on_resume_session_selected,
+        )
+
+    def action_new_session(self) -> None:
+        """Start a clean local session from the top-right action button."""
+        if self._submitting or self._new_session_in_flight:
+            return
+        old_session = self.session
+        self.session = None
+        self._new_session_in_flight = True
+        self._pending_submissions.clear()
+        self._clear_pending_stream_deltas()
+        self._streaming_current_response = False
+        self._stream_header_printed = False
+        self.state.snapshot.session_id = None
+        self.state.snapshot.turn = 0
+        self.state.snapshot.dirty_count = 0
+        self.state.snapshot.context_tokens = 0
+        self.state.snapshot.status = "starting"
+        self.state.blocks = [
+            TranscriptBlock("status", "starting", "", "running")
+        ]
+        self._input_enabled(False)
+        self._redraw_transcript()
+        self._refresh_bars()
+        self._restart_session_worker(old_session)
+
+    @work(thread=True, group="startup", exclusive=True, exit_on_error=False)
+    def _restart_session_worker(self, old_session) -> None:
+        try:
+            if old_session is not None:
+                old_session.close()
+            permission_provider = TuiApprovalProvider(project_root=self.cwd, app_tui=self)
+            question_provider = TuiQuestionProvider(app_tui=self)
+            session = self._session_factory(
+                cwd=self.cwd,
+                profile_name=self.profile_name,
+                profile_explicit=self.profile_explicit,
+                stream_sink=self._stream_delta,
+                event_listener=self._event_listener,
+                approval_provider=permission_provider,
+                question_provider=question_provider,
+                output_sink=self._output,
+                enable_turn_summary=False,
+                startup_sink=self._startup_progress,
+            )
+        except Exception as exc:
+            self.post_message(SessionStartupError(f"{type(exc).__name__}: {exc}"))
+            return
+        if self._exiting:
+            try:
+                session.close()
+            except Exception:
+                log.debug("Error closing a session that finished after TUI exit", exc_info=True)
+            return
+        self.post_message(SessionReady(session))
+
+    def _load_resume_sessions(self) -> list[dict]:
+        """Build picker rows off the UI thread from the current workspace store."""
+        from ..sessions.store import SessionStore
+
+        store = getattr(self.session, "session_store", None)
+        if store is None:
+            store = SessionStore(self.cwd / ".harness")
+        rows: list[dict] = []
+        for metadata in store.list_sessions():
+            session_id = str(metadata.get("id") or "").strip()
+            if not session_id:
+                continue
+            preview = ""
+            has_user_input = False
+            try:
+                for event in reversed(store.read_events(session_id)):
+                    if event.get("type") == "user_input":
+                        has_user_input = True
+                        preview = str((event.get("payload") or {}).get("text") or "")
+                        break
+            except (OSError, ValueError, KeyError, TypeError):
+                log.debug("Could not read session preview", exc_info=True)
+            if not has_user_input:
+                continue
+            preview = _preview_submission(preview, limit=64) or "未命名会话"
+            profile = str(metadata.get("profile") or "通用")
+            label = preview
+            rows.append(
+                {
+                    "id": session_id,
+                    "label": label,
+                    "age": _format_session_age(metadata.get("created_at")),
+                    "search_text": " ".join(
+                        [label, str(metadata.get("cwd") or ""), profile]
+                    ),
+                }
+            )
+        return rows
+
+    def _on_resume_session_selected(self, selected: dict | None) -> None:
+        if not selected:
+            return
+        session_id = str(selected.get("id") or "").strip()
+        if not session_id or self.session is None:
+            return
+        self._start_resume(session_id)
+
+    def _start_resume(self, session_id: str) -> None:
+        self._submitting = True
+        self._input_enabled(False)
+        self.state.snapshot.status = "loading history"
+        self._refresh_bars()
+        self._resume_session_worker(session_id)
+
+    @work(thread=True, group="resume", exclusive=True, exit_on_error=False)
+    def _resume_session_worker(self, session_id: str) -> None:
+        try:
+            self._startup_progress("loading history")
+            self.session.resume_from_session(session_id)
+            self._startup_progress("history loaded")
+            self.post_message(ResumeSessionComplete())
+        except Exception as exc:
+            self.post_message(SubmitError(str(exc)))
+
+    def on_resume_session_complete(self, _message: ResumeSessionComplete) -> None:
+        self._submitting = False
+        self._input_enabled(True)
+        self.state.snapshot.status = "idle"
+        self._refresh_bars()
 
     def action_toggle_permission(self) -> None:
         """Toggle runtime permission mode (dispatched to worker thread)."""
@@ -1069,6 +1239,22 @@ def _preview_submission(text: str, limit: int = 80) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: max(0, limit - 3)] + "..."
+
+
+def _format_session_age(value: object) -> str:
+    """Format a stored UTC timestamp as the compact age shown in the picker."""
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        elapsed = max(0.0, (datetime.now(stamp.tzinfo) - stamp).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if elapsed < 60:
+        return "刚刚"
+    if elapsed < 86_400:
+        return f"{int(elapsed // 3_600)}小时前"
+    if elapsed < 7 * 86_400:
+        return f"{int(elapsed // 86_400)}天前"
+    return stamp.astimezone().strftime("%m-%d")
 
 
 def _localize_tui_label(label: str) -> str:

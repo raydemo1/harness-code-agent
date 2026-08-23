@@ -3,15 +3,32 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import config
-from .core.formatters import print_session
-from .core.interactive import PRODUCT_DEFAULT_PROFILE, InteractiveSession, print_turn_result
-from .core.mentions import MentionResolutionError
-from .sessions.store import SessionStore
-from .tui import TuiApp
+
+if TYPE_CHECKING:
+    from .core.interactive import InteractiveSession
+    from .sessions.store import SessionStore
+
+PRODUCT_DEFAULT_PROFILE = "general"
+
+
+def InteractiveSession(**kwargs):
+    """Lazy session constructor kept patchable for CLI tests and embedders."""
+    from .core.interactive import InteractiveSession as Session
+
+    return Session(**kwargs)
+
+
+def TuiApp(**kwargs):
+    """Lazy TUI constructor so non-interactive CLI commands stay lightweight."""
+    from .tui import TuiApp as App
+
+    return App(**kwargs)
 
 
 def _configure_stdio_encoding() -> None:
@@ -23,11 +40,9 @@ def _configure_stdio_encoding() -> None:
     if sys.platform != "win32":
         return
     for stream in (sys.stdout, sys.stderr):
-        try:
+        with contextlib.suppress(Exception):  # non-TTY or already configured — best-effort
             if hasattr(stream, "reconfigure"):
                 stream.reconfigure(encoding="utf-8")
-        except Exception:
-            pass  # non-TTY or already configured — best-effort
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,16 +59,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="veriforge", description="VeriForge interactive local coding agent")
     parser.add_argument("task", nargs="*", help="Optional first task to submit after startup")
     parser.add_argument("--profile", default=PRODUCT_DEFAULT_PROFILE, help="Profile name to use before the session starts")
-    parser.add_argument("--resume", help="Session id to resume as context")
     parser.add_argument("-p", "--print", dest="print_mode", action="store_true",
         help="Execute a single task and print results (no REPL)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--list-profiles", action="store_true", help="List profiles and exit")
     args = parser.parse_args(argv)
     profile_explicit = any(arg == "--profile" or arg.startswith("--profile=") for arg in argv)
+    is_tty = _is_interactive_tty()
 
     from .core.logging_config import setup_logging
-    setup_logging(verbose=args.verbose)
+    setup_logging(
+        verbose=args.verbose,
+        console=args.list_profiles or args.print_mode or not is_tty,
+    )
 
     if args.list_profiles:
         from .core.formatters import print_profiles
@@ -67,7 +85,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     cwd = Path.cwd()
-    is_tty = _is_interactive_tty()
 
     if args.print_mode or not is_tty:
         if not first_task and not args.print_mode:
@@ -85,7 +102,6 @@ def main(argv: list[str] | None = None) -> int:
             cwd=cwd,
             profile_name=args.profile,
             profile_explicit=profile_explicit,
-            resume_session_id=args.resume,
             first_task=first_task,
             stream_sink=stream_sink,
         )
@@ -95,7 +111,6 @@ def main(argv: list[str] | None = None) -> int:
             cwd=cwd,
             profile_name=args.profile,
             profile_explicit=profile_explicit,
-            resume_session_id=args.resume,
             first_task=first_task,
         )
     except Exception as e:
@@ -108,17 +123,18 @@ def run_batch(
     *,
     cwd: Path,
     profile_name: str,
-    resume_session_id: str | None,
     first_task: str,
     stream_sink=None,
     profile_explicit: bool = False,
 ) -> int:
+    from .core.interactive import print_turn_result
+    from .core.mentions import MentionResolutionError
+
     try:
         session = InteractiveSession(
             cwd=cwd,
             profile_name=profile_name,
             profile_explicit=profile_explicit,
-            resume_session_id=resume_session_id,
             stream_sink=stream_sink,
         )
     except Exception as e:
@@ -180,6 +196,9 @@ def _build_stream_callback():
 
 
 def show_latest_session(cwd: Path) -> int:
+    from .core.formatters import print_session
+    from .sessions.store import SessionStore
+
     store = SessionStore(cwd / ".harness")
     try:
         print_session(store, _latest_session_id(store))
@@ -196,6 +215,7 @@ def observe_session(cwd: Path, args: list[str]) -> int:
         format_project_observability,
         format_session_observability,
     )
+    from .sessions.store import SessionStore
 
     export = False
     target_args = list(args)
@@ -228,6 +248,9 @@ def observe_session(cwd: Path, args: list[str]) -> int:
 
 
 def _submit_and_print(session: InteractiveSession, line: str) -> None:
+    from .core.interactive import print_turn_result
+    from .core.mentions import MentionResolutionError
+
     try:
         result = session.submit(line)
     except MentionResolutionError as e:

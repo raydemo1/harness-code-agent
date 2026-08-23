@@ -2,15 +2,15 @@
 
 VeriForge — Verifiable Coding-Agent Runtime
 
-VeriForge 是一个面向真实代码仓库的 coding-agent runtime。它把 profile、工具权限、会话记录、上下文管理、失败恢复、验收检查和 benchmark adapter 放在同一套运行时里，让 agent 的每一步都有记录，也有验证入口。
+VeriForge 是一个面向真实代码仓库的 coding-agent runtime，提供 profile、工具权限、会话、上下文、恢复、验收和评测能力。
 
-项目基于 OpenAI-compatible Chat Completions API，可接入 DeepSeek、OpenAI 等兼容服务。平时可以用它修 bug、补测试、做 review、写计划或构建小型 Web 应用；需要评测时，仍然使用同一套 runtime 跑 Terminal-Bench 和 Claw-SWE-Bench 风格任务。
+项目基于 OpenAI-compatible Chat Completions API，可接入 DeepSeek、OpenAI 等兼容服务。它支持修 bug、补测试、做 review、写计划、构建小型 Web 应用，以及运行 Terminal-Bench 和 Claw-SWE-Bench 风格评测。
 
 ## TUI 预览
 
 ![VeriForge TUI：计划进度、对话区、输入框与运行状态](https://raw.githubusercontent.com/raydemo1/veriforge-agent/main/docs/images/veriforge-tui.png)
 
-终端界面会把任务计划、当前 profile 和运行状态放在对话流里。工具调用、恢复过程和验收结果则写进同一条 session 轨迹，之后可以继续运行或回看。
+终端界面展示任务计划、当前 profile 和运行状态；工具调用、恢复过程和验收结果统一归档到 session。
 
 ## 为什么做这个
 
@@ -34,7 +34,7 @@ VeriForge 把这些边界放进 runtime：什么时候读代码、什么时候�
 
 本地结果来自 VeriForge，官方参考来自 DeepSeek Harness；两者使用同一个模型版本和 Terminal-Bench 2.1 评测集，但推理强度按各自运行配置记录。
 
-我在这个项目里更关心模型之外的部分：profile、工具治理、失败恢复、上下文管理，以及一份能从原始产物复盘出来的评测账本。
+项目重点是模型之外的 profile、工具治理、失败恢复、上下文管理和评测账本。
 
 其他运行记录：
 
@@ -75,7 +75,7 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 | Session log | 记录事件、观察、工具结果、LLM usage 和 checkpoint，方便复盘 |
 | Eval ledger | 从 raw 结果重建 task-level 真相，避免单次中断或环境波动污染总结果 |
 
-一句话概括：让 agent 在真实仓库里工作，同时把过程留下来、把结果验出来。
+一句话概括：让 agent 在真实仓库里工作，并对结果进行验证。
 
 ## 项目结构
 
@@ -116,13 +116,13 @@ cd veriforge-agent
 pip install -e .
 ```
 
-如果只想在源码目录临时运行，也可以安装 `requirements.txt` 后使用：
+源码目录运行：
 
 ```bash
 python -m harness_code_agent.cli
 ```
 
-但推荐 editable install，因为它会注册 `veriforge` 命令。
+editable install 会注册 `veriforge` 命令。
 
 如果要使用 `app-builder` 的浏览器验证：
 
@@ -209,9 +209,7 @@ Shift+Enter   插入换行
 Tab           接受补全
 Esc           关闭补全
 Ctrl-C        取消当前 turn
-Ctrl-T        切换 thought 元信息显示
-Ctrl-K        手动压缩上下文
-Ctrl-P        切换权限模式
+Ctrl-O        打开可观测性
 ```
 
 ## Profiles
@@ -251,13 +249,13 @@ TUI 中可用短命令：
 
 ## Skills
 
-Skills 采用渐进式披露。VeriForge 不会把所有长规则常驻塞进 prompt，而是先给模型一个精简 catalog；当任务需要某个 skill 时，再用 `read_skill_file` 读取完整说明。
+Skills 采用渐进式披露。常驻 prompt 保留精简 catalog，任务需要时再用 `read_skill_file` 读取完整说明。
 
 - 用户可直接调用的 workflow 暴露为 slash command，例如 `/implement`、`/triage`、`/handoff`、`/workflows`。
 - 面向 agent 的工程纪律只放 name、description、path，相关时再按需加载正文。
 - 文件和历史 session 用 `@file:`、`@session:` 明确引用。
 
-这样专业工作流可以复用，常驻 prompt 也不会被暂时用不上的长文档占满。
+这样专业工作流可以复用，常驻 prompt 保持精简。
 
 ## 会话、快照和复盘
 
@@ -269,30 +267,25 @@ Skills 采用渐进式披露。VeriForge 不会把所有长规则常驻塞进 pr
 - file snapshots
 - checkpoint 信息
 
-常用命令：
+相关命令：
 
 ```text
 /sessions
-/session <session-id>
-/resume <session-id>
-/fork <session-id>
-/rollback <session-id> <path>
 /checkpoint status
 /checkpoint auto off
 /compact show
 ```
 
-兼容的非交互命令：
+非交互入口：
 
 ```bash
 veriforge session show latest
 ```
 
-在任务里引用文件或历史 session：
+在任务里引用文件：
 
 ```text
 根据 @README.md 修复文档里的启动示例
-继续 @session:20260518-120000-abcd1234 里的工作
 根据 @"docs/path with spaces.md" 补充测试说明
 ```
 
@@ -313,7 +306,7 @@ veriforge session show latest
 - 可选浏览器验证
 - MCP server 暴露的 tools
 
-Runtime 还会处理循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。模型可以尝试，运行时会记录这些尝试，并在必要时纠偏。
+Runtime 还会处理循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。
 
 ## 权限模式
 
@@ -460,8 +453,8 @@ Eval ledger 会从 raw `summary.json`、Harbor `result.json`、VeriForge artifac
 | `MAX_AGENT_TOOL_CALLS` | `200` | 单 turn 工具调用预算 |
 | `AGENT_BUDGET_WARN_FRACTION` | `0.8` | 预算提醒阈值 |
 | `HARNESS_TRACE_STDERR` | 空 | 为 true 时输出底层 API 错误追踪 |
-| `MAX_HARNESS_ROUNDS` | `5` | 旧 harness loop 兼容项 |
-| `PASS_THRESHOLD` | `7.0` | 旧 harness loop 兼容项 |
+| `MAX_HARNESS_ROUNDS` | `5` | harness loop 轮数 |
+| `PASS_THRESHOLD` | `7.0` | 通过阈值 |
 
 Profile 参数可通过环境变量覆盖：
 
@@ -502,7 +495,7 @@ python -m unittest tests.test_terminal_bench_launcher
 1. 在 `harness_code_agent/profiles/` 下新增 `BaseProfile` 实现。
 2. 实现 `name()`、`description()`、`main_agent()`。
 3. 在 `harness_code_agent/profiles/__init__.py` 中注册。
-4. 只有产品可见 profile 才加入 `PRODUCT_PROFILES`。
+4. 产品可见 profile 加入 `PRODUCT_PROFILES`。
 5. 为关键行为补测试。
 
 新增内置工具：
@@ -510,7 +503,7 @@ python -m unittest tests.test_terminal_bench_launcher
 1. 在 `harness_code_agent/runtime/builtins/` 下按领域实现工具函数。
 2. 在 `harness_code_agent/runtime/builtins/schemas.py` 中声明 schema。
 3. 在 registry 中注册 handler 和 permission class。
-4. 只有现有权限分类表达不了风险时，才新增分类。
+4. 现有权限分类覆盖风险时直接复用，需要扩展时再新增分类。
 5. 覆盖成功路径和失败路径测试。
 
 新增 middleware：
@@ -520,14 +513,12 @@ python -m unittest tests.test_terminal_bench_launcher
 3. 关键行为发事件，方便 debug 和复盘。
 4. 用回归测试覆盖它要防的具体失败模式。
 
-`harness_code_agent/runtime/tools.py` 和 `harness_code_agent/runtime/middlewares.py` 只保留旧 public API 的兼容 re-export，新代码应放在结构化模块里。
-
 ## 注意事项
 
 - 不要提交 `.env`，使用 `.env.template` 作为模板。
 - `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名。
 - `app-builder` 的浏览器验证依赖 Playwright。
-- `terminal` profile 是 eval-only 默认定位，不应进入普通产品自动路由。
+- `terminal` profile 用于 eval runner，普通产品自动路由使用产品 profile。
 - Terminal-Bench runner 会设置 `HARNESS_PERMISSION_MODE=danger-full-access` 和 `HCA_TERMINAL_EVAL_MODE=1`，以允许容器内绝对路径写入，同时保留破坏性命令保护。
 - 默认 `workspace-write` 会对 risky shell 和未知工具触发批准流程。
 - 如果 eval run 被中断，要报告为 interrupted 或 incomplete，不要把局部结果包装成最终 benchmark 数字。

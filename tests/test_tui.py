@@ -1,4 +1,3 @@
-import json
 import shutil
 import tempfile
 import unittest
@@ -15,11 +14,20 @@ from harness_code_agent.tui.approval import (
     TuiApprovalProvider,
     _derive_persistent_prefix,
 )
-from harness_code_agent.tui.question import TuiQuestionProvider
 from harness_code_agent.tui.commands import default_command_registry
-from harness_code_agent.tui.completion import current_mention_query, mention_candidates, replace_mention_fragment
-from harness_code_agent.tui.state import PlanStep, SessionStatusSnapshot, TranscriptBlock, TuiState
-from harness_code_agent.tui.widgets import block_to_rich, StatusBar
+from harness_code_agent.tui.completion import (
+    current_mention_query,
+    mention_candidates,
+    replace_mention_fragment,
+)
+from harness_code_agent.tui.screens import ApprovalPanel
+from harness_code_agent.tui.state import (
+    PlanStep,
+    SessionStatusSnapshot,
+    TranscriptBlock,
+    TuiState,
+)
+from harness_code_agent.tui.widgets import StatusBar, block_to_rich
 
 
 class TuiTests(unittest.TestCase):
@@ -39,7 +47,7 @@ class TuiTests(unittest.TestCase):
         result = registry.execute("/code", session)
         review_result = registry.execute("/review", session)
 
-        self.assertIn("Profiles:", help_text)
+        self.assertIn("配置:", help_text)
         self.assertNotIn("/swe", help_text)
         self.assertIn("/review", help_text)
         self.assertIn("/checkpoint", help_text)
@@ -51,7 +59,7 @@ class TuiTests(unittest.TestCase):
         registry = default_command_registry()
         result = registry.execute("/config nope", SimpleNamespace())
 
-        self.assertIn("Usage: /config show", result.text)
+        self.assertIn("用法：/config show", result.text)
         self.assertTrue(result.should_continue)
 
     def test_user_skills_are_dynamic_agent_commands(self):
@@ -92,20 +100,6 @@ class TuiTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "conflicts with built-in command"):
             default_command_registry(skill_registry=skill_registry)
-
-    def test_resume_command_can_run_before_session_is_bound(self):
-        registry = default_command_registry()
-        calls = []
-        session = SimpleNamespace(
-            is_bound=False,
-            _inject_resume_context=lambda session_id: calls.append(session_id) or f"queued {session_id}",
-        )
-
-        result = registry.execute("/resume previous-session", session)
-
-        self.assertEqual(result.text, "queued previous-session")
-        self.assertEqual(calls, ["previous-session"])
-        self.assertTrue(result.should_continue)
 
     def test_observe_command_formats_and_exports_current_session(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
@@ -165,7 +159,7 @@ class TuiTests(unittest.TestCase):
         screen = ObservabilityScreen(session)
 
         self.assertIsNone(screen._current_session_id())
-        self.assertIn("No active session yet", screen._current_session_body())
+        self.assertIn("当前还没有会话", screen._current_session_body())
 
     def test_explicit_quoted_file_mention_resolves_paths_with_spaces(self):
         Path(self.temp_dir, "space name.md").write_text("hello space\n", encoding="utf-8")
@@ -354,8 +348,17 @@ class TuiTests(unittest.TestCase):
 
     def test_python_command_does_not_persist_bare_prefix(self):
         self.assertIsNone(_derive_persistent_prefix("python"))
-        self.assertIsNone(_derive_persistent_prefix("python script.py"))
+        self.assertEqual(_derive_persistent_prefix("python script.py"), ["python", "script.py"])
+        self.assertEqual(
+            _derive_persistent_prefix('python focusflow.py "Write the report" 25'),
+            ["python", "focusflow.py"],
+        )
+        self.assertIsNone(_derive_persistent_prefix("python -c \"print('hi')\""))
         self.assertEqual(_derive_persistent_prefix("python -m unittest tests.test_tui"), ["python", "-m", "unittest"])
+        self.assertEqual(
+            _derive_persistent_prefix('python focusflow.py Task 25; "---"; python focusflow.py Other 15'),
+            ["python", "focusflow.py"],
+        )
 
     def test_project_allowlist_does_not_match_other_project(self):
         allowlist = ApprovalAllowlist(self.root)
@@ -385,6 +388,7 @@ class TuiTests(unittest.TestCase):
 
     def test_iter_workspace_paths_skips_excluded_dirs_traversal(self):
         import os
+
         from harness_code_agent.tui.completion import iter_workspace_paths
 
         node_modules_dir = Path(self.temp_dir) / "node_modules"
@@ -460,6 +464,78 @@ class TuiApprovalTests(unittest.TestCase):
         self.assertIsNone(allowlist.match("npm run build"))
         self.assertIsNotNone(allowlist.match("npm run test -- foo"))
 
+    def test_compound_command_does_not_offer_fake_persistence(self):
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "python -m unittest; python app.py"},
+            risk="shell_risky",
+            reason="workspace-write mode requires user approval",
+        )
+        panel = ApprovalPanel(request)
+
+        self.assertIn("无法信任", panel._format_choices().plain)
+        self.assertTrue(panel.handle_key("2"))
+        self.assertEqual(panel._selected_index, 0)
+
+    def test_compound_with_one_shared_python_prefix_can_be_trusted(self):
+        command = 'python focusflow.py Task 25; "---"; python focusflow.py Other 15'
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": command},
+            risk="shell_risky",
+            reason="workspace-write mode requires user approval",
+        )
+        panel = ApprovalPanel(request)
+        allowlist = ApprovalAllowlist(self.root)
+        allowlist.add_prefix_rule(["python", "focusflow.py"], command=command)
+
+        self.assertIn("信任此前缀", panel._format_choices().plain)
+        self.assertTrue(allowlist.matches(command))
+
+        smoke_command = (
+            'python focusflow.py Task 25 && echo "---" && '
+            'python focusflow.py Other 15; echo "exit=$?"'
+        )
+        self.assertEqual(
+            _derive_persistent_prefix(smoke_command),
+            ["python", "focusflow.py"],
+        )
+        self.assertTrue(allowlist.matches(smoke_command))
+
+    def test_approval_waits_for_an_explicit_decision_without_auto_approval(self):
+        import threading
+        import time
+
+        captured = {}
+
+        class FakeApp:
+            def call_from_thread(self, callback):
+                callback()
+
+            def show_approval_panel(self, request, event, result_holder):
+                captured.update(event=event, result_holder=result_holder)
+
+        provider = TuiApprovalProvider(project_root=self.root, app_tui=FakeApp())
+        request = ApprovalRequest(
+            tool_name="run_bash",
+            args={"command": "python app.py"},
+            risk="shell_risky",
+            reason="workspace-write mode requires user approval",
+        )
+        results = []
+        worker = threading.Thread(target=lambda: results.append(provider.request(request)))
+        worker.start()
+
+        time.sleep(0.05)
+        self.assertTrue(worker.is_alive())
+        self.assertEqual(results, [])
+
+        captured["result_holder"][0] = True
+        captured["event"].set()
+        worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(results[0].approved)
+
 
 class TuiNoiseReductionTests(unittest.TestCase):
     """Output noise reduction tests."""
@@ -530,6 +606,28 @@ class TuiNoiseReductionTests(unittest.TestCase):
 
         self.assertIn("2", block.body)  # 2048 chars ~ 2KB
 
+    def test_middleware_activity_is_compact_and_names_guidance_source(self):
+        state = self._make_state()
+        event = SimpleNamespace(
+            to_dict=lambda: {
+                "type": "middleware_activity",
+                "payload": {
+                    "tool": "write_file",
+                    "hooks": 18,
+                    "duration_ms": 1.4,
+                    "outcome": "guided",
+                    "sources": ["RecoveryStrategyMiddleware"],
+                },
+            }
+        )
+
+        block = state.apply_event(event)
+
+        self.assertEqual(block.kind, "middleware")
+        self.assertEqual(block.status, "guided")
+        self.assertIn("18 个钩子", block.body)
+        self.assertIn("恢复", block.body)
+
     def test_failed_tool_shows_error_summary(self):
         """Failed tool should show short error, not full output."""
         state = self._make_state()
@@ -592,7 +690,7 @@ class TuiNoiseReductionTests(unittest.TestCase):
         )
         block = state.apply_event(call_event)
 
-        self.assertEqual(block.title, "parallel_agents(3 tools)")
+        self.assertEqual(block.title, "parallel_agents(3 个工具)")
 
     def test_parallel_tool_result_shows_nested_success_counts(self):
         state = self._make_state()
@@ -625,9 +723,9 @@ class TuiNoiseReductionTests(unittest.TestCase):
         state.apply_event(call_event)
         block = state.apply_event(result_event)
 
-        self.assertIn("2 tools", block.body)
-        self.assertIn("1 ok", block.body)
-        self.assertIn("1 failed", block.body)
+        self.assertIn("2 个工具", block.body)
+        self.assertIn("1 成功", block.body)
+        self.assertIn("1 失败", block.body)
 
     def test_profile_route_decision_shows_clean_summary(self):
         state = self._make_state()
@@ -645,7 +743,7 @@ class TuiNoiseReductionTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(block.title, "profile route")
+        self.assertEqual(block.title, "配置路由")
         self.assertIn("coding-agent", block.body)
         # Internal routing metrics stay out of the transcript.
         self.assertNotIn("confidence", block.body)
@@ -693,7 +791,7 @@ class TuiNoiseReductionTests(unittest.TestCase):
             block = state.apply_event(event)
             state.add_block(block)
 
-        stored_result = [event for event in events if event.type == "tool_result"][0]
+        stored_result = next(event for event in events if event.type == "tool_result")
         self.assertEqual(stored_result.payload["output"], large_output)
         self.assertNotIn(large_output, state.blocks[-1].body)
 
@@ -746,7 +844,7 @@ class TuiNoiseReductionTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(block.title, "edited src/app.py")
+        self.assertEqual(block.title, "已编辑 src/app.py")
         self.assertIn("-old line", block.body)
         self.assertIn("+new line", block.body)
 
@@ -758,7 +856,7 @@ class TuiNoiseReductionTests(unittest.TestCase):
             "payload": {"path": "src/new.py", "operation": "write_file"},
         })
 
-        self.assertEqual(block.title, "wrote src/new.py")
+        self.assertEqual(block.title, "已写入 src/new.py")
         self.assertEqual(block.body, "")
 
 class TuiThoughtTests(unittest.TestCase):
@@ -826,13 +924,13 @@ class TuiRichRenderTests(unittest.TestCase):
         block = TranscriptBlock("user", "user turn 1", "fix the bug")
         rendered = block_to_rich(block)
         self.assertNotEqual(rendered.__class__.__name__, "Panel")
-        self.assertIn("You", rendered.renderables[0].plain)
+        self.assertIn("你", rendered.renderables[0].plain)
 
     def test_assistant_block_renders_with_green_border(self):
         block = TranscriptBlock("assistant", "assistant", "I'll fix it.")
         rendered = block_to_rich(block)
         self.assertNotEqual(rendered.__class__.__name__, "Panel")
-        self.assertIn("Assistant", rendered.renderables[0].plain)
+        self.assertIn("助手", rendered.renderables[0].plain)
 
     def test_large_assistant_block_uses_bounded_plain_rendering(self):
         block = TranscriptBlock("assistant", "assistant", "line\n" * 5000)
@@ -841,14 +939,29 @@ class TuiRichRenderTests(unittest.TestCase):
 
         body = rendered.renderables[1]
         self.assertEqual(body.__class__.__name__, "Text")
-        self.assertIn("response truncated", body.plain)
+        self.assertIn("响应过长", body.plain)
 
     def test_tool_block_renders_with_yellow_border(self):
         block = TranscriptBlock("tool", "read_file(path=x.py)", "", "running")
         rendered = block_to_rich(block)
         self.assertNotEqual(rendered.__class__.__name__, "Panel")
-        self.assertIn("Reading", str(rendered))
+        self.assertIn("读取", str(rendered))
         self.assertNotIn("read_file", str(rendered))
+
+    def test_middleware_block_renders_as_compact_policy_line(self):
+        block = TranscriptBlock(
+            "middleware",
+            "策略管线",
+            "write_file  ·  18 个钩子  ·  1.4 毫秒  ·  恢复",
+            "guided",
+        )
+
+        rendered = block_to_rich(block)
+
+        self.assertEqual(rendered.__class__.__name__, "Text")
+        self.assertIn("策略管线", rendered.plain)
+        self.assertIn("已引导", rendered.plain)
+        self.assertIn("恢复", rendered.plain)
 
     def test_primary_transcript_content_is_not_dimmed(self):
         user = block_to_rich(TranscriptBlock("user", "user turn 1", "fix the bug"))
@@ -870,12 +983,12 @@ class TuiRichRenderTests(unittest.TestCase):
         block = TranscriptBlock("thought", "thinking", "for 12.3s", "thought")
         rendered = block_to_rich(block)
         self.assertNotEqual(rendered.__class__.__name__, "Panel")
-        self.assertIn("thought", str(rendered))
+        self.assertIn("思考", str(rendered))
 
     def test_failure_block_renders_with_red_border(self):
         block = TranscriptBlock("failure", "failure", "something went wrong", "failed")
         rendered = block_to_rich(block)
-        self.assertIn("failure", rendered.title)
+        self.assertIn("错误", rendered.title)
 
     def test_status_bar_renders_from_snapshot(self):
         from rich.text import Text
@@ -889,9 +1002,17 @@ class TuiRichRenderTests(unittest.TestCase):
         plain = text.plain
         self.assertIn("coding-agent", plain)
         self.assertIn("gpt-4", plain)
-        self.assertIn("context left", plain)
+        self.assertIn("剩余上下文", plain)
         self.assertNotIn("workspace-write", plain)
         self.assertNotIn("turn 3", plain)
+
+    def test_status_bar_shows_live_elapsed_time_for_slow_operations(self):
+        bar = StatusBar()
+        bar.profile = "coding-agent"
+        bar.status = "thinking"
+        bar.elapsed_seconds = 73
+
+        self.assertIn("模型思考中  1m 13s", bar.render().plain)
 
     def test_plan_update_block_renders_full_colored_progress(self):
         rendered = block_to_rich(
@@ -1005,7 +1126,7 @@ class TuiAppTests(unittest.TestCase):
             self.assertEqual(app.run(headless=True, auto_pilot=auto_exit), 0)
 
     def test_tui_state_recovers_from_blocked_after_turn_started(self):
-        from harness_code_agent.tui.state import TuiState, SessionStatusSnapshot
+        from harness_code_agent.tui.state import SessionStatusSnapshot, TuiState
 
         state = TuiState(
             SessionStatusSnapshot(

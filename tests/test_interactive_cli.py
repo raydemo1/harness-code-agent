@@ -401,7 +401,7 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_resume_slash_command_injects_context_into_existing_session(self):
+    def test_selected_session_loads_context_into_existing_session(self):
         store = SessionStore(Path(self.temp_dir) / ".harness")
         previous = store.create(
             profile="plan",
@@ -419,14 +419,10 @@ class InteractiveCliTests(unittest.TestCase):
                 profile_explicit=True,
             )
             try:
-                output = StringIO()
-                session.output_sink = lambda text: print(text, file=output)
-
-                self.assertTrue(session.handle_slash_command(f"/resume {previous.id}"))
+                session.resume_from_session(previous.id)
 
                 self.assertTrue(session.is_bound)
                 self.assertEqual(session.resume_session_id, previous.id)
-                self.assertIn("injected", output.getvalue())
 
                 metadata = session.session_store.read_metadata(session.session.id)
                 self.assertEqual(metadata["resumed_from"], previous.id)
@@ -435,40 +431,6 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertIn("previous task", conversation.messages[1]["content"])
             finally:
                 session.close()
-
-    def test_resume_initialization_reports_history_loading_stages(self):
-        store = SessionStore(Path(self.temp_dir) / ".harness")
-        previous = store.create(
-            profile="plan",
-            cwd=self.temp_dir,
-            model="model-a",
-            permission_mode="workspace-write",
-        )
-        store.event_bus(previous).emit(
-            "user_input",
-            agent="main_agent",
-            payload={"text": "previous task"},
-        )
-        stages = []
-
-        with patch(
-            "harness_code_agent.agent.conversation.Agent.start_conversation",
-            return_value=FakeConversation(),
-        ):
-            session = InteractiveSession(
-                cwd=self.temp_dir,
-                profile_name="coding-agent",
-                profile_explicit=True,
-                resume_session_id=previous.id,
-                startup_sink=stages.append,
-            )
-        try:
-            self.assertIn("loading history", stages)
-            self.assertIn("history loaded", stages)
-            self.assertLess(stages.index("loading history"), stages.index("history loaded"))
-            self.assertIn(previous.id, session.resume_context or "")
-        finally:
-            session.close()
 
     def test_profile_switch_reuses_profile_slots_without_closing_old_context(self):
         coding_conversation = FakeConversation()
@@ -1570,7 +1532,6 @@ class InteractiveCliTests(unittest.TestCase):
             result = cli.run_batch(
                 cwd=root,
                 profile_name="coding-agent",
-                resume_session_id=None,
                 first_task="/doctor",
             )
 

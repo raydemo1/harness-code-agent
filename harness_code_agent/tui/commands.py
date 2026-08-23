@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -42,17 +43,17 @@ class SlashCommandRegistry:
         try:
             parts = shlex.split(line)
         except ValueError as exc:
-            return CommandResult(f"Error: {exc}")
+            return CommandResult(f"错误：{exc}")
         if not parts:
             return CommandResult()
         command, args = parts[0], parts[1:]
         spec = self._by_name.get(command)
         if spec is None:
-            return CommandResult(f"Unknown slash command: {command}")
+            return CommandResult(f"未知的斜杠命令：{command}")
         try:
             return spec.handler(session, args, self)
         except (FileNotFoundError, ValueError, KeyError) as exc:
-            return CommandResult(f"Error: {exc}")
+            return CommandResult(f"错误：{exc}")
 
     def command_names(self) -> list[str]:
         return [spec.name for spec in self.specs]
@@ -71,7 +72,7 @@ class SlashCommandRegistry:
         return list(self.specs)
 
     def format_help(self) -> str:
-        lines = ["VeriForge commands:"]
+        lines = ["VeriForge 命令："]
         current_group = ""
         for spec in self.specs:
             if spec.group != current_group:
@@ -84,25 +85,24 @@ class SlashCommandRegistry:
 
 def default_command_registry(skill_registry=None) -> SlashCommandRegistry:
     specs = [
-        CommandSpec("/help", "General", "/help", "Show commands grouped by workflow.", _help),
-        CommandSpec("/exit", "General", "/exit", "Close the current TUI session.", _exit, aliases=("/quit",)),
-        CommandSpec("/profiles", "Profiles", "/profiles", "List available profiles.", _profiles),
-        CommandSpec("/general", "Profiles", "/general", "Switch to general profile.", _profile("general", "/general")),
-        CommandSpec("/code", "Profiles", "/code", "Switch to coding-agent profile.", _profile("coding-agent", "/code")),
-        CommandSpec("/plan", "Profiles", "/plan", "Switch to constrained planning profile.", _profile("plan", "/plan")),
-        CommandSpec("/app", "Profiles", "/app", "Switch to app-builder profile.", _profile("app-builder", "/app")),
-        CommandSpec("/review", "Profiles", "/review", "Switch to read-only review profile.", _profile("review", "/review")),
-        CommandSpec("/sessions", "Sessions", "/sessions", "List local Harness sessions.", _sessions),
-        CommandSpec("/session", "Sessions", "/session <session-id>", "Show a human-readable session summary.", _session),
-        CommandSpec("/resume", "Sessions", "/resume <session-id>", "Inject previous session context into this conversation.", _resume),
-        CommandSpec("/fork", "Sessions", "/fork <session-id>", "Create a lineage-preserving fork record.", _fork),
-        CommandSpec("/rollback", "Sessions", "/rollback <session-id> <path>", "Restore one file from the latest session snapshot.", _rollback),
-        CommandSpec("/checkpoint", "Workflow", "/checkpoint [auto on|auto off|every turn|every <N> turns|status]", "Create or configure checkpoint commits.", _checkpoint),
-        CommandSpec("/mcp", "Diagnostics", "/mcp [status|list|reload]", "Show or reload configured MCP servers and tools.", _mcp),
-        CommandSpec("/doctor", "Diagnostics", "/doctor", "Check API, workspace, git, and shell setup.", _doctor),
-        CommandSpec("/config", "Diagnostics", "/config show", "Show effective Harness configuration.", _config),
-        CommandSpec("/observe", "Diagnostics", "/observe [current|project|export current|export project]", "Show or export observability metrics.", _observe),
-        CommandSpec("/compact", "Workflow", "/compact show", "View the latest compacted summary.", _compact),
+        CommandSpec("/help", "常用", "/help", "按工作流查看命令。", _help),
+        CommandSpec("/exit", "常用", "/exit", "关闭当前 TUI 会话。", _exit, aliases=("/quit",)),
+        CommandSpec("/profiles", "配置", "/profiles", "列出可用配置。", _profiles),
+        CommandSpec("/general", "配置", "/general", "切换到通用配置。", _profile("general", "/general")),
+        CommandSpec("/code", "配置", "/code", "切换到编码代理配置。", _profile("coding-agent", "/code")),
+        CommandSpec("/plan", "配置", "/plan", "切换到受约束的规划配置。", _profile("plan", "/plan")),
+        CommandSpec("/app", "配置", "/app", "切换到应用构建配置。", _profile("app-builder", "/app")),
+        CommandSpec("/review", "配置", "/review", "切换到只读审查配置。", _profile("review", "/review")),
+        CommandSpec("/sessions", "会话", "/sessions", "列出本地 Harness 会话。", _sessions),
+        CommandSpec("/session", "会话", "/session <session-id>", "查看可读的会话摘要。", _session),
+        CommandSpec("/fork", "会话", "/fork <session-id>", "创建保留血缘的分支记录。", _fork),
+        CommandSpec("/rollback", "会话", "/rollback <session-id> <path>", "从最近的会话快照恢复一个文件。", _rollback),
+        CommandSpec("/checkpoint", "工作流", "/checkpoint [auto on|auto off|every turn|every <N> turns|status]", "创建或配置检查点提交。", _checkpoint),
+        CommandSpec("/mcp", "诊断", "/mcp [status|list|reload]", "查看或重新加载 MCP 服务和工具。", _mcp),
+        CommandSpec("/doctor", "诊断", "/doctor", "检查 API、工作区、Git 和 Shell 配置。", _doctor),
+        CommandSpec("/config", "诊断", "/config show", "查看生效的 Harness 配置。", _config),
+        CommandSpec("/observe", "诊断", "/observe [current|project|export current|export project]", "查看或导出可观测性指标。", _observe),
+        CommandSpec("/compact", "工作流", "/compact show", "查看最近一次压缩摘要。", _compact),
     ]
     if skill_registry is None:
         from ..skills import SkillRegistry
@@ -172,11 +172,6 @@ def _session(session: Any, args: list[str], registry: SlashCommandRegistry) -> C
     return CommandResult(load_session_summary(session.session_store, args[0]))
 
 
-def _resume(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
-    _require_arg(args, "Usage: /resume <session-id>")
-    return CommandResult(session._inject_resume_context(args[0]))
-
-
 def _fork(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     _require_arg(args, "Usage: /fork <session-id>")
     from ..core.formatters import format_fork
@@ -226,12 +221,12 @@ def _mcp(session: Any, args: list[str], registry: SlashCommandRegistry) -> Comma
         return CommandResult(session.mcp_list())
     if args == ["reload"]:
         return CommandResult(session.reload_mcp())
-    raise ValueError("Usage: /mcp [status|list|reload]")
+        raise ValueError("用法：/mcp [status|list|reload]")
 
 
 def _config(session: Any, args: list[str], registry: SlashCommandRegistry) -> CommandResult:
     if args != ["show"]:
-        raise ValueError("Usage: /config show")
+        raise ValueError("用法：/config show")
     from ..core.formatters import format_config_show
 
     return CommandResult(format_config_show(session.cwd))
@@ -251,14 +246,14 @@ def _observe(session: Any, args: list[str], registry: SlashCommandRegistry) -> C
         if args[0] == "export":
             export = True
             if len(args) > 2:
-                raise ValueError("Usage: /observe [current|project|export current|export project]")
+                raise ValueError("用法：/observe [current|project|export current|export project]")
             mode = args[1] if len(args) == 2 else "current"
         else:
             if len(args) != 1:
-                raise ValueError("Usage: /observe [current|project|export current|export project]")
+                raise ValueError("用法：/observe [current|project|export current|export project]")
             mode = args[0]
     if mode not in {"current", "project"}:
-        raise ValueError("Usage: /observe [current|project|export current|export project]")
+        raise ValueError("用法：/observe [current|project|export current|export project]")
 
     if mode == "current":
         _require_bound(session)
@@ -299,8 +294,8 @@ def _compact(session: Any, args: list[str], registry: SlashCommandRegistry) -> C
     if summary is None:
         summary = _latest_compacted_summary(getattr(session.conversation, "messages", []))
     if summary is None:
-        return CommandResult("No compacted summary available yet.")
-    return CommandResult(f"Latest compacted summary:\n\n{summary}")
+        return CommandResult("目前还没有可用的压缩摘要。")
+    return CommandResult(f"最近的压缩摘要：\n\n{summary}")
 
 
 def _latest_compacted_summary_from_disk(session: Any) -> str | None:
@@ -322,8 +317,7 @@ def _latest_compacted_summary(messages: list[dict]) -> str | None:
     for message in reversed(list(messages or [])):
         content = str(message.get("content") or "")
         if not (
-            content.startswith("[COMPACTED CONTEXT")
-            or content.startswith("[HANDOFF RESET]")
+            content.startswith(("[COMPACTED CONTEXT", "[HANDOFF RESET]"))
         ):
             continue
         _header, _sep, body = content.partition("\n")
