@@ -7,11 +7,10 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from harness_code_agent.agent.cancellation import CancelledError
 from harness_code_agent.tui.app import TuiApp
-from harness_code_agent.tui.state import SessionStatusSnapshot, TranscriptBlock, TuiState
 from harness_code_agent.tui.widgets import SubmitTextArea
 
 
@@ -36,6 +35,7 @@ def _mock_session(root: Path):
         session_store=store,
         cwd=str(root),
         permission_mode="workspace-write",
+        skill_registry=SimpleNamespace(user_commands=[]),
         conversation=SimpleNamespace(messages=[{"role": "system", "content": "test"}]),
         close=lambda: None,
         handle_slash_command=lambda line: True,
@@ -92,12 +92,112 @@ class TuiInteractiveTests(unittest.TestCase):
     def test_app_mounts_all_widgets(self):
         async def _test():
             app = self._make_app()
-            async with app.run_test() as pilot:
+            async with app.run_test():
                 self.assertIsNotNone(app.query_one("#transcript"))
                 self.assertIsNotNone(app.query_one("#input-area"))
                 self.assertIsNotNone(app.query_one("#status-bar"))
                 self.assertIsNotNone(app.query_one("#input-text"))
                 self.assertIsNotNone(app.query_one("#cmd-palette"))
+        _run(_test())
+
+    def test_slow_session_initialization_does_not_block_first_frame(self):
+        async def _test():
+            ready_session = _mock_session(self.root)
+
+            def slow_session(**kwargs):
+                time.sleep(0.35)
+                return ready_session
+
+            with patch(
+                "harness_code_agent.tui.app.InteractiveSession",
+                side_effect=slow_session,
+            ):
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+
+            started = time.perf_counter()
+            async with app.run_test() as pilot:
+                first_frame_seconds = time.perf_counter() - started
+                self.assertLess(first_frame_seconds, 0.2)
+                self.assertEqual(app.state.snapshot.status, "starting")
+
+                await pilot.press("h", "e", "l", "l", "o", "enter")
+                self.assertEqual(list(app._pending_submissions), ["hello"])
+
+                await pilot.pause(0.5)
+
+                self.assertIs(app.session, ready_session)
+                self.assertEqual(app.state.snapshot.status, "idle")
+
+        _run(_test())
+
+    def test_slow_context_snapshot_does_not_block_ready_frame(self):
+        async def _test():
+            ready_session = _mock_session(self.root)
+
+            def slow_count(*args, **kwargs):
+                time.sleep(0.35)
+                return 1234
+
+            with (
+                patch("harness_code_agent.tui.app.InteractiveSession", return_value=ready_session),
+                patch(
+                    "harness_code_agent.agent.context.count_request_tokens",
+                    side_effect=slow_count,
+                ),
+            ):
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                started = time.perf_counter()
+                async with app.run_test(size=(100, 30)) as pilot:
+                    first_frame_seconds = time.perf_counter() - started
+                    await pilot.press("h", "e", "l", "l", "o")
+                    await pilot.pause(0.05)
+
+                    self.assertLess(first_frame_seconds, 0.2)
+                    self.assertEqual(
+                        app.query_one("#input-text", SubmitTextArea).text,
+                        "hello",
+                    )
+                    self.assertEqual(app.state.snapshot.context_tokens, 0)
+
+                    await pilot.pause(0.45)
+                    self.assertEqual(app.state.snapshot.context_tokens, 1234)
+
+        _run(_test())
+
+    def test_resuming_session_shows_history_loading_status(self):
+        async def _test():
+            ready_session = _mock_session(self.root)
+
+            def slow_resume(**kwargs):
+                kwargs["startup_sink"]("loading history")
+                time.sleep(0.2)
+                kwargs["startup_sink"]("history loaded")
+                return ready_session
+
+            with patch(
+                "harness_code_agent.tui.app.InteractiveSession",
+                side_effect=slow_resume,
+            ):
+                app = TuiApp(
+                    cwd=self.root,
+                    profile_name="coding-agent",
+                    resume_session_id="old-session",
+                )
+                async with app.run_test(size=(100, 30)) as pilot:
+                    for _ in range(20):
+                        if app.state.snapshot.status == "loading history":
+                            break
+                        await pilot.pause(0.01)
+
+                    status_bar = app.query_one("#status-bar").render().plain
+                    self.assertEqual(app.state.snapshot.status, "loading history")
+                    self.assertIn("加载历史会话", status_bar)
+                    self.assertIn(status_bar.strip()[:1], "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                    self.assertIn("加载历史会话", app.state.blocks[0].body)
+
+                    await pilot.pause(0.35)
+                    self.assertEqual(app.state.snapshot.status, "idle")
+
         _run(_test())
 
     def test_narrow_layout_hides_empty_plan_and_input_line_numbers(self):
@@ -114,7 +214,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 self.assertEqual(input_text.region.height, 3)
                 self.assertEqual(input_prompt.region.height, 3)
                 self.assertEqual(input_prompt.content_region.y, input_text.cursor_screen_offset.y)
-                self.assertIn("Ask anything", input_text.render_line(0).text)
+                self.assertIn("输入任务", input_text.render_line(0).text)
 
         _run(_test())
 
@@ -128,7 +228,7 @@ class TuiInteractiveTests(unittest.TestCase):
                 await pilot.pause()
 
                 self.assertEqual(text_area.region.height, 3)
-                self.assertNotIn("Ask anything", text_area.render_line(0).text)
+                self.assertNotIn("输入任务", text_area.render_line(0).text)
 
                 await pilot.press("shift+enter")
                 await pilot.pause()
@@ -174,7 +274,7 @@ class TuiInteractiveTests(unittest.TestCase):
             with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
                 MockSession.return_value = _mock_session(self.root)
                 app = TuiApp(cwd=self.root, profile_name="coding-agent")
-                async with app.run_test() as pilot:
+                async with app.run_test():
                     approval_provider = MockSession.call_args.kwargs["approval_provider"]
                     self.assertIsNotNone(approval_provider.allowlist)
                     self.assertEqual(approval_provider.allowlist.project_root, self.root.resolve())
@@ -186,7 +286,6 @@ class TuiInteractiveTests(unittest.TestCase):
         async def _test():
             submitted = []
             mock = _mock_session(self.root)
-            orig_submit = mock.submit
             def capture(text, cancellation_token=None):
                 submitted.append(text)
                 return SimpleNamespace(notice="", checkpoint="")
@@ -287,7 +386,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     self.assertEqual(submitted, ["first", "second"])
                     self.assertEqual(interrupted, [True])
                     self.assertTrue(
-                        any(block.title == "turn cancelled" for block in app.state.blocks)
+                        any(block.title == "回合已取消" for block in app.state.blocks)
                     )
         _run(_test())
 
@@ -322,6 +421,7 @@ class TuiInteractiveTests(unittest.TestCase):
                     self.assertEqual(commands, [])
 
                     release.set()
+                    await pilot.pause(0.2)
                     for _ in range(50):
                         if commands == ["/help"] and not app._submitting:
                             break
@@ -329,6 +429,72 @@ class TuiInteractiveTests(unittest.TestCase):
 
                     self.assertEqual(submitted, ["first"])
                     self.assertEqual(commands, ["/help"])
+        _run(_test())
+
+    def test_slow_local_command_does_not_block_input(self):
+        async def _test():
+            command_started = threading.Event()
+            command_release = threading.Event()
+            mock = _mock_session(self.root)
+
+            def handle_command(line):
+                command_started.set()
+                command_release.wait(2)
+                return True
+
+            mock.handle_slash_command = handle_command
+            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
+                MockSession.return_value = mock
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test() as pilot:
+                    started = time.perf_counter()
+                    self.assertTrue(app._submit_async("/mcp status"))
+                    self.assertLess(time.perf_counter() - started, 0.1)
+                    await pilot.pause(0.05)
+                    self.assertTrue(command_started.is_set())
+                    self.assertEqual(app.state.snapshot.status, "running command")
+
+                    await pilot.press("n", "e", "x", "t")
+                    self.assertEqual(
+                        app.query_one("#input-text", SubmitTextArea).text,
+                        "next",
+                    )
+                    command_release.set()
+
+        _run(_test())
+
+    def test_resume_command_shows_history_loading_status(self):
+        async def _test():
+            command_started = threading.Event()
+            command_release = threading.Event()
+            mock = _mock_session(self.root)
+
+            def handle_resume(line):
+                command_started.set()
+                command_release.wait(2)
+                return True
+
+            mock.handle_slash_command = handle_resume
+            with patch("harness_code_agent.tui.app.InteractiveSession") as MockSession:
+                MockSession.return_value = mock
+                app = TuiApp(cwd=self.root, profile_name="coding-agent")
+                async with app.run_test() as pilot:
+                    self.assertTrue(app._submit_async("/resume old-session"))
+                    for _ in range(20):
+                        if command_started.is_set():
+                            break
+                        await pilot.pause(0.01)
+
+                    self.assertEqual(app.state.snapshot.status, "loading history")
+                    self.assertIn("加载历史会话", app.query_one("#status-bar").render().plain)
+                    command_release.set()
+                    for _ in range(50):
+                        if app.state.snapshot.status == "idle":
+                            break
+                        await pilot.pause(0.01)
+
+                    self.assertEqual(app.state.snapshot.status, "idle")
+
         _run(_test())
 
     def test_empty_input_not_submitted(self):
@@ -389,13 +555,13 @@ class TuiInteractiveTests(unittest.TestCase):
                     await pilot.pause(0.01)
                     self.assertIsInstance(app.screen, ObservabilityScreen)
                     body = str(app.screen.query_one("#observability-body").renderable)
-                    self.assertIn("Observability dashboard", body)
-                    self.assertIn("cache hit ratio: 80.0%", body)
+                    self.assertIn("可观测性", body)
+                    self.assertIn("缓存命中率：80.0%", body)
 
                     await pilot.press("tab")
                     await pilot.pause(0.01)
                     body = str(app.screen.query_one("#observability-body").renderable)
-                    self.assertIn("Project observability", body)
+                    self.assertIn("项目可观测性", body)
 
                     await pilot.press("e")
                     await pilot.pause(0.01)
@@ -418,12 +584,12 @@ class TuiInteractiveTests(unittest.TestCase):
                     await pilot.pause(0.01)
 
                     body = str(app.screen.query_one("#observability-body").renderable)
-                    self.assertIn("No active session yet", body)
+                    self.assertIn("当前还没有会话", body)
 
                     await pilot.press("e")
                     await pilot.pause(0.01)
                     footer = str(app.screen.query_one("#observability-footer").renderable)
-                    self.assertIn("No active session yet", footer)
+                    self.assertIn("当前还没有会话", footer)
         _run(_test())
 
     # ── Submit behavior ─────────────────────────────────────────────────────
@@ -632,7 +798,11 @@ class TuiInteractiveTests(unittest.TestCase):
         async def _test():
             app = self._make_app()
             async with app.run_test() as pilot:
-                from harness_code_agent.tui.app import SessionEvent, StreamDelta, SubmitComplete
+                from harness_code_agent.tui.app import (
+                    SessionEvent,
+                    StreamDelta,
+                    SubmitComplete,
+                )
 
                 app.post_message(StreamDelta("Hello world"))
                 await pilot.pause(0.01)
@@ -662,6 +832,7 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test(size=(120, 40)) as pilot:
                 import threading
+
                 from harness_code_agent.runtime.approvals import ApprovalRequest
 
                 event = threading.Event()
@@ -694,6 +865,7 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test(size=(120, 40)) as pilot:
                 import threading
+
                 from harness_code_agent.runtime.approvals import ApprovalRequest
 
                 event = threading.Event()
@@ -721,6 +893,7 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test(size=(120, 40)) as pilot:
                 import threading
+
                 from harness_code_agent.runtime.approvals import ApprovalRequest
 
                 event = threading.Event()
@@ -753,6 +926,7 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test(size=(120, 40)) as pilot:
                 import threading
+
                 from harness_code_agent.runtime.approvals import ApprovalRequest
 
                 event = threading.Event()
@@ -779,7 +953,11 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test(size=(120, 40)) as pilot:
                 import threading
-                from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
+
+                from harness_code_agent.runtime.questions import (
+                    QuestionOption,
+                    QuestionRequest,
+                )
 
                 event = threading.Event()
                 holder = [None]
@@ -809,7 +987,11 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test(size=(120, 40)) as pilot:
                 import threading
-                from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
+
+                from harness_code_agent.runtime.questions import (
+                    QuestionOption,
+                    QuestionRequest,
+                )
 
                 event = threading.Event()
                 holder = [None]
@@ -829,7 +1011,11 @@ class TuiInteractiveTests(unittest.TestCase):
             app = self._make_app()
             async with app.run_test(size=(120, 40)) as pilot:
                 import threading
-                from harness_code_agent.runtime.questions import QuestionOption, QuestionRequest
+
+                from harness_code_agent.runtime.questions import (
+                    QuestionOption,
+                    QuestionRequest,
+                )
 
                 event = threading.Event()
                 holder = [None]

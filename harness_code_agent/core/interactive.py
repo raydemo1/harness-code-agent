@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import logging
+import os
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
 
 from .. import config
 from ..agent.conversation import AgentConversation
 from ..agent.prompts import GlobalRulesDoc, PromptPrefixBuilder
-from ..profiles import get_profile, list_profiles
+from ..profiles import get_profile
 from ..profiles.base import BaseProfile
 from ..profiles.router import (
     ROUTE_ACTION_SWITCH_PROFILE,
@@ -22,27 +22,45 @@ from ..profiles.router import (
     RouteDecision,
     route_profile_for_turn,
 )
+from ..runtime.approvals import (
+    ApprovalProvider,
+    ConsoleApprovalProvider,
+    LlmAutoApprovalProvider,
+)
 from ..runtime.builtins.browser import stop_dev_server
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
-from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider, LlmAutoApprovalProvider
-from ..runtime.middleware import MemoryMiddleware, StaticVerifierMiddleware, TimeBudgetMiddleware, ToolPolicyMiddleware
-from ..runtime.mcp import McpClientManager, McpConfigError, load_mcp_config
+from ..runtime.mcp import McpClientManager
+from ..runtime.middleware import (
+    MemoryMiddleware,
+    StaticVerifierMiddleware,
+    TimeBudgetMiddleware,
+    ToolPolicyMiddleware,
+)
 from ..runtime.permission_middleware import PermissionMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.questions import ConsoleQuestionProvider, QuestionProvider
 from ..runtime.tool_context import ToolContext
 from ..runtime.tool_registry import tool_schemas_for_profile
-from ..sessions.events import AssistantMessageEvent, FinalReportEvent, SessionFinishedEvent, TurnSummaryEvent, UserInputEvent
+from ..sessions.events import (
+    AssistantMessageEvent,
+    FinalReportEvent,
+    SessionFinishedEvent,
+    TurnSummaryEvent,
+    UserInputEvent,
+)
 from ..sessions.report import build_final_report
-from ..sessions._event_helpers import is_ignored_changed_file
-from ..sessions.summary import load_session_summary
 from ..sessions.store import Session, SessionStore
 from ..sessions.turn_summary import generate_turn_summary, should_summarize_turn
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
-from ..workspace.shell_session import docker_cli_path, docker_info_check, docker_shell_hint, sandbox_mode, validate_shell_configuration, windows_shell_hint, windows_shell_path
-from .mentions import MentionResolutionError, ResolvedMention, render_mention_context, resolve_mentions
-
+from ..workspace.shell_session import (
+    validate_shell_configuration,
+)
+from .mentions import (
+    ResolvedMention,
+    render_mention_context,
+    resolve_mentions,
+)
 
 PRODUCT_DEFAULT_PROFILE = "general"
 DIRECT_ANSWER_TURN_INSTRUCTION = (
@@ -106,9 +124,12 @@ class InteractiveSession:
         profile_explicit: bool | None = None,
         enable_turn_summary: bool = True,
         allow_checkpoint_init_failure: bool = False,
+        startup_sink: Callable[[str], None] | None = None,
     ):
         self.cwd = Path(cwd).resolve()
         config.WORKSPACE = str(self.cwd)
+        self.startup_sink = startup_sink
+        self._report_startup("checking workspace")
         validate_shell_configuration()
         self.stream_sink = stream_sink or stream_callback
         self.event_listener = event_listener
@@ -120,6 +141,7 @@ class InteractiveSession:
         self.output_sink = output_sink or print
         self.enable_turn_summary = enable_turn_summary
         self.checkpoint_init_error: str = ""
+        self._report_startup("loading skills")
         self.skill_registry = SkillRegistry()
         self._slash_registry = None
         self.session_store = SessionStore(self.cwd / ".harness")
@@ -131,6 +153,7 @@ class InteractiveSession:
         self._pending_profile_name = profile_name
         self._profile_source = "explicit" if self.profile_explicit else "default"
         if resume_session_id:
+            self._report_startup("loading history")
             metadata = self.session_store.read_metadata(resume_session_id)
             self.cwd = Path(metadata["cwd"]).resolve()
             config.WORKSPACE = str(self.cwd)
@@ -139,8 +162,10 @@ class InteractiveSession:
             self._pending_profile_name = metadata.get("profile") or profile_name
             self._profile_source = "resume"
             self.resume_context = _build_resume_context(self.session_store, resume_session_id)
+            self._report_startup("history loaded")
 
         self.profile = get_profile(self._pending_profile_name)
+        self._report_startup("preparing checkpoints")
         try:
             _ensure_git_repository(self.cwd)
         except (OSError, subprocess.CalledProcessError) as exc:
@@ -152,6 +177,8 @@ class InteractiveSession:
         self.tool_context: ToolContext | None = None
         self.tool_registry = None
         self.mcp_manager = None
+        self._mcp_tools_loaded = False
+        self._mcp_load_lock = threading.Lock()
         self.agent = None
         self.conversation: AgentConversation | None = None
         self.profile_slots: dict[str, ProfileSlot] = {}
@@ -167,7 +194,13 @@ class InteractiveSession:
         self._resolved_task_timeout: float | None = None
         self._closed = False
         self._close_lock = threading.Lock()
+        self._report_startup("connecting tools")
         self._bind_profile(self._pending_profile_name, source=self._profile_source)
+        self._report_startup("ready")
+
+    def _report_startup(self, stage: str) -> None:
+        if self.startup_sink is not None:
+            self.startup_sink(stage)
 
     @property
     def is_bound(self) -> bool:
@@ -229,14 +262,31 @@ class InteractiveSession:
         )
 
     def _load_mcp_tools(self) -> None:
-        self.tool_registry = BUILTIN_TOOL_REGISTRY.copy()
-        self.mcp_manager = McpClientManager.from_workspace(self.cwd)
+        if self.tool_registry is None or self.mcp_manager is None:
+            self._prepare_tool_registry()
         self.mcp_manager.connect_all()
         self.mcp_manager.register_tools(self.tool_registry)
+        self._mcp_tools_loaded = True
+
+    def _prepare_tool_registry(self) -> None:
+        self.tool_registry = BUILTIN_TOOL_REGISTRY.copy()
+        self.mcp_manager = McpClientManager.from_workspace(self.cwd)
+        self._mcp_tools_loaded = False
 
     def _ensure_mcp_tools_loaded(self) -> None:
-        if self.mcp_manager is None or self.tool_registry is None:
+        if self._mcp_tools_loaded:
+            return
+        with self._mcp_load_lock:
+            if self._mcp_tools_loaded:
+                return
+            self._report_startup("connecting external tools")
             self._load_mcp_tools()
+            self._refresh_agent_tool_schemas()
+            self._report_startup("external tools ready")
+
+    def warm_mcp_tools(self) -> None:
+        """Connect configured MCP servers after the core session is usable."""
+        self._ensure_mcp_tools_loaded()
 
     def _tool_schemas_for_agent_config(self, cfg) -> list[dict]:
         core_schemas = tool_schemas_for_profile(
@@ -445,7 +495,7 @@ class InteractiveSession:
                     "error": self.checkpoint_init_error,
                 },
             )
-        self._ensure_mcp_tools_loaded()
+        self._prepare_tool_registry()
         self.tool_context = ToolContext(
             workspace=WorkspaceService(
                 root=self.cwd,
@@ -540,6 +590,7 @@ class InteractiveSession:
         cancellation_token=None,
         turn_instruction: str | None = None,
     ) -> TurnResult:
+        self._ensure_mcp_tools_loaded()
         turn_started_at = time.time()
         baseline_dirty = git_dirty_paths(self.cwd)
         baseline_staged = git_staged_paths(self.cwd)
@@ -893,7 +944,8 @@ class InteractiveSession:
     def reload_mcp(self) -> str:
         self._ensure_mcp_tools_loaded()
         self.mcp_manager.close()
-        self._load_mcp_tools()
+        self._prepare_tool_registry()
+        self._ensure_mcp_tools_loaded()
         if self.tool_context is not None:
             self.tool_context.tool_registry = self.tool_registry
         self._refresh_agent_tool_schemas()
@@ -1019,8 +1071,12 @@ class InteractiveSession:
         if args[:2] == ["every", "turn"]:
             self.checkpoint.every_turns = 1
             return "checkpoint cadence: every turn"
-        if args and args[0] == "every":
-            if len(args) in (2, 3) and (len(args) == 2 or args[2] in ("turn", "turns")):
+        if (
+            args
+            and args[0] == "every"
+            and len(args) in (2, 3)
+            and (len(args) == 2 or args[2] in ("turn", "turns"))
+        ):
                 try:
                     turns = int(args[1])
                 except ValueError as e:

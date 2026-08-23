@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import ClassVar
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -20,10 +22,20 @@ _STREAM_FLUSH_DELAY_SECONDS = 0.005
 _STREAM_FLUSH_MAX_CHARS = 4_096
 _CONTEXT_SNAPSHOT_MIN_INTERVAL_SECONDS = 1.0
 _SPINNER_INTERVAL_SECONDS = 0.12
+_STARTUP_STAGE_LABELS = {
+    "starting": "启动中",
+    "loading profile": "加载配置",
+    "loading history": "加载历史会话",
+    "history loaded": "历史会话已加载",
+    "loading skills": "加载技能",
+    "loading workspace": "加载工作区",
+    "connecting external tools": "连接外部工具",
+    "external tools ready": "外部工具已就绪",
+    "ready": "就绪",
+}
 
 from .. import config
-from ..agent.cancellation import CancelledError, CancellationToken
-from ..core.interactive import InteractiveSession
+from ..agent.cancellation import CancellationToken, CancelledError
 from ..core.mentions import MentionResolutionError
 from .approval import TuiApprovalProvider
 from .commands import default_command_registry
@@ -36,6 +48,12 @@ from .widgets import (
     TranscriptView,
 )
 
+
+def InteractiveSession(**kwargs):
+    """Import the orchestration stack only inside the startup worker."""
+    from ..core.interactive import InteractiveSession as Session
+
+    return Session(**kwargs)
 
 # ── Messages (worker → UI thread) ──────────────────────────────────────────
 
@@ -72,6 +90,48 @@ class SubmitError(Message):
         self.error = error
 
 
+class SlashCommandComplete(Message):
+    """A local slash command finished outside the UI thread."""
+
+    def __init__(self, should_continue: bool):
+        super().__init__()
+        self.should_continue = should_continue
+
+
+class SessionReady(Message):
+    """The background startup worker finished creating the session."""
+
+    def __init__(self, session):
+        super().__init__()
+        self.session = session
+
+
+class SessionStartupError(Message):
+    """The background startup worker could not create the session."""
+
+    def __init__(self, error: str):
+        super().__init__()
+        self.error = error
+
+
+class StartupProgress(Message):
+    """A user-visible stage from background session initialization."""
+
+    def __init__(self, stage: str):
+        super().__init__()
+        self.stage = stage
+
+
+class ContextSnapshotReady(Message):
+    """A background context-token snapshot ready for the status bar."""
+
+    def __init__(self, session, context_tokens: int, context_window_tokens: int) -> None:
+        super().__init__()
+        self.session = session
+        self.context_tokens = context_tokens
+        self.context_window_tokens = context_window_tokens
+
+
 class OutputEvent(Message):
     """Output a status block to the transcript from a worker thread."""
     def __init__(self, text: str, title: str = "output") -> None:
@@ -86,9 +146,9 @@ class TuiApp(App):
     """Full-screen Textual TUI for VeriForge."""
 
     TITLE = "VeriForge"
-    SUB_TITLE = "Local coding workspace"
+    SUB_TITLE = "本地代码工作区"
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list] = [
         Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
         Binding("ctrl+o", "observe", "Observe", show=False, priority=True),
         # Panel keys: check_action guards these to only fire when a panel is active.
@@ -231,8 +291,12 @@ class TuiApp(App):
         self.profile_explicit = profile_explicit
         self.resume_session_id = resume_session_id
         self.first_task = first_task
+        self._session_factory = InteractiveSession
         self.registry = default_command_registry()
+        self.session = None
         self.state: TuiState | None = None
+        self._startup_error = ""
+        self._exiting = False
         self._pending_events: list = []
         self._streaming_current_response = False
         self._stream_header_printed = False
@@ -243,6 +307,7 @@ class TuiApp(App):
         self._pending_submissions: deque[str] = deque()
         self._cancellation_token = CancellationToken()
         self._last_context_refresh = 0.0
+        self._context_refresh_in_flight = False
 
         # Approval/question state
         self._approval_event: threading.Event | None = None
@@ -267,66 +332,146 @@ class TuiApp(App):
         yield StatusBar(id="status-bar")
 
     def on_mount(self) -> None:
-        """Create session and initialize state."""
-        # Build approval/question providers with reference to self
+        """Paint an interactive shell immediately, then initialize in a worker."""
+        permission_mode = os.environ.get("HARNESS_PERMISSION_MODE", "workspace-write")
+        self.state = TuiState(
+            snapshot=SessionStatusSnapshot(
+                profile=self.profile_name,
+                model=config.MODEL,
+                provider=config.PROVIDER,
+                permission_mode=permission_mode,
+                session_id=None,
+                cwd=self.cwd,
+                status="starting",
+            )
+        )
+
+        input_area = self.query_one("#input-area", InputArea)
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.show_welcome(self.state.snapshot)
+        startup_block = TranscriptBlock(
+            "status",
+            "starting",
+            "正在准备工作区并连接已配置工具…",
+            "running",
+        )
+        self.state.add_block(startup_block)
+        transcript.append_block(startup_block)
+        self._refresh_bars()
+        self.set_interval(_SPINNER_INTERVAL_SECONDS, self._advance_spinner)
+        input_area.focus_input()
+
         approval_provider = TuiApprovalProvider(project_root=self.cwd, app_tui=self)
         question_provider = TuiQuestionProvider(app_tui=self)
+        self._initialize_session(approval_provider, question_provider)
 
-        self.session = InteractiveSession(
-            cwd=self.cwd,
-            profile_name=self.profile_name,
-            profile_explicit=self.profile_explicit,
-            resume_session_id=self.resume_session_id,
-            stream_sink=self._stream_delta,
-            event_listener=self._event_listener,
-            approval_provider=approval_provider,
-            question_provider=question_provider,
-            output_sink=self._output,
-            enable_turn_summary=False,
-        )
-        display_profile = getattr(self.session, "display_profile", self.session.profile.name())
+        if self.first_task:
+            self._submit_async(self.first_task)
+
+    @work(thread=True, group="startup", exclusive=True, exit_on_error=False)
+    def _initialize_session(self, approval_provider, question_provider) -> None:
+        """Build the potentially slow session without blocking the Textual loop."""
+        try:
+            session = self._session_factory(
+                cwd=self.cwd,
+                profile_name=self.profile_name,
+                profile_explicit=self.profile_explicit,
+                resume_session_id=self.resume_session_id,
+                stream_sink=self._stream_delta,
+                event_listener=self._event_listener,
+                approval_provider=approval_provider,
+                question_provider=question_provider,
+                output_sink=self._output,
+                enable_turn_summary=False,
+                startup_sink=self._startup_progress,
+            )
+        except Exception as exc:
+            self.post_message(SessionStartupError(f"{type(exc).__name__}: {exc}"))
+            return
+
+        if self._exiting:
+            try:
+                session.close()
+            except Exception:
+                log.debug("Error closing a session that finished after TUI exit", exc_info=True)
+            return
+        self.post_message(SessionReady(session))
+
+    def on_startup_progress(self, msg: StartupProgress) -> None:
+        if self.state is None or msg.stage == "ready":
+            return
+        if msg.stage == "external tools ready":
+            if self.state.snapshot.status == "connecting external tools":
+                self.state.snapshot.status = "running" if self._submitting else "idle"
+            self._refresh_bars()
+            return
+        display_stage = _STARTUP_STAGE_LABELS.get(msg.stage, msg.stage)
+        self.state.snapshot.status = msg.stage
+        for block in self.state.blocks:
+            if block.title == "starting":
+                block.body = f"{display_stage}…"
+                break
+        self._redraw_transcript()
+        self._refresh_bars()
+
+    def on_session_ready(self, msg: SessionReady) -> None:
+        """Attach a ready session and drain input accepted during startup."""
+        self.session = msg.session
+        display_profile = getattr(self.session, "display_profile", None)
+        if not display_profile:
+            display_profile = self.session.profile.name()
         session_id = getattr(
             self.session,
             "session_id",
             getattr(getattr(self.session, "session", None), "id", None),
         )
         is_bound = getattr(self.session, "is_bound", True)
-        self.state = TuiState(
-            snapshot=SessionStatusSnapshot(
-                profile=display_profile,
-                model=config.MODEL,
-                provider=config.PROVIDER,
-                permission_mode=self.session.permission_mode,
-                session_id=session_id,
-                cwd=self.session.cwd,
-                status="idle" if is_bound else "pending",
-            )
-        )
-        # Process any events that arrived before state was ready
+        self.state.snapshot.profile = display_profile
+        self.state.snapshot.permission_mode = self.session.permission_mode
+        self.state.snapshot.session_id = session_id
+        self.state.snapshot.cwd = Path(self.session.cwd)
+        self.state.snapshot.status = "idle" if is_bound else "pending"
+
         for event in self._pending_events:
             self._process_session_event(event)
         self._pending_events.clear()
 
-        # Wire up input area
         input_area = self.query_one("#input-area", InputArea)
+        self.registry = default_command_registry(
+            skill_registry=getattr(self.session, "skill_registry", None)
+        )
+        input_area.set_registry(self.registry)
         input_area.set_session(self.session)
+        self.state.blocks = [block for block in self.state.blocks if block.title != "starting"]
+        self._redraw_transcript()
+        self._refresh_bars()
+        if hasattr(self.session, "warm_mcp_tools"):
+            self._warm_mcp_tools()
+        self._drain_pending_submissions()
 
-        # Show welcome message
-        transcript = self.query_one("#transcript", TranscriptView)
-        transcript.show_welcome(self.state.snapshot)
+    @work(thread=True, group="mcp-warmup", exclusive=True, exit_on_error=False)
+    def _warm_mcp_tools(self) -> None:
+        try:
+            self.session.warm_mcp_tools()
+        except Exception as exc:
+            log.warning("MCP warmup failed: %s", exc)
 
-        # Update status/context bars
+    def on_session_startup_error(self, msg: SessionStartupError) -> None:
+        self._startup_error = msg.error
+        self.state.snapshot.status = "needs attention"
+        self.state.blocks = [block for block in self.state.blocks if block.title != "starting"]
+        self._output(msg.error, title="startup failed")
         self._refresh_bars()
 
-        # Animate the status spinner while a turn is active
-        self.set_interval(_SPINNER_INTERVAL_SECONDS, self._advance_spinner)
-
-        # Focus input
-        input_area.focus_input()
-
-        # Submit first task if provided
-        if self.first_task:
-            self._submit_async(self.first_task)
+    def on_context_snapshot_ready(self, msg: ContextSnapshotReady) -> None:
+        """Apply a context snapshot without blocking the UI thread."""
+        self._context_refresh_in_flight = False
+        if self.state is None or msg.session is not self.session:
+            return
+        self.state.snapshot.context_tokens = msg.context_tokens
+        self.state.snapshot.context_window_tokens = msg.context_window_tokens
+        self._last_context_refresh = time.monotonic()
+        self._refresh_bars()
 
     # ── Input handling ──────────────────────────────────────────────────────
 
@@ -373,16 +518,28 @@ class TuiApp(App):
         text = str(text or "").strip()
         if not text:
             return False
+        if self._startup_error:
+            self._output(self._startup_error, title="启动失败")
+            return False
+        if self.session is None:
+            self._pending_submissions.append(text)
+            self._output(_preview_submission(text), title="启动后排队")
+            return True
         if self._submitting:
             self._pending_submissions.append(text)
-            self._output(_preview_submission(text), title="queued")
+            self._output(_preview_submission(text), title="已排队")
             return True
         return self._start_submission(text)
 
     def _start_submission(self, text: str) -> bool:
         """Dispatch one accepted submission. Non-blocking for agent turns."""
-        if self._run_slash_command_if_needed(text):
-            self._drain_pending_submissions()
+        if self._is_local_slash_command(text):
+            self._submitting = True
+            self.state.snapshot.status = (
+                "loading history" if self._is_resume_command(text) else "running command"
+            )
+            self._refresh_bars()
+            self._slash_command_worker(text)
             return True
         self._submitting = True
         self._clear_pending_stream_deltas()
@@ -393,7 +550,7 @@ class TuiApp(App):
         self._submit_worker(text, token)
         return True
 
-    @work(thread=True, exclusive=True, exit_on_error=False)
+    @work(thread=True, group="turn", exclusive=True, exit_on_error=False)
     def _submit_worker(self, text: str, cancellation_token: CancellationToken) -> None:
         """Run session.submit() in a background thread."""
         try:
@@ -406,19 +563,34 @@ class TuiApp(App):
         except Exception as exc:
             self.post_message(SubmitError(str(exc)))
 
-    def _run_slash_command_if_needed(self, text: str) -> bool:
+    def _is_local_slash_command(self, text: str) -> bool:
         if not text.startswith("/"):
             return False
-        if self.registry is not None and self.registry.is_agent_command(text):
-            return False
+        return not (
+            self.registry is not None and self.registry.is_agent_command(text)
+        )
+
+    @staticmethod
+    def _is_resume_command(text: str) -> bool:
+        return str(text or "").strip().split(maxsplit=1)[:1] == ["/resume"]
+
+    @work(thread=True, group="turn", exclusive=True, exit_on_error=False)
+    def _slash_command_worker(self, text: str) -> None:
         try:
             should_continue = self.session.handle_slash_command(text)
         except Exception as exc:
-            self._output(f"Error: {exc}", title="error")
-            return True
-        if not should_continue:
+            self.post_message(SubmitError(str(exc)))
+            return
+        self.post_message(SlashCommandComplete(should_continue))
+
+    def on_slash_command_complete(self, msg: SlashCommandComplete) -> None:
+        self._submitting = False
+        self.state.snapshot.status = "idle"
+        self._refresh_bars()
+        if not msg.should_continue:
             self.exit()
-        return True
+            return
+        self._drain_pending_submissions()
 
     def _drain_pending_submissions(self) -> None:
         while not self._submitting and self._pending_submissions:
@@ -451,9 +623,9 @@ class TuiApp(App):
             return
         result = msg.result
         if hasattr(result, "notice") and result.notice:
-            self._output(result.notice, title="notice")
+            self._output(result.notice, title="提示")
         if hasattr(result, "checkpoint") and self._should_show_checkpoint(result.checkpoint):
-            self._output(result.checkpoint, title="checkpoint")
+            self._output(result.checkpoint, title="检查点")
         self._submitting = False
         self._input_enabled(True)
         self._drain_pending_submissions()
@@ -463,7 +635,7 @@ class TuiApp(App):
         if not self._finalize_streaming():
             self._submitting = False
             return
-        block = TranscriptBlock("status", "turn cancelled", "Ctrl-C pressed", "cancelled")
+        block = TranscriptBlock("status", "回合已取消", "已按下 Ctrl+C", "cancelled")
         self.state.add_block(block)
         self._append_block(block)
         self._submitting = False
@@ -475,8 +647,11 @@ class TuiApp(App):
         if not self._finalize_streaming():
             self._submitting = False
             return
-        self._output(f"Error: {msg.error}", title="error")
+        self._output(f"错误：{msg.error}", title="错误")
         self._submitting = False
+        if self.state.snapshot.status in {"running command", "loading history"}:
+            self.state.snapshot.status = "idle"
+            self._refresh_bars()
         self._input_enabled(True)
         self._drain_pending_submissions()
 
@@ -502,9 +677,20 @@ class TuiApp(App):
             return
         self.post_message(SessionEvent(event))
 
+    def _startup_progress(self, stage: str) -> None:
+        """Forward startup stages from the initialization thread."""
+        self.post_message(StartupProgress(stage))
+
     def _output(self, text: str, *, title: str = "output") -> None:
         """Write a status block to the transcript."""
-        block = TranscriptBlock("status", title, text)
+        # Only local slash-command/status results are translated. Error text,
+        # tool output, and model-generated content must remain verbatim.
+        display_text = (
+            _localize_tui_output(text)
+            if title in {"output", "提示", "检查点"}
+            else str(text or "")
+        )
+        block = TranscriptBlock("status", _localize_tui_label(title), display_text)
         self.state.add_block(block)
         self._append_block(block)
 
@@ -594,7 +780,7 @@ class TuiApp(App):
             self.state.snapshot.permission_mode = self.session.permission_mode
             self.post_message(OutputEvent("", title="__refresh_only__"))
         except Exception as exc:
-            self.post_message(OutputEvent(f"Error: {exc}", title="permission mode error"))
+            self.post_message(OutputEvent(f"错误：{exc}", title="权限模式错误"))
 
     def action_panel_key(self, key: str) -> None:
         """High-priority key binding for active approval/question panels."""
@@ -776,30 +962,51 @@ class TuiApp(App):
         if self.state is None:
             return
         try:
-            self._refresh_context_snapshot()
-            self.query_one("#status-bar", StatusBar).update_from_snapshot(self.state.snapshot)
+            self._request_context_snapshot()
+            status_bar = self.query_one("#status-bar", StatusBar)
+            status_bar.update_from_snapshot(self.state.snapshot)
         except NoMatches:
             log.debug("Status bar not found in _refresh_bars")
         except Exception:
             log.warning("Error refreshing bars", exc_info=True)
 
-    def _refresh_context_snapshot(self) -> None:
-        """Refresh context token counts (throttled; full recount is costly)."""
-        if not getattr(self.session, "is_bound", True) or self.session.conversation is None:
+    def _request_context_snapshot(self) -> None:
+        """Schedule a throttled context count without blocking the UI thread."""
+        if (
+            self.session is None
+            or not getattr(self.session, "is_bound", True)
+            or self.session.conversation is None
+        ):
             self.state.snapshot.context_tokens = 0
             self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
             return
         now = time.monotonic()
-        if self.state.snapshot.context_tokens and now - self._last_context_refresh < _CONTEXT_SNAPSHOT_MIN_INTERVAL_SECONDS:
+        if self._context_refresh_in_flight or now - self._last_context_refresh < _CONTEXT_SNAPSHOT_MIN_INTERVAL_SECONDS:
             return
-        self._last_context_refresh = now
+        self._context_refresh_in_flight = True
+        self._refresh_context_snapshot_worker(self.session)
+
+    @work(thread=True, group="context-refresh", exclusive=True, exit_on_error=False)
+    def _refresh_context_snapshot_worker(self, session) -> None:
+        """Count request tokens off the UI thread; tool schemas can be costly."""
         from ..agent import context
-        tool_schemas = getattr(getattr(self.session, "agent", None), "tool_schemas", None)
-        self.state.snapshot.context_tokens = context.count_request_tokens(
-            self.session.conversation.messages,
-            tool_schemas=tool_schemas,
+
+        try:
+            tool_schemas = getattr(getattr(session, "agent", None), "tool_schemas", None)
+            context_tokens = context.count_request_tokens(
+                list(session.conversation.messages),
+                tool_schemas=tool_schemas,
+            )
+        except Exception:
+            log.debug("Context token refresh failed", exc_info=True)
+            context_tokens = 0
+        self.post_message(
+            ContextSnapshotReady(
+                session,
+                context_tokens,
+                config.CONTEXT_WINDOW_TOKENS,
+            )
         )
-        self.state.snapshot.context_window_tokens = config.CONTEXT_WINDOW_TOKENS
 
     def _redraw_transcript(self) -> None:
         try:
@@ -840,6 +1047,7 @@ class TuiApp(App):
 
     def exit(self, *args, **kwargs) -> None:
         """Clean shutdown."""
+        self._exiting = True
         if self._approval_event is not None and not self._approval_event.is_set():
             if self._approval_result_holder:
                 self._approval_result_holder[0] = False
@@ -848,10 +1056,11 @@ class TuiApp(App):
             if self._question_result_holder:
                 self._question_result_holder[0] = None
             self._question_event.set()
-        try:
-            self.session.close()
-        except Exception:
-            log.debug("Error closing session during exit", exc_info=True)
+        if self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                log.debug("Error closing session during exit", exc_info=True)
         super().exit(*args, **kwargs)
 
 
@@ -860,3 +1069,35 @@ def _preview_submission(text: str, limit: int = 80) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: max(0, limit - 3)] + "..."
+
+
+def _localize_tui_label(label: str) -> str:
+    return {
+        "output": "输出",
+        "notice": "提示",
+        "checkpoint": "检查点",
+        "error": "错误",
+        "permission mode error": "权限模式错误",
+    }.get(str(label), str(label))
+
+
+def _localize_tui_output(text: str) -> str:
+    """Translate fixed runtime status phrases without touching model content."""
+    replacements = {
+        "profile switched: ": "配置已切换：",
+        "profile selected: ": "已选择配置：",
+        "profile already active: ": "配置已处于当前状态：",
+        "permission mode switched: ": "权限模式已切换：",
+        "permission mode already active: ": "权限模式已处于当前状态：",
+        "checkpoint created: ": "检查点已创建：",
+        "MCP reloaded": "MCP 已重新加载",
+        "No compacted summary available yet.": "目前还没有可用的压缩摘要。",
+        "Latest compacted summary:": "最近的压缩摘要：",
+    }
+    localized = str(text or "")
+    for source, target in replacements.items():
+        localized = localized.replace(source, target)
+    if localized.startswith(("Observability dashboard", "Project observability")):
+        from .screens import _localize_observability_text
+        localized = _localize_observability_text(localized)
+    return localized

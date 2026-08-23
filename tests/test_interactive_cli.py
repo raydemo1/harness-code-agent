@@ -11,8 +11,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
-from unittest.mock import Mock
+from typing import ClassVar
+from unittest.mock import Mock, patch
 
 
 def _install_fake_openai_module() -> None:
@@ -36,15 +36,15 @@ from harness_code_agent.core.mentions import (
     render_mention_context,
     resolve_mentions,
 )
-from harness_code_agent.sessions.events import FileChangeEvent, ToolResultEvent
-from harness_code_agent.sessions.store import SessionStore
 from harness_code_agent.profiles.base import AgentConfig
 from harness_code_agent.runtime.middleware import TimeBudgetMiddleware
+from harness_code_agent.sessions.events import FileChangeEvent, ToolResultEvent
+from harness_code_agent.sessions.store import SessionStore
 from harness_code_agent.skills import SkillRegistry
 
 
 class FakeConversation:
-    instances = []
+    instances: ClassVar[list] = []
     response_text = "assistant done"
 
     def __init__(self):
@@ -70,13 +70,17 @@ class RecordingInteractiveAgent:
         self.__class__.init_args = args
         self.__class__.init_kwargs = kwargs
         self.middlewares = kwargs.get("middlewares") or []
+        self.tool_schemas = kwargs.get("tool_schemas") or []
+
+    def update_tool_schemas(self, schemas):
+        self.tool_schemas = schemas
 
     def start_conversation(self):
         return FakeConversation()
 
 
 class EmptySkillRegistry:
-    user_commands = []
+    user_commands: ClassVar[list] = []
 
     def build_catalog_prompt(self):
         return ""
@@ -432,6 +436,40 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_resume_initialization_reports_history_loading_stages(self):
+        store = SessionStore(Path(self.temp_dir) / ".harness")
+        previous = store.create(
+            profile="plan",
+            cwd=self.temp_dir,
+            model="model-a",
+            permission_mode="workspace-write",
+        )
+        store.event_bus(previous).emit(
+            "user_input",
+            agent="main_agent",
+            payload={"text": "previous task"},
+        )
+        stages = []
+
+        with patch(
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
+            return_value=FakeConversation(),
+        ):
+            session = InteractiveSession(
+                cwd=self.temp_dir,
+                profile_name="coding-agent",
+                profile_explicit=True,
+                resume_session_id=previous.id,
+                startup_sink=stages.append,
+            )
+        try:
+            self.assertIn("loading history", stages)
+            self.assertIn("history loaded", stages)
+            self.assertLess(stages.index("loading history"), stages.index("history loaded"))
+            self.assertIn(previous.id, session.resume_context or "")
+        finally:
+            session.close()
+
     def test_profile_switch_reuses_profile_slots_without_closing_old_context(self):
         coding_conversation = FakeConversation()
         plan_conversation = FakeConversation()
@@ -499,7 +537,7 @@ class InteractiveCliTests(unittest.TestCase):
                 session.submit("fix with tools")
                 event_types = [event.type for event in session.event_bus.events]
                 self.assertIn("turn_summary", event_types)
-                turn_summary = [event for event in session.event_bus.events if event.type == "turn_summary"][0]
+                turn_summary = next(event for event in session.event_bus.events if event.type == "turn_summary")
                 self.assertEqual(turn_summary.payload["generated_by"]["intensity"], "fast")
             finally:
                 session.close()
@@ -663,10 +701,17 @@ class InteractiveCliTests(unittest.TestCase):
                 session.ensure_profile_bound_for_first_task("inspect docs")
                 tool_names = {
                     schema["function"]["name"]
-                    for schema in RecordingInteractiveAgent.init_kwargs["tool_schemas"]
+                    for schema in session.agent.tool_schemas
                 }
 
                 self.assertIn("read_file", tool_names)
+                self.assertNotIn("mcp__docs__search", tool_names)
+
+                session.warm_mcp_tools()
+                tool_names = {
+                    schema["function"]["name"]
+                    for schema in session.agent.tool_schemas
+                }
                 self.assertIn("mcp__docs__search", tool_names)
                 self.assertIsNot(session.tool_registry, tools.BUILTIN_TOOL_REGISTRY)
                 self.assertIs(session.tool_context.tool_registry, session.tool_registry)
@@ -675,7 +720,7 @@ class InteractiveCliTests(unittest.TestCase):
 
     def test_mcp_slash_commands_show_status_list_and_reload(self):
         class FakeMcpManager:
-            instances = []
+            instances: ClassVar[list] = []
 
             def __init__(self):
                 self.closed = False
@@ -1100,10 +1145,10 @@ class InteractiveCliTests(unittest.TestCase):
         summary_path = Path(self.temp_dir) / ".harness" / "sessions" / session_id / "summary.md"
         text = summary_path.read_text(encoding="utf-8")
         metadata = session.session_store.read_metadata(session_id)
-        listed = [
+        listed = next(
             item for item in session.session_store.list_sessions()
             if item.get("id") == session_id
-        ][0]
+        )
         self.assertIn("Session summary", text)
         self.assertIn(f"id: {session_id}", text)
         self.assertIn("status: closed", text)
@@ -1186,7 +1231,7 @@ class InteractiveCliTests(unittest.TestCase):
                 try:
                     barrier.wait()
                     session.close()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - the test collects whatever races raise
                     errors.append(exc)
 
             threads = [threading.Thread(target=close_session) for _ in range(2)]
@@ -1293,9 +1338,11 @@ class InteractiveCliTests(unittest.TestCase):
     def test_git_init_failure_raises_by_default(self):
         from harness_code_agent.core.git_helpers import _ensure_git_repository
 
-        with patch("harness_code_agent.core.git_helpers.subprocess.run", side_effect=subprocess.CalledProcessError(1, ["git", "init"])):
-            with self.assertRaises(subprocess.CalledProcessError):
-                _ensure_git_repository(Path(self.temp_dir))
+        with (
+            patch("harness_code_agent.core.git_helpers.subprocess.run", side_effect=subprocess.CalledProcessError(1, ["git", "init"])),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            _ensure_git_repository(Path(self.temp_dir))
 
         self.assertFalse((Path(self.temp_dir) / ".git").exists())
 
@@ -1332,7 +1379,7 @@ class InteractiveCliTests(unittest.TestCase):
         try:
             self.assertTrue(session.handle_slash_command("/terminal"))
             self.assertEqual(session.profile.name(), "general")
-            self.assertIn("Unknown slash command: /terminal", output.getvalue())
+            self.assertIn("未知的斜杠命令：/terminal", output.getvalue())
         finally:
             session.close()
 
@@ -1443,6 +1490,25 @@ class InteractiveCliTests(unittest.TestCase):
                 tui_app.assert_called_once()
                 for key, value in expected.items():
                     self.assertEqual(tui_app.call_args.kwargs[key], value)
+
+    def test_hca_tui_startup_disables_console_logging(self):
+        from harness_code_agent import cli
+
+        class TtyBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with (
+            patch("harness_code_agent.cli.TuiApp") as tui_app,
+            patch("harness_code_agent.core.logging_config.setup_logging") as setup_logging,
+            patch.object(sys, "stdin", TtyBuffer()),
+            patch.object(sys, "stdout", TtyBuffer()),
+        ):
+            tui_app.return_value.run.return_value = 0
+            result = cli.main(["tiny", "demo"])
+
+        self.assertEqual(result, 0)
+        setup_logging.assert_called_once_with(verbose=False, console=False)
 
     def test_hca_print_mode_flags_submit_without_tui(self):
         from harness_code_agent import cli

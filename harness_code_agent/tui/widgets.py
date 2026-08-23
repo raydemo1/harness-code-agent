@@ -1,6 +1,7 @@
 """Textual widgets for the VeriForge TUI."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,14 +11,14 @@ from rich.panel import Panel
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
-from textual import on, work
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.strip import Strip
-from textual.widgets import Input, RichLog, Static, TextArea
+from textual.widgets import RichLog, Static, TextArea
 
 from .state import TranscriptBlock
 
@@ -30,23 +31,20 @@ if TYPE_CHECKING:
 
 class InputSubmit(Message):
     """Message posted when user presses Enter to submit input."""
-    pass
 
 
 class PaletteComplete(Message):
     """Message posted when user accepts the highlighted completion."""
-    pass
 
 
 class PaletteDismiss(Message):
     """Message posted when user closes the completion palette."""
-    pass
 
 
 class SubmitTextArea(TextArea):
     """TextArea that submits on Enter and inserts newline on Shift+Enter."""
 
-    PLACEHOLDER = "Ask anything  ·  / commands  ·  @ files"
+    PLACEHOLDER = "输入任务  ·  / 命令  ·  @ 文件"
 
     BINDINGS = TextArea.BINDINGS + [
         Binding("enter", "submit", "Submit", show=False, priority=True),
@@ -120,6 +118,21 @@ _SUCCESS = "#86efac"
 _WARNING = "#fde68a"
 _ERROR = "#fca5a5"
 
+_BLOCK_LABELS = {
+    "failure": "错误",
+    "error": "错误",
+    "file changed": "文件已变更",
+    "profile switched": "配置已切换",
+    "profile route": "配置路由",
+    "plan ready": "计划已准备",
+    "context compacted": "上下文已压缩",
+    "turn cancelled": "回合已取消",
+    "startup failed": "启动失败",
+    "queued": "已排队",
+    "queued while starting": "启动后排队",
+    "output": "输出",
+}
+
 _ASSISTANT_MARKDOWN_CHAR_LIMIT = 12_000
 _ASSISTANT_DISPLAY_HEAD_CHARS = 4_000
 _ASSISTANT_DISPLAY_TAIL_CHARS = 4_000
@@ -129,21 +142,23 @@ _ASSISTANT_STREAM_TAIL_CHARS = 12_000
 def block_to_rich(block: TranscriptBlock):
     """Convert a TranscriptBlock to a Rich renderable."""
     if block.kind == "user":
-        header = Text("› You", style=f"bold {_ACCENT}")
+        header = Text("› 你", style=f"bold {_ACCENT}")
         body = Text(block.body, style=_INK)
         return Group(header, body, Text(""))
     if block.kind == "assistant":
-        header = Text("• Assistant", style=f"bold {_SUCCESS}")
+        header = Text("• 助手", style=f"bold {_SUCCESS}")
         body = _assistant_body_renderable(block.body, streaming=block.status == "streaming")
         return Group(header, body, Text(""))
     if block.kind == "tool":
         return _tool_line(block)
+    if block.kind == "middleware":
+        return _middleware_line(block)
     if block.kind == "thought":
-        return Text(f"  · thought {block.body}", style=f"italic {_SUBTLE}")
+        return Text(f"  · 思考 {block.body}", style=f"italic {_SUBTLE}")
     if block.kind == "failure":
         return Panel(
             Text(block.body or "", style=_INK),
-            title=Text(block.title or "Error", style=f"bold {_ERROR}"),
+            title=Text(_BLOCK_LABELS.get(block.title, block.title or "错误"), style=f"bold {_ERROR}"),
             border_style=_ERROR,
         )
     if block.kind == "plan":
@@ -151,7 +166,7 @@ def block_to_rich(block: TranscriptBlock):
     if block.kind == "file":
         header = Text()
         header.append("  ✎ ", style=f"bold {_WARNING}")
-        header.append(block.title or "file changed", style=f"bold {_MUTED}")
+        header.append(_BLOCK_LABELS.get(block.title, block.title or "文件已变更"), style=f"bold {_MUTED}")
         if not block.body:
             return header
         return Group(header, _diff_renderable(block.body), Text(""))
@@ -180,7 +195,7 @@ def _diff_renderable(diff_text: str) -> Text:
             text.append(line, style="green")
         elif line.startswith("-"):
             text.append(line, style=_ERROR)
-        elif line.startswith("@@") or line.startswith("…"):
+        elif line.startswith(("@@", "…")):
             text.append(line, style=_SUBTLE)
         else:
             text.append(line, style=_MUTED)
@@ -211,21 +226,42 @@ def _tool_line(block: TranscriptBlock) -> Text:
     return text
 
 
+def _middleware_line(block: TranscriptBlock) -> Text:
+    marker = "◇"
+    color = _ACCENT
+    outcome = "已通过"
+    if block.status == "guided":
+        marker = "◆"
+        color = _WARNING
+        outcome = "已引导"
+    elif block.status == "blocked":
+        marker = "×"
+        color = _ERROR
+        outcome = "已阻止"
+    text = Text()
+    text.append(f"  {marker} ", style=f"bold {color}")
+    text.append(block.title, style=f"bold {color}")
+    text.append(f"  {outcome}", style=color)
+    if block.body:
+            text.append(f"  ·  {block.body}", style=_SUBTLE)
+    return text
+
+
 def _humanize_tool_title(title: str, status: str) -> str:
     """Turn internal tool identifiers into a compact activity feed label."""
     tool, separator, details = title.partition("(")
     details = details[:-1] if separator and details.endswith(")") else details
     labels = {
-        "read_file": ("Reading", "Read"),
-        "write_file": ("Writing", "Wrote"),
-        "apply_patch": ("Editing", "Edited"),
-        "run_bash": ("Running", "Ran"),
-        "search_files": ("Searching", "Searched"),
-        "list_files": ("Listing", "Listed"),
-        "parallel_commands": ("Running in parallel", "Ran in parallel"),
-        "parallel_agents": ("Delegating in parallel", "Delegated in parallel"),
-        "delegate_agent": ("Delegating", "Delegated"),
-        "update_plan_state": ("Updating plan", "Updated plan"),
+        "read_file": ("读取", "已读取"),
+        "write_file": ("写入", "已写入"),
+        "apply_patch": ("编辑", "已编辑"),
+        "run_bash": ("执行", "已执行"),
+        "search_files": ("搜索", "已搜索"),
+        "list_files": ("列出", "已列出"),
+        "parallel_commands": ("并行执行", "已并行执行"),
+        "parallel_agents": ("并行委派", "已并行委派"),
+        "delegate_agent": ("委派", "已委派"),
+        "update_plan_state": ("更新计划", "计划已更新"),
     }
     running, completed = labels.get(tool, (tool.replace("_", " "), tool.replace("_", " ")))
     label = running if status == "running" else completed
@@ -249,7 +285,7 @@ def _plan_update_renderable(body: str) -> Group:
         else:
             lines.append("  ○ ", style=_MUTED)
             lines.append(label, style=_MUTED)
-    return Group(Text("Plan", style=f"bold {_ACCENT}"), lines, Text(""))
+    return Group(Text("计划", style=f"bold {_ACCENT}"), lines, Text(""))
 
 
 def _assistant_body_renderable(body: str, *, streaming: bool):
@@ -267,10 +303,10 @@ def _assistant_body_excerpt(body: str) -> str:
     tail = body[-_ASSISTANT_DISPLAY_TAIL_CHARS:].lstrip()
     omitted = max(0, len(body) - len(head) - len(tail))
     return (
-        f"[response truncated: showing first {len(head)} and last {len(tail)} "
-        f"of {len(body)} characters]\n\n"
+        f"[响应过长：显示开头 {len(head)} 字符和结尾 {len(tail)} 字符，"
+        f"共 {len(body)} 字符]\n\n"
         f"{head}\n\n"
-        f"... [omitted {omitted} characters] ...\n\n"
+        f"... [中间省略 {omitted} 字符] ...\n\n"
         f"{tail}"
     )
 
@@ -279,11 +315,11 @@ def _streaming_body_excerpt(body: str) -> str:
     if len(body) <= _ASSISTANT_STREAM_TAIL_CHARS:
         return body
     tail = body[-_ASSISTANT_STREAM_TAIL_CHARS:].lstrip()
-    omitted = len(body) - len(tail)
-    return f"[showing latest {len(tail)} of {len(body)} characters]\n\n{tail}"
+    len(body) - len(tail)
+    return f"[显示最近 {len(tail)} / {len(body)} 字符]\n\n{tail}"
 
 
-_WELCOME_KEY_HINTS = "  / commands  ·  @ files  ·  ctrl+o observability  ·  ctrl+c interrupt"
+_WELCOME_KEY_HINTS = "  / 命令  ·  @ 文件  ·  Ctrl+O 可观测性  ·  Ctrl+C 中断"
 
 
 def welcome_rich(snapshot: SessionStatusSnapshot) -> Group:
@@ -358,19 +394,30 @@ class TranscriptView(RichLog):
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 _STATUS_LABELS = {
-    "running": "working",
-    "tool": "running tool",
-    "thinking": "thinking",
-    "compacting context": "compacting context",
-    "needs attention": "needs attention",
-    "plan ready": "plan ready",
-    "blocked": "stopped",
+    "starting": "启动中",
+    "loading history": "加载历史会话",
+    "history loaded": "历史会话已加载",
+    "ready": "就绪",
+    "pending": "等待任务",
+    "running": "处理中",
+    "running command": "执行命令",
+    "queued": "已排队",
+    "queued while starting": "启动后排队",
+    "tool": "执行工具",
+    "thinking": "模型思考中",
+    "compacting context": "压缩上下文",
+    "connecting external tools": "连接外部工具",
+    "needs attention": "需要处理",
+    "plan ready": "计划已准备",
+    "blocked": "已停止",
+    "failed": "失败",
+    "idle": "空闲",
 }
 
 _PERMISSION_LABELS = {
-    "workspace-write": "ws-write",
-    "danger-full-access": "full-access",
-    "llm-auto": "auto",
+    "workspace-write": "工作区可写",
+    "danger-full-access": "完全访问",
+    "llm-auto": "模型自动确认",
 }
 
 
@@ -382,6 +429,7 @@ class StatusBar(Static):
     turn: reactive[int] = reactive(0)
     status: reactive[str] = reactive("idle")
     spinner_frame: reactive[int] = reactive(0)
+    elapsed_seconds: reactive[int] = reactive(0)
     context_percent: reactive[int] = reactive(0)
     permission_mode: reactive[str] = reactive("workspace-write")
     dirty_count: reactive[int] = reactive(0)
@@ -392,9 +440,17 @@ class StatusBar(Static):
         if active:
             frame = _SPINNER_FRAMES[self.spinner_frame % len(_SPINNER_FRAMES)]
             label = _STATUS_LABELS.get(self.status, self.status)
-            busy_style = _WARNING if self.status in {"running", "tool", "thinking", "compacting context"} else _ERROR
+            busy_style = (
+                _ERROR
+                if self.status in {"needs attention", "blocked", "failed"}
+                else _WARNING
+            )
             text.append(f" {frame} ", style=f"bold {busy_style}")
             text.append(label, style=f"bold {busy_style}")
+            if self.elapsed_seconds:
+                minutes, seconds = divmod(self.elapsed_seconds, 60)
+                elapsed = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+                text.append(f"  {elapsed}", style=_SUBTLE)
             text.append("  ·  ", style=_SUBTLE)
         else:
             text.append(" ")
@@ -410,9 +466,9 @@ class StatusBar(Static):
             context_style = _ERROR
         elif remaining <= 40:
             context_style = _WARNING
-        text.append(f"{remaining}% context left", style=context_style)
+        text.append(f"剩余上下文 {remaining}%", style=context_style)
         if self.dirty_count and (not self.size.width or self.size.width >= 70):
-            text.append(f"  ·  {self.dirty_count} changed", style=_WARNING)
+            text.append(f"  ·  已变更 {self.dirty_count} 项", style=_WARNING)
         if self.model:
             text.append("  ·  ", style=_SUBTLE)
             text.append(self.model, style=f"bold {_INK}")
@@ -421,6 +477,18 @@ class StatusBar(Static):
     def advance_spinner(self) -> None:
         if self.status not in {"idle", "ready"}:
             self.spinner_frame = self.spinner_frame + 1
+            now = time.monotonic()
+            active_status = getattr(self, "_active_status", None)
+            if active_status != self.status:
+                self._active_status = self.status
+                self._active_since = now
+                self.elapsed_seconds = 0
+            else:
+                self.elapsed_seconds = int(now - self._active_since)
+        else:
+            self._active_status = self.status
+            self._active_since = time.monotonic()
+            self.elapsed_seconds = 0
 
     def update_from_snapshot(self, snap: SessionStatusSnapshot) -> None:
         self.profile = snap.profile
@@ -430,7 +498,7 @@ class StatusBar(Static):
         self.permission_mode = snap.permission_mode
         self.dirty_count = snap.dirty_count
         if snap.context_window_tokens > 0:
-            self.context_percent = min(999, int(round(snap.context_tokens * 100 / snap.context_window_tokens)))
+            self.context_percent = min(999, round(snap.context_tokens * 100 / snap.context_window_tokens))
         else:
             self.context_percent = 0
 
@@ -505,6 +573,9 @@ class InputArea(Vertical):
     def set_session(self, session) -> None:
         self._session = session
 
+    def set_registry(self, registry: SlashCommandRegistry) -> None:
+        self._registry = registry
+
     def compose(self) -> ComposeResult:
         yield CommandPalette(id="cmd-palette")
         with Horizontal(id="prompt-row"):
@@ -539,7 +610,7 @@ class InputArea(Vertical):
             selected = palette.get_selected()
             if selected:
                 text_area = self.query_one("#input-text", SubmitTextArea)
-                if selected.startswith("/") or selected.startswith("@"):
+                if selected.startswith(("/", "@")):
                     text_area.text = _complete_input_text(text_area.text, selected)
                 palette.update_candidates([])
                 event.prevent_default()
@@ -570,7 +641,7 @@ class InputArea(Vertical):
         if palette.display and palette.candidates:
             selected = palette.get_selected()
             if selected:
-                if selected.startswith("/") or selected.startswith("@"):
+                if selected.startswith(("/", "@")):
                     text_area.text = _complete_input_text(text_area.text, selected)
                 palette.update_candidates([])
                 return
@@ -585,7 +656,7 @@ class InputArea(Vertical):
         selected = palette.get_selected()
         if selected:
             text_area = self.query_one("#input-text", SubmitTextArea)
-            if selected.startswith("/") or selected.startswith("@"):
+            if selected.startswith(("/", "@")):
                 text_area.text = _complete_input_text(text_area.text, selected)
             palette.update_candidates([])
             event.stop()
