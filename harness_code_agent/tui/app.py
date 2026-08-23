@@ -332,6 +332,8 @@ class TuiApp(App):
         self._pending_stream_chars = 0
         self._stream_flush_scheduled = False
         self._submitting = False
+        self._new_session_in_flight = False
+        self._pending_resume_session_id: str | None = None
         self._pending_submissions: deque[str] = deque()
         self._cancellation_token = CancellationToken()
         self._last_context_refresh = 0.0
@@ -479,6 +481,11 @@ class TuiApp(App):
         self._input_enabled(True)
         if hasattr(self.session, "warm_mcp_tools"):
             self._warm_mcp_tools()
+        pending_resume = self._pending_resume_session_id
+        self._pending_resume_session_id = None
+        if pending_resume and is_bound:
+            self._start_resume(pending_resume)
+            return
         self._drain_pending_submissions()
 
     @work(thread=True, group="mcp-warmup", exclusive=True, exit_on_error=False)
@@ -495,6 +502,7 @@ class TuiApp(App):
         self._output(msg.error, title="startup failed")
         self._refresh_bars()
         self._new_session_in_flight = False
+        self._pending_resume_session_id = None
         self._input_enabled(True)
 
     def on_context_snapshot_ready(self, msg: ContextSnapshotReady) -> None:
@@ -911,7 +919,10 @@ class TuiApp(App):
         if not selected:
             return
         session_id = str(selected.get("id") or "").strip()
-        if not session_id or self.session is None:
+        if not session_id:
+            return
+        if self.session is None:
+            self._pending_resume_session_id = session_id
             return
         self._start_resume(session_id)
 
