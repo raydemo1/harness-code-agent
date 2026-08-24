@@ -77,9 +77,20 @@ class SkillRegistry:
 
         for skill_file in sorted(self.skills_dir.rglob("SKILL.md")):
             meta = _parse_frontmatter(skill_file)
-            if not meta:
-                continue
-            name = str(meta.get("name") or skill_file.parent.name).strip()
+            if meta is None:
+                raise ValueError(f"Skill is missing valid frontmatter: {skill_file}")
+            name = str(meta.get("name", "")).strip()
+            if not name:
+                raise ValueError(f"Skill has no name: {skill_file}")
+            if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
+                raise ValueError(f"Invalid skill name '{name}' in {skill_file}")
+            if skill_file.parent.name != name:
+                raise ValueError(
+                    f"Skill name '{name}' must match folder '{skill_file.parent.name}'"
+                )
+            description = str(meta.get("description", "")).strip()
+            if not description:
+                raise ValueError(f"Skill '{name}' has no description: {skill_file}")
             key = name.lower()
             if key in self._by_name:
                 previous = self._by_name[key]
@@ -89,7 +100,7 @@ class SkillRegistry:
             relative = Path(self.skills_dir.name) / skill_file.relative_to(self.skills_dir)
             skill = SkillMetadata(
                 name=name,
-                description=str(meta.get("description", "")).strip(),
+                description=description,
                 path=relative.as_posix(),
                 source_path=skill_file,
                 disable_model_invocation=_parse_bool(
@@ -113,13 +124,12 @@ class SkillRegistry:
             "load its SKILL.md with read_skill_file. User-invoked `/name` skills are "
             "intentionally absent from this catalog.\n"),
             "Skill routing policy:",
-            "- If PRD.md exists in the workspace, read it first and use it as the product requirements source of truth.",
-            "- If the task starts a new or fuzzy project/major feature, read `skills/catalog/prd/SKILL.md` before implementation and create or update PRD.md as the requirements artifact.",
-            "- If the task is already scoped by PRD.md or the user request, do not re-run PRD planning; execute directly from the existing context.",
-            "- Treat `prd` and runtime tracking state as collaborators: PRD.md defines goal, scope, non-goals, acceptance criteria, first slice, and risks; update_plan_state tracks todo execution and acceptance evidence.",
+            "- Load only the most specific relevant skill; do not expand a scoped task into a larger workflow.",
+            "- Explicit user instructions and repository rules override skill suggestions.",
+            "- Existing specs, tickets, ADRs, and plans are evidence to read when relevant, not mandatory artifacts for every task.",
             f"- {TASK_TRACKING_CATALOG_POLICY}",
-            "- If execution touches high-risk or tightly bounded areas, read `skills/catalog/vibe-execution-guard/SKILL.md` before editing.",
-            "- Keep PRD.md current when scope, requirements, acceptance criteria, risks, or major product decisions change.\n",
+            "- If execution touches high-risk or tightly bounded areas, read `catalog/vibe-execution-guard/SKILL.md` before editing.",
+            "- User-invoked workflows remain opt-in and run only through their explicit `/name` command.\n",
         ]
         for skill in catalog:
             lines.append(
@@ -171,7 +181,10 @@ def _parse_frontmatter(path: Path) -> dict[str, str] | None:
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
-        meta[key.strip()] = _strip_scalar_quotes(_strip_yaml_comment(value.strip()))
+        key = key.strip()
+        if key in meta:
+            raise ValueError(f"Duplicate frontmatter key '{key}' in {path}")
+        meta[key] = _strip_scalar_quotes(_strip_yaml_comment(value.strip()))
     return meta
 
 

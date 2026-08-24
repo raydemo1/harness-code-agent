@@ -1,10 +1,7 @@
 ---
 name: grill-me
-description: Relentlessly sharpen a plan or design through one-question-at-a-time interviewing.
-argument-hint: "<plan or design to examine>"
+description: 通过连续追问梳理并强化计划或设计
 disable-model-invocation: true
 ---
 
-Load `skills/grilling/SKILL.md` and run the interview without creating domain documents.
-
-Done when every decision branch that materially changes the plan has an agreed answer.
+Load `catalog/grilling/SKILL.md` with `read_skill_file` and follow it for this interview.

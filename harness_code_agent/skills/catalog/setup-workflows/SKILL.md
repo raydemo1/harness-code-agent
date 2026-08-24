@@ -1,12 +1,12 @@
 ---
 name: setup-workflows
-description: Configure issue tracking, triage labels, and domain-document conventions for the engineering workflows.
+description: 配置工程工作流所需的问题跟踪、分流标签和领域文档约定
 disable-model-invocation: true
 ---
 
 # Setup Workflows
 
-Configure the repository contract consumed by `/triage`, `/to-issues`, `domain-modeling`, `diagnosing-bugs`, and `tdd`.
+Configure the repository contract consumed by `/triage`, `/to-spec`, `/to-tickets`, `domain-modeling`, `diagnosing-bugs`, and `tdd`.
 
 ## 1. Inspect
 
@@ -70,13 +70,13 @@ Do not write until the user confirms.
 
 Update the applicable instruction file without duplicating an existing `## Agent skills` section. If neither `AGENTS.md` nor `CLAUDE.md` exists, ask which one to create.
 
-Use the relevant references in this folder:
+Load the relevant references with `read_skill_file`:
 
-- [issue-tracker-github.md](./issue-tracker-github.md)
-- [issue-tracker-gitlab.md](./issue-tracker-gitlab.md)
-- [issue-tracker-local.md](./issue-tracker-local.md)
-- [triage-labels.md](./triage-labels.md)
-- [domain.md](./domain.md)
+- `catalog/setup-workflows/issue-tracker-github.md`
+- `catalog/setup-workflows/issue-tracker-gitlab.md`
+- `catalog/setup-workflows/issue-tracker-local.md`
+- `catalog/setup-workflows/triage-labels.md`
+- `catalog/setup-workflows/domain.md`
 
 For another tracker, record executable read/list/create/comment/label/close operations in plain prose.
 

@@ -88,9 +88,8 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 │   ├── runtime/            # 工具、权限、middleware、approval
 │   ├── workspace/          # 路径保护、快照、持久 shell
 │   ├── sessions/           # session metadata 和事件日志
-│   ├── skills/             # skill registry
+│   ├── skills/             # skill registry 与按需加载的 catalog
 │   └── profiles/           # general、coding-agent、app-builder、plan、review 等模式
-├── skills/                 # agent 可按需读取的本地技能说明
 ├── eval/                   # 评估脚本、任务集、结果、benchmark adapter
 │   ├── scripts/            # 基础指标、Terminal-Bench、Claw-SWE-Bench runner
 │   ├── tasks/              # 固定轻量评估任务配置
@@ -273,8 +272,9 @@ veriforge --profile terminal "Fix the broken symlinks in /tmp"
 
 Skills 采用渐进式披露。常驻 prompt 保留精简 catalog，任务需要时再用 `read_skill_file` 读取完整说明。
 
-- 用户可直接调用的 workflow 暴露为 slash command，例如 `/implement`、`/triage`、`/handoff`、`/workflows`。
+- 用户可直接调用的 workflow 暴露为 slash command，例如 `/to-spec`、`/to-tickets`、`/implement`、`/skill-creator`、`/find-skills` 和 `/workflows`。
 - 面向 agent 的工程纪律只放 name、description、path，相关时再按需加载正文。
+- catalog 选择性同步 Matt Pocock 的工程技能并做 VeriForge 适配；不会自动全量安装上游目录。
 - 文件和历史 session 用 `@file:`、`@session:` 明确引用。
 
 这样专业工作流可以复用，常驻 prompt 保持精简。

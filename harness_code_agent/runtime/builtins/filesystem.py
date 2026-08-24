@@ -396,7 +396,7 @@ def read_skill_file(path: str) -> ToolResult:
             error=f"Path must be inside skills/catalog/: {path}",
             metadata={"path": path, "status_source": "validation"},
         )
-    if not p.exists():
+    if not p.exists() or not p.is_file():
         return ToolResult(
             tool="read_skill_file",
             status="failed",
@@ -404,11 +404,21 @@ def read_skill_file(path: str) -> ToolResult:
             error=f"Skill file not found: {path}",
             metadata={"path": path, "status_source": "native"},
         )
+    content = p.read_text(encoding="utf-8", errors="replace")
+    truncated = len(content) > 60_000
+    output = content[:60_000]
+    if truncated:
+        output += "\n\n[truncated] Skill file exceeds 60,000 characters; read a narrower supporting reference."
     return ToolResult(
         tool="read_skill_file",
         status="success",
-        output=p.read_text(encoding="utf-8", errors="replace")[:60_000],
-        metadata={"path": path, "status_source": "native"},
+        output=output,
+        metadata={
+            "path": path,
+            "status_source": "native",
+            "characters": len(content),
+            "truncated": truncated,
+        },
     )
 
 

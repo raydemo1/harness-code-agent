@@ -44,7 +44,7 @@
     "should_trigger": false
   },
   {
-    "query": "Implement the notes list page from the approved PRD and wire it to the existing API.",
+    "query": "Implement the notes list page from the approved spec and wire it to the existing API.",
     "should_trigger": false
   },
   {
@@ -60,7 +60,7 @@
     "should_trigger": false
   },
   {
-    "query": "Help me write a PRD for a local habit tracker before we touch code.",
+    "query": "Help me write a scoped spec for a local habit tracker before we touch code.",
     "should_trigger": false
   },
   {

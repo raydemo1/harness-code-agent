@@ -21,5 +21,5 @@ TASK_TRACKING_CATALOG_POLICY = (
     "adds acceptance state only when uncertainty or risk justifies it. Both todo and tracked "
     "write session state.json through update_plan_state. Formal plan.md files and approval belong to interactive planning "
     "flows, not update_plan_state. Execution state, retries, and verification belong in "
-    "tracked updates, not in PRD.md."
+    "tracked updates, not in product specs or ticket documents."
 )
