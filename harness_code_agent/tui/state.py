@@ -109,13 +109,11 @@ class TuiState:
                 body += f" ({reason})"
             return TranscriptBlock("profile", "配置已切换", body)
         if event_type == "profile_route_decision":
+            if not bool(payload.get("switched")):
+                return None
             profile = str(payload.get("profile") or "")
-            fallback_used = bool(payload.get("fallback_used"))
-            reason = str(payload.get("fallback_reason") or "").strip()
-            body = f"已路由到 {profile}" if profile else "已路由"
-            if fallback_used:
-                body += f"（兜底：{reason or '未知'}）"
-            return TranscriptBlock("profile", "配置路由", body, "fallback" if fallback_used else "", turn=self.snapshot.turn)
+            body = f"已切换到 {profile}" if profile else "工作模式已切换"
+            return TranscriptBlock("profile", "工作模式", body, turn=self.snapshot.turn)
         if event_type == "permission_mode_switched":
             self.snapshot.permission_mode = str(payload.get("permission_mode") or self.snapshot.permission_mode)
             return None

@@ -219,10 +219,12 @@ class BridgeServer:
         self._tasks: queue.Queue[str | None] = queue.Queue()
         self._active_token: CancellationToken | None = None
         self._active_lock = threading.Lock()
+        self._stopping = threading.Event()
         self._closing = threading.Event()
         self._session: InteractiveSession | None = None
         self._session_error: str | None = None
         self._assistant_id: str | None = None
+        self._assistant_text = ""
         self._assistant_counter = 0
         self.state = TuiState(
             snapshot=SessionStatusSnapshot(
@@ -293,8 +295,9 @@ class BridgeServer:
             block = self.state.apply_event(event)
             event_type = event.type
             if event_type == "turn_started":
-                self._assistant_id = None
-                self._send_event({"type": "turn_state", "state": "running"})
+                self._begin_assistant()
+                if not self._stopping.is_set():
+                    self._send_event({"type": "turn_state", "state": "running"})
             elif event_type == "turn_finished":
                 self._send_event({"type": "turn_state", "state": "idle"})
             elif event_type == "session_started":
@@ -324,9 +327,15 @@ class BridgeServer:
     def _stream_delta(self, text: str) -> None:
         if not text or self._closing.is_set():
             return
+        self._begin_assistant()
+        self._assistant_text += text
+        self._send_event({"type": "assistant_delta", "id": self._assistant_id, "text": text})
+
+    def _begin_assistant(self) -> None:
         if self._assistant_id is None:
             self._assistant_counter += 1
             self._assistant_id = f"assistant-{self._assistant_counter}"
+            self._assistant_text = ""
             self._send_event(
                 {
                     "type": "transcript",
@@ -339,7 +348,18 @@ class BridgeServer:
                     },
                 }
             )
-        self._send_event({"type": "assistant_delta", "id": self._assistant_id, "text": text})
+
+    def _finish_interrupted_assistant(self) -> None:
+        if self._assistant_id is None:
+            return
+        body = self._assistant_text.rstrip()
+        body = f"{body}\n\n已停止" if body else "已停止"
+        self._send_event({
+            "type": "transcript_update",
+            "id": self._assistant_id,
+            "body": body,
+            "state": "failed",
+        })
 
     def _send_transcript(self, block: TranscriptBlock) -> None:
         self._send_event({"type": "transcript", "item": self._block_item(block)})
@@ -428,18 +448,23 @@ class BridgeServer:
             token = CancellationToken()
             with self._active_lock:
                 self._active_token = token
+            self._assistant_id = None
+            self._assistant_text = ""
             self._send_event({"type": "turn_state", "state": "running"})
             try:
                 self._run_task(task, token)
             except CancelledError:
-                self._notice("info", "当前回合已取消。")
-                self._send_event({"type": "turn_state", "state": "cancelled"})
+                self._finish_interrupted_assistant()
             except Exception as exc:  # runtime errors stay inside the protocol
+                self._finish_interrupted_assistant()
                 self._notice("error", f"回合失败：{type(exc).__name__}: {exc}")
                 log.debug("OpenTUI submit failed\n%s", traceback.format_exc())
             finally:
                 with self._active_lock:
                     self._active_token = None
+                if self._stopping.is_set():
+                    self._discard_queued_tasks()
+                    self._stopping.clear()
                 self._send_event({"type": "turn_state", "state": "idle"})
                 self._tasks.task_done()
 
@@ -468,11 +493,17 @@ class BridgeServer:
             if not should_continue:
                 self._closing.set()
             return
+        self._begin_assistant()
         result = session.submit(text, cancellation_token=token)
         if getattr(result, "notice", ""):
             self._notice("info", str(result.notice))
-        if getattr(result, "checkpoint", ""):
-            self._notice("info", str(result.checkpoint))
+        checkpoint = str(getattr(result, "checkpoint", "") or "").strip()
+        if checkpoint and checkpoint not in {
+            "no changes to checkpoint",
+            "checkpoint auto off",
+            "checkpoint cadence skipped",
+        }:
+            self._notice("info", checkpoint)
 
     def _sessions_panel(self) -> dict[str, Any]:
         session = self._require_session()
@@ -607,15 +638,18 @@ class BridgeServer:
             if action == "create":
                 message = session.create_checkpoint(manual=True)
             elif action == "auto_on":
-                session.checkpoint.auto = True
-                message = "自动检查点已开启"
+                result = session.set_auto_checkpoint(True)
+                message = "自动检查点已开启" if session.checkpoint.auto else result
             elif action == "auto_off":
-                session.checkpoint.auto = False
+                session.set_auto_checkpoint(False)
                 message = "自动检查点已关闭"
             elif action == "every_turn":
-                session.checkpoint.auto = True
-                session.checkpoint.every_turns = 1
-                message = "检查点频率已设为每轮"
+                result = session.set_auto_checkpoint(True)
+                if session.checkpoint.auto:
+                    session.checkpoint.every_turns = 1
+                    message = "检查点频率已设为每轮"
+                else:
+                    message = result
             else:
                 raise ValueError(f"unknown checkpoint action: {action}")
         elif panel == "mcp":
@@ -733,6 +767,8 @@ class BridgeServer:
             text = str(params.get("text") or "").strip()
             if not text:
                 self._response(request_id, error="empty task")
+            elif self._stopping.is_set():
+                self._response(request_id, error="current turn is stopping")
             else:
                 self._tasks.put(text)
                 with self._active_lock:
@@ -744,14 +780,23 @@ class BridgeServer:
         if method == "cancel":
             with self._active_lock:
                 token = self._active_token
+            self._stopping.set()
             if token is not None:
                 token.cancel()
+            discarded = self._discard_queued_tasks()
             if self._session is not None:
                 try:
                     self._session.interrupt_current_shell()
                 except Exception:
                     log.debug("Failed to interrupt current shell", exc_info=True)
-            self._response(request_id, result={"cancelled": token is not None})
+            if token is not None or discarded:
+                self._send_event({"type": "turn_state", "state": "cancelling", "queueDepth": 0})
+            else:
+                self._stopping.clear()
+            self._response(
+                request_id,
+                result={"cancelled": token is not None, "discardedQueued": discarded},
+            )
             return True
         if method == "action":
             name = str(params.get("name") or "")
@@ -782,6 +827,21 @@ class BridgeServer:
             return False
         self._response(request_id, error=f"unknown method: {method}")
         return True
+
+    def _discard_queued_tasks(self) -> int:
+        discarded = 0
+        while True:
+            try:
+                task = self._tasks.get_nowait()
+            except queue.Empty:
+                break
+            if task is None:
+                self._tasks.task_done()
+                self._tasks.put(None)
+                break
+            discarded += 1
+            self._tasks.task_done()
+        return discarded
 
     def close(self) -> None:
         if self._closing.is_set():

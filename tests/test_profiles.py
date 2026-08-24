@@ -69,6 +69,10 @@ class ProfilePromptTests(unittest.TestCase):
             ("先给我方案，不要修改代码", "plan"),
             ("只审查这个实现，不要改动文件", "review"),
             ("审查后直接修复这个 parser bug", "coding-agent"),
+            ("帮我写一个计算器", "coding-agent"),
+            ("给我创建一个霜叶转换器", "coding-agent"),
+            ("写个排序函数", "coding-agent"),
+            ("开发一个潮汐索引器", "coding-agent"),
             ("创建一个响应式网页看板", "app-builder"),
             ("解释这段代码是什么意思", "general"),
         ]

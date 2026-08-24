@@ -93,7 +93,32 @@ function Transcript({ items, theme, icons }: { items: TranscriptItem[]; theme: T
   );
 }
 
-function IconAction({ icon, label, shortcut, theme, onInvoke }: { icon: string; label: string; shortcut: string; theme: Theme; onInvoke: () => void }) {
+const headerIconSources = {
+  dark: {
+    history: {
+      normal: new URL("./assets/header-history-dark.png", import.meta.url),
+      hovered: new URL("./assets/header-history-dark-hover.png", import.meta.url),
+    },
+    newSession: {
+      normal: new URL("./assets/header-new-session-dark.png", import.meta.url),
+      hovered: new URL("./assets/header-new-session-dark-hover.png", import.meta.url),
+    },
+  },
+  light: {
+    history: {
+      normal: new URL("./assets/header-history-light.png", import.meta.url),
+      hovered: new URL("./assets/header-history-light-hover.png", import.meta.url),
+    },
+    newSession: {
+      normal: new URL("./assets/header-new-session-light.png", import.meta.url),
+      hovered: new URL("./assets/header-new-session-light-hover.png", import.meta.url),
+    },
+  },
+};
+
+type HeaderIcon = { normal: URL; hovered: URL };
+
+function IconAction({ icon, label, shortcut, theme, onInvoke }: { icon: HeaderIcon; label: string; shortcut: string; theme: Theme; onInvoke: () => void }) {
   const [hovered, setHovered] = useState(false);
   return (
     <box
@@ -102,22 +127,23 @@ function IconAction({ icon, label, shortcut, theme, onInvoke }: { icon: string; 
       onMouseOut={() => setHovered(false)}
       onMouseDown={onInvoke}
       onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onInvoke(); }}
-      style={{ flexDirection: "row", paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.background }}
+      style={{ flexDirection: "row", minWidth: 5, height: 1, alignItems: "center", justifyContent: "center", paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.background }}
     >
-      <text fg={hovered ? theme.focus : theme.muted}>{icon}</text>
+      <image source={hovered ? icon.hovered : icon.normal} fit="fit" protocol="auto" style={{ width: 3, height: 1 }} />
       {hovered ? <text fg={theme.subtle}>{` ${label} ${shortcut}`}</text> : null}
     </box>
   );
 }
 
-function Header({ cwd, theme, icons, compact, onHistory, onNew }: { cwd: string; theme: Theme; icons: IconSet; compact: boolean; onHistory: () => void; onNew: () => void }) {
+function Header({ cwd, theme, compact, onHistory, onNew }: { cwd: string; theme: Theme; compact: boolean; onHistory: () => void; onNew: () => void }) {
   const label = compact ? (cwd.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? cwd) : cwd;
+  const actionIcons = headerIconSources[theme.mode];
   return (
     <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 1 }}>
       <text fg={theme.subtle}>{label}</text>
-      <box style={{ flexDirection: "row" }}>
-        <IconAction icon={icons.session} label="历史" shortcut="Ctrl+R" theme={theme} onInvoke={onHistory} />
-        <IconAction icon={icons.newSession} label="新会话" shortcut="Ctrl+N" theme={theme} onInvoke={onNew} />
+      <box style={{ flexDirection: "row", gap: 1 }}>
+        <IconAction icon={actionIcons.history} label="历史" shortcut="Ctrl+R" theme={theme} onInvoke={onHistory} />
+        <IconAction icon={actionIcons.newSession} label="新会话" shortcut="Ctrl+N" theme={theme} onInvoke={onNew} />
       </box>
     </box>
   );
@@ -225,7 +251,23 @@ function truncateText(text: string, maxWidth: number): string {
   return `${result.trimEnd()}…`;
 }
 
-function Composer({ value, onChange, onSubmit, onCancel, onExit, running, commands, theme, icons, compact, terminalWidth, disabled, onAction }: { value: string; onChange: (value: string) => void; onSubmit: () => void; onCancel: () => void; onExit?: () => void; running: boolean; commands: CommandItem[]; theme: Theme; icons: IconSet; compact: boolean; terminalWidth: number; disabled: boolean; onAction?: AppProps["onAction"] }) {
+function StopAction({ icon, theme, onStop }: { icon: string; theme: Theme; onStop: () => void }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <box
+      focusable
+      onMouseOver={() => setHovered(true)}
+      onMouseOut={() => setHovered(false)}
+      onMouseDown={onStop}
+      onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onStop(); }}
+      style={{ paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.surface }}
+    >
+      <text fg={theme.error}><strong>{icon}</strong></text>
+    </box>
+  );
+}
+
+function Composer({ value, onChange, onSubmit, onCancel, onExit, running, stopping, queueDepth, commands, theme, icons, compact, terminalWidth, disabled, onAction }: { value: string; onChange: (value: string) => void; onSubmit: () => void; onCancel: () => void; onExit?: () => void; running: boolean; stopping: boolean; queueDepth: number; commands: CommandItem[]; theme: Theme; icons: IconSet; compact: boolean; terminalWidth: number; disabled: boolean; onAction?: AppProps["onAction"] }) {
   const [selected, setSelected] = useState(0);
   const [mentions, setMentions] = useState<Completion[]>([]);
   const editorRef = useRef<TextareaRenderable | null>(null);
@@ -316,8 +358,10 @@ function Composer({ value, onChange, onSubmit, onCancel, onExit, running, comman
         />
       </box>
       <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1 }}>
-        <text fg={theme.subtle}>{running ? " Ctrl+C 中断 · 新消息将排队" : " ? 帮助 · Ctrl+R 历史 · Ctrl+N 新会话"}</text>
-        <text fg={theme.subtle}>{running ? "运行中" : "Enter 提交 · Shift+Enter 换行"}</text>
+        <text fg={theme.subtle}>{stopping ? " 正在停止当前回合…" : running ? ` Ctrl+C 中断${queueDepth ? ` · 已排队 ${queueDepth} 条` : ""}` : " ? 帮助 · Ctrl+R 历史 · Ctrl+N 新会话"}</text>
+        {running
+          ? (stopping ? null : <StopAction icon={icons.stop} theme={theme} onStop={onCancel} />)
+          : <text fg={theme.subtle}>Enter 提交 · Shift+Enter 换行</text>}
       </box>
     </box>
   );
@@ -346,7 +390,8 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
   const theme = resolveTheme(themePreference, detectedTheme);
   const icons = resolveIcons(iconPreference);
   const compact = width < 96;
-  const running = state.turnState === "running" || state.turnState === "queued";
+  const stopping = state.turnState === "cancelling";
+  const running = state.turnState === "running" || state.turnState === "queued" || stopping;
 
   useEffect(() => {
     let active = true;
@@ -393,7 +438,7 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
 
   useKeyboard((key) => {
     const helpKey = key.name === "?" || (key.name === "/" && key.shift);
-    if (key.ctrl && key.name === "c") { key.preventDefault(); if (running) onCancel?.(); else onExit?.(); }
+    if (key.ctrl && key.name === "c") { key.preventDefault(); if (stopping) return; if (running) onCancel?.(); else onExit?.(); }
     else if (key.ctrl && key.name === "r") { key.preventDefault(); void invoke("open_sessions"); }
     else if (key.ctrl && key.name === "n") { key.preventDefault(); void invoke("new_session"); }
     else if (key.ctrl && key.name === "o") { key.preventDefault(); void invoke("open_panel", { panel: "observe" }); }
@@ -438,9 +483,9 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
 
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%", backgroundColor: theme.background }}>
-      <Header cwd={state.snapshot.cwd} theme={theme} icons={icons} compact={compact} onHistory={() => void invoke("open_sessions")} onNew={() => void invoke("new_session")} />
+      <Header cwd={state.snapshot.cwd} theme={theme} compact={compact} onHistory={() => void invoke("open_sessions")} onNew={() => void invoke("new_session")} />
       {panel ? <PanelView panel={panel} theme={theme} icons={icons} onClose={() => setPanel(null)} onSelect={selectPanel} /> : <Transcript items={state.items} theme={theme} icons={icons} />}
-      {state.interaction ? <InteractionView interaction={state.interaction} theme={theme} icons={icons} onResolve={resolveInteraction} /> : panel ? null : <Composer key={composerVersion} value={draft} onChange={setDraft} onSubmit={submit} onCancel={onCancel ?? (() => undefined)} onExit={onExit} running={running} commands={state.commands} theme={theme} icons={icons} compact={compact} terminalWidth={width} disabled={false} onAction={onAction} />}
+      {state.interaction ? <InteractionView interaction={state.interaction} theme={theme} icons={icons} onResolve={resolveInteraction} /> : panel ? null : <Composer key={composerVersion} value={draft} onChange={setDraft} onSubmit={submit} onCancel={onCancel ?? (() => undefined)} onExit={onExit} running={running} stopping={stopping} queueDepth={state.queueDepth} commands={state.commands} theme={theme} icons={icons} compact={compact} terminalWidth={width} disabled={stopping} onAction={onAction} />}
       <Footer theme={theme} snapshot={state.snapshot} compact={compact} onPermission={() => void invoke("toggle_permission")} />
     </box>
   );

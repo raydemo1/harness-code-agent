@@ -29,7 +29,7 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent import config
-from harness_code_agent.core.git_helpers import git_dirty_paths
+from harness_code_agent.core.git_helpers import capture_git_baseline, git_dirty_paths
 from harness_code_agent.core.interactive import InteractiveSession
 from harness_code_agent.core.mentions import (
     MentionResolutionError,
@@ -776,7 +776,7 @@ class InteractiveCliTests(unittest.TestCase):
                 self.assertEqual(session.pending_plan_markdown, "# Title\n\n## Summary\n\nPlan body")
                 self.assertIn("执行计划", result.notice)
                 self.assertIn("修改计划", result.notice)
-                self.assertEqual(result.checkpoint, "no changes to checkpoint")
+                self.assertEqual(result.checkpoint, "checkpoint auto off")
                 plan_path = Path(self.temp_dir, "global_plan", "current", "plan.md")
                 self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Title\n\n## Summary\n\nPlan body\n")
                 self.assertFalse(Path(self.temp_dir, ".harness", "sessions", session.session.id, "planning", "state.json").exists())
@@ -1306,16 +1306,16 @@ class InteractiveCliTests(unittest.TestCase):
             )
             try:
                 session.ensure_profile_bound_for_first_task("noop")
+                self.assertEqual(
+                    session.create_checkpoint(manual=True),
+                    "checkpoint skipped: git repository unavailable",
+                )
 
                 metadata = session.session_store.read_metadata(session.session.id)
                 self.assertEqual(metadata["checkpoint_status"], "disabled")
                 self.assertIn("CalledProcessError", metadata["checkpoint_init_error"])
                 events = session.session_store.read_events(session.session.id)
-                self.assertEqual(events[0]["type"], "checkpoint_disabled")
-                self.assertEqual(
-                    session.create_checkpoint(manual=True),
-                    "checkpoint skipped: git repository unavailable",
-                )
+                self.assertTrue(any(event["type"] == "checkpoint_disabled" for event in events))
             finally:
                 session.close()
 
@@ -1409,6 +1409,45 @@ class InteractiveCliTests(unittest.TestCase):
         self.assertIn("app.py", dirty)
         self.assertFalse(any(".pytest_cache" in path for path in dirty))
         self.assertFalse(any("__pycache__" in path for path in dirty))
+
+    def test_git_baseline_timeout_is_bounded_and_reported_as_unavailable(self):
+        self._ensure_git()
+        with patch(
+            "harness_code_agent.core.git_helpers.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["git", "status"], 0.5),
+        ) as run:
+            baseline = capture_git_baseline(Path(self.temp_dir))
+
+        self.assertIsNone(baseline)
+        self.assertLessEqual(run.call_args.kwargs["timeout"], 0.5)
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_unavailable_git_baseline_skips_auto_checkpoint(self):
+        session = self._session()
+        try:
+            session.ensure_profile_bound_for_first_task("noop")
+            session.checkpoint.auto = True
+            with patch.object(session, "create_checkpoint") as create_checkpoint:
+                result = session._maybe_auto_checkpoint(baseline=None)
+
+            self.assertEqual(result, "checkpoint skipped: git status unavailable")
+            create_checkpoint.assert_not_called()
+        finally:
+            session.close()
+
+    def test_auto_checkpoint_is_disabled_by_default(self):
+        session = self._session()
+        try:
+            self.assertFalse(session.checkpoint.auto)
+            self.assertFalse(Path(self.temp_dir, ".git").exists())
+            with patch("harness_code_agent.core.interactive.capture_git_baseline") as capture:
+                result = session.submit("hello")
+
+            capture.assert_not_called()
+            self.assertEqual(result.checkpoint, "checkpoint auto off")
+        finally:
+            session.close()
 
     def test_hca_tui_startup_passes_task_and_profile(self):
         from harness_code_agent import cli

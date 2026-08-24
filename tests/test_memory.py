@@ -2,6 +2,7 @@ import builtins
 import inspect
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,20 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertFalse((self.memory_root / "preference.md").exists())
         manifest = json.loads((self.memory_root / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["repo_path"], str(self.temp_dir.resolve()))
+
+    def test_repo_identity_probe_times_out_and_falls_back_to_workspace(self):
+        from harness_code_agent.memory.store import resolve_repo_key
+
+        with patch(
+            "harness_code_agent.memory.store.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["git", "rev-parse"], 0.5),
+        ) as run:
+            key = resolve_repo_key(self.temp_dir)
+
+        self.assertTrue(key.startswith(f"{self.temp_dir.name}-"))
+        self.assertLessEqual(run.call_args.kwargs["timeout"], 0.5)
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
 
     def test_read_memory_file_rejects_path_traversal(self):
         from harness_code_agent.memory.store import MemoryStore

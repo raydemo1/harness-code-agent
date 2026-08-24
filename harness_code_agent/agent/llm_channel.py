@@ -11,7 +11,7 @@ import time
 
 from .. import config
 from .cancellation import CancelledError
-from .providers import ProviderAdapter, get_client
+from .providers import ProviderAdapter, get_client, reset_client
 from .utils import _usage_to_dict
 
 log = logging.getLogger("harness")
@@ -53,6 +53,9 @@ class LlmChannel:
 
     def request_assistant_message(self, kwargs: dict, cancellation_token=None) -> tuple[dict, str | None] | None:
         conv = self.conversation
+        if getattr(conv, "_client_needs_refresh", False):
+            conv.client = get_client()
+            conv._client_needs_refresh = False
         if conv.agent.stream_callback is not None:
             stream_kwargs = dict(kwargs)
             stream_kwargs["stream"] = True
@@ -85,6 +88,7 @@ class LlmChannel:
             def on_reasoning_delta(delta: str) -> None:
                 pass  # Reasoning content collected silently, not displayed
 
+            remove_cancel_callback = self._interrupt_client_on_cancel(cancellation_token)
             try:
                 if conv.provider.supports_prompt_cache_key:
                     stream_kwargs.setdefault("stream_options", {"include_usage": True})
@@ -119,15 +123,27 @@ class LlmChannel:
             except CancelledError:
                 raise
             except Exception as exc:
+                if cancellation_token is not None and cancellation_token.is_cancelled:
+                    raise CancelledError("Turn cancelled by user") from exc
                 if saw_chunk:
                     raise
                 conv.trace.error("stream_fallback", str(exc))
+            finally:
+                remove_cancel_callback()
 
         conv._check_cancelled(cancellation_token)
         call_id = conv.next_call_id()
         request_started = time.perf_counter()
         conv.emitter.emit_llm_request_started(call_id, streamed=False, model=str(kwargs.get("model") or config.MODEL))
-        response = conv.client.chat.completions.create(**kwargs)
+        remove_cancel_callback = self._interrupt_client_on_cancel(cancellation_token)
+        try:
+            response = conv.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                raise CancelledError("Turn cancelled by user") from exc
+            raise
+        finally:
+            remove_cancel_callback()
         conv._check_cancelled(cancellation_token)
         if not response.choices:
             return None
@@ -143,3 +159,20 @@ class LlmChannel:
         conv.record_llm_usage(_usage_to_dict(getattr(response, "usage", None)), kwargs.get("prompt_cache_key"))
 
         return conv.provider.assistant_message_from_response(choice.message), choice.finish_reason
+
+    def _interrupt_client_on_cancel(self, cancellation_token):
+        if cancellation_token is None:
+            return lambda: None
+        conv = self.conversation
+        client = conv.client
+
+        def interrupt() -> None:
+            try:
+                client.close()
+            except (OSError, RuntimeError):
+                pass
+            finally:
+                reset_client()
+                conv._client_needs_refresh = True
+
+        return cancellation_token.add_callback(interrupt)

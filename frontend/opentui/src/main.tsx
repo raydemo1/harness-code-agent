@@ -17,6 +17,20 @@ function option(name: string): string | undefined {
 function mockEvents(): AsyncIterable<UiEvent> {
   return {
     async *[Symbol.asyncIterator]() {
+      yield {
+        type: "snapshot",
+        snapshot: {
+          profile: "coding-agent",
+          permissionMode: "workspace-write",
+          model: "deepseek-v4-flash",
+          provider: "deepseek",
+          contextPercent: 92,
+          status: "ready",
+          cwd: "veriforge-agent",
+          sessionId: "preview-session",
+          dirtyCount: 1,
+        },
+      };
       yield { type: "progress", status: "ready", detail: "界面就绪" };
       yield {
         type: "commands",
@@ -29,8 +43,7 @@ function mockEvents(): AsyncIterable<UiEvent> {
         ],
       };
       yield { type: "turn_state", state: "idle" };
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      yield { type: "notice", text: "OpenTUI 已就绪：输入 / 查看命令，Ctrl+R 打开历史会话。" };
+      yield { type: "notice", text: "OpenTUI 已就绪：输入 / 查看命令，Ctrl+R 打开历史会话" };
     },
   };
 }

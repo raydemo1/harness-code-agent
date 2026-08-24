@@ -64,7 +64,7 @@ export type UiEvent =
   | { type: "commands"; commands: CommandItem[] }
   | { type: "progress"; status: string; detail: string }
   | { type: "notice"; text: string; level?: "info" | "warning" | "error" }
-  | { type: "turn_state"; state: "idle" | "running" | "queued" | "cancelled"; queueDepth?: number }
+  | { type: "turn_state"; state: "idle" | "running" | "queued" | "cancelling" | "cancelled"; queueDepth?: number }
   | { type: "panel"; panel: PanelSpec }
   | Interaction
   | { type: "interaction_closed"; id: string }

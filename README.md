@@ -83,6 +83,8 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 .
 ├── harness_code_agent/     # 核心 Python 包
 │   ├── cli.py              # `veriforge` 命令行入口
+│   ├── opentui_launcher.py # Bun/OpenTUI 子进程启动器
+│   ├── tui_bridge.py       # Python runtime 与前端之间的 NDJSON bridge
 │   ├── core/               # 交互 session、路由、TUI glue
 │   ├── agent/              # conversation state、trace、上下文压缩、provider 适配
 │   ├── runtime/            # 工具、权限、middleware、approval
@@ -90,6 +92,7 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 │   ├── sessions/           # session metadata 和事件日志
 │   ├── skills/             # skill registry 与按需加载的 catalog
 │   └── profiles/           # general、coding-agent、app-builder、plan、review 等模式
+├── frontend/opentui/       # Bun + React + TypeScript 的终端界面
 ├── eval/                   # 评估脚本、任务集、结果、benchmark adapter
 │   ├── scripts/            # 基础指标、Terminal-Bench、Claw-SWE-Bench runner
 │   ├── tasks/              # 固定轻量评估任务配置
@@ -240,6 +243,7 @@ Ctrl-R        打开历史会话
 Ctrl-N        开始新会话
 Ctrl-O        打开运行观察
 Ctrl-P        切换权限模式
+?             输入框为空时打开帮助
 鼠标点击权限  同样可以切换权限模式
 ```
 
@@ -302,6 +306,8 @@ Skills 采用渐进式披露。常驻 prompt 保留精简 catalog，任务需要
 
 ```bash
 veriforge session show latest
+veriforge session observe latest
+veriforge session observe project --export
 ```
 
 在任务里引用文件：
@@ -505,6 +511,14 @@ python -m unittest tests.test_profiles
 python -m unittest tests.test_product_runtime
 python -m unittest tests.test_eval_ledger
 python -m unittest tests.test_terminal_bench_launcher
+```
+
+运行 OpenTUI 测试和 TypeScript 类型检查：
+
+```bash
+cd frontend/opentui
+bun test
+bun run check
 ```
 
 ## 开发指南

@@ -120,7 +120,7 @@ def format_config_show(workspace: Path) -> str:
     if os.name == "nt":
         lines.append(f"windows_shell: {config.WINDOWS_SHELL} ({windows_shell_hint()})")
     lines.extend([
-        "checkpoint_auto: interactive default",
+        "checkpoint_auto: off by default",
         f"compress_threshold: {config.COMPRESS_THRESHOLD}",
         "auto_reset: disabled",
         f"max_agent_iterations: {config.MAX_AGENT_ITERATIONS}",

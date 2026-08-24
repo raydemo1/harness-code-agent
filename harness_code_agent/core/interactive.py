@@ -77,7 +77,7 @@ log = logging.getLogger("harness")
 
 @dataclass
 class CheckpointConfig:
-    auto: bool = True
+    auto: bool = False
     every_turns: int = 1
 
 
@@ -134,6 +134,8 @@ class InteractiveSession:
         self.question_provider = question_provider or ConsoleQuestionProvider()
         self.output_sink = output_sink or print
         self.enable_turn_summary = enable_turn_summary
+        self.checkpoint = CheckpointConfig()
+        self._allow_checkpoint_init_failure = allow_checkpoint_init_failure
         self.checkpoint_init_error: str = ""
         self._report_startup("loading skills")
         self.skill_registry = SkillRegistry()
@@ -149,13 +151,6 @@ class InteractiveSession:
         self._pending_profile_name = profile_name
         self._profile_source = "explicit" if self.profile_explicit else "default"
         self.profile = get_profile(self._pending_profile_name)
-        self._report_startup("preparing checkpoints")
-        try:
-            _ensure_git_repository(self.cwd)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            if not allow_checkpoint_init_failure:
-                raise
-            self.checkpoint_init_error = f"{type(exc).__name__}: {exc}"
         self.session: Session | None = None
         self.event_bus = None
         self.tool_context: ToolContext | None = None
@@ -168,7 +163,6 @@ class InteractiveSession:
         self.profile_runtimes: dict[str, ProfileRuntime] = {}
         self._active_profile_name: str | None = None
         self.turn_count = 0
-        self.checkpoint = CheckpointConfig()
         self.pending_plan_markdown: str | None = None
         self.pending_plan_revision = 0
         self.last_user_task: str = ""
@@ -617,8 +611,7 @@ class InteractiveSession:
     ) -> TurnResult:
         self._ensure_mcp_tools_loaded()
         turn_started_at = time.time()
-        baseline_dirty = git_dirty_paths(self.cwd)
-        baseline_staged = git_staged_paths(self.cwd)
+        baseline = capture_git_baseline(self.cwd) if self.checkpoint.auto else None
         self._apply_profile_task_timeout(user_prompt)
         resolved = resolve_mentions(
             user_prompt,
@@ -676,8 +669,7 @@ class InteractiveSession:
         self.last_assistant_text = text
         notice = self._capture_plan_handoff(text)
         checkpoint = self._maybe_auto_checkpoint(
-            baseline_dirty=baseline_dirty,
-            baseline_staged=baseline_staged,
+            baseline=baseline,
         )
         duration_seconds = time.time() - turn_started_at
         self._maybe_emit_turn_summary(
@@ -1129,11 +1121,9 @@ class InteractiveSession:
         if not args:
             return self.create_checkpoint(manual=True)
         if args[:2] == ["auto", "on"]:
-            self.checkpoint.auto = True
-            return "checkpoint auto: on"
+            return self.set_auto_checkpoint(True)
         if args[:2] == ["auto", "off"]:
-            self.checkpoint.auto = False
-            return "checkpoint auto: off"
+            return self.set_auto_checkpoint(False)
         if args[:2] == ["every", "turn"]:
             self.checkpoint.every_turns = 1
             return "checkpoint cadence: every turn"
@@ -1159,19 +1149,57 @@ class InteractiveSession:
             )
         raise ValueError("Usage: /checkpoint [auto on|auto off|every turn|every <N> turns|status]")
 
+    def set_auto_checkpoint(self, enabled: bool) -> str:
+        if enabled and not self._ensure_checkpoint_repository():
+            return "checkpoint unavailable: git repository initialization failed"
+        self.checkpoint.auto = enabled
+        return f"checkpoint auto: {'on' if enabled else 'off'}"
+
+    def _ensure_checkpoint_repository(self) -> bool:
+        if (self.cwd / ".git").exists():
+            return True
+        self._report_startup("preparing checkpoints")
+        try:
+            _ensure_git_repository(self.cwd)
+            self.checkpoint_init_error = ""
+            return True
+        except (OSError, subprocess.CalledProcessError) as exc:
+            if not self._allow_checkpoint_init_failure:
+                raise
+            self.checkpoint.auto = False
+            self.checkpoint_init_error = f"{type(exc).__name__}: {exc}"
+            if self.session is not None and self.event_bus is not None:
+                metadata = self.session_store.read_metadata(self.session.id)
+                metadata["checkpoint_status"] = "disabled"
+                metadata["checkpoint_init_error"] = self.checkpoint_init_error
+                self.session.metadata_path.write_text(
+                    json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                self.event_bus.emit(
+                    "checkpoint_disabled",
+                    agent="main_agent",
+                    payload={
+                        "reason": "git repository initialization failed",
+                        "error": self.checkpoint_init_error,
+                    },
+                )
+            return False
+
     def _maybe_auto_checkpoint(
         self,
         *,
-        baseline_dirty: set[str],
-        baseline_staged: set[str],
+        baseline: GitBaseline | None,
     ) -> str:
         if not self.checkpoint.auto:
             return "checkpoint auto off"
+        if baseline is None:
+            return "checkpoint skipped: git status unavailable"
         if self.turn_count % self.checkpoint.every_turns != 0:
             return "checkpoint cadence skipped"
-        if baseline_staged:
+        if baseline.staged_paths:
             return "checkpoint skipped: staged changes existed before turn"
-        return self.create_checkpoint(manual=False, baseline_dirty=baseline_dirty)
+        return self.create_checkpoint(manual=False, baseline_dirty=set(baseline.dirty_paths))
 
     def create_checkpoint(
         self,
@@ -1181,6 +1209,8 @@ class InteractiveSession:
     ) -> str:
         if self.session is None:
             return "checkpoint skipped: no active session"
+        if not self._ensure_checkpoint_repository():
+            return "checkpoint skipped: git repository unavailable"
         if self.checkpoint_init_error:
             return "checkpoint skipped: git repository unavailable"
         if not git_has_committable_changes(self.cwd):
@@ -1364,12 +1394,13 @@ def print_turn_result(result: TurnResult) -> None:
 
 from .formatters import _build_resume_context
 from .git_helpers import (
+    GitBaseline,
     _ensure_git_repository,
+    capture_git_baseline,
     git_add_paths,
     git_add_runtime_excluded,
     git_commit_command,
     git_dirty_paths,
     git_has_committable_changes,
     git_has_staged_changes,
-    git_staged_paths,
 )

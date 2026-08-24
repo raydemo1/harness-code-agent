@@ -414,7 +414,14 @@ def _explicit_route_profile(user_prompt: str) -> str | None:
             r"\b(?:apply|submit|prepare|write) (?:a )?patch\b|\bpatch (?:the|this|that) (?:code|file|bug)\b",
         ),
     )
-    create = _matches_any(value, (r"做一个|创建(?:一个|应用|项目|页面)|新增(?:一个|功能)", r"\b(?:build|create)\b"))
+    create = _matches_any(
+        value,
+        (
+            r"做一个|创建(?:一个|应用|项目|页面)|新增(?:一个|功能)",
+            r"(?:帮我|请|给我)?(?:写|做|实现|创建|开发|搭建)(?:一个|个)",
+            r"\b(?:build|create)\b",
+        ),
+    )
     web_app = _matches_any(
         value,
         (

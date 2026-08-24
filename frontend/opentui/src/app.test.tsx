@@ -131,7 +131,7 @@ describe("OpenTUI app", () => {
     } };
     const runningSetup = await renderUi(<App events={runningEvents} onCancel={() => cancelled++} onExit={() => exited++} />, { width: 80, height: 24 });
     renderers.push(runningSetup.renderer);
-    await waitFrame(runningSetup, (frame) => frame.includes("运行中"));
+    await waitFrame(runningSetup, (frame) => frame.includes("■"));
     runningSetup.mockInput.pressCtrlC();
     await waitFor(runningSetup, () => cancelled === 1);
     expect(exited).toBe(0);
@@ -142,6 +142,34 @@ describe("OpenTUI app", () => {
     idleSetup.mockInput.pressCtrlC();
     await waitFor(idleSetup, () => exited === 1);
     expect(cancelled).toBe(1);
+  });
+
+  test("running turn exposes a clickable stop action", async () => {
+    let cancelled = 0;
+    const runningEvents: AsyncIterable<UiEvent> = { async *[Symbol.asyncIterator]() {
+      yield { type: "turn_state", state: "running" };
+    } };
+    const setup = await renderUi(<App events={runningEvents} onCancel={() => cancelled++} />, { width: 80, height: 24 });
+    renderers.push(setup.renderer);
+    const frame = await waitFrame(setup, (value) => value.includes("■"));
+    expect(frame).toContain("■");
+    for (const y of [21, 22]) {
+      for (let x = 70; x < 80 && cancelled === 0; x++) {
+        await setup.mockMouse.click(x, y);
+      }
+    }
+    await waitFor(setup, () => cancelled === 1);
+  });
+
+  test("stop action disappears as soon as cancellation starts", async () => {
+    const cancellingEvents: AsyncIterable<UiEvent> = { async *[Symbol.asyncIterator]() {
+      yield { type: "turn_state", state: "running" };
+      yield { type: "turn_state", state: "cancelling", queueDepth: 0 };
+    } };
+    const setup = await renderUi(<App events={cancellingEvents} />, { width: 80, height: 24 });
+    renderers.push(setup.renderer);
+    const frame = await waitFrame(setup, (value) => value.includes("正在停止当前回合"));
+    expect(frame).not.toContain("■");
   });
 
   test("command selection remains visible after scrolling beyond eight rows", async () => {
@@ -195,7 +223,7 @@ describe("OpenTUI app", () => {
     const setup = await renderUi(<App onAction={async (name) => { actions.push(name); return { ok: true, panel: { kind: "sessions", title: "历史会话" } }; }} />, { width: 80, height: 24 });
     renderers.push(setup.renderer);
     await flush(setup);
-    await setup.mockMouse.click(75, 0);
+    await setup.mockMouse.click(69, 0);
     await waitFor(setup, () => actions.length > 0);
     expect(actions[0]).toBe("open_sessions");
   });

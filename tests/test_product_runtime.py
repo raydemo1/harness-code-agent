@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr
 from io import StringIO
@@ -288,6 +289,60 @@ class ProductRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(deltas, ["hel"])
+
+    def test_cancelling_while_waiting_for_stream_closes_the_active_client(self):
+        from harness_code_agent.agent.cancellation import (
+            CancellationToken,
+            CancelledError,
+        )
+        from harness_code_agent.agent.conversation import Agent, AgentConversation
+
+        started = threading.Event()
+        released = threading.Event()
+
+        class BlockingCompletions:
+            def create(self, **kwargs):
+                started.set()
+                released.wait(timeout=2)
+                raise RuntimeError("request closed")
+
+        class BlockingClient:
+            def __init__(self):
+                self.chat = SimpleNamespace(completions=BlockingCompletions())
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+                released.set()
+
+        client = BlockingClient()
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=client):
+            conversation = AgentConversation(Agent("test", "system", use_tools=False, stream_callback=lambda _: None))
+        token = CancellationToken()
+        errors = []
+
+        def request():
+            try:
+                conversation.llm.request_assistant_message(
+                    conversation.provider.chat_kwargs(model="m", messages=[], max_tokens=10),
+                    cancellation_token=token,
+                )
+            except CancelledError as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=request)
+        worker.start()
+        self.assertTrue(started.wait(timeout=1))
+        token.cancel()
+        worker.join(timeout=1)
+        if worker.is_alive():
+            released.set()
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(client.closed)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], CancelledError)
 
     def test_streaming_request_falls_back_to_non_stream_before_first_chunk(self):
         from harness_code_agent.agent.conversation import Agent, AgentConversation

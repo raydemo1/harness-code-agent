@@ -60,7 +60,23 @@ class _FakeSession:
         self.closed = True
 
 
+class _SlowFirstDeltaSession(_FakeSession):
+    started = threading.Event()
+    release = threading.Event()
+
+    def submit(self, text, cancellation_token=None):
+        type(self).started.set()
+        type(self).release.wait(timeout=2)
+        if cancellation_token is not None:
+            cancellation_token.check()
+        return super().submit(text, cancellation_token=cancellation_token)
+
+
 class OpenTuiBridgeTests(unittest.TestCase):
+    def setUp(self):
+        _SlowFirstDeltaSession.started.clear()
+        _SlowFirstDeltaSession.release.clear()
+
     def test_interaction_provider_waits_for_approval_resolution(self):
         events = []
         provider = BridgeInteractionProvider(events.append, project_root=Path.cwd())
@@ -126,6 +142,68 @@ class OpenTuiBridgeTests(unittest.TestCase):
         self.assertTrue(any(event.get("type") == "assistant_delta" and event.get("text") == "hello" for event in events))
         self.assertTrue(any(event.get("type") == "transcript_update" and event.get("state") == "success" for event in events))
         self.assertTrue(any(event.get("type") == "shutdown" for event in events))
+
+    def test_submit_shows_assistant_before_first_provider_delta(self):
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "harness_code_agent.tui_bridge.InteractiveSession", _SlowFirstDeltaSession
+        ), patch("harness_code_agent.tui_bridge.sys.stdout", output):
+            server = BridgeServer(cwd=Path(tmp), profile_name="general", profile_explicit=False)
+            server._handle_request({
+                "type": "request",
+                "id": "submit",
+                "method": "submit",
+                "params": {"text": "slow response"},
+            })
+            self.assertTrue(_SlowFirstDeltaSession.started.wait(timeout=1))
+            events = [
+                json.loads(line)["event"]
+                for line in output.getvalue().splitlines()
+                if line.strip() and json.loads(line).get("type") == "event"
+            ]
+            self.assertTrue(any(
+                event.get("type") == "transcript"
+                and event.get("item", {}).get("kind") == "assistant"
+                and event.get("item", {}).get("state") == "running"
+                for event in events
+            ))
+            _SlowFirstDeltaSession.release.set()
+            server._tasks.join()
+            server.close()
+
+    def test_cancel_clears_queued_submissions(self):
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "harness_code_agent.tui_bridge.InteractiveSession", _SlowFirstDeltaSession
+        ), patch("harness_code_agent.tui_bridge.sys.stdout", output):
+            server = BridgeServer(cwd=Path(tmp), profile_name="general", profile_explicit=False)
+            server._handle_request({
+                "type": "request",
+                "id": "first",
+                "method": "submit",
+                "params": {"text": "first"},
+            })
+            self.assertTrue(_SlowFirstDeltaSession.started.wait(timeout=1))
+            server._handle_request({
+                "type": "request",
+                "id": "second",
+                "method": "submit",
+                "params": {"text": "queued"},
+            })
+            server._handle_request({"type": "request", "id": "cancel", "method": "cancel"})
+            _SlowFirstDeltaSession.release.set()
+            server._tasks.join()
+            server.close()
+
+        messages = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+        cancel_response = next(message for message in messages if message.get("id") == "cancel")
+        self.assertEqual(cancel_response["result"]["discardedQueued"], 1)
+        assistant_updates = [
+            message["event"] for message in messages
+            if message.get("type") == "event"
+            and message.get("event", {}).get("type") == "transcript_update"
+        ]
+        self.assertTrue(any(event.get("state") == "failed" for event in assistant_updates))
 
     def test_structured_action_returns_searchable_session_panel(self):
         output = StringIO()

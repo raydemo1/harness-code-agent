@@ -51,6 +51,7 @@ MEMORY_FILES = (
 )
 PROTECTED_FILES = {"MEMORY.md", "manifest.json", "dream-log.md", "records.jsonl", "inbox.jsonl"}
 LOCK_STALE_SECONDS = _env_int("HARNESS_MEMORY_LOCK_STALE_SECONDS", 300)
+GIT_IDENTITY_TIMEOUT_SECONDS = 0.5
 
 _PROCESS_LOCK = threading.RLock()
 
@@ -99,6 +100,10 @@ def resolve_repo_key(workspace: Path) -> str:
             capture_output=True,
             text=True,
             check=True,
+            timeout=GIT_IDENTITY_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+            env=_noninteractive_git_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         common_dir = Path(proc.stdout.strip())
         if not common_dir.is_absolute():
@@ -109,6 +114,13 @@ def resolve_repo_key(workspace: Path) -> str:
     digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
     name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in workspace.name) or "workspace"
     return f"{name}-{digest}"
+
+
+def _noninteractive_git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "Never"
+    return env
 
 
 class MemoryStore:

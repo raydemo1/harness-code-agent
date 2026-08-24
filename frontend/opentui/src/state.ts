@@ -7,7 +7,7 @@ export const initialSnapshot: Snapshot = {
 };
 export type AppState = {
   snapshot: Snapshot; items: TranscriptItem[]; commands: CommandItem[];
-  turnState: "idle" | "running" | "queued" | "cancelled"; queueDepth: number; interaction: Interaction | null;
+  turnState: "idle" | "running" | "queued" | "cancelling" | "cancelled"; queueDepth: number; interaction: Interaction | null;
 };
 export const initialState: AppState = {
   snapshot: initialSnapshot,
