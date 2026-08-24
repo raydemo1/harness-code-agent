@@ -8,7 +8,7 @@ VeriForge 是一个面向真实代码仓库的 coding-agent runtime，提供 pro
 
 ## TUI 预览
 
-![VeriForge TUI：计划进度、对话区、输入框与运行状态](https://raw.githubusercontent.com/raydemo1/veriforge-agent/main/docs/images/veriforge-tui.png)
+![VeriForge OpenTUI：Mac 三点窗口、任务清单、工具调用、输入框与运行状态](https://raw.githubusercontent.com/raydemo1/veriforge-agent/main/docs/images/veriforge-tui.png)
 
 终端界面展示任务计划、当前 profile 和运行状态；工具调用、恢复过程和验收结果统一归档到 session。
 
@@ -497,6 +497,8 @@ PROFILE_APP_BUILDER_ACCEPTANCE_REVIEW_TIMEOUT=10
 ```
 
 ## 测试
+
+当前基线包含 28 个 Python 测试文件、519 个 unittest 用例，以及 18 个 OpenTUI/Bun 测试；两侧需要分别验证。
 
 运行完整 unittest：
 
