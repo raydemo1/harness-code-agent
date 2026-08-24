@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { stringWidth } from "bun";
 import { CliRenderEvents } from "@opentui/core";
 import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
@@ -206,7 +207,25 @@ function InteractionView({ interaction, theme, icons, onResolve }: { interaction
 
 type Completion = { id: string; label: string; description: string; insert: string };
 
-function Composer({ value, onChange, onSubmit, onCancel, onExit, running, commands, theme, icons, compact, disabled, onAction }: { value: string; onChange: (value: string) => void; onSubmit: () => void; onCancel: () => void; onExit?: () => void; running: boolean; commands: CommandItem[]; theme: Theme; icons: IconSet; compact: boolean; disabled: boolean; onAction?: AppProps["onAction"] }) {
+const COMMAND_LABEL_WIDTH = 30;
+
+function truncateLabel(label: string, maxWidth: number): string {
+  if (label.length <= maxWidth) return label;
+  return `${label.slice(0, Math.max(0, maxWidth - 1))}…`;
+}
+
+function truncateText(text: string, maxWidth: number): string {
+  if (stringWidth(text) <= maxWidth) return text;
+  if (maxWidth <= 1) return "…";
+  let result = "";
+  for (const char of text) {
+    if (stringWidth(result + char) > maxWidth - 1) break;
+    result += char;
+  }
+  return `${result.trimEnd()}…`;
+}
+
+function Composer({ value, onChange, onSubmit, onCancel, onExit, running, commands, theme, icons, compact, terminalWidth, disabled, onAction }: { value: string; onChange: (value: string) => void; onSubmit: () => void; onCancel: () => void; onExit?: () => void; running: boolean; commands: CommandItem[]; theme: Theme; icons: IconSet; compact: boolean; terminalWidth: number; disabled: boolean; onAction?: AppProps["onAction"] }) {
   const [selected, setSelected] = useState(0);
   const [mentions, setMentions] = useState<Completion[]>([]);
   const editorRef = useRef<TextareaRenderable | null>(null);
@@ -225,6 +244,8 @@ function Composer({ value, onChange, onSubmit, onCancel, onExit, running, comman
     if (slashQuery) return commands.filter((command) => commandMatches(command, slashQuery)).map((command) => ({ id: command.name, label: command.name, description: command.description, insert: `${command.name} ` }));
     return mentionMatch ? mentions : [];
   }, [commands, slashQuery, mentionMatch?.[1], mentions]);
+  const commandMode = Boolean(slashQuery);
+  const descriptionWidth = Math.max(1, terminalWidth - COMMAND_LABEL_WIDTH - 8);
   const paletteOpen = !disabled && candidates.length > 0 && Boolean(slashQuery || mentionMatch);
   useEffect(() => setSelected((value) => Math.min(value, Math.max(0, candidates.length - 1))), [candidates.length, slashQuery, mentionMatch?.[1]]);
   useEffect(() => { if (paletteOpen) paletteRef.current?.scrollChildIntoView(`completion-${selected}`); }, [paletteOpen, selected]);
@@ -237,6 +258,7 @@ function Composer({ value, onChange, onSubmit, onCancel, onExit, running, comman
   useKeyboard((key) => {
     if (disabled) return;
     if (paletteOpen) {
+      let handled = true;
       if (key.name === "up") setSelected((value) => (value - 1 + candidates.length) % candidates.length);
       else if (key.name === "down") setSelected((value) => (value + 1) % candidates.length);
       else if (key.name === "pageup") setSelected((value) => Math.max(0, value - 8));
@@ -245,21 +267,53 @@ function Composer({ value, onChange, onSubmit, onCancel, onExit, running, comman
       else if (key.name === "end") setSelected(candidates.length - 1);
       else if (key.name === "tab" || isEnterKey(key.name)) applyCompletion(candidates[selected]);
       else if (key.name === "escape") { editorRef.current?.setText(""); onChange(""); }
-    } else if (key.name === "escape") onCancel();
+      else handled = false;
+      if (handled) key.preventDefault();
+    } else if (key.name === "escape") {
+      key.preventDefault();
+      onCancel();
+    }
   });
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 2, paddingRight: 2 }}>
       {paletteOpen ? (
         <box style={{ flexDirection: "column", backgroundColor: theme.surfaceRaised, paddingLeft: 1, paddingRight: 1 }}>
           <scrollbox ref={paletteRef} style={{ height: Math.min(candidates.length, 8), backgroundColor: theme.surfaceRaised }}>
-            {candidates.map((item, index) => <box id={`completion-${index}`} key={item.id} style={{ flexDirection: "row", backgroundColor: index === selected ? theme.surfaceSelected : theme.surfaceRaised }}><text fg={index === selected ? theme.focus : theme.accent}>{` ${item.label.padEnd(compact ? 1 : 14, " ")} `}</text>{compact ? null : <text fg={index === selected ? theme.text : theme.subtle}>{item.description}</text>}</box>)}
+            {candidates.map((item, index) => (
+              <box id={`completion-${index}`} key={item.id} style={{ flexDirection: "row", backgroundColor: index === selected ? theme.surfaceSelected : theme.surfaceRaised }}>
+                <box style={{ width: commandMode ? COMMAND_LABEL_WIDTH + 2 : 16, flexDirection: "row", flexShrink: 0, justifyContent: "flex-start", paddingLeft: 1, paddingRight: 1 }}>
+                  <text fg={index === selected ? theme.focus : theme.accent}>{commandMode ? truncateLabel(item.label, COMMAND_LABEL_WIDTH) : item.label}</text>
+                </box>
+                {compact ? null : (
+                  <text fg={index === selected ? theme.text : theme.subtle} wrapMode="none" truncate>
+                    {truncateText(item.description, descriptionWidth)}
+                  </text>
+                )}
+              </box>
+            ))}
           </scrollbox>
           <text fg={theme.subtle}>{` ${selected + 1}/${candidates.length} · ↑↓ 选择 · Enter/Tab 使用 · Esc 关闭`}</text>
         </box>
       ) : null}
       <box style={{ flexDirection: "row", backgroundColor: theme.surface, paddingTop: 1, paddingBottom: 1 }}>
         <text fg={theme.accent}><strong>{` ${icons.prompt} `}</strong></text>
-        <textarea ref={editorRef} initialValue={value} placeholder="输入任务  ·  / 命令  ·  @ 文件" onContentChange={() => onChange(editorRef.current?.plainText ?? "")} onSubmit={onSubmit} focused={!disabled} style={{ flexGrow: 1, minHeight: 3, maxHeight: 7, backgroundColor: theme.surface, textColor: theme.text, cursorColor: theme.accent, placeholderColor: theme.muted }} />
+        <textarea
+          ref={editorRef}
+          initialValue={value}
+          placeholder="输入任务  ·  / 命令  ·  @ 文件"
+          keyBindings={[
+            { name: "return", action: "submit" },
+            { name: "kpenter", action: "submit" },
+            { name: "linefeed", action: "submit" },
+            { name: "return", shift: true, action: "newline" },
+            { name: "kpenter", shift: true, action: "newline" },
+            { name: "linefeed", shift: true, action: "newline" },
+          ]}
+          onContentChange={() => onChange(editorRef.current?.plainText ?? "")}
+          onSubmit={() => { if (!paletteOpen) onSubmit(); }}
+          focused={!disabled}
+          style={{ flexGrow: 1, minHeight: 3, maxHeight: 7, backgroundColor: theme.surface, textColor: theme.text, cursorColor: theme.accent, placeholderColor: theme.muted }}
+        />
       </box>
       <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1 }}>
         <text fg={theme.subtle}>{running ? " Ctrl+C 中断 · 新消息将排队" : " ? 帮助 · Ctrl+R 历史 · Ctrl+N 新会话"}</text>
@@ -284,6 +338,7 @@ function Footer({ theme, snapshot, compact, onPermission }: { theme: Theme; snap
 export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInteraction, initialTask, themePreference = "auto", iconPreference = "auto" }: AppProps) {
   const [state, dispatch] = useReducer(reduceEvent, initialState);
   const [draft, setDraft] = useState("");
+  const [composerVersion, setComposerVersion] = useState(0);
   const [panel, setPanel] = useState<PanelSpec | null>(null);
   const [detectedTheme, setDetectedTheme] = useState<ThemeMode | null>(null);
   const renderer = useRenderer();
@@ -303,7 +358,20 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
   useEffect(() => {
     if (!events) return;
     let active = true;
-    void (async () => { for await (const event of events) { if (!active) return; if (event.type === "panel") setPanel(event.panel); else dispatch(event); } })();
+    void (async () => {
+      for await (const event of events) {
+        if (!active) return;
+        if (event.type === "panel") setPanel(event.panel);
+        else {
+          if (event.type === "session_reset") {
+            setPanel(null);
+            setDraft("");
+            setComposerVersion((version) => version + 1);
+          }
+          dispatch(event);
+        }
+      }
+    })();
     return () => { active = false; };
   }, [events]);
 
@@ -312,7 +380,11 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
     try {
       const result = await onAction(name, params);
       if (result.panel) setPanel(result.panel);
-      else if (name === "new_session") { setPanel(null); setDraft(""); }
+      else if (name === "new_session") {
+        setPanel(null);
+        setDraft("");
+        setComposerVersion((version) => version + 1);
+      }
       if (result.message) dispatch({ type: "notice", text: result.message });
     } catch (error) {
       dispatch({ type: "notice", level: "error", text: String(error) });
@@ -320,12 +392,13 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
   };
 
   useKeyboard((key) => {
-    if (key.ctrl && key.name === "c") { if (running) onCancel?.(); else onExit?.(); }
-    else if (key.ctrl && key.name === "r") void invoke("open_sessions");
-    else if (key.ctrl && key.name === "n") void invoke("new_session");
-    else if (key.ctrl && key.name === "o") void invoke("open_panel", { panel: "observe" });
-    else if (key.ctrl && key.name === "p") void invoke("toggle_permission");
-    else if (key.name === "?" && !draft && !panel && !state.interaction) void invoke("open_panel", { panel: "help" });
+    const helpKey = key.name === "?" || (key.name === "/" && key.shift);
+    if (key.ctrl && key.name === "c") { key.preventDefault(); if (running) onCancel?.(); else onExit?.(); }
+    else if (key.ctrl && key.name === "r") { key.preventDefault(); void invoke("open_sessions"); }
+    else if (key.ctrl && key.name === "n") { key.preventDefault(); void invoke("new_session"); }
+    else if (key.ctrl && key.name === "o") { key.preventDefault(); void invoke("open_panel", { panel: "observe" }); }
+    else if (key.ctrl && key.name === "p") { key.preventDefault(); void invoke("toggle_permission"); }
+    else if (helpKey && !draft && !panel && !state.interaction) { key.preventDefault(); void invoke("open_panel", { panel: "help" }); }
   });
 
   useEffect(() => {
@@ -367,7 +440,7 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
     <box style={{ flexDirection: "column", width: "100%", height: "100%", backgroundColor: theme.background }}>
       <Header cwd={state.snapshot.cwd} theme={theme} icons={icons} compact={compact} onHistory={() => void invoke("open_sessions")} onNew={() => void invoke("new_session")} />
       {panel ? <PanelView panel={panel} theme={theme} icons={icons} onClose={() => setPanel(null)} onSelect={selectPanel} /> : <Transcript items={state.items} theme={theme} icons={icons} />}
-      {state.interaction ? <InteractionView interaction={state.interaction} theme={theme} icons={icons} onResolve={resolveInteraction} /> : panel ? null : <Composer value={draft} onChange={setDraft} onSubmit={submit} onCancel={onCancel ?? (() => undefined)} onExit={onExit} running={running} commands={state.commands} theme={theme} icons={icons} compact={compact} disabled={false} onAction={onAction} />}
+      {state.interaction ? <InteractionView interaction={state.interaction} theme={theme} icons={icons} onResolve={resolveInteraction} /> : panel ? null : <Composer key={composerVersion} value={draft} onChange={setDraft} onSubmit={submit} onCancel={onCancel ?? (() => undefined)} onExit={onExit} running={running} commands={state.commands} theme={theme} icons={icons} compact={compact} terminalWidth={width} disabled={false} onAction={onAction} />}
       <Footer theme={theme} snapshot={state.snapshot} compact={compact} onPermission={() => void invoke("toggle_permission")} />
     </box>
   );

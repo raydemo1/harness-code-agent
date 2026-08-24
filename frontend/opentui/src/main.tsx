@@ -22,10 +22,10 @@ function mockEvents(): AsyncIterable<UiEvent> {
         type: "commands",
         commands: [
           ...DEFAULT_COMMANDS,
-          { name: "/handoff", category: "Skills", description: "整理当前上下文并生成交接文档。" },
-          { name: "/implement", category: "Skills", description: "按计划执行实现任务。" },
-          { name: "/triage", category: "Skills", description: "整理问题并生成可执行简报。" },
-          { name: "/workflows", category: "Skills", description: "查看当前可用工作流。" },
+          { name: "/handoff", category: "Skills", description: "整理当前上下文并生成交接文档" },
+          { name: "/implement", category: "Skills", description: "按计划执行实现任务" },
+          { name: "/triage", category: "Skills", description: "整理问题并生成可执行简报" },
+          { name: "/workflows", category: "Skills", description: "查看当前可用工作流" },
         ],
       };
       yield { type: "turn_state", state: "idle" };

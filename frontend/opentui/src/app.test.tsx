@@ -41,6 +41,38 @@ function events(): AsyncIterable<UiEvent> {
 }
 
 describe("OpenTUI app", () => {
+  test("enter submits the composer while shift-enter inserts a newline", async () => {
+    const submitted: string[] = [];
+    const setup = await renderUi(<App onSubmit={(text) => submitted.push(text)} />, { width: 120, height: 24, kittyKeyboard: true });
+    renderers.push(setup.renderer);
+    await setup.mockInput.typeText("第一行");
+    setup.mockInput.pressEnter({ shift: true });
+    await setup.mockInput.typeText("第二行");
+    await flush(setup);
+    expect(submitted).toHaveLength(0);
+    setup.mockInput.pressEnter();
+    await waitFor(setup, () => submitted.length === 1);
+    expect(submitted[0]).toBe("第一行\n第二行");
+  });
+
+  test("enter accepts a command completion without submitting the stale slash", async () => {
+    const submitted: string[] = [];
+    const commandEvents: AsyncIterable<UiEvent> = { async *[Symbol.asyncIterator]() {
+      yield { type: "commands", commands: [{ name: "/handoff", description: "生成交接文档" }] };
+    } };
+    const setup = await renderUi(<App events={commandEvents} onSubmit={(text) => submitted.push(text)} />, { width: 120, height: 24 });
+    renderers.push(setup.renderer);
+    await setup.mockInput.typeText("/");
+    await waitFrame(setup, (frame) => frame.includes("/handoff"));
+    setup.mockInput.pressEnter();
+    await flush(setup);
+    expect(submitted).toHaveLength(0);
+    expect(setup.captureCharFrame()).toContain("/handoff");
+    setup.mockInput.pressEnter();
+    await waitFor(setup, () => submitted.length === 1);
+    expect(submitted[0]).toBe("/handoff");
+  });
+
   test("history shortcut opens a searchable panel and escape restores composer", async () => {
     const actions: ActionName[] = [];
     const onAction = async (name: ActionName): Promise<ActionResult> => {
@@ -57,6 +89,61 @@ describe("OpenTUI app", () => {
     await waitFrame(setup, (frame) => frame.includes("输入任务") && !frame.includes("搜索会话"));
   });
 
+  test("question-mark opens help without leaking into the composer draft", async () => {
+    const submitted: string[] = [];
+    const setup = await renderUi(
+      <App
+        onSubmit={(text) => submitted.push(text)}
+        onAction={async () => ({ ok: true, panel: { kind: "help", title: "快捷键与命令", body: "帮助内容" } })}
+      />,
+      { width: 120, height: 24 },
+    );
+    renderers.push(setup.renderer);
+    setup.mockInput.pressKey("?");
+    await waitFrame(setup, (frame) => frame.includes("帮助内容"));
+    setup.mockInput.pressEscape();
+    await waitFrame(setup, (frame) => frame.includes("输入任务"));
+    await setup.mockInput.typeText("测试帮助后输入");
+    await flush(setup);
+    setup.mockInput.pressEnter();
+    await waitFor(setup, () => submitted.length === 1);
+    expect(submitted[0]).toBe("测试帮助后输入");
+  });
+
+  test("ctrl-n starts a new session and clears the current draft", async () => {
+    const actions: ActionName[] = [];
+    const setup = await renderUi(
+      <App onAction={async (name) => { actions.push(name); return { ok: true, message: "已开始新会话" }; }} />,
+      { width: 120, height: 24 },
+    );
+    renderers.push(setup.renderer);
+    await setup.mockInput.typeText("尚未提交的草稿");
+    setup.mockInput.pressKey("n", { ctrl: true });
+    await waitFor(setup, () => actions.includes("new_session"));
+    await waitFrame(setup, (frame) => frame.includes("输入任务") && !frame.includes("尚未提交的草稿"));
+  });
+
+  test("ctrl-c cancels a running turn and exits only while idle", async () => {
+    let cancelled = 0;
+    let exited = 0;
+    const runningEvents: AsyncIterable<UiEvent> = { async *[Symbol.asyncIterator]() {
+      yield { type: "turn_state", state: "running" };
+    } };
+    const runningSetup = await renderUi(<App events={runningEvents} onCancel={() => cancelled++} onExit={() => exited++} />, { width: 80, height: 24 });
+    renderers.push(runningSetup.renderer);
+    await waitFrame(runningSetup, (frame) => frame.includes("运行中"));
+    runningSetup.mockInput.pressCtrlC();
+    await waitFor(runningSetup, () => cancelled === 1);
+    expect(exited).toBe(0);
+
+    const idleSetup = await renderUi(<App onCancel={() => cancelled++} onExit={() => exited++} />, { width: 80, height: 24 });
+    renderers.push(idleSetup.renderer);
+    await flush(idleSetup);
+    idleSetup.mockInput.pressCtrlC();
+    await waitFor(idleSetup, () => exited === 1);
+    expect(cancelled).toBe(1);
+  });
+
   test("command selection remains visible after scrolling beyond eight rows", async () => {
     const setup = await renderUi(<App events={events()} />, { width: 80, height: 24 });
     renderers.push(setup.renderer);
@@ -66,6 +153,32 @@ describe("OpenTUI app", () => {
     await setup.mockInput.pressKeys(Array.from({ length: 9 }, () => "ARROW_DOWN"), 1);
     const frame = await waitFrame(setup, (value) => value.includes("10/12"));
     expect(frame).toContain("/command-10");
+  });
+
+  test("each command stays on one left-aligned row and truncates overflow with an ellipsis", async () => {
+    const longCommand = "/third-party-skill-with-an-extremely-long-command-name";
+    const longDescription = "这是一个来自第三方技能的特别长说明，用来验证说明文字不会换到第二行，而是在终端剩余宽度内明确显示截断符号";
+    const commandEvents: AsyncIterable<UiEvent> = { async *[Symbol.asyncIterator]() {
+      yield { type: "commands", commands: [
+        { name: "/profile", description: "选择工作模式" },
+        { name: "/improve-codebase-architecture", description: "扫描代码库中的架构深化机会" },
+        { name: longCommand, description: longDescription },
+      ] };
+    } };
+    const setup = await renderUi(<App events={commandEvents} />, { width: 120, height: 24 });
+    renderers.push(setup.renderer);
+    await setup.mockInput.typeText("/");
+    const truncated = `${longCommand.slice(0, 29)}…`;
+    const frame = await waitFrame(setup, (value) => value.includes(truncated) && value.includes("…"));
+    const lines = frame.split("\n");
+    const shortLine = lines.find((line) => line.includes("/profile")) ?? "";
+    const longLine = lines.find((line) => line.includes("/improve-codebase-architecture")) ?? "";
+    const truncatedLine = lines.find((line) => line.includes(truncated)) ?? "";
+    expect(shortLine.indexOf("/profile")).toBe(longLine.indexOf("/improve-codebase-architecture"));
+    expect(shortLine.indexOf("/profile")).toBe(truncatedLine.indexOf(truncated));
+    expect(frame).not.toContain(longCommand);
+    expect(frame).not.toContain(longDescription);
+    expect(truncatedLine.match(/…/g)?.length).toBe(2);
   });
 
   test("responsive footer hides model at 80 columns and restores it after resize", async () => {
