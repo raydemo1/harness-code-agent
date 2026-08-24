@@ -1420,6 +1420,7 @@ class InteractiveCliTests(unittest.TestCase):
         cases = [
             (["veriforge", "fix", "tests"], {"first_task": "fix tests"}),
             (["veriforge", "--profile", "terminal", "fix", "shell"], {"profile_name": "terminal", "first_task": "fix shell"}),
+            (["veriforge", "--theme", "light", "--icons", "nerd"], {"theme": "light", "icons": "nerd"}),
         ]
         for argv, expected in cases:
             with self.subTest(argv=argv):

@@ -1,0 +1,23 @@
+{
+  "name": "veriforge-opentui",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "scripts": {
+    "dev": "bun run src/main.tsx --mock",
+    "check": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.7",
+    "@opentui/react": "0.5.7",
+    "react": "19.2.8",
+    "react-reconciler": "0.33.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "@types/react-reconciler": "0.28.9",
+    "bun-types": "1.4.0",
+    "typescript": "5.9.3"
+  }
+}

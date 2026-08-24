@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+from harness_code_agent.runtime.approvals import ApprovalRequest
+from harness_code_agent.sessions.events import SessionEvent
+from harness_code_agent.tui.approval import (
+    ApprovalAllowlist,
+    _persistent_prefix_for_request,
+)
+from harness_code_agent.tui.commands import default_command_registry
+from harness_code_agent.tui.completion import (
+    current_mention_query,
+    mention_candidates,
+    replace_mention_fragment,
+)
+from harness_code_agent.tui.state import SessionStatusSnapshot, TuiState
+
+
+class TerminalUiTests(unittest.TestCase):
+    def test_command_registry_exposes_structured_panel_actions(self):
+        registry = default_command_registry(skill_registry=SimpleNamespace(user_commands=[]))
+        self.assertEqual(registry.execute("/profile", SimpleNamespace()).action, "profile")
+        self.assertEqual(registry.execute("/observe", SimpleNamespace()).action, "observe")
+        self.assertIn("/checkpoint", registry.command_names())
+
+    def test_mentions_search_files_and_replace_only_active_fragment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README file.md").write_text("demo", encoding="utf-8")
+            store = SimpleNamespace(list_sessions=list)
+            candidates = mention_candidates(root, "read", store)
+        self.assertEqual(candidates[0].insert_text, 'file:"README file.md"')
+        self.assertEqual(current_mention_query("inspect @rea"), ("rea", -4))
+        self.assertEqual(replace_mention_fragment("inspect @rea", candidates[0].insert_text), 'inspect @file:"README file.md" ')
+
+    def test_transcript_state_tracks_tool_and_file_events(self):
+        state = TuiState(SessionStatusSnapshot("general", "model", "provider", "workspace-write", "session", Path.cwd()))
+        call = state.apply_event(SessionEvent(1, 0, "tool_call", "main", {"tool": "read_file", "args": {"path": "README.md"}}))
+        change = state.apply_event(SessionEvent(2, 0, "file_change", "main", {"operation": "edit", "path": "README.md", "diff": "+new"}))
+        self.assertEqual(call.kind, "tool")
+        self.assertIn("README.md", call.title)
+        self.assertEqual(change.kind, "file")
+        self.assertEqual(state.snapshot.dirty_count, 1)
+
+    def test_project_allowlist_reuses_persisted_command_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            allowlist = ApprovalAllowlist(tmp)
+            request = ApprovalRequest("run_bash", {"command": "python scripts/check.py --fast"}, "shell_risky", "confirm")
+            prefix = _persistent_prefix_for_request(request)
+            self.assertIsNotNone(prefix)
+            allowlist.add_prefix_rule(prefix, command=request.args["command"])
+            self.assertTrue(allowlist.matches("python scripts/check.py --all"))
+            self.assertFalse(allowlist.matches("python scripts/delete.py --all"))
+
+
+if __name__ == "__main__":
+    unittest.main()

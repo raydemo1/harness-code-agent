@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,8 +26,8 @@ def InteractiveSession(**kwargs):
 
 
 def TuiApp(**kwargs):
-    """Lazy TUI constructor so non-interactive CLI commands stay lightweight."""
-    from .tui import TuiApp as App
+    """Lazy OpenTUI constructor so batch commands stay lightweight."""
+    from .opentui_launcher import OpenTuiApp as App
 
     return App(**kwargs)
 
@@ -63,6 +64,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Execute a single task and print results (no REPL)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--list-profiles", action="store_true", help="List profiles and exit")
+    parser.add_argument("--no-alt-screen", action="store_true",
+        help="Keep the OpenTUI frontend in the main terminal screen")
+    parser.add_argument("--theme", choices=("auto", "dark", "light"),
+        default=os.environ.get("VERIFORGE_THEME", "auto"), help="OpenTUI color theme")
+    parser.add_argument("--icons", choices=("auto", "nerd", "unicode"),
+        default=os.environ.get("VERIFORGE_ICONS", "auto"), help="OpenTUI icon set")
     args = parser.parse_args(argv)
     profile_explicit = any(arg == "--profile" or arg.startswith("--profile=") for arg in argv)
     is_tty = _is_interactive_tty()
@@ -112,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
             profile_name=args.profile,
             profile_explicit=profile_explicit,
             first_task=first_task,
+            no_alt_screen=args.no_alt_screen,
+            theme=args.theme,
+            icons=args.icons,
         )
     except Exception as e:
         _print_error(f"Error: {e}")

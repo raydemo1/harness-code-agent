@@ -104,6 +104,7 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 环境要求：
 
 - Python 3.10+
+- Bun 1.4+（OpenTUI 前端）
 - Git
 - 一个 OpenAI-compatible API key
 - 可选：Playwright Chromium，用于浏览器验证
@@ -114,6 +115,11 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 ```bash
 cd veriforge-agent
 pip install -e .
+
+# 安装 OpenTUI 前端依赖（首次运行前执行）
+cd frontend/opentui
+bun install
+cd ../..
 ```
 
 源码目录运行：
@@ -172,6 +178,17 @@ DeepSeek 默认档位：
 veriforge
 ```
 
+交互前端使用 Bun + React + TypeScript 的 OpenTUI；Python 负责
+`InteractiveSession`、工具、权限和会话持久化，二者通过本地 NDJSON 协议通信。
+历史恢复、新会话、工作模式、检查点、MCP、运行观察、审批、问题选择、命令和
+`@` 文件补全均在 OpenTUI 内完成。
+
+需要保留当前终端画面而不切换 alternate screen 时：
+
+```bash
+veriforge --no-alt-screen
+```
+
 然后输入任务，例如：
 
 ```text
@@ -189,7 +206,14 @@ veriforge
 /observe      打开运行观察
 ```
 
-输入 `/` 会打开扁平命令面板，左侧显示命令，右侧显示作用。历史会话和新会话使用界面右上角的时钟、加号图标；profile 选择使用 `/profile` 面板完成。
+输入 `/` 会打开可滚动命令面板，最多显示 8 行；上下键、PageUp/PageDown、Home/End 都会保持当前选项可见。右上角的历史和新会话图标是可点击的真实入口，也分别支持 `Ctrl+R` 和 `Ctrl+N`；profile 选择使用 `/profile` 面板完成。
+
+主题默认跟随终端，可显式指定；Nerd Font 图标需要主动启用，默认使用不会缺字的 Unicode 图标：
+
+```bash
+veriforge --theme light
+veriforge --theme dark --icons nerd
+```
 
 也可以启动时直接提交任务：
 
@@ -212,9 +236,12 @@ Enter         提交输入
 Shift+Enter   插入换行
 Tab           接受补全
 Esc           关闭补全
-Ctrl-C        取消当前 turn
-右上角时钟    打开历史会话
-右上角加号    开始新会话
+Ctrl-C        取消当前 turn；空闲时退出
+Ctrl-R        打开历史会话
+Ctrl-N        开始新会话
+Ctrl-O        打开运行观察
+Ctrl-P        切换权限模式
+鼠标点击权限  同样可以切换权限模式
 ```
 
 ## Profiles

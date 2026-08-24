@@ -1,74 +1,16 @@
-"""Approval provider for the Textual TUI."""
+"""Project-local approval prefix rules shared by terminal frontends."""
 from __future__ import annotations
 
 import json
 import re
 import shlex
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from ..runtime.approvals import ApprovalRequest, ApprovalResult
+from ..runtime.approvals import ApprovalRequest
 from ..runtime.shell_classification import classify_safe_shell_command
 
-if TYPE_CHECKING:
-    from .app import TuiApp
-
 _PYTHON_COMMANDS = {"python", "python3", "python.exe", "python3.exe", "py", "py.exe"}
-
-
-class TuiApprovalProvider:
-    def __init__(
-        self,
-        *,
-        project_root: str | Path | None = None,
-        app_tui: TuiApp | None = None,
-        allowlist: ApprovalAllowlist | None = None,
-    ):
-        self.app_tui = app_tui
-        self.allowlist = allowlist
-        if self.allowlist is None and project_root is not None:
-            self.allowlist = ApprovalAllowlist(project_root)
-
-    def request(self, request: ApprovalRequest) -> ApprovalResult:
-        _persistent_prefix_for_request(request)
-        if self.allowlist is not None and request.tool_name == "run_bash":
-            rule = self.allowlist.match(str(request.args.get("command", "")))
-            if rule is not None:
-                return ApprovalResult(
-                    True,
-                    "approved by project allowlist",
-                    {
-                        "ui": "tui",
-                        "approval_source": "project_allowlist",
-                        "prefix": rule.get("prefix", []),
-                    },
-                )
-
-        if self.app_tui is None:
-            return ApprovalResult(False, "no TUI app available", {"ui": "tui"})
-
-        # Bridge: worker thread → UI thread via call_from_thread + Event
-        event = threading.Event()
-        result_holder: list = [None]
-
-        def _show():
-            self.app_tui.show_approval_panel(request, event, result_holder)
-
-        try:
-            self.app_tui.call_from_thread(_show)
-        except Exception:
-            return ApprovalResult(False, "failed to show approval panel", {"ui": "tui"})
-
-        # Block until user makes a choice
-        event.wait()
-
-        approved = result_holder[0] if result_holder else False
-        if approved:
-            # If persist was used, the panel already handled it
-            return ApprovalResult(True, "approved in TUI", {"ui": "tui"})
-        return ApprovalResult(False, "denied in TUI", {"ui": "tui"})
 
 
 class ApprovalAllowlist:
