@@ -1,18 +1,24 @@
-"""Local conservative profile routing."""
+"""Conservative hybrid profile routing."""
 from __future__ import annotations
 
+import json
+import logging
 import math
 import re
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 DEFAULT_PROFILE = "general"
 ROUTING_MODE_AUTO = "auto"
 ROUTING_MODE_PINNED = "pinned"
-LOCAL_ROUTE_MIN_CONFIDENCE = 0.10
-LOCAL_ROUTE_MIN_MARGIN = 0.035
+LOCAL_ROUTE_MIN_CONFIDENCE = 0.72
+LOCAL_ROUTE_MIN_MARGIN = 0.18
+LLM_ROUTE_MIN_CONFIDENCE = 0.80
+LLM_ROUTE_TIMEOUT_SECONDS = 3.0
 LOCAL_ROUTE_BM25_K1 = 1.2
 LOCAL_ROUTE_BM25_B = 0.75
 LOCAL_ROUTE_PROFILES = {"general", "coding-agent", "review", "plan", "app-builder"}
@@ -21,6 +27,34 @@ ROUTE_ACTION_SWITCH_PROFILE = "switch_profile"
 ROUTE_ACTION_DIRECT_ANSWER = "direct_answer"
 TURN_MODE_NORMAL = "normal"
 TURN_MODE_DIRECT_ANSWER = "direct_answer"
+
+log = logging.getLogger("harness")
+
+_LLM_ROUTE_SYSTEM_PROMPT = """You route user turns between five VeriForge workflow profiles.
+Return one JSON object only: {"profile": string, "confidence": number, "reason": string}.
+The profile must be exactly one of: general, coding-agent, review, plan, app-builder.
+
+Choose by the final deliverable, not isolated keywords:
+- general: explanations, discussion, summaries, and questions needing no workspace action.
+- coding-agent: modify, fix, refactor, test, or otherwise work in an existing repository. Review-then-fix also belongs here. Existing UI changes belong here.
+- review: an explicit code-review workflow for source code, a PR, diff, patch, or implementation. Use it only when the user clearly asks to review, audit, or inspect code and wants findings. Do not choose review for an ordinary question about the current implementation, and do not choose it when the user also asks to fix findings.
+- plan: investigate and produce a decision-complete plan without implementation. Explicit no-edit or wait-for-approval constraints belong here unless the user only wants an explanation.
+- app-builder: create a complete new browser application or product interface from an idea. Do not choose it merely because an existing repository uses React or has a UI.
+
+Use the previous exchange to resolve follow-ups such as "continue" or "implement that plan". Summaries, explanations, and brief questions about the work already in progress should keep the current specialized profile. Switch between specialized profiles only for a clear workflow phase change. If genuinely ambiguous, keep the current profile and lower confidence. Do not invent a sixth route."""
+
+
+@dataclass(frozen=True)
+class LlmRouteResult:
+    profile_name: str = ""
+    confidence: float = 0.0
+    reason: str = ""
+    provider: str = ""
+    model: str = ""
+    failure_type: str = ""
+
+
+RouteClassifier = Callable[..., LlmRouteResult]
 
 
 @dataclass(frozen=True)
@@ -38,6 +72,14 @@ class RouteDecision:
     matched_profile: str = ""
     routing_mode: str = ROUTING_MODE_AUTO
     decisive_signal: str = ""
+    local_candidate: str = ""
+    local_confidence: float = 0.0
+    local_margin: float = 0.0
+    llm_called: bool = False
+    llm_confidence: float = 0.0
+    llm_provider: str = ""
+    llm_model: str = ""
+    failure_type: str = ""
 
 
 def route_profile_for_turn(
@@ -47,16 +89,11 @@ def route_profile_for_turn(
     routing_mode: str = ROUTING_MODE_AUTO,
     confidence_threshold: float = LOCAL_ROUTE_MIN_CONFIDENCE,
     margin_threshold: float = LOCAL_ROUTE_MIN_MARGIN,
+    previous_user_task: str = "",
+    previous_assistant_text: str = "",
+    llm_classifier: RouteClassifier | None = None,
 ) -> RouteDecision:
-    """Route one turn with explicit contracts and sticky automatic routing.
-
-    The router is deliberately state-light: callers own the current profile and
-    routing mode, while this module decides whether the next turn may switch.
-    Pinned profiles never enter the classifier. Automatic routing can enter a
-    specialised profile from ``general``; specialised-to-specialised changes
-    require an explicit workflow contract and semantic guesses never fall back
-    to ``general``.
-    """
+    """Route one turn through explicit, local, then fast-LLM decisions."""
     started_at = time.perf_counter()
     current = current_profile
     mode = routing_mode if routing_mode in {ROUTING_MODE_AUTO, ROUTING_MODE_PINNED} else ROUTING_MODE_AUTO
@@ -92,186 +129,174 @@ def route_profile_for_turn(
         )
 
     explicit_mode = _explicit_mode_profile(user_prompt)
-    explicit_profile = explicit_mode or _explicit_route_profile(user_prompt)
-    if explicit_profile is not None:
-        best_profile = explicit_profile
-        best_score = 1.0
-        margin = 1.0
-        route_reason = (
-            f"Explicit mode selection matched {best_profile}."
-            if explicit_mode is not None
-            else f"Explicit instruction contract matched {best_profile}."
-        )
-        decisive_signal = "explicit_mode" if explicit_mode is not None else "explicit_contract"
-    else:
-        scores = _local_route_scores(user_prompt)
-        if not scores:
-            return _with_elapsed(started_at, _local_fallback(current, "empty local route query"))
-
-        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-        best_profile, best_score = ranked[0]
-        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
-        margin = max(0.0, best_score - second_score)
-        route_reason = f"Local BM25 prototype matched {best_profile}."
-        decisive_signal = "semantic"
-
-    if decisive_signal == "semantic" and (
-        best_score < confidence_threshold or margin < margin_threshold
-    ):
-        decision = _local_fallback(current, "low local route confidence")
-        return _with_elapsed(
-            started_at,
-            _replace_route_scores(decision, best_score, margin, routing_mode=mode),
-        )
-
-    # Natural-language explanations are not a request to abandon the current
-    # specialised workflow. Keep the profile and suppress tools for this turn.
-    if explicit_mode is not None and explicit_mode != current:
-        return _with_elapsed(
-            started_at,
-            RouteDecision(
-                profile_name=explicit_mode,
-                confidence=best_score,
-                margin=margin,
-                reason=route_reason,
-                source="local",
-                action=ROUTE_ACTION_SWITCH_PROFILE,
-                matched_profile=explicit_mode,
-                routing_mode=mode,
-                decisive_signal=decisive_signal,
-            ),
-        )
-
-    # A natural-language explanation is a direct-answer turn, not an implicit
-    # request to leave a specialised workflow.
-    if explicit_profile == "general" and current != "general":
-        return _with_elapsed(
-            started_at,
-            RouteDecision(
-                profile_name=current,
-                confidence=best_score,
-                margin=margin,
-                reason="The user asked for a general answer in the current workflow.",
-                source="local",
-                action=ROUTE_ACTION_DIRECT_ANSWER,
-                turn_mode=TURN_MODE_DIRECT_ANSWER,
-                matched_profile="general",
-                routing_mode=mode,
-                decisive_signal=decisive_signal,
-            ),
-        )
-
-    if current == "general" and best_profile != "general":
-        return _with_elapsed(
-            started_at,
-            RouteDecision(
-                profile_name=best_profile,
-                confidence=best_score,
-                margin=margin,
-                reason=route_reason,
-                source="local",
-                action=ROUTE_ACTION_SWITCH_PROFILE,
-                matched_profile=best_profile,
-                routing_mode=mode,
-                decisive_signal=decisive_signal,
-            ),
-        )
-
-    if current != "general" and best_profile == "general":
-        return _with_elapsed(
-            started_at,
-            RouteDecision(
-                profile_name=current,
-                confidence=best_score,
-                margin=margin,
-                reason="Local BM25 prototype matched general; answer directly in the current profile.",
-                source="local",
-                action=ROUTE_ACTION_DIRECT_ANSWER,
-                turn_mode=TURN_MODE_DIRECT_ANSWER,
-                matched_profile=best_profile,
-                routing_mode=mode,
-                decisive_signal=decisive_signal,
-            ),
-        )
-
-    if current != "general" and best_profile != current:
-        # A semantic guess must never move between specialised workflows. An
-        # explicit contract may do so, but only for an unambiguous phase change.
-        if decisive_signal in {"explicit_contract", "explicit_mode"} and _explicit_transition_allowed(
-            user_prompt,
-            current_profile=current,
-            target_profile=best_profile,
-        ):
-            return _with_elapsed(
-                started_at,
-                RouteDecision(
-                    profile_name=best_profile,
-                    confidence=best_score,
-                    margin=margin,
-                    reason=route_reason,
-                    source="local",
-                    action=ROUTE_ACTION_SWITCH_PROFILE,
-                    matched_profile=best_profile,
-                    routing_mode=mode,
-                    decisive_signal=decisive_signal,
-                ),
-            )
-        decision = _local_fallback(current, f"specialized profile sticky; local best was {best_profile}")
-        return _with_elapsed(
-            started_at,
-            _replace_route_scores(decision, best_score, margin, routing_mode=mode),
-        )
-
-    return _with_elapsed(
-        started_at,
-        RouteDecision(
-            profile_name=best_profile,
-            confidence=best_score,
-            margin=margin,
-            reason=route_reason,
+    if explicit_mode is not None:
+        return _with_elapsed(started_at, _decision_for_candidate(
+            current=current,
+            target=explicit_mode,
+            confidence=1.0,
+            margin=1.0,
+            reason=f"Explicit mode selection matched {explicit_mode}.",
             source="local",
-            action=ROUTE_ACTION_STAY,
-            matched_profile=best_profile,
             routing_mode=mode,
-            decisive_signal=decisive_signal,
-        ),
-    )
+            decisive_signal="explicit_mode",
+            force_general_switch=True,
+        ))
+
+    local_contract = _explicit_route_profile(user_prompt)
+    scores = _local_route_scores(user_prompt)
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    local_candidate = ranked[0][0] if ranked else ""
+    local_confidence = ranked[0][1] if ranked else 0.0
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    local_margin = max(0.0, local_confidence - second_score)
+
+    if local_contract is not None:
+        return _with_elapsed(started_at, _decision_for_candidate(
+            current=current,
+            target=local_contract,
+            confidence=0.98,
+            margin=1.0,
+            reason=f"High-precision local contract matched {local_contract}.",
+            source="local",
+            routing_mode=mode,
+            decisive_signal="local_contract",
+            local_candidate=local_candidate,
+            local_confidence=local_confidence,
+            local_margin=local_margin,
+        ))
+
+    if (
+        local_candidate
+        and local_confidence >= confidence_threshold
+        and local_margin >= margin_threshold
+        and (
+            current == "general"
+            or local_candidate == current
+            or local_candidate == "general"
+        )
+    ):
+        return _with_elapsed(started_at, _decision_for_candidate(
+            current=current,
+            target=local_candidate,
+            confidence=local_confidence,
+            margin=local_margin,
+            reason=f"High-confidence local prototype matched {local_candidate}.",
+            source="local",
+            routing_mode=mode,
+            decisive_signal="local_semantic",
+            local_candidate=local_candidate,
+            local_confidence=local_confidence,
+            local_margin=local_margin,
+        ))
+
+    classifier = llm_classifier or _classify_with_fast_llm
+    try:
+        llm_result = classifier(
+            user_prompt=user_prompt,
+            current_profile=current,
+            previous_user_task=previous_user_task,
+            previous_assistant_text=previous_assistant_text,
+        )
+    except Exception as exc:  # noqa: BLE001 - routing failures must degrade to stay
+        log.info("Fast profile router failed: %s", exc)
+        llm_result = LlmRouteResult(failure_type=_failure_type_for_exception(exc))
+    if not isinstance(llm_result, LlmRouteResult):
+        llm_result = LlmRouteResult(failure_type="invalid_response")
+
+    if (
+        llm_result.failure_type
+        or llm_result.profile_name not in LOCAL_ROUTE_PROFILES
+        or llm_result.confidence < LLM_ROUTE_MIN_CONFIDENCE
+    ):
+        failure_type = llm_result.failure_type
+        if not failure_type:
+            failure_type = "low_confidence" if llm_result.profile_name in LOCAL_ROUTE_PROFILES else "invalid_response"
+        return _with_elapsed(started_at, RouteDecision(
+            profile_name=current,
+            confidence=llm_result.confidence,
+            reason="Keeping the current profile because the model router was not decisive.",
+            fallback_used=True,
+            fallback_reason=f"llm router {failure_type}",
+            source="llm",
+            action=ROUTE_ACTION_STAY,
+            matched_profile=llm_result.profile_name or current,
+            routing_mode=mode,
+            decisive_signal="llm_fallback",
+            local_candidate=local_candidate,
+            local_confidence=local_confidence,
+            local_margin=local_margin,
+            llm_called=True,
+            llm_confidence=llm_result.confidence,
+            llm_provider=llm_result.provider,
+            llm_model=llm_result.model,
+            failure_type=failure_type,
+        ))
+
+    return _with_elapsed(started_at, _decision_for_candidate(
+        current=current,
+        target=llm_result.profile_name,
+        confidence=llm_result.confidence,
+        margin=0.0,
+        reason=llm_result.reason or f"Fast model selected {llm_result.profile_name}.",
+        source="llm",
+        routing_mode=mode,
+        decisive_signal="llm",
+        local_candidate=local_candidate,
+        local_confidence=local_confidence,
+        local_margin=local_margin,
+        llm_called=True,
+        llm_confidence=llm_result.confidence,
+        llm_provider=llm_result.provider,
+        llm_model=llm_result.model,
+    ))
 
 
-def _local_fallback(profile_name: str, fallback_reason: str) -> RouteDecision:
-    return RouteDecision(
-        profile_name=profile_name,
-        confidence=0.0,
-        reason="Keeping the current profile.",
-        fallback_used=True,
-        fallback_reason=fallback_reason,
-        source="local",
-        action=ROUTE_ACTION_STAY,
-        matched_profile=profile_name,
-        routing_mode=ROUTING_MODE_AUTO,
-    )
-
-
-def _replace_route_scores(
-    decision: RouteDecision,
+def _decision_for_candidate(
+    *,
+    current: str,
+    target: str,
     confidence: float,
     margin: float,
-    *,
-    routing_mode: str = ROUTING_MODE_AUTO,
+    reason: str,
+    source: str,
+    routing_mode: str,
+    decisive_signal: str,
+    force_general_switch: bool = False,
+    local_candidate: str = "",
+    local_confidence: float = 0.0,
+    local_margin: float = 0.0,
+    llm_called: bool = False,
+    llm_confidence: float = 0.0,
+    llm_provider: str = "",
+    llm_model: str = "",
 ) -> RouteDecision:
+    profile_name = target
+    action = ROUTE_ACTION_STAY
+    turn_mode = TURN_MODE_NORMAL
+    if target == "general" and current != "general" and not force_general_switch:
+        profile_name = current
+        action = ROUTE_ACTION_DIRECT_ANSWER
+        turn_mode = TURN_MODE_DIRECT_ANSWER
+    elif target != current:
+        action = ROUTE_ACTION_SWITCH_PROFILE
     return RouteDecision(
-        profile_name=decision.profile_name,
+        profile_name=profile_name,
         confidence=confidence,
         margin=margin,
-        reason=decision.reason,
-        fallback_used=decision.fallback_used,
-        fallback_reason=decision.fallback_reason,
-        source=decision.source,
-        action=decision.action,
-        turn_mode=decision.turn_mode,
-        matched_profile=decision.matched_profile,
+        reason=reason,
+        source=source,
+        action=action,
+        turn_mode=turn_mode,
+        matched_profile=target,
         routing_mode=routing_mode,
-        decisive_signal=decision.decisive_signal,
+        decisive_signal=decisive_signal,
+        local_candidate=local_candidate,
+        local_confidence=local_confidence,
+        local_margin=local_margin,
+        llm_called=llm_called,
+        llm_confidence=llm_confidence,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
     )
 
 
@@ -290,7 +315,99 @@ def _with_elapsed(started_at: float, decision: RouteDecision) -> RouteDecision:
         matched_profile=decision.matched_profile,
         routing_mode=decision.routing_mode,
         decisive_signal=decision.decisive_signal,
+        local_candidate=decision.local_candidate,
+        local_confidence=decision.local_confidence,
+        local_margin=decision.local_margin,
+        llm_called=decision.llm_called,
+        llm_confidence=decision.llm_confidence,
+        llm_provider=decision.llm_provider,
+        llm_model=decision.llm_model,
+        failure_type=decision.failure_type,
     )
+
+
+def _classify_with_fast_llm(
+    *,
+    user_prompt: str,
+    current_profile: str,
+    previous_user_task: str = "",
+    previous_assistant_text: str = "",
+) -> LlmRouteResult:
+    from .. import config
+    from ..agent.providers import ProviderAdapter, get_client
+
+    profile = config.resolve_model_profile("fast")
+    adapter = ProviderAdapter(profile.provider)
+    client = get_client().with_options(timeout=LLM_ROUTE_TIMEOUT_SECONDS, max_retries=0)
+    request = {
+        "current_profile": current_profile,
+        "previous_user_task": _truncate_route_context(previous_user_task, 800),
+        "previous_assistant_answer": _truncate_route_context(previous_assistant_text, 1200),
+        "user_request": str(user_prompt or ""),
+    }
+    try:
+        response = client.chat.completions.create(**adapter.chat_kwargs(
+            profile=profile,
+            messages=[
+                {"role": "system", "content": _LLM_ROUTE_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
+            ],
+            max_tokens=160,
+        ))
+        raw = response.choices[0].message.content or ""
+        parsed = _parse_llm_route_result(raw)
+        return LlmRouteResult(
+            profile_name=parsed.profile_name,
+            confidence=parsed.confidence,
+            reason=parsed.reason,
+            provider=profile.provider,
+            model=profile.model,
+            failure_type=parsed.failure_type,
+        )
+    except Exception as exc:  # noqa: BLE001 - provider failures must degrade to stay
+        log.info("Fast profile router request failed: %s", exc)
+        return LlmRouteResult(
+            provider=profile.provider,
+            model=profile.model,
+            failure_type=_failure_type_for_exception(exc),
+        )
+
+
+def _parse_llm_route_result(raw: str) -> LlmRouteResult:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        data: Any = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return LlmRouteResult(failure_type="invalid_json")
+    if not isinstance(data, dict):
+        return LlmRouteResult(failure_type="invalid_response")
+    profile_name = str(data.get("profile") or "").strip().lower()
+    if profile_name not in LOCAL_ROUTE_PROFILES:
+        return LlmRouteResult(failure_type="invalid_profile")
+    try:
+        confidence = float(data.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return LlmRouteResult(failure_type="invalid_confidence")
+    if not math.isfinite(confidence):
+        return LlmRouteResult(failure_type="invalid_confidence")
+    confidence = max(0.0, min(1.0, confidence))
+    reason = str(data.get("reason") or "").strip()[:300]
+    return LlmRouteResult(profile_name=profile_name, confidence=confidence, reason=reason)
+
+
+def _failure_type_for_exception(exc: Exception) -> str:
+    name = type(exc).__name__.lower()
+    return "timeout" if "timeout" in name else "request_error"
+
+
+def _truncate_route_context(value: str, limit: int) -> str:
+    text = str(value or "").strip()
+    return text if len(text) <= limit else text[-limit:]
 
 
 def _local_route_scores(user_prompt: str) -> dict[str, float]:
@@ -365,115 +482,89 @@ def _bm25_route_scores(query: Counter[str]) -> dict[str, float]:
 
 
 def _explicit_route_profile(user_prompt: str) -> str | None:
-    """Resolve explicit user contracts before fuzzy semantic similarity.
-
-    Mutation authority, read-only constraints, and workflow intent are separate
-    signals. A requested mutation wins over review wording; an explicit
-    plan-only or no-edit constraint wins over words such as implement or fix.
-    """
+    """Return only task contracts precise enough to bypass the model router."""
     value = " ".join(str(user_prompt or "").lower().split())
     if not value:
         return None
 
-    plan_only = _matches_any(
-        value,
-        (
-            r"不要(?:实现|执行)",
-            r"先(?:给我|做|写|出)?.{0,8}(?:方案|计划)",
-            r"(?:先|动手前|开始前).{0,12}(?:梳理|明确|制定|规划|拆解|输出|给出).{0,18}(?:方案|计划|步骤|阶段|路线|边界|依赖|验收|取舍|风险)",
-            r"(?:目标|任务).{0,10}(?:需要|应该|可以).{0,10}(?:经过|拆成|分成).{0,10}(?:阶段|步骤)",
-            r"(?:技术|实施|落地)路线(?:和|与)?(?:风险|依赖|验收)?",
-            r"等我确认(?:后|再)",
-            r"do not (?:implement|execute)",
-            r"(?:plan|design) only",
-            r"wait for (?:my )?(?:approval|confirmation)",
-        ),
-    )
-    read_only = _matches_any(
-        value,
-        (
-            r"只(?:审查|审阅|检查|评估|分析)",
-            r"不要(?:修改|改动|改代码|写文件|修复)",
-            r"不(?:修改|改动|改代码|写文件|修复)",
-            r"read[ -]?only",
-            r"(?:review|audit|inspect) only",
-            r"do not (?:modify|edit|change)",
-            r"don't (?:modify|edit|change)",
-        ),
-    )
+    no_implementation = _matches_any(value, (
+        r"不要(?:实现|执行|修改|改动|改代码|写文件|修复)",
+        r"不(?:实现|执行|修改|改动|改代码|写文件|修复)",
+        r"do not (?:implement|execute|modify|edit|change|fix)",
+        r"don't (?:implement|execute|modify|edit|change|fix)",
+        r"wait for (?:my )?(?:approval|confirmation)",
+        r"等我确认(?:后|再)",
+        r"只(?:告诉|给)我.{0,6}(?:结论|问题|风险|清单)",
+        r"findings only",
+    ))
+    plan_request = _matches_any(value, (
+        r"先(?:给我|做|写|出)?.{0,8}(?:方案|计划)",
+        r"只(?:给|要|输出).{0,6}(?:方案|计划|步骤)",
+        r"(?:规划|制定|输出|给出|设计).{0,12}(?:方案|计划|路线|步骤)",
+        r"(?:怎么|如何).{0,12}(?:实现|改造|迁移|设计|落地)",
+        r"(?:拆成|分成).{0,8}(?:阶段|步骤)|技术路线|实施路径|落地路径|架构方案",
+        r"\b(?:plan|proposal|roadmap|implementation approach|migration path)\b",
+    ))
+    review_request = _matches_any(value, (
+        r"(?:只|仅)?(?:审查|审阅|评审).{0,16}(?:代码|实现|提交|变更|补丁|分支|pr|diff)?",
+        r"检查.{0,10}(?:代码|提交|变更|补丁|分支|pr|diff).{0,12}(?:问题|风险|回归|安全)",
+        r"\b(?:review|audit|inspect)\b.{0,16}(?:代码|实现|提交|变更|补丁|分支)",
+        r"\b(?:review|audit|inspect)\b.{0,24}\b(?:code|implementation|pr|diff|patch|commit|branch)\b",
+        r"\b(?:find issues|what risks?)\b.{0,24}\b(?:code|change|pr|diff|patch|commit)\b",
+    ))
+    explanation = _matches_any(value, (
+        r"解释|是什么意思|说明一下|帮我理解|只告诉我原因|你是谁|你能做什么|为什么会|原理是什么",
+        r"(?:总结|概括|比较|对比).{0,16}(?:内容|区别|优缺点|方案|结果|信息)?",
+        r"^(?:你好|您好|嗨|hello|hi)\b",
+        r"\b(?:explain|what does|what is|why does|help me understand|who are you|what can you do|summarize|compare)\b",
+    ))
+    mixed_delivery = _matches_any(value, (
+        r"(?:并|然后|之后|解释后|审查后|评估后|发现问题).{0,12}(?:修复|修改|实现|优化|落地)",
+        r"\b(?:and|then)\s+(?:fix|implement|modify|update|refactor)\b",
+        r"^(?:implement|execute|apply).{0,16}\b(?:approved )?(?:plan|proposal)\b",
+    ))
     mutation = _matches_any(
         value,
         (
-            r"修复|修掉|修完|一并修|直接修|改代码|修改|优化|调整|迁移|加功能|补上|落地|写代码",
-            r"(?:并|然后|直接|帮我|请)实现|实现(?:一个|该|这个|功能|模块)",
-            r"(?:测试|报错|失败|回归).{0,16}(?:恢复|通过|修复|解决|处理|排除)",
-            r"(?:测试|报错|失败|回归|bug).{0,20}(?:原因|定位|下手|怎么查|如何处理)",
-            r"行为(?:和|与).{0,8}(?:不一致|不符)|需要动手(?:处理|修复|改)",
+            r"修复|修掉|修完|一并修|直接修|修(?:一下|一个|个)|改代码|修改|优化|调整|迁移|加功能|补上|落地|写代码",
+            r"(?:帮我|请|直接|开始|继续|需要)(?:实现|完成)|实现(?:一个|该|这个|功能|模块|方案)",
+            r"(?:帮我|请|直接|需要)(?:新增|增加|删除|移除|接入|完成|解决|处理|排查)",
+            r"让.{0,16}(?:测试|构建|编译).{0,6}通过",
             r"\b(?:fix|implement|modify|refactor|update|optimize|migrate)\b",
-            r"\b(?:write|change) (?:the )?code\b",
-            r"\b(?:apply|submit|prepare|write) (?:a )?patch\b|\bpatch (?:the|this|that) (?:code|file|bug)\b",
+            r"\b(?:please|can you|go ahead and)\s+(?:add|remove|delete|integrate|resolve)\b",
+            r"\b(?:write|change) (?:the )?code\b|\bapply (?:a )?patch\b",
         ),
     )
-    create = _matches_any(
-        value,
-        (
-            r"做一个|创建(?:一个|应用|项目|页面)|新增(?:一个|功能)",
-            r"(?:帮我|请|给我)?(?:写|做|实现|创建|开发|搭建)(?:一个|个)",
-            r"\b(?:build|create)\b",
-        ),
-    )
-    web_app = _matches_any(
-        value,
-        (
-            r"网页|网站|前端|页面|浏览器|响应式|组件|看板|小游戏|界面|可视化|工作台|侧边栏|筛选|数据展示",
-            r"(?:交互|操作|预览).{0,12}(?:界面|结果|浏览器)",
-            r"\b(?:browser|interface|dashboard|interact|preview|visual workspace|product surface)\b",
-            r"\b(?:web app|website|react|frontend|landing page|dashboard)\b",
-        ),
-    )
-    terminal_ui = _matches_any(
-        value,
-        (r"\btui\b", r"终端界面|命令行界面|terminal ui", r"command[- ]line|\bcli\b"),
-    )
-    review = _matches_any(
-        value,
-        (
-            r"审查|审阅|评审|代码有没有|安全问题|检查.{0,10}(?:问题|风险)",
-            r"风险评估|潜在回归|安全风险|边界情况|可维护性|正确性",
-            r"(?:提交|补丁|变更|代码).{0,20}(?:风险|问题|回归|安全|正确性|可维护性|破坏)",
-            r"(?:破坏|影响).{0,10}(?:现有行为|兼容性)",
-            r"\b(?:what risks?|edge cases?|break existing behavior|maintainability|correctness|patch)\b",
-            r"\b(?:review|audit|critique|inspect)\b",
-        ),
-    )
-    explain = _matches_any(value, (r"解释|是什么意思|说明一下|帮我理解", r"\b(?:explain|what does|help me understand)\b"))
-    plan = _matches_any(
-        value,
-        (
-            r"(?:先|需要|可以|应该|请|帮我|把|从).{0,12}(?:梳理|明确|制定|规划|拆解|设计|输出|给出).{0,16}(?:方案|计划|步骤|阶段|路线|边界|依赖|验收|取舍|风险)",
-            r"(?:需要|可以|应该).{0,12}(?:经过|拆成|分成).{0,12}(?:阶段|步骤)",
-            r"(?:方案|计划|步骤|阶段|路线|验收方式).{0,15}(?:如何|怎么|先|之前|取舍|依赖|风险|验证|落地)",
-            r"技术路线|实施路径|落地路径|阶段拆分",
-            r"\b(?:how|what).{0,20}(?:break|split).{0,12}(?:goal|task).{0,12}(?:stages|steps)\b",
-            r"\b(?:each|every) phase\b|\bbefore we start\b",
-            r"\b(?:plan|design|proposal|roadmap)\b",
-        ),
-    )
+    create = _matches_any(value, (
+        r"(?:写|做|创建|搭建|开发|生成)(?:一个|个)",
+        r"\b(?:build|create)(?:\s+(?:a|an))?\s+",
+    ))
+    web_product = _matches_any(value, (
+        r"网页|网站|响应式|看板|小游戏|可视化|工作台|数据大屏|交互界面|前端应用",
+        r"\b(?:web app|website|landing page|dashboard|browser app)\b",
+    ))
+    terminal_ui = _matches_any(value, (r"\btui\b", r"终端界面|命令行界面|terminal ui|\bcli\b"))
 
-    if plan_only:
+    if plan_request and no_implementation:
         return "plan"
-    if not read_only and (mutation or create):
-        if web_app and not terminal_ui:
-            return "app-builder"
-        return "coding-agent"
-    if explain:
-        return "general"
-    if review:
+    if review_request and no_implementation:
         return "review"
-    if plan:
+    if review_request and mutation:
+        return "coding-agent"
+    if explanation and no_implementation:
+        return "general"
+    if explanation and not mixed_delivery:
+        return "general"
+    if plan_request and not mixed_delivery:
         return "plan"
-    if web_app and not terminal_ui:
+    if review_request and not mixed_delivery:
+        return "review"
+    if mutation and not no_implementation:
+        return "coding-agent"
+    if create and web_product and not terminal_ui:
         return "app-builder"
+    if create and not web_product:
+        return "coding-agent"
     return None
 
 
@@ -498,29 +589,6 @@ def _explicit_mode_profile(user_prompt: str) -> str | None:
         if _matches_any(value, profile_patterns):
             return profile
     return None
-
-
-def _explicit_transition_allowed(
-    user_prompt: str,
-    *,
-    current_profile: str,
-    target_profile: str,
-) -> bool:
-    """Allow only explicit phase changes between specialised workflows."""
-    value = " ".join(str(user_prompt or "").lower().split())
-    if _explicit_mode_profile(value) == target_profile:
-        return True
-    if target_profile == "plan":
-        return _matches_any(value, (r"先.{0,12}(?:方案|计划|规划)", r"不要(?:实现|修改|执行)"))
-    if target_profile == "review":
-        return _matches_any(value, (r"只(?:审查|审阅|检查)", r"不要(?:修改|改动|写文件)", r"read[ -]?only"))
-    if target_profile == "app-builder":
-        return _matches_any(value, (r"网页|网站|前端|页面|浏览器|响应式|web app|frontend|react"))
-    if target_profile == "coding-agent":
-        if current_profile == "app-builder":
-            return _matches_any(value, (r"后端|命令行|cli|服务端|非(?:网页|前端|界面)"))
-        return _matches_any(value, (r"直接(?:修复|实现|修改)", r"开始(?:实现|执行)", r"修复|改代码|写代码|implement|fix"))
-    return False
 
 
 def _matches_any(value: str, patterns: tuple[str, ...]) -> bool:

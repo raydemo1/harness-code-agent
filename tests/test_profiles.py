@@ -15,6 +15,7 @@ from harness_code_agent.profiles import (
 )
 from harness_code_agent.profiles.router import (
     ROUTING_MODE_PINNED,
+    LlmRouteResult,
     route_profile_for_turn,
 )
 from harness_code_agent.profiles.terminal import TerminalProfile
@@ -80,8 +81,9 @@ class ProfilePromptTests(unittest.TestCase):
             with self.subTest(prompt=prompt):
                 decision = route_profile_for_turn(prompt, current_profile="general")
                 self.assertEqual(decision.profile_name, expected)
-                self.assertEqual(decision.reason, f"Explicit instruction contract matched {expected}.")
-                self.assertEqual(decision.confidence, 1.0)
+                self.assertEqual(decision.reason, f"High-precision local contract matched {expected}.")
+                self.assertEqual(decision.confidence, 0.98)
+                self.assertFalse(decision.llm_called)
 
     def test_profile_router_keeps_specialized_profile_sticky_for_general_followup(self):
         decision = route_profile_for_turn("help me understand this concept", current_profile="coding-agent")
@@ -102,14 +104,23 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertEqual(decision.source, "pinned")
         self.assertEqual(decision.decisive_signal, "pinned")
 
-    def test_semantic_routing_does_not_jump_between_specialized_profiles(self):
+    def test_model_routing_can_jump_between_specialized_profiles(self):
         decision = route_profile_for_turn(
-            "refactor parser",
+            "take care of the parser task",
             current_profile="plan",
+            llm_classifier=lambda **_: LlmRouteResult(
+                profile_name="coding-agent",
+                confidence=0.94,
+                reason="Implementation requested.",
+                provider="test",
+                model="fast-test",
+            ),
         )
 
-        self.assertEqual(decision.profile_name, "plan")
-        self.assertTrue(decision.fallback_used)
+        self.assertEqual(decision.profile_name, "coding-agent")
+        self.assertEqual(decision.action, "switch_profile")
+        self.assertEqual(decision.source, "llm")
+        self.assertTrue(decision.llm_called)
 
     def test_explicit_mode_can_transition_and_pins_at_session_layer(self):
         decision = route_profile_for_turn(
@@ -122,7 +133,15 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertEqual(decision.action, "switch_profile")
 
     def test_low_evidence_route_keeps_non_unit_confidence(self):
-        decision = route_profile_for_turn("嗯", current_profile="general")
+        decision = route_profile_for_turn(
+            "嗯",
+            current_profile="general",
+            llm_classifier=lambda **_: LlmRouteResult(
+                profile_name="general",
+                confidence=0.41,
+                reason="Ambiguous acknowledgement.",
+            ),
+        )
 
         self.assertLess(decision.confidence, 1.0)
         self.assertTrue(decision.fallback_used)

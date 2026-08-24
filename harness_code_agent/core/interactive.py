@@ -427,6 +427,8 @@ class InteractiveSession:
             user_prompt,
             current_profile=current,
             routing_mode=self.routing_mode,
+            previous_user_task=self.last_user_task,
+            previous_assistant_text=self.last_assistant_text,
         )
         switched = decision.action == ROUTE_ACTION_SWITCH_PROFILE and decision.profile_name != current
         self.event_bus.emit(
@@ -448,6 +450,14 @@ class InteractiveSession:
                 "switched": switched,
                 "routing_mode": self.routing_mode,
                 "decisive_signal": getattr(decision, "decisive_signal", ""),
+                "local_candidate": getattr(decision, "local_candidate", ""),
+                "local_confidence": getattr(decision, "local_confidence", 0.0),
+                "local_margin": getattr(decision, "local_margin", 0.0),
+                "llm_called": getattr(decision, "llm_called", False),
+                "llm_confidence": getattr(decision, "llm_confidence", 0.0),
+                "llm_provider": getattr(decision, "llm_provider", ""),
+                "llm_model": getattr(decision, "llm_model", ""),
+                "failure_type": getattr(decision, "failure_type", ""),
             },
         )
         if switched:
@@ -466,7 +476,6 @@ class InteractiveSession:
         profile_name: str,
         *,
         source: str,
-        route_decision: RouteDecision | None = None,
     ) -> None:
         if self.is_bound:
             return
@@ -531,25 +540,6 @@ class InteractiveSession:
                 "interactive": True,
             },
         )
-        if route_decision is not None:
-            self.event_bus.emit(
-                "profile_route_decision",
-                agent="main_agent",
-                payload={
-                    "profile": route_decision.profile_name,
-                    "matched_profile": route_decision.matched_profile,
-                    "action": route_decision.action,
-                    "turn_mode": route_decision.turn_mode,
-                    "confidence": route_decision.confidence,
-                    "reason": route_decision.reason,
-                    "fallback_used": route_decision.fallback_used,
-                    "fallback_reason": route_decision.fallback_reason,
-                    "elapsed_ms": round(float(getattr(route_decision, "elapsed_ms", 0.0)), 1),
-                    "margin": getattr(route_decision, "margin", 0.0),
-                    "source": getattr(route_decision, "source", "llm"),
-                    "switched": False,
-                },
-            )
         if self.resume_context:
             self._append_conversation_message({
                 "role": "user",

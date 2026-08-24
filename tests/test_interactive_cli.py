@@ -347,6 +347,55 @@ class InteractiveCliTests(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_model_route_receives_previous_turn_context_and_emits_observability(self):
+        from harness_code_agent.profiles.router import RouteDecision
+
+        conversation = FakeConversation()
+        with patch(
+            "harness_code_agent.agent.conversation.Agent.start_conversation",
+            return_value=conversation,
+        ):
+            session = InteractiveSession(cwd=self.temp_dir)
+            try:
+                session.last_user_task = "previous request"
+                session.last_assistant_text = "previous answer"
+                model_decision = RouteDecision(
+                    profile_name="review",
+                    confidence=0.93,
+                    reason="Read-only assessment requested.",
+                    source="llm",
+                    action="switch_profile",
+                    matched_profile="review",
+                    decisive_signal="llm",
+                    local_candidate="general",
+                    local_confidence=0.42,
+                    local_margin=0.03,
+                    llm_called=True,
+                    llm_confidence=0.93,
+                    llm_provider="test-provider",
+                    llm_model="test-fast",
+                )
+                with patch(
+                    "harness_code_agent.core.interactive.route_profile_for_turn",
+                    return_value=model_decision,
+                ) as route:
+                    session.submit("ambiguous follow-up")
+
+                self.assertEqual(route.call_args.kwargs["previous_user_task"], "previous request")
+                self.assertEqual(route.call_args.kwargs["previous_assistant_text"], "previous answer")
+                self.assertEqual(session.profile.name(), "review")
+                event = [
+                    item for item in session.event_bus.events
+                    if item.type == "profile_route_decision"
+                ][-1]
+                self.assertEqual(event.payload["local_candidate"], "general")
+                self.assertEqual(event.payload["llm_provider"], "test-provider")
+                self.assertEqual(event.payload["llm_model"], "test-fast")
+                self.assertTrue(event.payload["llm_called"])
+                self.assertEqual(event.payload["failure_type"], "")
+            finally:
+                session.close()
+
     def test_specialized_profile_direct_answer_stays_in_current_slot(self):
         conversation = FakeConversation()
         with patch(

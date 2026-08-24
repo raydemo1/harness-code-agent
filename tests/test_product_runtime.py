@@ -592,14 +592,22 @@ class ProductRuntimeTests(unittest.TestCase):
                 self.assertEqual(decision.source, "local")
                 self.assertFalse(decision.fallback_used)
 
-    def test_local_turn_router_does_not_hop_between_specialized_profiles(self):
+    def test_high_precision_local_route_hops_between_specialized_profiles(self):
         from harness_code_agent.profiles import router
 
-        decision = router.route_profile_for_turn("帮我 review 这段代码", current_profile="coding-agent")
+        decision = router.route_profile_for_turn(
+            "帮我 review 这段代码",
+            current_profile="coding-agent",
+            llm_classifier=lambda **_: (_ for _ in ()).throw(
+                AssertionError("high precision review route should stay local")
+            ),
+        )
 
-        self.assertEqual(decision.profile_name, "coding-agent")
-        self.assertTrue(decision.fallback_used)
-        self.assertIn("sticky", decision.fallback_reason)
+        self.assertEqual(decision.profile_name, "review")
+        self.assertEqual(decision.action, "switch_profile")
+        self.assertFalse(decision.fallback_used)
+        self.assertEqual(decision.source, "local")
+        self.assertFalse(decision.llm_called)
 
     def test_read_only_command_whitelist_includes_common_verification_commands(self):
         from harness_code_agent.runtime.permissions import is_read_only_command
