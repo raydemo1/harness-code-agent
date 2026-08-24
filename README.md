@@ -208,7 +208,7 @@ veriforge --no-alt-screen
 /observe      打开运行观察
 ```
 
-输入 `/` 会打开可滚动命令面板，最多显示 8 行；上下键、PageUp/PageDown、Home/End 都会保持当前选项可见。右上角的历史和新会话图标是可点击的真实入口，也分别支持 `Ctrl+R` 和 `Ctrl+N`；profile 选择使用 `/profile` 面板完成。
+输入 `/` 会打开可滚动命令面板，最多显示 8 行；上下键、PageUp/PageDown、Home/End 都会保持当前选项可见。右上角的历史和新会话图标是可点击的真实入口，也分别支持 `Ctrl+R` 和 `Ctrl+N`；profile 选择使用 `/profile` 面板完成，再切回自动模式时由本地匹配优先、fast model 兜底的路由器判断。
 
 主题默认跟随终端，可显式指定；Nerd Font 图标需要主动启用，默认使用不会缺字的 Unicode 图标：
 
