@@ -14,7 +14,7 @@ from ..sessions.events import (
     classify_tool_failure,
 )
 from .tool_context import ToolContext
-from .tool_registry import ToolExecutionLane, ToolRegistry
+from .tool_registry import ToolRegistry
 from .tool_result import ToolResult, unstructured_tool_result_from_text
 
 
@@ -121,7 +121,6 @@ def execute_tool_result(
     agent_name: str | None = None,
     tool_context: ToolContext | None = None,
     emit_events: bool = True,
-    execution_lane: ToolExecutionLane | str | None = None,
     cancellation_token=None,
 ) -> ToolResult:
     """Execute a tool by name with pre-validation and auto-correction."""
@@ -129,12 +128,11 @@ def execute_tool_result(
     registry = _registry_for_context(tool_context)
 
     if emit_events and tool_context is not None:
-        tool_context.event_bus.emit_event(
-            ToolCallEvent(
-                tool=name,
-                args=_redact_tool_args(arguments),
-                agent=agent_name,
-            ).to_event()
+        emit_tool_call_started(
+            name=name,
+            arguments=arguments,
+            tool_context=tool_context,
+            agent_name=agent_name,
         )
 
     fn = registry.get(name)
@@ -190,7 +188,6 @@ def execute_tool_result(
             runtime_state=runtime_state,
             agent_name=agent_name,
             tool_context=tool_context,
-            execution_lane=execution_lane,
             cancellation_token=cancellation_token,
         )
     except Exception as e:
@@ -223,15 +220,15 @@ def finalize_executed_tool_result(
     arguments: dict | None = None,
     tool_context: ToolContext | None,
     agent_name: str | None,
+    emit_call: bool = True,
 ) -> ToolResult:
     """Record a tool call and its already-computed result on the main thread."""
-    if tool_context is not None:
-        tool_context.event_bus.emit_event(
-            ToolCallEvent(
-                tool=tool_result.tool,
-                args=_redact_tool_args(arguments or {}),
-                agent=agent_name,
-            ).to_event()
+    if emit_call:
+        emit_tool_call_started(
+            name=tool_result.tool,
+            arguments=arguments or {},
+            tool_context=tool_context,
+            agent_name=agent_name,
         )
     return _finalize_tool_result_object(
         tool_result,
@@ -263,6 +260,24 @@ def finalize_intercepted_tool_result(
     )
 
 
+def emit_tool_call_started(
+    *,
+    name: str,
+    arguments: dict,
+    tool_context: ToolContext | None,
+    agent_name: str | None,
+) -> None:
+    if tool_context is None:
+        return
+    tool_context.event_bus.emit_event(
+        ToolCallEvent(
+            tool=name,
+            args=_redact_tool_args(arguments),
+            agent=agent_name,
+        ).to_event()
+    )
+
+
 def _registry_for_context(tool_context: ToolContext | None) -> ToolRegistry:
     if tool_context is not None and tool_context.tool_registry is not None:
         return tool_context.tool_registry
@@ -278,7 +293,6 @@ def _invoke_registered_tool(
     runtime_state,
     agent_name: str | None,
     tool_context: ToolContext | None,
-    execution_lane: ToolExecutionLane | str | None = None,
     cancellation_token=None,
 ):
     kwargs = dict(arguments)
@@ -291,15 +305,10 @@ def _invoke_registered_tool(
         "runtime_state": runtime_state,
         "agent_name": agent_name,
         "tool_context": tool_context,
-        "execution_lane": execution_lane,
     }
     if cancellation_token is not None:
         extras["cancellation_token"] = cancellation_token
     for key, value in extras.items():
-        if key == "execution_lane":
-            if key not in kwargs and key in parameters:
-                kwargs[key] = value
-            continue
         if key not in kwargs and (key in parameters or accepts_kwargs):
             kwargs[key] = value
     return fn(**kwargs)
@@ -328,7 +337,7 @@ def _event_safe_tool_output(tool_result: ToolResult) -> tuple[str, dict]:
     metadata = dict(tool_result.metadata)
     output = tool_result.output or ""
     metadata["output_length"] = len(output)
-    if tool_result.tool in {"read_file", "delegate_agent", "parallel_commands", "parallel_agents"} and output:
+    if tool_result.tool in {"read_file", "read_agent_changes", "read_agent_conflicts"} and output:
         metadata["output_redacted"] = True
         return f"[redacted {tool_result.tool} output: {len(output)} chars]", metadata
     if len(output) > TOOL_EVENT_OUTPUT_LIMIT:
@@ -395,12 +404,18 @@ def _emit_file_change_events(
         }
         if change.get("operation"):
             payload["operation"] = change["operation"]
+        if change.get("additions") is not None:
+            payload["additions"] = change["additions"]
+        if change.get("deletions") is not None:
+            payload["deletions"] = change["deletions"]
         tool_context.event_bus.emit_event(
             FileChangeEvent(
                 path=str(path),
                 operation=change.get("operation"),
                 snapshot_path=change.get("snapshot_path"),
                 diff=change.get("diff"),
+                additions=change.get("additions"),
+                deletions=change.get("deletions"),
                 agent=agent_name,
             ).to_event()
         )

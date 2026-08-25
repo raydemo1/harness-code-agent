@@ -1,7 +1,6 @@
 """Shell execution and background shell job tools."""
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
@@ -9,7 +8,7 @@ import subprocess
 
 from ... import config
 from ...workspace.shell_jobs import ShellJobNotFound
-from ..tool_registry import ToolExecutionLane, _coerce_tool_lane
+from ..shell_classification import analyze_shell_command
 from ..tool_result import ToolResult
 
 
@@ -20,13 +19,10 @@ def run_bash(
     runtime_state=None,
     agent_name: str | None = None,
     tool_context=None,
-    execution_lane: ToolExecutionLane | str | None = None,
 ) -> ToolResult:
-    """Run a shell command inside the agent's persistent shell session."""
+    """Run one self-contained shell command from the workspace root."""
     expected_codes = _normalize_expected_exit_codes(expected_exit_codes)
-    # Lane classification is the executor's job; a missing lane means serial.
-    lane = _coerce_tool_lane(execution_lane) if execution_lane is not None else ToolExecutionLane.SHELL_SERIAL
-    if lane == ToolExecutionLane.SHELL_LONG_RUNNING:
+    if analyze_shell_command(command).long_running:
         manager = _shell_job_manager(runtime_state)
         if manager is None:
             return ToolResult(
@@ -75,24 +71,11 @@ def run_bash(
             metadata=metadata,
         )
 
-    use_temporary_shell = lane in {ToolExecutionLane.SHELL_READ, ToolExecutionLane.SHELL_VERIFY}
-    shell_session = None
-    owns_shell = False
-    if use_temporary_shell:
-        from ...workspace.shell_session import PersistentShellSession
+    from ...workspace.shell_session import PersistentShellSession
 
-        shell_session = PersistentShellSession(_workspace_root(tool_context))
-        owns_shell = True
-    elif runtime_state is not None:
-        shell_session = runtime_state.shell_session
-    if shell_session is None:
-        return ToolResult(
-            tool="run_bash",
-            status="failed",
-            output="[error] No active shell session for run_bash",
-            error="No active shell session for run_bash",
-            metadata={"status_source": "runtime"},
-        )
+    shell_session = PersistentShellSession(_workspace_root(tool_context))
+    if runtime_state is not None and hasattr(runtime_state, "register_shell_session"):
+        runtime_state.register_shell_session(shell_session)
     try:
         if _requires_one_shot_powershell(command):
             shell_result = _run_one_shot_powershell(command, timeout, tool_context)
@@ -130,11 +113,6 @@ def run_bash(
         )
     except Exception as e:
         metadata = {"status_source": "exception"}
-        if _looks_like_dead_shell_error(e):
-            metadata["shell_session_reset"] = _reset_runtime_shell_session(
-                runtime_state,
-                shell_session,
-            )
         return ToolResult(
             tool="run_bash",
             status="failed",
@@ -143,12 +121,13 @@ def run_bash(
             metadata=metadata,
         )
     finally:
-        if owns_shell and shell_session is not None:
-            shell_session.close()
+        if runtime_state is not None and hasattr(runtime_state, "unregister_shell_session"):
+            runtime_state.unregister_shell_session(shell_session)
+        shell_session.close()
 
 
 def _requires_one_shot_powershell(command: str) -> bool:
-    """Keep PowerShell's ``exit`` from terminating the persistent shell host."""
+    """Run PowerShell ``exit`` through an explicit one-shot process."""
     if os.name != "nt" or not re.search(r"(?i)(?:^|[;|&]\s*)exit(?:\s|$)", command):
         return False
     from ...workspace.shell_session import sandbox_mode, windows_shell_kind
@@ -328,19 +307,3 @@ def _build_shell_output(stdout: str, stderr: str) -> str:
             return stdout + "\n\n--- STDERR ---\n" + stderr
         return "--- STDERR ---\n" + stderr
     return stdout
-
-
-def _looks_like_dead_shell_error(exc: Exception) -> bool:
-    text = str(exc).lower()
-    return "shell failed to become ready" in text
-
-
-def _reset_runtime_shell_session(runtime_state, shell_session) -> bool:
-    if runtime_state is None or shell_session is None:
-        return False
-    if getattr(runtime_state, "shell_session", None) is not shell_session:
-        return False
-    with contextlib.suppress(Exception):
-        shell_session.close()
-    runtime_state.shell_session = None
-    return True

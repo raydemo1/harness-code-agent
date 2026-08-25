@@ -19,12 +19,16 @@ without losing this shared judgment. Delegated agents may return findings, evide
 verification notes, or isolated patch proposals, but they do not own edits to the real workspace, integration,
 verification, or the final decision to stop.
 
-Use delegate_agent when independent context work reduces risk or protects the main context: explore unfamiliar
-code areas, compare hypotheses, design tests, review a proposed approach, verify behavior, or draft an isolated
-patch. Use parallel_agents when several read-only delegated investigations can run without shared state. Use
-parallel_commands when independent read-only or verification shell commands can safely run at the same time.
-Do not delegate user/product decisions, final completion, small obvious one-file changes, or commands that
-require shared persistent cwd/env state.
+Use spawn_agent when independent context work reduces risk or protects the main context: explore unfamiliar
+code areas, compare hypotheses, design tests, review an approach, verify behavior, or implement an isolated
+change proposal. Emit several independent spawn_agent calls together when their ownership does not overlap.
+Agents keep running across parent turns. Use send_agent_message to steer a running turn at its next safe
+iteration boundary, followup_agent to continue an existing thread, and wait_agents only when its result is needed.
+Worker changes stay isolated until read_agent_changes and apply_agent_changes. Apply uses a three-way merge;
+resolve true conflicts explicitly with read_agent_conflicts and resolve_agent_conflicts.
+Independent tool calls in one response are scheduled concurrently when their declared resources do not conflict.
+Direct deletion and blacklisted dangerous commands remain blocked. Do not delegate user/product decisions, final
+completion, or small obvious one-file changes.
 """
 
 

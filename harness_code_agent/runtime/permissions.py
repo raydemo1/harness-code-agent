@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import ClassVar
 
-from .shell_classification import analyze_shell_command, classify_safe_shell_command
+from .shell_classification import (
+    analyze_shell_command,
+    is_workspace_write_shell_command,
+)
 
 TOOL_PERMISSION_READ = "read"
 TOOL_PERMISSION_NETWORK_READ = "network_read"
@@ -24,14 +28,22 @@ DEFAULT_TOOL_PERMISSIONS = {
     "read_skill_file": TOOL_PERMISSION_READ,
     "repo_search": TOOL_PERMISSION_READ,
     "tool_search": TOOL_PERMISSION_READ,
-    "parallel_agents": TOOL_PERMISSION_READ,
-    "parallel_commands": TOOL_PERMISSION_READ,
+    "spawn_agent": TOOL_PERMISSION_READ,
+    "send_agent_message": TOOL_PERMISSION_READ,
+    "followup_agent": TOOL_PERMISSION_READ,
+    "wait_agents": TOOL_PERMISSION_READ,
+    "list_agents": TOOL_PERMISSION_READ,
+    "interrupt_agent": TOOL_PERMISSION_CONTROL,
+    "read_agent_changes": TOOL_PERMISSION_READ,
+    "apply_agent_changes": TOOL_PERMISSION_EDIT,
+    "read_agent_conflicts": TOOL_PERMISSION_READ,
+    "resolve_agent_conflicts": TOOL_PERMISSION_EDIT,
+    "close_agent": TOOL_PERMISSION_CONTROL,
     "list_files": TOOL_PERMISSION_READ,
     "ask_user": TOOL_PERMISSION_READ,
     "memory_search": TOOL_PERMISSION_READ,
     "remember_memory": TOOL_PERMISSION_EDIT,
     "read_memory_file": TOOL_PERMISSION_READ,
-    "delegate_agent": TOOL_PERMISSION_READ,
     "web_search": TOOL_PERMISSION_NETWORK_READ,
     "web_fetch": TOOL_PERMISSION_NETWORK_READ,
     "write_file": TOOL_PERMISSION_EDIT,
@@ -79,16 +91,29 @@ class PermissionPolicy:
         tool_permission: str | None = None,
     ) -> PermissionDecision:
         args = args or {}
-        risk = self.classify_tool_call(tool_name, args, tool_permission=tool_permission)
+        permission = tool_permission or DEFAULT_TOOL_PERMISSIONS.get(tool_name)
+        risk = self.classify_tool_call(tool_name, args, tool_permission=permission)
         if risk == "shell_blocked":
             return PermissionDecision("deny", risk, "blacklisted shell command is never allowed")
+        if risk == "shell_write_blocked":
+            return PermissionDecision(
+                "deny",
+                risk,
+                "shell file deletion or overwrite is not allowed; use a controlled file edit after confirming a backup",
+            )
+        if permission == TOOL_PERMISSION_SHELL and risk == "shell_risky" and self.mode != self.DANGER_FULL_ACCESS:
+            return PermissionDecision(
+                "ask",
+                risk,
+                f"{self.mode} mode requires approval because this shell command may change files or external state",
+            )
         if self.mode == self.DANGER_FULL_ACCESS:
             return PermissionDecision("allow", risk, "danger-full-access mode allows this tool call")
         if risk in {"shell_risky", "unknown", "dangerous"}:
             return PermissionDecision(
                 "ask",
                 risk,
-                f"{self.mode} mode requires approval for non-whitelisted commands and tools",
+                f"{self.mode} mode requires approval for commands or tools with side effects",
             )
         return PermissionDecision("allow", risk, f"{self.mode} mode allows {risk}")
 
@@ -108,12 +133,25 @@ class PermissionPolicy:
         if permission == TOOL_PERMISSION_CONTROL:
             return "control"
         if permission == TOOL_PERMISSION_SHELL:
-            return analyze_shell_command(str(args.get("command", ""))).risk
+            command = str(args.get("command", ""))
+            analysis = analyze_shell_command(command)
+            risk = "shell_risky" if analysis.kind == "unknown" else analysis.risk
+            if risk == "shell_safe" and _shell_command_requires_approval(command):
+                return "shell_risky"
+            return risk
         if permission == TOOL_PERMISSION_DANGEROUS:
             return "dangerous"
         return "unknown"
 
 
-def is_read_only_command(command: str) -> bool:
-    """Check whether a shell command is safe to run in read-only contexts."""
-    return classify_safe_shell_command(command) in {"read", "verify"}
+def is_workspace_write_command(command: str) -> bool:
+    """Check only the workspace-write boundary, without a read command allowlist."""
+    return is_workspace_write_shell_command(command)
+
+
+def _shell_command_requires_approval(command: str) -> bool:
+    """Keep sensitive-but-read-only shell commands behind the approval boundary."""
+    normalized = " ".join(str(command or "").strip().lower().split())
+    return bool(
+        re.match(r"^(?:env|printenv)(?:\s|$)", normalized)
+    )

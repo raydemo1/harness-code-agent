@@ -1,7 +1,7 @@
 """Composition root for built-in tool registration."""
 from __future__ import annotations
 
-from ...agent.delegation import delegate_agent
+from ..execution_planner import CallEffect, ResourceClaim, workspace_claim
 from ..permissions import (
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_EDIT,
@@ -9,7 +9,21 @@ from ..permissions import (
     TOOL_PERMISSION_READ,
     TOOL_PERMISSION_SHELL,
 )
-from ..tool_registry import ToolExecutionLane, ToolRegistry
+from ..shell_classification import analyze_shell_command
+from ..tool_registry import ToolRegistry
+from .agents import (
+    apply_agent_changes,
+    close_agent,
+    followup_agent,
+    interrupt_agent,
+    list_agents,
+    read_agent_changes,
+    read_agent_conflicts,
+    resolve_agent_conflicts,
+    send_agent_message,
+    spawn_agent,
+    wait_agents,
+)
 from .browser import browser_test, stop_dev_server
 from .discovery import tool_search
 from .filesystem import (
@@ -22,7 +36,6 @@ from .filesystem import (
 )
 from .interaction import ask_user
 from .memory_tools import memory_search, read_memory_file, remember_memory
-from .parallel import parallel_agents, parallel_commands
 from .planning import update_plan_state
 from .schemas import BROWSER_TOOL_SCHEMAS, CORE_TOOL_SCHEMAS
 from .shell import list_shell_jobs, read_shell_output, run_bash, stop_shell_job
@@ -36,8 +49,17 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "read_skill_file": read_skill_file,
         "repo_search": repo_search,
         "tool_search": tool_search,
-        "parallel_agents": parallel_agents,
-        "parallel_commands": parallel_commands,
+        "spawn_agent": spawn_agent,
+        "send_agent_message": send_agent_message,
+        "followup_agent": followup_agent,
+        "wait_agents": wait_agents,
+        "list_agents": list_agents,
+        "interrupt_agent": interrupt_agent,
+        "read_agent_changes": read_agent_changes,
+        "apply_agent_changes": apply_agent_changes,
+        "read_agent_conflicts": read_agent_conflicts,
+        "resolve_agent_conflicts": resolve_agent_conflicts,
+        "close_agent": close_agent,
         "write_file": write_file,
         "apply_patch": apply_patch,
         "update_plan_state": update_plan_state,
@@ -50,7 +72,6 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "list_shell_jobs": list_shell_jobs,
         "read_shell_output": read_shell_output,
         "stop_shell_job": stop_shell_job,
-        "delegate_agent": delegate_agent,
         "web_search": web_search,
         "web_fetch": web_fetch,
         "browser_test": browser_test,
@@ -61,14 +82,22 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "read_skill_file": TOOL_PERMISSION_READ,
         "repo_search": TOOL_PERMISSION_READ,
         "tool_search": TOOL_PERMISSION_READ,
-        "parallel_agents": TOOL_PERMISSION_READ,
-        "parallel_commands": TOOL_PERMISSION_READ,
+        "spawn_agent": TOOL_PERMISSION_READ,
+        "send_agent_message": TOOL_PERMISSION_READ,
+        "followup_agent": TOOL_PERMISSION_READ,
+        "wait_agents": TOOL_PERMISSION_READ,
+        "list_agents": TOOL_PERMISSION_READ,
+        "interrupt_agent": TOOL_PERMISSION_CONTROL,
+        "read_agent_changes": TOOL_PERMISSION_READ,
+        "apply_agent_changes": TOOL_PERMISSION_EDIT,
+        "read_agent_conflicts": TOOL_PERMISSION_READ,
+        "resolve_agent_conflicts": TOOL_PERMISSION_EDIT,
+        "close_agent": TOOL_PERMISSION_CONTROL,
         "list_files": TOOL_PERMISSION_READ,
         "ask_user": TOOL_PERMISSION_READ,
         "memory_search": TOOL_PERMISSION_READ,
         "remember_memory": TOOL_PERMISSION_EDIT,
         "read_memory_file": TOOL_PERMISSION_READ,
-        "delegate_agent": TOOL_PERMISSION_READ,
         "web_search": TOOL_PERMISSION_NETWORK_READ,
         "web_fetch": TOOL_PERMISSION_NETWORK_READ,
         "write_file": TOOL_PERMISSION_EDIT,
@@ -81,36 +110,94 @@ def _build_builtin_tool_registry() -> ToolRegistry:
         "browser_test": TOOL_PERMISSION_SHELL,
         "stop_dev_server": TOOL_PERMISSION_SHELL,
     }
-    lanes = {
-        "read_file": ToolExecutionLane.WORKSPACE_READ,
-        "read_skill_file": ToolExecutionLane.WORKSPACE_READ,
-        "repo_search": ToolExecutionLane.WORKSPACE_READ,
-        "tool_search": ToolExecutionLane.CONTROL_SERIAL,
-        "parallel_agents": ToolExecutionLane.SUBAGENT_READ,
-        "parallel_commands": ToolExecutionLane.WORKSPACE_READ,
-        "list_files": ToolExecutionLane.WORKSPACE_READ,
-        "ask_user": ToolExecutionLane.CONTROL_SERIAL,
-        "memory_search": ToolExecutionLane.WORKSPACE_READ,
-        "remember_memory": ToolExecutionLane.WORKSPACE_WRITE,
-        "read_memory_file": ToolExecutionLane.WORKSPACE_READ,
-        "delegate_agent": ToolExecutionLane.SUBAGENT_READ,
-        "web_search": ToolExecutionLane.NETWORK_READ,
-        "web_fetch": ToolExecutionLane.NETWORK_READ,
-        "write_file": ToolExecutionLane.WORKSPACE_WRITE,
-        "apply_patch": ToolExecutionLane.WORKSPACE_WRITE,
-        "update_plan_state": ToolExecutionLane.CONTROL_SERIAL,
-        "run_bash": ToolExecutionLane.SHELL_SERIAL,
-        "list_shell_jobs": ToolExecutionLane.CONTROL_SERIAL,
-        "read_shell_output": ToolExecutionLane.CONTROL_SERIAL,
-        "stop_shell_job": ToolExecutionLane.CONTROL_SERIAL,
-        "browser_test": ToolExecutionLane.SHELL_SERIAL,
-        "stop_dev_server": ToolExecutionLane.SHELL_SERIAL,
+    effects = {
+        "read_file": _path_effect("path", access="read"),
+        "write_file": _path_effect("path", access="write"),
+        "apply_patch": _path_effect("path", access="write"),
+        "repo_search": _path_effect("path", access="read", scope="subtree", default="."),
+        "list_files": _path_effect("directory", access="read", scope="subtree", default="."),
+        "spawn_agent": CallEffect(kind="agent_spawn"),
+        "send_agent_message": _agent_effect("agent_id", access="write"),
+        "followup_agent": _agent_effect("agent_id", access="write"),
+        "wait_agents": CallEffect((ResourceClaim("agent-session", "*", "global", "read"),), kind="agent_wait"),
+        "list_agents": CallEffect((ResourceClaim("agent-session", "*", "global", "read"),), kind="agent_list"),
+        "interrupt_agent": _agent_effect("agent_id", access="write"),
+        "read_agent_changes": _agent_effect("proposal_id", access="read", domain="agent-proposal"),
+        "apply_agent_changes": _proposal_effect,
+        "read_agent_conflicts": _agent_effect("conflict_id", access="read", domain="agent-conflict"),
+        "resolve_agent_conflicts": _conflict_effect,
+        "close_agent": _agent_effect("agent_id", access="write"),
+        "web_search": CallEffect((ResourceClaim("network", "*", "global", "read"),), concurrency_key="network"),
+        "web_fetch": CallEffect((ResourceClaim("network", "*", "global", "read"),), concurrency_key="network"),
+        "run_bash": _shell_effect,
+        "ask_user": CallEffect.global_exclusive(kind="interaction"),
+        "update_plan_state": CallEffect.global_exclusive(kind="control"),
+        "tool_search": CallEffect.global_exclusive(kind="control"),
+        "list_shell_jobs": CallEffect.global_exclusive(kind="control"),
+        "read_shell_output": CallEffect.global_exclusive(kind="control"),
+        "stop_shell_job": CallEffect.global_exclusive(kind="control"),
     }
     for schema in CORE_TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS:
         name = schema["function"]["name"]
         if name in handlers:
-            registry.register(schema, handlers[name], permission=permissions.get(name), lane=lanes.get(name))
+            registry.register(schema, handlers[name], permission=permissions.get(name), effect=effects.get(name))
     return registry
+
+
+def _root(context) -> str:
+    return str(context.workspace.root) if context is not None else "."
+
+
+def _path_effect(argument: str, *, access: str, scope: str = "exact", default: str = ""):
+    def resolve(args, context):
+        return CallEffect((workspace_claim(_root(context), args.get(argument) or default, scope=scope, access=access),))
+    return resolve
+
+
+def _workspace_global(access: str):
+    def resolve(_args, context):
+        return CallEffect((workspace_claim(_root(context), ".", scope="global", access=access),))
+    return resolve
+
+
+def _agent_effect(argument: str, *, access: str, domain: str = "agent"):
+    def resolve(args, _context):
+        return CallEffect((ResourceClaim(domain, str(args.get(argument) or "*"), "exact", access),))
+    return resolve
+
+
+def _proposal_effect(args, context):
+    coordinator = getattr(context, "agent_coordinator", None) if context is not None else None
+    if coordinator is None:
+        return CallEffect.global_exclusive(kind="agent_proposal")
+    try:
+        paths = coordinator.proposal_paths(str(args.get("proposal_id") or ""))
+    except (KeyError, ValueError):
+        return CallEffect.global_exclusive(kind="agent_proposal")
+    return CallEffect(tuple(workspace_claim(_root(context), path, scope="exact", access="write") for path in paths), kind="agent_proposal")
+
+
+def _conflict_effect(args, context):
+    coordinator = getattr(context, "agent_coordinator", None) if context is not None else None
+    if coordinator is None:
+        return CallEffect.global_exclusive(kind="agent_conflict")
+    try:
+        paths = coordinator.conflict_paths(str(args.get("conflict_id") or ""))
+    except (KeyError, ValueError):
+        return CallEffect.global_exclusive(kind="agent_conflict")
+    return CallEffect(tuple(workspace_claim(_root(context), path, scope="exact", access="write") for path in paths), kind="agent_conflict")
+
+
+def _shell_effect(args, context):
+    analysis = analyze_shell_command(str(args.get("command") or ""))
+    workspace = workspace_claim(_root(context), ".", scope="global", access="read")
+    if analysis.kind == "inspect":
+        return CallEffect((workspace,), kind="inspect")
+    if analysis.kind == "verify":
+        return CallEffect((workspace, ResourceClaim("workspace:derived", "*", "global", "write")), kind="verify")
+    if analysis.kind == "long_running":
+        return CallEffect.global_exclusive(kind="long_running")
+    return CallEffect.global_exclusive(kind=analysis.kind)
 
 
 BUILTIN_TOOL_REGISTRY = _build_builtin_tool_registry()

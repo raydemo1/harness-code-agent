@@ -13,7 +13,18 @@ from pathlib import Path
 
 from .. import config
 from ..agent.conversation import AgentConversation
+from ..agent.coordinator import AgentCoordinator
 from ..agent.prompts import GlobalRulesDoc, PromptPrefixBuilder
+from ..attachments import (
+    Attachment,
+    AttachmentError,
+    AttachmentManager,
+    ExternalPathConfirmationRequired,
+    PreparedTurn,
+    TurnSubmission,
+    build_model_content,
+    model_input_mode,
+)
 from ..profiles import get_profile
 from ..profiles.base import BaseProfile
 from ..profiles.router import (
@@ -26,6 +37,7 @@ from ..profiles.router import (
 )
 from ..runtime.approvals import (
     ApprovalProvider,
+    ApprovalRequest,
     ConsoleApprovalProvider,
     LlmAutoApprovalProvider,
 )
@@ -152,6 +164,7 @@ class InteractiveSession:
         self._profile_source = "explicit" if self.profile_explicit else "default"
         self.profile = get_profile(self._pending_profile_name)
         self.session: Session | None = None
+        self.attachment_manager: AttachmentManager | None = None
         self.event_bus = None
         self.tool_context: ToolContext | None = None
         self.tool_registry = None
@@ -389,7 +402,71 @@ class InteractiveSession:
     def format_task(self, user_prompt: str) -> str:
         return f"Task:\n{user_prompt}"
 
-    def submit(self, user_prompt: str, cancellation_token=None) -> TurnResult:
+    def prepare_submission(self, submission: TurnSubmission | str) -> PreparedTurn:
+        if isinstance(submission, str):
+            submission = TurnSubmission(submission)
+        if self.attachment_manager is None:
+            self.ensure_profile_bound_for_first_task(submission.text)
+        if self.attachment_manager is None:
+            raise RuntimeError("附件模块尚未准备好，请稍候")
+        return self.attachment_manager.prepare(submission)
+
+    def stage_attachment_path(self, path: str | Path, *, source: str = "picker") -> Attachment:
+        if self.attachment_manager is None:
+            self.ensure_profile_bound_for_first_task("")
+        if self.attachment_manager is None:
+            raise RuntimeError("附件模块尚未准备好，请稍候")
+        return self.attachment_manager.stage_path(
+            path,
+            source=source,  # type: ignore[arg-type]
+            copy_to_session=None,
+        )
+
+    def stage_attachment_bytes(
+        self,
+        data: bytes,
+        *,
+        name: str,
+        mime_type: str,
+        source: str = "clipboard",
+    ) -> Attachment:
+        if self.attachment_manager is None:
+            self.ensure_profile_bound_for_first_task("")
+        if self.attachment_manager is None:
+            raise RuntimeError("附件模块尚未准备好，请稍候")
+        return self.attachment_manager.stage_bytes(
+            data,
+            name=name,
+            mime_type=mime_type,
+            source=source,  # type: ignore[arg-type]
+        )
+
+    def remove_attachment(self, attachment_id: str) -> bool:
+        return bool(self.attachment_manager and self.attachment_manager.remove(attachment_id))
+
+    def submit(self, user_prompt: str | TurnSubmission, cancellation_token=None) -> TurnResult:
+        submission = user_prompt if isinstance(user_prompt, TurnSubmission) else TurnSubmission(user_prompt)
+        try:
+            prepared = self.prepare_submission(submission)
+        except ExternalPathConfirmationRequired as exc:
+            approval = self.approval_provider.request(ApprovalRequest(
+                tool_name="read_external_attachment",
+                args={"paths": exc.paths},
+                risk="读取工作区外文件并复制到当前会话附件缓存",
+                reason="用户提示词中引用了工作区外的文件",
+                agent_name="main_agent",
+                session_id=getattr(self.session, "id", None),
+            ))
+            if not approval.approved:
+                raise AttachmentError("已拒绝读取工作区外文件，本次任务未提交")
+            prepared = self.prepare_submission(replace(
+                submission,
+                authorized_paths=tuple(exc.paths),
+            ))
+        return self.submit_prepared(prepared, cancellation_token=cancellation_token)
+
+    def submit_prepared(self, prepared: PreparedTurn, cancellation_token=None) -> TurnResult:
+        user_prompt = prepared.text
         self.ensure_profile_bound_for_first_task(user_prompt)
         skill_invocation = self.skill_registry.build_user_invocation(user_prompt)
         if skill_invocation is not None:
@@ -397,17 +474,19 @@ class InteractiveSession:
                 user_prompt,
                 cancellation_token=cancellation_token,
                 turn_instruction=skill_invocation.prompt,
+                attachments=prepared.attachments,
             )
         if self.pending_plan_markdown and self.profile.name() == "plan":
             if _is_plan_execution_confirmation(user_prompt):
-                return self.execute_pending_plan()
-            return self.revise_pending_plan(user_prompt)
+                return self.execute_pending_plan(attachments=prepared.attachments)
+            return self.revise_pending_plan(user_prompt, attachments=prepared.attachments)
         route_decision = self._maybe_auto_route_profile(user_prompt)
         turn_instruction = _turn_instruction_for_route(route_decision)
         return self._submit_to_current_agent(
             user_prompt,
             cancellation_token=cancellation_token,
             turn_instruction=turn_instruction,
+            attachments=prepared.attachments,
         )
 
     def ensure_profile_bound_for_first_task(self, user_prompt: str) -> None:
@@ -490,6 +569,11 @@ class InteractiveSession:
             resumed_from=self.resume_session_id,
             profile_source=source,
         )
+        self.attachment_manager = AttachmentManager(
+            self.cwd,
+            self.session.root,
+            model_input_mode(),
+        )
         metadata = self.session_store.read_metadata(self.session.id)
         metadata["routing_mode"] = self.routing_mode
         self.session.metadata_path.write_text(
@@ -525,6 +609,12 @@ class InteractiveSession:
             approval_provider=self.approval_provider,
             question_provider=self.question_provider,
             tool_registry=self.tool_registry,
+        )
+        self.tool_context.agent_coordinator = AgentCoordinator(
+            self.tool_context,
+            parent_messages=lambda: (
+                list(self.conversation.messages) if self.conversation is not None else []
+            ),
         )
         self._started_at = time.time()
         self._activate_profile_runtime(self.profile.name())
@@ -598,6 +688,7 @@ class InteractiveSession:
         user_prompt: str,
         cancellation_token=None,
         turn_instruction: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> TurnResult:
         self._ensure_mcp_tools_loaded()
         turn_started_at = time.time()
@@ -608,6 +699,7 @@ class InteractiveSession:
             workspace_root=self.cwd,
             session_store=self.session_store,
         )
+        resolved = [item for item in resolved if item.kind != "file"]
         prompt_for_model = self._externalize_large_turn_text(
             "prompt",
             user_prompt,
@@ -626,12 +718,23 @@ class InteractiveSession:
         if turn_instruction:
             prompt_with_mentions = f"{turn_instruction}\n\nUser request:\n{prompt_with_mentions}"
         task = self.format_task(prompt_with_mentions)
+        model_content = build_model_content(
+            task,
+            attachments,
+            text_transform=lambda attachment, content: self._externalize_large_turn_text(
+                f"attachment-{attachment.id}",
+                content,
+                intro=f"The full contents of attachment {attachment.name!r} were too large to inline.",
+            ),
+        )
+        attachment_metadata = [item.public_dict() for item in attachments]
         self.turn_count += 1
         self.event_bus.emit_event(
             UserInputEvent(
                 text=user_prompt,
                 turn=self.turn_count,
                 mentions=[item.raw for item in resolved],
+                attachments=attachment_metadata,
             ).to_event()
         )
         self.event_bus.emit(
@@ -640,10 +743,15 @@ class InteractiveSession:
             payload={
                 "turn": self.turn_count,
                 "mentions": [item.raw for item in resolved],
+                "attachments": attachment_metadata,
             },
         )
         turn_event_start = len(getattr(self.event_bus, "events", []))
-        text = self.conversation.submit(task, cancellation_token=cancellation_token)
+        text = self.conversation.submit(
+            model_content,
+            task_text=task,
+            cancellation_token=cancellation_token,
+        )
         if cancellation_token is not None and cancellation_token.is_cancelled:
             from ..agent.cancellation import CancelledError
             raise CancelledError("Turn cancelled by user")
@@ -726,17 +834,16 @@ class InteractiveSession:
         if self.conversation is None:
             return False
         runtime_state = getattr(self.conversation, "runtime_state", None)
-        shell_session = getattr(runtime_state, "shell_session", None)
-        if shell_session is None:
+        interrupt = getattr(runtime_state, "interrupt_shell_sessions", None)
+        if interrupt is None:
             return False
         try:
-            shell_session.interrupt()
+            return bool(interrupt())
         except Exception as exc:
             log.debug("Failed to interrupt active shell session: %s", exc)
             return False
-        return True
 
-    def execute_pending_plan(self) -> TurnResult:
+    def execute_pending_plan(self, *, attachments: tuple[Attachment, ...] = ()) -> TurnResult:
         if not self.pending_plan_markdown:
             raise ValueError("No pending plan to execute. Switch to /plan and create a plan first.")
         plan_markdown = self.pending_plan_markdown
@@ -752,18 +859,26 @@ class InteractiveSession:
             "make the smallest appropriate code/test changes, and run verification before stopping.\n\n"
             f"Approved plan:\n{plan_markdown}"
         )
-        return self._submit_to_current_agent(task)
+        return self._submit_to_current_agent(task, attachments=attachments)
 
-    def revise_pending_plan(self, feedback: str) -> TurnResult:
+    def revise_pending_plan(
+        self,
+        feedback: str,
+        *,
+        attachments: tuple[Attachment, ...] = (),
+    ) -> TurnResult:
         if not self.pending_plan_markdown:
             raise ValueError("No pending plan to revise. Switch to /plan and create a plan first.")
         feedback = feedback.strip()
-        if not feedback:
+        if not feedback and attachments:
+            feedback = "Revise the plan using the attached files as additional feedback and context."
+        elif not feedback:
             raise ValueError("Provide feedback for the pending plan, or say 'continue' to execute it.")
         return self._submit_to_current_agent(
             "Revise the previous Markdown plan using this user feedback. "
             "Return the complete updated plan in the required structured Markdown format.\n\n"
-            f"User feedback:\n{feedback}"
+            f"User feedback:\n{feedback}",
+            attachments=attachments,
         )
 
     def _capture_plan_handoff(self, text: str) -> str:
@@ -798,7 +913,7 @@ class InteractiveSession:
         self,
         profile_name: str,
         *,
-        reason: str = "slash command",
+        reason: str = "profile picker",
     ) -> None:
         previous = self.profile.name()
         if previous == profile_name:
@@ -976,6 +1091,11 @@ class InteractiveSession:
         source = self.session
         branched = self.session_store.fork(source.id)
         self.session = branched
+        self.attachment_manager = AttachmentManager(
+            self.cwd,
+            branched.root,
+            model_input_mode(),
+        )
         self.event_bus = self.session_store.event_bus(
             branched,
             listener=self.event_listener,
@@ -1241,6 +1361,8 @@ class InteractiveSession:
                 return
             self._closed = True
         stop_dev_server()
+        if self.tool_context is not None and self.tool_context.agent_coordinator is not None:
+            self.tool_context.agent_coordinator.close()
         conversations = {
             id(slot.conversation): slot.conversation
             for slot in self.profile_runtimes.values()

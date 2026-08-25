@@ -190,7 +190,7 @@ class ProfilePromptTests(unittest.TestCase):
         self.assertIn("non-interactive", prompts["terminal"])
         self.assertIn("smallest suitable stack", prompts["app-builder"])
 
-    def test_general_profile_allows_parallel_commands_but_not_delegate_agents(self):
+    def test_general_profile_does_not_expose_shell_batch_commands(self):
         cfg = get_profile("general").main_agent()
         tool_names = {
             schema["function"]["name"]
@@ -202,9 +202,10 @@ class ProfilePromptTests(unittest.TestCase):
             )
         }
 
-        self.assertIn("parallel_commands", tool_names)
+        self.assertNotIn("parallel_commands", tool_names)
         self.assertNotIn("delegate_agent", tool_names)
         self.assertNotIn("parallel_agents", tool_names)
+        self.assertNotIn("spawn_agent", tool_names)
 
     def test_execution_profiles_share_acceptance_enforcement(self):
         for name in ("coding-agent", "app-builder"):

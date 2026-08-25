@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import weakref
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ from ..runtime.tool_runner import finalize_intercepted_tool_result
 from . import context
 from .cancellation import CancelledError
 from .compaction import CompactionGate, compaction_action, get_thresholds
-from .llm_channel import LlmChannel, llm_call_simple
+from .llm_channel import LlmChannel, LlmStreamTimeoutError, llm_call_simple
 from .observations import FactTracker, ObservationStore
 from .providers import ProviderAdapter, current_adapter, get_client
 from .runtime_state import (
@@ -65,7 +66,9 @@ class Agent:
                  tool_context: ToolContext | None = None,
                  stream_callback=None,
                  prompt_cache_identity: dict[str, str] | None = None,
-                 initial_planning_mode: str = "unset"):
+                 initial_planning_mode: str = "unset",
+                 model_intensity: str | None = None,
+                 max_iterations: int | None = None):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
@@ -78,6 +81,8 @@ class Agent:
         self.stream_callback = stream_callback
         self.prompt_cache_identity = prompt_cache_identity
         self.initial_planning_mode = _normalize_initial_planning_mode(initial_planning_mode)
+        self.model_intensity = model_intensity
+        self.max_iterations = max_iterations
         self.current_task_metadata: dict = {}
         self._conversations: weakref.WeakSet[AgentConversation] = weakref.WeakSet()
 
@@ -146,6 +151,8 @@ class AgentConversation:
         self.last_text = ""
         self.last_run_streamed_text = False
         self._closed = False
+        self._queued_messages: list[str] = []
+        self._queued_messages_lock = threading.Lock()
         self._iteration_offset = 0
         self.compaction_gate = CompactionGate()
         self.event_bus = agent.tool_context.event_bus if agent.tool_context is not None else None
@@ -235,9 +242,15 @@ class AgentConversation:
         self._refresh_dynamic_context_after_compaction(phase="manual")
         return f"已压缩对话：{messages_before} 条消息 → {len(self.messages)} 条"
 
-    def add_user_turn(self, task: str) -> None:
+    def add_user_turn(
+        self,
+        task: str | list[dict],
+        *,
+        task_text: str | None = None,
+    ) -> None:
+        logical_task = task_text if task_text is not None else str(task)
         self.runtime_state.current_turn_start_index = len(self.messages)
-        self.runtime_state.task_board = self.agent._new_task_board(task)
+        self.runtime_state.task_board = self.agent._new_task_board(logical_task)
         self.runtime_state.action_tool_count = 0
         self.runtime_state.fallback = AgentFallbackState()
         self.runtime_state.auto_compaction_turn_start_index = -1
@@ -245,12 +258,36 @@ class AgentConversation:
         self.runtime_state.context_anxiety_turn_start_index = -1
         for mw in self.agent.middlewares:
             mw.begin_turn(
-                task,
+                logical_task,
                 self.messages,
                 runtime_state=self.runtime_state,
                 agent_name=self.agent.name,
             )
         self._append_message({"role": "user", "content": task})
+
+    def queue_message(self, message: str) -> None:
+        """Queue steering text for the next valid model-request boundary."""
+        text = str(message or "").strip()
+        if not text:
+            raise ValueError("queued message must not be empty")
+        with self._queued_messages_lock:
+            self._queued_messages.append(text)
+
+    def has_queued_messages(self) -> bool:
+        with self._queued_messages_lock:
+            return bool(self._queued_messages)
+
+    def _drain_queued_messages(self) -> bool:
+        with self._queued_messages_lock:
+            pending = self._queued_messages
+            self._queued_messages = []
+        for message in pending:
+            self._append_message({
+                "role": "user",
+                "content": f"[PARENT STEERING MESSAGE]\n{message}",
+            })
+            self.trace.middleware_inject("AgentInbox", "safe_boundary", message)
+        return bool(pending)
 
     def _append_message(self, message: dict) -> None:
         self.messages.append(message)
@@ -285,7 +322,7 @@ class AgentConversation:
         changed = False
         turn_start = self.runtime_state.current_turn_start_index
         for idx, message in enumerate(self.messages):
-            content = str(message.get("content") or "")
+            content = _safe_message_content(message)
             if content.startswith(DYNAMIC_CONTEXT_MARKER):
                 changed = True
                 if idx < turn_start:
@@ -512,7 +549,7 @@ class AgentConversation:
     def _latest_user_message(self) -> str:
         for msg in reversed(self.messages):
             if msg.get("role") == "user" and msg.get("content"):
-                return str(msg.get("content"))
+                return _safe_message_content(msg)
         return ""
 
     def _task_board_status(self) -> str:
@@ -532,7 +569,7 @@ class AgentConversation:
         errors: list[str] = []
         failed_commands: list[str] = []
         for msg in self.messages[-30:]:
-            content = str(msg.get("content") or "")
+            content = _safe_message_content(msg)
             lowered = content.lower()
             if "[error]" in lowered or "failed" in lowered or "traceback" in lowered:
                 errors.append(content[:500])
@@ -543,7 +580,7 @@ class AgentConversation:
     def _active_constraints(self) -> list[str]:
         constraints = []
         for msg in self.messages[-20:]:
-            content = str(msg.get("content") or "")
+            content = _safe_message_content(msg)
             lowered = content.lower()
             if "constraint" in lowered or "不要" in content or "must" in lowered or "only" in lowered:
                 constraints.append(content[:300])
@@ -565,8 +602,14 @@ class AgentConversation:
                     continue
         return "none"
 
-    def submit(self, task: str, cancellation_token=None) -> str:
-        self.add_user_turn(task)
+    def submit(
+        self,
+        task: str | list[dict],
+        cancellation_token=None,
+        *,
+        task_text: str | None = None,
+    ) -> str:
+        self.add_user_turn(task, task_text=task_text)
         return self.run_until_idle(cancellation_token=cancellation_token)
 
     def next_call_id(self) -> str:
@@ -738,11 +781,13 @@ class AgentConversation:
         self.last_run_streamed_text = False
         run_started = time.monotonic()
 
-        for local_iteration in range(1, config.MAX_AGENT_ITERATIONS + 1):
+        iteration_limit = agent.max_iterations or config.MAX_AGENT_ITERATIONS
+        for local_iteration in range(1, iteration_limit + 1):
             iteration = self._iteration_offset + local_iteration
 
             # --- Cancellation check ---
             self._check_cancelled(cancellation_token)
+            self._drain_queued_messages()
 
             # --- Time budget check ---
             if agent.time_budget is not None:
@@ -798,7 +843,7 @@ class AgentConversation:
 
             # --- Build prompt and LLM call ---
             prompt_messages = self._build_prompt()
-            profile = config.resolve_model_profile(config.MODEL_INTENSITY)
+            profile = config.resolve_model_profile(agent.model_intensity or config.MODEL_INTENSITY)
             chat_args = {
                 "profile": profile,
                 "messages": prompt_messages,
@@ -823,6 +868,10 @@ class AgentConversation:
             try:
                 completion = self.llm.request_assistant_message(kwargs, cancellation_token=cancellation_token)
             except CancelledError:
+                raise
+            except LlmStreamTimeoutError as e:
+                self.trace.error("api_timeout", str(e))
+                self.trace.finish("llm_timeout", iteration)
                 raise
             except Exception as e:
                 err_str = str(e)
@@ -878,6 +927,8 @@ class AgentConversation:
 
             # --- If no tool calls, check pre-exit middlewares ---
             if not tool_calls:
+                if self._drain_queued_messages():
+                    continue
                 forced_continue = False
                 for mw in agent.middlewares:
                     inject = mw.pre_exit(
@@ -911,6 +962,9 @@ class AgentConversation:
 
             if stop_after_tool_loop:
                 break
+
+            if self._drain_queued_messages():
+                continue
 
             # --- Check finish reason ---
             if finish_reason == "stop":
@@ -948,12 +1002,12 @@ class AgentConversation:
                     })
 
         else:
-            log.warning(f"[{agent.name}] Hit max iterations ({config.MAX_AGENT_ITERATIONS}).")
+            log.warning(f"[{agent.name}] Hit max iterations ({iteration_limit}).")
             self.runtime_state.fallback.request_stop(
                 reason="max_iterations",
                 limit_type="iterations",
                 used=config.MAX_AGENT_ITERATIONS,
-                limit=config.MAX_AGENT_ITERATIONS,
+                limit=iteration_limit,
                 recent_action_summary=self.runtime_state.fallback.recent_action_summary,
             )
             self.emitter.emit_agent_fallback(self.runtime_state.fallback)
@@ -976,14 +1030,20 @@ class AgentConversation:
                 runtime_state=self.runtime_state,
                 agent_name=self.agent.name,
             )
-        if self.runtime_state.shell_session is not None:
-            self.runtime_state.shell_session.close()
+        self.runtime_state.close_shell_sessions()
         if self.runtime_state.shell_job_manager is not None:
             self.runtime_state.shell_job_manager.close()
 
 
 def _safe_tool_summary(tool_name: str, tool_args: dict) -> str:
     return f"{tool_name}({_safe_args_preview(tool_args)})"
+
+
+def _safe_message_content(message: dict) -> str:
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        return context._messages_to_text([message])
+    return str(content)
 
 
 def _safe_args_preview(tool_args: dict) -> str:
@@ -1029,4 +1089,3 @@ def _normalize_initial_planning_mode(value: str) -> str:
 
 def _assistant_message_from_response(msg) -> dict:
     return current_adapter().assistant_message_from_response(msg)
-

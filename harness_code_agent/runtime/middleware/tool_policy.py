@@ -219,7 +219,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
                 return None
             return self._blocked(
                 "run_bash",
-                "Bare rg without an explicit search path is blocked because persistent shells can leave rg waiting on stdin. "
+                "Bare rg without an explicit search path is blocked because it can wait on stdin. "
                 "Use repo_search(pattern=..., path=...) or provide an explicit bounded path.",
                 runtime_state,
                 category="bare_rg",

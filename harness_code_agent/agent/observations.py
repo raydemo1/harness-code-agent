@@ -240,5 +240,3 @@ def _summary_for(tool: str, args: dict[str, Any], result: ToolResult, output_has
 
 def _norm_path(path: object) -> str:
     return str(path).replace("\\", "/").strip()
-
-

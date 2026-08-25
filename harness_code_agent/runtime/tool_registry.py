@@ -3,15 +3,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from typing import TYPE_CHECKING
 
-from .permissions import (
-    TOOL_PERMISSION_EDIT,
-    TOOL_PERMISSION_NETWORK_READ,
-    TOOL_PERMISSION_READ,
-    TOOL_PERMISSION_SHELL,
-    VALID_TOOL_PERMISSIONS,
-)
+from .execution_planner import CallEffect
+from .permissions import VALID_TOOL_PERMISSIONS
+
+if TYPE_CHECKING:
+    from .tool_context import ToolContext
+
+EffectResolver = Callable[[dict, "ToolContext | None"], CallEffect]
 
 
 @dataclass(frozen=True)
@@ -20,21 +20,8 @@ class ToolSpec:
     schema: dict
     handler: Callable
     permission: str
-    lane: ToolExecutionLane
+    effect_resolver: EffectResolver
     disclosure: str = "core"
-
-
-class ToolExecutionLane(str, Enum):
-    WORKSPACE_READ = "workspace_read"
-    NETWORK_READ = "network_read"
-    SUBAGENT_READ = "subagent_read"
-    SHELL_READ = "shell_read"
-    SHELL_VERIFY = "shell_verify"
-    SHELL_LONG_RUNNING = "shell_long_running"
-    WORKSPACE_WRITE = "workspace_write"
-    CONTROL_SERIAL = "control_serial"
-    SHELL_SERIAL = "shell_serial"
-    BLOCKED = "blocked"
 
 
 VALID_TOOL_DISCLOSURES = {"core", "deferred"}
@@ -47,7 +34,7 @@ class ToolRegistry:
         self._schemas: dict[str, dict] = {}
         self._handlers: dict[str, Callable] = {}
         self._permissions: dict[str, str] = {}
-        self._lanes: dict[str, ToolExecutionLane] = {}
+        self._effects: dict[str, EffectResolver] = {}
         self._disclosures: dict[str, str] = {}
 
     def register(
@@ -56,7 +43,7 @@ class ToolRegistry:
         handler: Callable,
         *,
         permission: str | None = None,
-        lane: ToolExecutionLane | str | None = None,
+        effect: EffectResolver | CallEffect | None = None,
         disclosure: str = "core",
     ) -> None:
         name = schema.get("function", {}).get("name")
@@ -71,7 +58,12 @@ class ToolRegistry:
         self._schemas[name] = schema
         self._handlers[name] = handler
         self._permissions[name] = permission
-        self._lanes[name] = _coerce_tool_lane(lane) if lane is not None else _default_lane_for_tool(name, permission)
+        if isinstance(effect, CallEffect):
+            self._effects[name] = lambda _args, _context, value=effect: value
+        elif effect is not None:
+            self._effects[name] = effect
+        else:
+            self._effects[name] = lambda _args, _context: CallEffect.global_exclusive()
         self._disclosures[name] = disclosure
 
     def get(self, name: str) -> Callable | None:
@@ -80,8 +72,12 @@ class ToolRegistry:
     def permission_for(self, name: str) -> str | None:
         return self._permissions.get(name)
 
-    def lane_for(self, name: str) -> ToolExecutionLane | None:
-        return self._lanes.get(name)
+    def effect_for(self, name: str, args: dict, context: ToolContext | None = None) -> CallEffect:
+        resolver = self._effects.get(name)
+        return resolver(dict(args or {}), context) if resolver is not None else CallEffect.global_exclusive()
+
+    def effect_resolver_for(self, name: str) -> EffectResolver | None:
+        return self._effects.get(name)
 
     def disclosure_for(self, name: str) -> str | None:
         return self._disclosures.get(name)
@@ -93,7 +89,7 @@ class ToolRegistry:
                 self._schemas[name],
                 self._handlers[name],
                 self._permissions[name],
-                self._lanes[name],
+                self._effects[name],
                 self._disclosures.get(name, "core"),
             )
             for name in sorted(self._schemas)
@@ -110,48 +106,9 @@ class ToolRegistry:
         clone._schemas = dict(self._schemas)
         clone._handlers = dict(self._handlers)
         clone._permissions = dict(self._permissions)
-        clone._lanes = dict(self._lanes)
+        clone._effects = dict(self._effects)
         clone._disclosures = dict(self._disclosures)
         return clone
-
-
-def _coerce_tool_lane(lane: ToolExecutionLane | str) -> ToolExecutionLane:
-    if isinstance(lane, ToolExecutionLane):
-        return lane
-    try:
-        return ToolExecutionLane(str(lane))
-    except ValueError as exc:
-        raise ValueError(f"Unknown tool execution lane: {lane}") from exc
-
-
-def _default_lane_for_tool(name: str, permission: str) -> ToolExecutionLane:
-    if name in {"read_file", "list_files", "read_skill_file"}:
-        return ToolExecutionLane.WORKSPACE_READ
-    if name in {"web_search", "web_fetch"}:
-        return ToolExecutionLane.NETWORK_READ
-    if name in {"delegate_agent", "parallel_agents"}:
-        return ToolExecutionLane.SUBAGENT_READ
-    if name == "parallel_commands":
-        return ToolExecutionLane.WORKSPACE_READ
-    if name in {"write_file", "apply_patch"}:
-        return ToolExecutionLane.WORKSPACE_WRITE
-    if name in {"ask_user", "update_plan_state"}:
-        return ToolExecutionLane.CONTROL_SERIAL
-    if name == "run_bash":
-        return ToolExecutionLane.SHELL_SERIAL
-    if name in {"list_shell_jobs", "read_shell_output", "stop_shell_job"}:
-        return ToolExecutionLane.CONTROL_SERIAL
-    if name in {"browser_test", "stop_dev_server"}:
-        return ToolExecutionLane.SHELL_SERIAL
-    if permission == TOOL_PERMISSION_NETWORK_READ:
-        return ToolExecutionLane.NETWORK_READ
-    if permission == TOOL_PERMISSION_READ:
-        return ToolExecutionLane.WORKSPACE_READ
-    if permission == TOOL_PERMISSION_EDIT:
-        return ToolExecutionLane.WORKSPACE_WRITE
-    if permission == TOOL_PERMISSION_SHELL:
-        return ToolExecutionLane.SHELL_SERIAL
-    return ToolExecutionLane.CONTROL_SERIAL
 
 
 def tool_schemas_for_profile(

@@ -206,14 +206,14 @@ class BaseProfile(ABC):
                 "keep the implementation focused.\n\n"
                 f"{TASK_TRACKING_POLICY}\n\n"
                 "Use delegation only when independent investigation, test design, review, verification, "
-                "or an isolated patch proposal would reduce risk or context load. Apply every code and "
-                "test change to the real workspace yourself. Long-running "
+                "or an isolated worker proposal would reduce risk or context load. Review worker changes "
+                "before explicitly applying them. Long-running "
                 "shell commands return job IDs; inspect and clean them up through the shell-job tools."
             ),
             boundaries=(
                 "The task text and profile acceptance criteria are the source of truth. Delegation "
-                "is evidence or an isolated proposal, not completed work. Do not delegate real workspace "
-                "modification, integration, final verification, or the stop decision."
+                "is evidence or an isolated proposal, not completed work. Keep integration, final verification, "
+                "and the stop decision with the main agent."
             ),
             completion=(
                 "Run concrete verification and read its output. If it fails, diagnose the evidence "

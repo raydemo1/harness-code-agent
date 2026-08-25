@@ -6,7 +6,7 @@ import re
 from typing import ClassVar
 
 from ...agent.acceptance import AcceptanceError
-from ..shell_classification import classify_safe_shell_command
+from ..permissions import is_workspace_write_command
 from ..tool_result import ToolResult
 from .base import MAIN_AGENT_NAMES, AgentMiddleware
 
@@ -16,7 +16,10 @@ log = logging.getLogger("harness")
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
     """Hard-require planning updates for tracked mode."""
 
-    ACTION_TOOLS: ClassVar[set] = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
+    ACTION_TOOLS: ClassVar[set] = {
+        "run_bash", "write_file", "apply_patch", "spawn_agent", "apply_agent_changes",
+        "resolve_agent_conflicts", "browser_test",
+    }
 
     def __init__(
         self,
@@ -108,7 +111,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
                 board.planning_mode == "tracked"
                 and board.update_count == 0
                 and tool_name == "run_bash"
-                and _is_read_only_probe(tool_args.get("command", ""))
+                and _is_non_workspace_write_probe(tool_args.get("command", ""))
             ):
                 return None
             runtime_state.action_tool_count += 1
@@ -226,14 +229,14 @@ def _weak_acceptance_command(checks: list[dict]) -> dict | None:
     return None
 
 
-def _is_read_only_probe(command: str) -> bool:
-    return classify_safe_shell_command(command) == "read"
+def _is_non_workspace_write_probe(command: str) -> bool:
+    return not is_workspace_write_command(command)
 
 
 def _is_pre_start_read_only_delegate(tool_name: str, tool_args: dict, board) -> bool:
     return (
-        tool_name == "delegate_agent"
-        and str((tool_args or {}).get("agent_profile") or "").strip().lower().replace("-", "_") != "patch"
+        tool_name == "spawn_agent"
+        and str((tool_args or {}).get("role") or "").strip().lower() != "worker"
         and board.update_count == 0
         and board.planning_mode in {"unset", "skip", "tracked"}
     )

@@ -428,8 +428,8 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         state.task_board.planning_mode = "tracked"
 
         blocked = middleware.before_tool(
-            "run_bash",
-            {"command": "pytest"},
+            "write_file",
+            {"path": "probe.txt", "content": "x"},
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -438,8 +438,8 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         for _ in range(4):
             early_post.append(
                 middleware.post_tool(
-                    "run_bash",
-                    {"command": "pytest"},
+                    "write_file",
+                    {"path": "probe.txt", "content": "x"},
                     _result("ok"),
                     messages=[],
                     runtime_state=state,
@@ -447,16 +447,16 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
                 )
             )
         reminder = middleware.post_tool(
-            "run_bash",
-            {"command": "pytest"},
+            "write_file",
+            {"path": "probe.txt", "content": "x"},
             _result("ok"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
         )
         second_reminder = middleware.post_tool(
-            "run_bash",
-            {"command": "pytest"},
+            "write_file",
+            {"path": "probe.txt", "content": "x"},
             _result("ok"),
             messages=[],
             runtime_state=state,
@@ -496,7 +496,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertEqual(state.task_board.action_count, 0)
         self.assertFalse(state.task_board.needs_final_update)
 
-    def test_tracked_mode_counts_verification_command_before_start(self):
+    def test_tracked_mode_treats_non_workspace_write_shell_as_probe_before_start(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
         state.task_board.planning_mode = "tracked"
@@ -519,8 +519,8 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         )
 
         self.assertIsNone(blocked)
-        self.assertEqual(state.task_board.action_count, 1)
-        self.assertTrue(state.task_board.needs_final_update)
+        self.assertEqual(state.task_board.action_count, 0)
+        self.assertFalse(state.task_board.needs_final_update)
 
     def test_requires_approval_flag_does_not_block_tracked_actions(self):
         middleware = TaskTrackingEnforcementMiddleware()
@@ -729,8 +729,8 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             )
 
         blocked = middleware.before_tool(
-            "delegate_agent",
-            {"agent_profile": "explore", "task": "inspect the parser"},
+            "spawn_agent",
+            {"role": "explorer", "task": "inspect the parser"},
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -744,8 +744,8 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         state.task_board.planning_mode = "tracked"
 
         reminder = middleware.post_tool(
-            "delegate_agent",
-            {"agent_profile": "explore", "task": "inspect the parser"},
+            "spawn_agent",
+            {"role": "explorer", "task": "inspect the parser"},
             _result("ok"),
             messages=[],
             runtime_state=state,
@@ -775,8 +775,8 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             )
 
         blocked = middleware.before_tool(
-            "delegate_agent",
-            {"agent_profile": "patch", "task": "draft a parser fix"},
+            "spawn_agent",
+            {"role": "worker", "task": "draft a parser fix", "allowed_paths": ["parser.py"]},
             messages=[],
             runtime_state=state,
             agent_name="main_agent",

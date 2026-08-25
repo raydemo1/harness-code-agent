@@ -609,65 +609,6 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(decision.source, "local")
         self.assertFalse(decision.llm_called)
 
-    def test_read_only_command_whitelist_includes_common_verification_commands(self):
-        from harness_code_agent.runtime.permissions import is_read_only_command
-
-        for command in [
-            "ruff check .",
-            "ruff check --diff --no-fix --output-format=text",
-            "mypy harness_code_agent",
-            "npm test",
-            "go test ./...",
-            "cargo test",
-            "git log --format=%s -1",
-            "whoami",
-            "id",
-            "uname -a",
-            "git --version",
-            "git rev-parse --is-bare-repository",
-            "python3 --version",
-            "curl -I http://localhost:8080",
-            "Get-ChildItem -Force | Select-Object Name, Length | Format-Table -AutoSize",
-            "git status --short; git log --oneline -5 2>$null; Get-ChildItem -Force | Select-Object Name",
-            "cd /app && pdflatex -interaction=nonstopmode -halt-on-error main.tex 2>&1",
-        ]:
-            with self.subTest(command=command):
-                self.assertTrue(is_read_only_command(command))
-
-    def test_read_only_command_allows_safe_pipelines_but_blocks_shell_writes(self):
-        from harness_code_agent.runtime.permissions import is_read_only_command
-
-        allowed = [
-            "rg foo . | head -n 5",
-            "Get-Content a.txt | Select-String foo",
-            "whoami && git --version && which python3",
-            "ls /git 2>/dev/null || echo no-git",
-            "test -d /git/server && git -C /git/server rev-parse --is-bare-repository 2>&1",
-            "pwd; git status --short",
-            "cd /app && md5sum main.tex synonyms.txt | grep -q '^abc.*main.tex$' || echo modified",
-        ]
-        blocked = [
-            "cat > file.txt",
-            "rg needle . > out.txt",
-            "pytest tests > result.txt",
-            "rg foo . | tee out.txt",
-            "git diff --output=out.patch",
-            "git show HEAD --output out.txt",
-            "sort -o out.txt input.txt",
-            "mkdir -p /git && git init --bare /git/server",
-            "echo probe > /var/www/deploy/_probe.txt && curl -s http://localhost:8080/_probe.txt",
-            "rm -rf /tmp/test-clone && git clone /git/server /tmp/test-clone",
-            "cd /app",
-            "cd /app && echo probe > out.txt",
-        ]
-
-        for command in allowed:
-            with self.subTest(command=command):
-                self.assertTrue(is_read_only_command(command))
-        for command in blocked:
-            with self.subTest(command=command):
-                self.assertFalse(is_read_only_command(command))
-
     def test_permission_policy_does_not_block_format_substrings_in_safe_commands(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
 
@@ -1222,9 +1163,9 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.permission_for("list_shell_jobs"), "read")
         self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.permission_for("read_shell_output"), "read")
         self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.permission_for("stop_shell_job"), "control")
-        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.lane_for("list_shell_jobs"), tools.ToolExecutionLane.CONTROL_SERIAL)
-        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.lane_for("read_shell_output"), tools.ToolExecutionLane.CONTROL_SERIAL)
-        self.assertEqual(tools.BUILTIN_TOOL_REGISTRY.lane_for("stop_shell_job"), tools.ToolExecutionLane.CONTROL_SERIAL)
+        self.assertTrue(tools.BUILTIN_TOOL_REGISTRY.effect_for("list_shell_jobs", {}).barrier)
+        self.assertTrue(tools.BUILTIN_TOOL_REGISTRY.effect_for("read_shell_output", {}).barrier)
+        self.assertTrue(tools.BUILTIN_TOOL_REGISTRY.effect_for("stop_shell_job", {}).barrier)
         self.assertTrue(all(spec.permission for spec in tools.BUILTIN_TOOL_REGISTRY.specs()))
         self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
 
@@ -1250,7 +1191,6 @@ class ProductRuntimeTests(unittest.TestCase):
             "npm run dev",
             timeout=300,
             runtime_state=runtime_state,
-            execution_lane=tools.ToolExecutionLane.SHELL_LONG_RUNNING,
         )
 
         self.assertEqual(result.status, "success")
@@ -1258,7 +1198,7 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertIn("shell-job-abc123", result.output)
         self.assertEqual(result.metadata["job_id"], "shell-job-abc123")
 
-    def test_run_bash_resets_dead_persistent_shell_session(self):
+    def test_run_bash_does_not_reuse_runtime_shell_session(self):
         from harness_code_agent.runtime import tools
 
         class DeadShell:
@@ -1274,17 +1214,15 @@ class ProductRuntimeTests(unittest.TestCase):
         dead_shell = DeadShell()
         runtime_state = SimpleNamespace(shell_session=dead_shell, shell_job_manager=None)
 
-        result = tools.run_bash(
-            "echo hi",
-            runtime_state=runtime_state,
-            execution_lane=tools.ToolExecutionLane.SHELL_SERIAL,
+        fresh_shell = SimpleNamespace(
+            run=lambda command, timeout=300: SimpleNamespace(stdout="hi", stderr="", exit_code=0, timed_out=False),
+            close=lambda: None,
         )
+        with patch("harness_code_agent.workspace.shell_session.PersistentShellSession", return_value=fresh_shell):
+            result = tools.run_bash("echo hi", runtime_state=runtime_state)
 
-        self.assertEqual(result.status, "failed")
-        self.assertIn("Shell failed to become ready", result.output)
-        self.assertTrue(dead_shell.closed)
-        self.assertIsNone(runtime_state.shell_session)
-        self.assertTrue(result.metadata["shell_session_reset"])
+        self.assertEqual(result.status, "success")
+        self.assertFalse(dead_shell.closed)
 
     def test_run_bash_accepts_explicit_expected_nonzero_exit_code(self):
         from harness_code_agent.runtime import tools
@@ -1298,17 +1236,14 @@ class ProductRuntimeTests(unittest.TestCase):
                     timed_out=False,
                 )
 
-        runtime_state = SimpleNamespace(
-            shell_session=ExpectedFailureShell(),
-            shell_job_manager=None,
-        )
-
-        result = tools.run_bash(
-            'python focusflow.py "Task" 0',
-            expected_exit_codes=[2],
-            runtime_state=runtime_state,
-            execution_lane=tools.ToolExecutionLane.SHELL_SERIAL,
-        )
+        shell = ExpectedFailureShell()
+        shell.close = lambda: None
+        with patch("harness_code_agent.workspace.shell_session.PersistentShellSession", return_value=shell):
+            result = tools.run_bash(
+                'python focusflow.py "Task" 0',
+                expected_exit_codes=[2],
+                runtime_state=SimpleNamespace(shell_job_manager=None),
+            )
 
         self.assertEqual(result.status, "success")
         self.assertEqual(result.return_code, 2)
@@ -1330,6 +1265,7 @@ class ProductRuntimeTests(unittest.TestCase):
         )
 
         with (
+            patch("harness_code_agent.workspace.shell_session.PersistentShellSession", return_value=Mock()),
             patch(
                 "harness_code_agent.runtime.builtins.shell._requires_one_shot_powershell",
                 return_value=True,
@@ -1342,7 +1278,6 @@ class ProductRuntimeTests(unittest.TestCase):
             result = tools.run_bash(
                 "Write-Output ready; exit 0",
                 runtime_state=runtime_state,
-                execution_lane=tools.ToolExecutionLane.SHELL_SERIAL,
             )
 
         self.assertEqual(result.status, "success")
@@ -2302,9 +2237,8 @@ class ProductRuntimeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 workspace.resolve("../outside.txt")
 
-    def test_workspace_service_read_text_uses_same_lock_as_writes(self):
+    def test_workspace_service_read_text_uses_same_path_lock_as_writes(self):
         import threading
-        import time
 
         from harness_code_agent.workspace.service import WorkspaceService
 
@@ -2313,16 +2247,42 @@ class ProductRuntimeTests(unittest.TestCase):
             (root / "app.py").write_text("old", encoding="utf-8")
             workspace = WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots")
             results = []
+            reader_started = threading.Event()
 
-            with workspace._lock:
-                reader = threading.Thread(target=lambda: results.append(workspace.read_text("app.py")))
+            def read_file():
+                reader_started.set()
+                results.append(workspace.read_text("app.py"))
+
+            with workspace._path_lock(workspace.resolve("app.py")):
+                reader = threading.Thread(target=read_file)
                 reader.start()
-                time.sleep(0.05)
+                self.assertTrue(reader_started.wait(1))
                 self.assertEqual(results, [])
 
             reader.join(timeout=1)
 
         self.assertEqual(results, ["old"])
+
+    def test_workspace_service_different_file_writes_do_not_share_a_lock(self):
+        import threading
+
+        from harness_code_agent.workspace.service import WorkspaceService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = WorkspaceService(root=root, snapshots_dir=root / ".harness" / "snapshots")
+            write_finished = threading.Event()
+
+            def write_other_file():
+                workspace.write_text("b.txt", "b")
+                write_finished.set()
+
+            with workspace._path_lock(workspace.resolve("a.txt")):
+                writer = threading.Thread(target=write_other_file)
+                writer.start()
+                self.assertTrue(write_finished.wait(1))
+            writer.join(timeout=1)
+            self.assertEqual((root / "b.txt").read_text(encoding="utf-8"), "b")
 
     def test_workspace_service_applies_unique_text_patch_and_rejects_ambiguous_patch(self):
         from harness_code_agent.workspace.service import WorkspaceService
@@ -2364,7 +2324,7 @@ class ProductRuntimeTests(unittest.TestCase):
         workspace_policy = PermissionPolicy(mode="workspace-write")
         read_decision = workspace_policy.decide_tool_call("read_file", {"path": "x.txt"})
         repo_search_decision = workspace_policy.decide_tool_call("repo_search", {"pattern": "needle"})
-        parallel_decision = workspace_policy.decide_tool_call("parallel_agents", {"agents": []})
+        agent_decision = workspace_policy.decide_tool_call("spawn_agent", {"role": "explorer"})
         edit_decision = workspace_policy.decide_tool_call("write_file", {"path": "x.txt"})
         plan_decision = workspace_policy.decide_tool_call("update_plan_state", {"mode": "tracked"})
         safe_shell_decision = workspace_policy.decide_tool_call(
@@ -2373,17 +2333,25 @@ class ProductRuntimeTests(unittest.TestCase):
         )
         risky_shell_decision = workspace_policy.decide_tool_call(
             "run_bash",
-            {"command": "rm -rf build"},
+            {"command": "npm install"},
+        )
+        mkdir_decision = workspace_policy.decide_tool_call(
+            "run_bash",
+            {"command": "mkdir generated"},
         )
         reset_decision = workspace_policy.decide_tool_call(
             "run_bash",
-            {"command": "git reset --hard"},
+            {"command": "git commit --allow-empty -m test"},
         )
         blocked_commands = [
             "rm -rf /",
             "rm -rf ~",
             "rm -rf *",
+            "rm -rf build",
             "Remove-Item C:\\ -Recurse",
+            "git reset --hard",
+            "git clean -fd",
+            "git push --force origin main",
             "mkfs.ext4 /dev/sda",
             "dd if=/dev/zero of=/dev/sda",
         ]
@@ -2396,7 +2364,6 @@ class ProductRuntimeTests(unittest.TestCase):
         llm_auto_policy = PermissionPolicy(mode="llm-auto")
         llm_read_decision = llm_auto_policy.decide_tool_call("read_file", {"path": "x.txt"})
         llm_repo_search_decision = llm_auto_policy.decide_tool_call("repo_search", {"pattern": "needle"})
-        llm_parallel_decision = llm_auto_policy.decide_tool_call("parallel_commands", {"commands": []})
         llm_edit_decision = llm_auto_policy.decide_tool_call("write_file", {"path": "x.txt"})
         llm_plan_decision = llm_auto_policy.decide_tool_call("update_plan_state", {"mode": "tracked"})
         llm_safe_shell_decision = llm_auto_policy.decide_tool_call(
@@ -2421,32 +2388,38 @@ class ProductRuntimeTests(unittest.TestCase):
         full_access_policy = PermissionPolicy(mode="danger-full-access")
         full_access_decision = full_access_policy.decide_tool_call(
             "run_bash",
-            {"command": "rm -rf build"},
+            {"command": "npm install"},
         )
         full_access_blocked_decision = full_access_policy.decide_tool_call(
             "run_bash",
             {"command": "dd if=/dev/zero of=/dev/sda"},
         )
+        overwrite_decision = full_access_policy.decide_tool_call(
+            "run_bash",
+            {"command": "Set-Content out.txt bad"},
+        )
 
         self.assertTrue(read_decision.allowed)
         self.assertTrue(repo_search_decision.allowed)
-        self.assertTrue(parallel_decision.allowed)
+        self.assertTrue(agent_decision.allowed)
         self.assertTrue(edit_decision.allowed)
         self.assertTrue(plan_decision.allowed)
         self.assertTrue(safe_shell_decision.allowed)
         self.assertTrue(risky_shell_decision.requires_approval)
         self.assertEqual(risky_shell_decision.risk, "shell_risky")
+        self.assertTrue(mkdir_decision.requires_approval)
+        self.assertEqual(mkdir_decision.risk, "shell_risky")
         self.assertTrue(reset_decision.requires_approval)
         self.assertEqual(reset_decision.risk, "shell_risky")
         for command, blocked_decision in zip(blocked_commands, blocked_decisions):
             with self.subTest(command=command):
                 self.assertFalse(blocked_decision.allowed)
                 self.assertFalse(blocked_decision.requires_approval)
-                self.assertEqual(blocked_decision.risk, "shell_blocked")
+                expected_risk = "shell_write_blocked" if command == "rm -rf build" else "shell_blocked"
+                self.assertEqual(blocked_decision.risk, expected_risk)
         self.assertTrue(unknown_decision.requires_approval)
         self.assertTrue(llm_read_decision.allowed)
         self.assertTrue(llm_repo_search_decision.allowed)
-        self.assertTrue(llm_parallel_decision.allowed)
         self.assertTrue(llm_edit_decision.allowed)
         self.assertTrue(llm_plan_decision.allowed)
         self.assertTrue(llm_safe_shell_decision.allowed)
@@ -2458,6 +2431,8 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(llm_blocked_decision.risk, "shell_blocked")
         self.assertTrue(full_access_decision.allowed)
         self.assertFalse(full_access_blocked_decision.allowed)
+        self.assertFalse(overwrite_decision.allowed)
+        self.assertEqual(overwrite_decision.risk, "shell_write_blocked")
         self.assertEqual(full_access_blocked_decision.risk, "shell_blocked")
 
     def test_permission_policy_rejects_read_only_mode(self):
@@ -2541,50 +2516,6 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metadata["approval_source"], "llm_auto")
         self.assertIn("network down", result.metadata["error"])
 
-    def test_interactive_session_switches_permission_mode_and_updates_context(self):
-        from harness_code_agent.core.interactive import InteractiveSession
-        from harness_code_agent.runtime.permissions import PermissionPolicy
-
-        with tempfile.TemporaryDirectory() as tmp:
-            session = InteractiveSession(cwd=tmp, profile_name="coding-agent")
-            try:
-                result = session.toggle_permission_mode()
-                self.assertTrue(session.is_bound)
-
-                session.ensure_profile_bound_for_first_task("inspect permissions")
-                metadata = session.session_store.read_metadata(session.session.id)
-
-                self.assertIn("workspace-write -> llm-auto", result)
-                self.assertEqual(session.permission_mode, "llm-auto")
-                self.assertEqual(metadata["permission_mode"], "llm-auto")
-                self.assertIsInstance(session.tool_context.permission_policy, PermissionPolicy)
-                self.assertTrue(
-                    session.tool_context.permission_policy.decide_tool_call(
-                        "run_bash",
-                        {"command": "rm -rf build"},
-                    ).requires_approval
-                )
-                from harness_code_agent.runtime.approvals import LlmAutoApprovalProvider
-                self.assertIsInstance(session.tool_context.approval_provider, LlmAutoApprovalProvider)
-
-                result = session.toggle_permission_mode()
-
-                self.assertIn("llm-auto -> danger-full-access", result)
-                self.assertEqual(session.permission_mode, "danger-full-access")
-                self.assertTrue(
-                    session.tool_context.permission_policy.decide_tool_call(
-                        "run_bash",
-                        {"command": "rm -rf build"},
-                    ).allowed
-                )
-
-                result = session.toggle_permission_mode()
-
-                self.assertIn("danger-full-access -> workspace-write", result)
-                self.assertEqual(session.permission_mode, "workspace-write")
-            finally:
-                session.close()
-
     def test_execute_tool_records_events_and_snapshots(self):
         from harness_code_agent.runtime import tools
         from harness_code_agent.runtime.permissions import PermissionPolicy
@@ -2648,7 +2579,7 @@ class ProductRuntimeTests(unittest.TestCase):
 
             blocked = middleware.before_tool(
                 "run_bash",
-                {"command": "rm -rf build"},
+                {"command": "npm install"},
                 messages=[],
                 agent_name="main_agent",
             )
@@ -2743,14 +2674,14 @@ class ProductRuntimeTests(unittest.TestCase):
                 conversation.run_until_idle()
 
             event_types = [event.type for event in context.event_bus.events]
-            self.assertIn("approval_requested", event_types)
-            self.assertIn("approval_decided", event_types)
             self.assertIn("tool_call", event_types)
             self.assertIn("tool_result", event_types)
             self.assertIn("failure", event_types)
+            self.assertNotIn("approval_requested", event_types)
+            self.assertNotIn("approval_decided", event_types)
             tool_result = next(event for event in context.event_bus.events if event.type == "tool_result")
             self.assertEqual(tool_result.payload["status"], "failed")
-            self.assertEqual(tool_result.payload["metadata"]["status_source"], "approval")
+            self.assertEqual(tool_result.payload["metadata"]["status_source"], "permission")
 
     def test_agent_loop_blocks_tool_calls_not_advertised_in_schema(self):
         from harness_code_agent.agent.conversation import Agent, AgentConversation
@@ -3191,7 +3122,7 @@ class ProductRuntimeTests(unittest.TestCase):
             )
 
             self.assertIn("[blocked]", blocked)
-            self.assertIn("blacklisted", blocked.lower())
+            self.assertIn("安全黑名单", blocked)
 
     def test_env_shell_command_requires_approval(self):
         from harness_code_agent.runtime.permissions import PermissionPolicy
@@ -3270,7 +3201,7 @@ class ProductRuntimeTests(unittest.TestCase):
 
             result = middleware.before_tool(
                 "run_bash",
-                {"command": "npm run test"},
+                {"command": "npm install"},
                 messages=[],
                 agent_name="main_agent",
             )

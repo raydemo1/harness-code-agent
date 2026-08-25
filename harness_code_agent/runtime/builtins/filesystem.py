@@ -46,13 +46,29 @@ def _change_diff(old: str | None, new: str) -> str:
             for line in difflib.unified_diff(
                 old.splitlines(), new.splitlines(), lineterm="", n=1
             )
-            if not line.startswith(("---", "+++"))
+            if not line.startswith(("--- ", "+++ "))
         ]
     if len(body) > _DIFF_MAX_LINES:
         omitted = len(body) - _DIFF_MAX_LINES
         kept = "\n".join(body[:_DIFF_MAX_LINES])
         return kept + "\n… " + str(omitted) + " more diff lines"
     return "\n".join(body)
+
+
+def _change_stats(old: str | None, new: str) -> tuple[int, int]:
+    """Return actual added/deleted line counts before the display diff is capped."""
+    if old is None:
+        return len(new.splitlines()), 0
+    body = [
+        line
+        for line in difflib.unified_diff(
+            old.splitlines(), new.splitlines(), lineterm="", n=1
+        )
+        if not line.startswith(("--- ", "+++ "))
+    ]
+    additions = sum(1 for line in body if line.startswith("+"))
+    deletions = sum(1 for line in body if line.startswith("-"))
+    return additions, deletions
 
 
 def _resolve(path: str) -> Path:
@@ -438,18 +454,18 @@ def write_file(
     metadata = {"path": path, "status_source": "native"}
     if tool_context is not None:
         workspace = tool_context.workspace
-        try:
-            old = workspace.read_text(path)
-        except (OSError, ValueError):
-            old = None
         write_result = workspace.write_text(path, content)
+        old = write_result.old_content
         rel = write_result.path.relative_to(workspace.root)
+        additions, deletions = _change_stats(old, content)
         metadata["file_changes"] = [
             {
                 "path": str(rel),
                 "operation": "write_file",
                 "snapshot_path": str(write_result.snapshot_path) if write_result.snapshot_path else None,
                 "diff": _change_diff(old, content),
+                "additions": additions,
+                "deletions": deletions,
             }
         ]
     else:
@@ -481,17 +497,15 @@ def apply_patch(
         )
     if tool_context is not None:
         workspace = tool_context.workspace
-        try:
-            old = workspace.read_text(path)
-        except (OSError, ValueError):
-            old = None
         patch_result = workspace.apply_text_patch(
             path,
             search=search,
             replace=replace,
         )
         rel = patch_result.path.relative_to(workspace.root)
-        new = workspace.read_text(path)
+        old = patch_result.old_content
+        new = patch_result.new_content
+        additions, deletions = _change_stats(old, new)
         return ToolResult(
             tool="apply_patch",
             status="success",
@@ -506,6 +520,8 @@ def apply_patch(
                         "operation": "apply_patch",
                         "snapshot_path": str(patch_result.snapshot_path) if patch_result.snapshot_path else None,
                         "diff": _change_diff(old, new),
+                        "additions": additions,
+                        "deletions": deletions,
                     }
                 ],
             },

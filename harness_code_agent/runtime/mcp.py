@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -13,13 +15,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .permissions import TOOL_PERMISSION_DANGEROUS, VALID_TOOL_PERMISSIONS
+from .permissions import (
+    TOOL_PERMISSION_DANGEROUS,
+    TOOL_PERMISSION_NETWORK_READ,
+    VALID_TOOL_PERMISSIONS,
+)
 from .tool_result import ToolResult
 
 MCP_CONFIG_RELATIVE_PATH = Path(".harness") / "mcp.json"
 MCP_TOOL_PREFIX = "mcp__"
 MCP_TOOL_NAME_LIMIT = 64
 MCP_OUTPUT_LIMIT = 60_000
+MCPORTER_CONFIG_ENV = "HARNESS_MCPORTER_CONFIG"
 
 
 class McpConfigError(ValueError):
@@ -60,11 +67,14 @@ class McpToolBinding:
         parameters = self.input_schema or {"type": "object", "properties": {}}
         if parameters.get("type") != "object":
             parameters = {"type": "object", "properties": {}, "additionalProperties": True}
+        description = self.description or f"MCP tool {self.server_name}/{self.tool_name}"
+        if _is_exa_search_tool(self):
+            description += "\n\nPreferred search tool for web research."
         return {
             "type": "function",
             "function": {
                 "name": self.exposed_name,
-                "description": self.description or f"MCP tool {self.server_name}/{self.tool_name}",
+                "description": description,
                 "parameters": parameters,
             },
         }
@@ -90,14 +100,19 @@ def load_mcp_config(workspace: str | Path) -> McpConfig:
     root = Path(workspace).resolve()
     path = root / MCP_CONFIG_RELATIVE_PATH
     if not path.exists():
-        return McpConfig(path=path)
+        mcporter_path = _find_mcporter_config(root)
+        if mcporter_path is None:
+            return McpConfig(path=path)
+        path = mcporter_path
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise McpConfigError(f"Invalid MCP config JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise McpConfigError("MCP config must be a JSON object")
-    raw_servers = data.get("servers", {})
+    raw_servers = data.get("servers")
+    if raw_servers is None and path.name == "mcporter.json":
+        raw_servers = data.get("mcpServers", {})
     if not isinstance(raw_servers, dict):
         raise McpConfigError("MCP config field 'servers' must be an object")
 
@@ -109,15 +124,22 @@ def load_mcp_config(workspace: str | Path) -> McpConfig:
             raise McpConfigError(f"MCP server {name!r} must be an object")
         if raw.get("enabled", True) is False:
             continue
+        if path.name == "mcporter.json" and name.lower() == "exa" and not _mcporter_exa_has_credentials(raw):
+            continue
 
         expanded = _expand_env(raw)
         transport = str(expanded.get("transport") or "").strip()
+        if not transport and path.name == "mcporter.json":
+            transport = _mcporter_transport(expanded)
         if transport == "streamable-http":
             transport = "streamable_http"
         if transport not in {"stdio", "streamable_http"}:
             raise McpConfigError(f"MCP server {name!r} has unsupported transport: {transport!r}")
 
-        permission = str(expanded.get("permission") or TOOL_PERMISSION_DANGEROUS)
+        default_permission = TOOL_PERMISSION_DANGEROUS
+        if path.name == "mcporter.json" and name.lower() == "exa":
+            default_permission = TOOL_PERMISSION_NETWORK_READ
+        permission = str(expanded.get("permission") or default_permission)
         _validate_permission(permission, f"server {name!r}")
         tool_permissions = _string_dict(expanded.get("tool_permissions") or {}, f"server {name!r} tool_permissions")
         for tool_name, tool_permission in tool_permissions.items():
@@ -142,7 +164,7 @@ def load_mcp_config(workspace: str | Path) -> McpConfig:
                 tool_permissions=tool_permissions,
             )
         else:
-            url = str(expanded.get("url") or "").strip()
+            url = str(expanded.get("url") or expanded.get("baseUrl") or "").strip()
             if not url:
                 raise McpConfigError(f"MCP streamable_http server {name!r} requires url")
             servers[name] = McpServerConfig(
@@ -155,6 +177,55 @@ def load_mcp_config(workspace: str | Path) -> McpConfig:
             )
 
     return McpConfig(path=path, servers=servers)
+
+
+def _find_mcporter_config(workspace: Path) -> Path | None:
+    """Find an existing MC Porter config without creating a second API config.
+
+    A workspace-local VeriForge config always wins.  The global MC Porter config
+    is intentionally considered only for the active process workspace, so unit
+    tests and programmatic sessions pointed at another directory do not
+    unexpectedly connect to the user's personal MCP servers.
+    """
+    configured = os.environ.get(MCPORTER_CONFIG_ENV, "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(workspace / ".mcporter" / "mcporter.json")
+    if workspace == Path.cwd().resolve():
+        candidates.append(Path.home() / ".mcporter" / "mcporter.json")
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _mcporter_transport(server: dict[str, Any]) -> str:
+    if server.get("command"):
+        return "stdio"
+    if server.get("baseUrl") or server.get("url"):
+        return "streamable_http"
+    return ""
+
+
+def _mcporter_exa_has_credentials(server: dict[str, Any]) -> bool:
+    """Allow Exa when its MC Porter entry contains a literal credential.
+
+    MC Porter may still use an environment placeholder in other setups, so
+    that form remains supported.  This check only prevents registering an Exa
+    server whose configured Authorization header is empty or unresolved.
+    """
+    headers = server.get("headers")
+    if not isinstance(headers, dict):
+        return False
+    authorization = headers.get("Authorization") or headers.get("authorization")
+    if not isinstance(authorization, str):
+        return False
+    value = authorization.strip()
+    if not value or "${EXA_API_KEY}" in value:
+        return bool(os.environ.get("EXA_API_KEY", "").strip())
+    return True
 
 
 class McpClientManager:
@@ -250,12 +321,26 @@ class McpClientManager:
         return _McpConnection(config=server, request_queue=request_queue, task=task), bindings
 
     def register_tools(self, registry) -> None:
+        from .execution_planner import CallEffect, ResourceClaim
+
         for binding in self.tool_bindings:
+            if binding.annotations.get("readOnlyHint") is True:
+                effect = CallEffect(
+                    (ResourceClaim("mcp", binding.server_name, "exact", "read"),),
+                    concurrency_key="network",
+                    kind="mcp_read",
+                )
+            else:
+                effect = CallEffect(
+                    (ResourceClaim("mcp", binding.server_name, "exact", "write"),),
+                    kind="mcp_server_write",
+                )
             registry.register(
                 binding.schema(),
                 self._handler_for(binding),
                 permission=binding.permission,
-                disclosure="deferred",
+                effect=effect,
+                disclosure="core" if _is_exa_search_tool(binding) else "deferred",
             )
 
     def call_tool(self, exposed_name: str, arguments: dict[str, Any]) -> ToolResult:
@@ -268,6 +353,8 @@ class McpClientManager:
                 error=f"Unknown MCP tool: {exposed_name}",
                 metadata={"status_source": "mcp"},
             )
+        if self._uses_mcporter_cli(binding):
+            return self._call_via_mcporter(binding, arguments)
         connection = self._connections.get(binding.server_name)
         if connection is None:
             return ToolResult(
@@ -288,6 +375,91 @@ class McpClientManager:
                 error=error,
                 metadata={"status_source": "mcp", "server": binding.server_name, "tool": binding.tool_name},
             )
+
+    def _uses_mcporter_cli(self, binding: McpToolBinding) -> bool:
+        return self.config.path.name == "mcporter.json" and binding.server_name in self.config.servers
+
+    def _call_via_mcporter(self, binding: McpToolBinding, arguments: dict[str, Any]) -> ToolResult:
+        command = _mcporter_cli_command()
+        if command is None:
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output="[error] mcporter command not found",
+                error="mcporter command not found",
+                metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+            )
+        argv = command + [
+            "--config",
+            str(self.config.path),
+            "call",
+            f"{binding.server_name}.{binding.tool_name}",
+            "--args",
+            json.dumps(dict(arguments or {}), ensure_ascii=False, separators=(",", ":")),
+            "--output",
+            "json",
+        ]
+        environment = os.environ.copy()
+        server = self.config.servers.get(binding.server_name)
+        if server is not None and _has_literal_authorization(server.headers):
+            environment.pop("EXA_API_KEY", None)
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=str(self.workspace),
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output="[error] mcporter call timed out",
+                error="mcporter call timed out",
+                metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+            )
+        except OSError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output=f"[error] mcporter call failed: {error}",
+                error=error,
+                metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+            )
+
+        raw_output = completed.stdout.strip()
+        if completed.returncode != 0:
+            error = completed.stderr.strip() or raw_output or f"mcporter exited with code {completed.returncode}"
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output=f"[error] {error}",
+                error=error,
+                metadata={
+                    "status_source": "mcporter",
+                    "server": binding.server_name,
+                    "tool": binding.tool_name,
+                    "return_code": completed.returncode,
+                },
+            )
+        try:
+            payload = json.loads(raw_output)
+        except json.JSONDecodeError as exc:
+            error = f"mcporter returned invalid JSON: {exc}"
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output=f"[error] {error}",
+                error=error,
+                metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+            )
+        return _mcporter_json_to_tool_result(binding, payload)
 
     def status_report(self) -> str:
         lines = ["MCP status"]
@@ -328,7 +500,9 @@ class McpClientManager:
             return sorted(self.config.servers)
         try:
             data = json.loads(self.config.path.read_text(encoding="utf-8"))
-            servers = data.get("servers", {}) if isinstance(data, dict) else {}
+            servers = data.get("servers") if isinstance(data, dict) else None
+            if servers is None and self.config.path.name == "mcporter.json":
+                servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
             return sorted(str(name) for name in servers if isinstance(name, str))
         except (OSError, json.JSONDecodeError, AttributeError):
             return sorted(self.config.servers)
@@ -380,6 +554,8 @@ class McpClientManager:
         except (OSError, json.JSONDecodeError) as exc:
             raise McpConfigError(f"无法读取 MCP 配置：{exc}") from exc
         servers = data.get("servers") if isinstance(data, dict) else None
+        if servers is None and self.config.path.name == "mcporter.json":
+            servers = data.get("mcpServers") if isinstance(data, dict) else None
         if not isinstance(servers, dict) or server_name not in servers:
             return f"MCP 服务不存在：{server_name}"
         entry = servers[server_name]
@@ -425,6 +601,7 @@ class McpClientManager:
 
         stack = contextlib.AsyncExitStack()
         close_response: asyncio.Future | None = None
+        active_calls: set[asyncio.Task] = set()
         try:
             if server.transport == "stdio":
                 params = StdioServerParameters(
@@ -451,18 +628,9 @@ class McpClientManager:
             if not ready.done():
                 ready.set_result(bindings)
 
-            while True:
-                kind, payload, response = await request_queue.get()
-                if kind == "close":
-                    close_response = response
-                    break
-                if kind != "call":
-                    if not response.done():
-                        response.set_exception(ValueError(f"Unknown MCP worker request: {kind}"))
-                    continue
-                binding, arguments = payload
+            async def execute_call(binding, arguments, response) -> None:
                 if response.cancelled():
-                    continue
+                    return
                 try:
                     result = await session.call_tool(binding.tool_name, arguments)
                     tool_result = mcp_result_to_tool_result(binding.exposed_name, result, binding=binding)
@@ -472,12 +640,32 @@ class McpClientManager:
                 else:
                     if not response.done():
                         response.set_result(tool_result)
+
+            while True:
+                kind, payload, response = await request_queue.get()
+                if kind == "close":
+                    close_response = response
+                    if active_calls:
+                        await asyncio.gather(*active_calls, return_exceptions=True)
+                    break
+                if kind != "call":
+                    if not response.done():
+                        response.set_exception(ValueError(f"Unknown MCP worker request: {kind}"))
+                    continue
+                binding, arguments = payload
+                task = asyncio.create_task(execute_call(binding, arguments, response))
+                active_calls.add(task)
+                task.add_done_callback(active_calls.discard)
         except Exception as exc:
             if not ready.done():
                 ready.set_exception(exc)
             raise
         finally:
             close_error: Exception | None = None
+            for task in active_calls:
+                task.cancel()
+            if active_calls:
+                await asyncio.gather(*active_calls, return_exceptions=True)
             try:
                 await stack.aclose()
             except Exception as exc:
@@ -594,6 +782,78 @@ def _bindings_for_server(server: McpServerConfig, mcp_tools: list[Any]) -> list[
             )
         )
     return bindings
+
+
+def _is_exa_search_tool(binding: McpToolBinding) -> bool:
+    identity = f"{binding.server_name} {binding.tool_name}".lower()
+    return "exa" in identity and "search" in identity
+
+
+def _mcporter_cli_command() -> list[str] | None:
+    executable = shutil.which("mcporter")
+    if not executable:
+        return None
+    path = Path(executable)
+    suffix = path.suffix.lower()
+    if suffix == ".ps1":
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        return [shell, "-NoProfile", "-NonInteractive", "-File", str(path)] if shell else None
+    if suffix in {".cmd", ".bat"}:
+        shell = shutil.which("cmd.exe") or shutil.which("cmd")
+        return [shell, "/d", "/c", str(path)] if shell else None
+    return [str(path)]
+
+
+def _has_literal_authorization(headers: dict[str, str]) -> bool:
+    authorization = headers.get("Authorization") or headers.get("authorization") or ""
+    return bool(authorization.strip()) and "${" not in authorization
+
+
+def _mcporter_json_to_tool_result(binding: McpToolBinding, payload: Any) -> ToolResult:
+    if not isinstance(payload, dict):
+        output = str(payload)
+        return ToolResult(
+            tool=binding.exposed_name,
+            status="success",
+            output=output,
+            metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+        )
+    parts = [
+        _mcporter_content_item_to_text(item)
+        for item in list(payload.get("content") or [])
+        if isinstance(item, dict)
+    ]
+    structured = payload.get("structuredContent")
+    if structured is not None:
+        parts.append("structuredContent:\n" + json.dumps(structured, ensure_ascii=False, indent=2, sort_keys=True))
+    output = "\n\n".join(part for part in parts if part)
+    if len(output) > MCP_OUTPUT_LIMIT:
+        output = output[:MCP_OUTPUT_LIMIT] + f"\n\n[TRUNCATED: {len(output) - MCP_OUTPUT_LIMIT} chars omitted]"
+    is_error = bool(payload.get("isError"))
+    return ToolResult(
+        tool=binding.exposed_name,
+        status="failed" if is_error else "success",
+        output=output,
+        error="mcporter tool returned isError=true" if is_error else None,
+        metadata={
+            "status_source": "mcporter",
+            "server": binding.server_name,
+            "tool": binding.tool_name,
+        },
+    )
+
+
+def _mcporter_content_item_to_text(item: dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "")
+    if item_type == "text":
+        return str(item.get("text") or "")
+    if item_type in {"image", "audio"}:
+        data = str(item.get("data") or "")
+        mime = str(item.get("mimeType") or "application/octet-stream")
+        return f"[{item_type} {mime}, {len(data)} base64 chars omitted]"
+    if item_type == "resource_link":
+        return f"[resource_link {item.get('name') or ''} {item.get('uri') or ''}]"
+    return f"[{item_type or 'unknown'} content omitted]"
 
 
 def _content_item_to_text(item: Any) -> str:

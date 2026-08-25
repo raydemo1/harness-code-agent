@@ -58,8 +58,8 @@ class CodingAgentProfile(BaseProfile):
                     "Use repository tools for inspection and the shell for reproduction, tests, builds, "
                     "and other execution. Treat command output as evidence: classify failures and change "
                     "strategy instead of repeating hopeful variants. Delegation can sharpen investigation, "
-                    "test design, review, verification, or isolated patch drafting, but perform all real "
-                    "workspace edits and integration yourself."
+                    "test design, review, verification, or isolated worker implementation. Review and "
+                    "explicitly apply worker proposals before integration."
                 ),
                 boundaries=(
                     "Keep unrelated refactors out of scope and do not add speculative extension points. "

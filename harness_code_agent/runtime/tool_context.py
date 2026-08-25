@@ -6,10 +6,12 @@ from typing import TYPE_CHECKING
 from ..sessions.events import EventBus
 from ..workspace.service import WorkspaceService
 from .approvals import ApprovalProvider, NoApprovalProvider
+from .execution_planner import ResourceCoordinator
 from .permissions import PermissionPolicy
 from .questions import NoQuestionProvider, QuestionProvider
 
 if TYPE_CHECKING:
+    from ..agent.coordinator import AgentCoordinator
     from .tool_registry import ToolRegistry
 
 
@@ -25,3 +27,5 @@ class ToolContext:
     allowed_tool_permissions: set[str] | None = None
     blocked_tool_names: set[str] = field(default_factory=set)
     revealed_tool_names: set[str] = field(default_factory=set)
+    resource_coordinator: ResourceCoordinator = field(default_factory=ResourceCoordinator)
+    agent_coordinator: AgentCoordinator | None = None

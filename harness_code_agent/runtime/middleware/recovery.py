@@ -1,10 +1,10 @@
 """Recovery strategy middleware."""
 from __future__ import annotations
 
+import re
 from typing import ClassVar
 
-from ..permissions import is_read_only_command
-from ..shell_classification import classify_safe_shell_command
+from ..permissions import is_workspace_write_command
 from ..tool_result import ToolResult
 from .base import (
     MAIN_AGENT_NAMES,
@@ -26,15 +26,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
         "no module named",
         "modulenotfounderror",
     )
-    ACTION_TOOLS: ClassVar[set] = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
-    VERIFICATION_FAILURE_PATTERNS = (
-        "assert",
-        "failed",
-        "failure",
-        "mismatch",
-        "expected",
-        "traceback",
-    )
+    ACTION_TOOLS: ClassVar[set] = {"run_bash", "write_file", "apply_patch", "spawn_agent", "apply_agent_changes", "resolve_agent_conflicts", "browser_test"}
 
     def __init__(self):
         self._edit_attempts: dict[str, int] = {}
@@ -78,7 +70,15 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
 
     def _looks_like_verification_failure(self, text: str) -> bool:
         lowered = text.lower()
-        return any(pattern in lowered for pattern in self.VERIFICATION_FAILURE_PATTERNS)
+        return any(
+            re.search(pattern, lowered)
+            for pattern in (
+                r"\bpytest\b.*\b(?:failed|failure|error)\b",
+                r"\b(?:assertionerror|assertion failed)\b",
+                r"\bfailed\b.*\b(?:test|assert|expected|got)\b",
+                r"\bexpected\b.*\b(?:got|received|but)\b",
+            )
+        )
 
     def observe_tool_result(self, tool_name: str, tool_args: dict, result: ToolResult, runtime_state) -> None:
         if runtime_state is None:
@@ -136,22 +136,24 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
                 return None
             if runtime_state.recovery.probe_in_flight:
                 return "[blocked] Recovery probe is already in flight; wait for its result before another action."
-            if tool_name == "run_bash" and is_read_only_command(tool_args.get("command", "")):
+            if tool_name == "run_bash" and not is_workspace_write_command(tool_args.get("command", "")):
                 return None
             runtime_state.recovery.mode = "NORMAL"
             runtime_state.task_board.requires_update = False
             return None
 
         if mode == "ENV_FIX":
-            if tool_name in {"write_file", "delegate_agent"}:
+            if tool_name in {"write_file", "spawn_agent", "apply_agent_changes", "resolve_agent_conflicts"}:
                 return "[blocked] Recovery mode ENV_FIX only allows diagnosis, installation, and environment repair actions."
             return None
 
         if mode == "SPEC_RECHECK":
-            if tool_name in {"write_file", "delegate_agent"}:
-                return "[blocked] Recovery mode SPEC_RECHECK is read-only. Re-read the task and verification outputs first."
-            if tool_name == "run_bash" and not is_read_only_command(tool_args.get("command", "")):
-                return "[blocked] Recovery mode SPEC_RECHECK only allows read-only verification commands."
+            if tool_name in {"write_file", "spawn_agent", "apply_agent_changes", "resolve_agent_conflicts"}:
+                return "[blocked] Recovery mode SPEC_RECHECK requires rechecking the task and verification outputs before file edits or delegation."
+            # There is no positive shell-command whitelist here. Ordinary
+            # shell calls continue through the normal permission pipeline;
+            # direct writes and explicitly dangerous commands are enforced by
+            # the shared policy.
             return None
 
         if mode == "RETHINK":
@@ -160,7 +162,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             return None
 
         if mode == "FINAL_VERIFY":
-            if tool_name in {"delegate_agent", "web_search", "web_fetch"}:
+            if tool_name in {"spawn_agent", "web_search", "web_fetch"}:
                 return "[blocked] Recovery mode FINAL_VERIFY only allows direct verification and final fixes."
             return None
 
@@ -179,7 +181,7 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             and runtime_state is not None
             and runtime_state.recovery.mode == "PROBE"
             and tool_name == "run_bash"
-            and is_read_only_command(tool_args.get("command", ""))
+            and not is_workspace_write_command(tool_args.get("command", ""))
         ):
             runtime_state.recovery.probe_in_flight = True
 
@@ -232,13 +234,10 @@ class RecoveryStrategyMiddleware(AgentMiddleware):
             if (
                 runtime_state.recovery.mode == "ENV_FIX"
                 and command
-                and not is_read_only_command(command)
+                and is_workspace_write_command(command)
             ):
                 self._clear_mode(runtime_state)
-            elif (
-                classify_safe_shell_command(command) == "verify"
-                and self._looks_like_verification_failure(result_text(result))
-            ):
+            elif self._looks_like_verification_failure(result_text(result)):
                 self.observe_verification_failure(result_text(result), runtime_state)
 
         if tool_name == "update_plan_state" and runtime_state.recovery.mode == "SPEC_RECHECK":

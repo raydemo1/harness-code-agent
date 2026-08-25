@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import threading
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -12,6 +13,7 @@ from typing import ClassVar
 class WorkspaceWriteResult:
     path: Path
     snapshot_path: Path | None
+    old_content: str | None = None
 
 
 @dataclass
@@ -19,14 +21,15 @@ class WorkspacePatchResult:
     path: Path
     snapshot_path: Path | None
     replacements: int
+    old_content: str = ""
+    new_content: str = ""
 
 
 class WorkspaceService:
     """Workspace path resolution and file snapshot service.
 
-    The internal lock serializes reads, writes, snapshots, and changed_files
-    bookkeeping for this service instance. Global cross-agent isolation is still
-    provided by the tool executor's group barrier.
+    Per-path locks keep each file transaction atomic without serializing
+    unrelated files. Metadata bookkeeping has its own short critical section.
     """
 
     DEFAULT_PROTECTED_NAMES: ClassVar[set] = {".env", ".env.local", ".env.production"}
@@ -42,7 +45,9 @@ class WorkspaceService:
         self.snapshots_dir = Path(snapshots_dir).resolve() if snapshots_dir else self.root / ".harness" / "snapshots"
         self.protected_names = protected_names or self.DEFAULT_PROTECTED_NAMES
         self.changed_files: list[Path] = []
-        self._lock = threading.RLock()
+        self._metadata_lock = threading.RLock()
+        self._path_locks_lock = threading.Lock()
+        self._path_locks: dict[str, threading.RLock] = {}
 
     def resolve(self, path: str | Path) -> Path:
         raw = Path(path)
@@ -55,20 +60,61 @@ class WorkspaceService:
         return candidate
 
     def read_text(self, path: str | Path) -> str:
-        with self._lock:
-            return self.resolve(path).read_text(encoding="utf-8", errors="replace")
+        resolved = self.resolve(path)
+        with self._path_lock(resolved):
+            return resolved.read_text(encoding="utf-8", errors="replace")
 
     def write_text(self, path: str | Path, content: str) -> WorkspaceWriteResult:
-        with self._lock:
-            resolved = self.resolve(path)
+        resolved = self.resolve(path)
+        with self._path_lock(resolved):
             self._ensure_writable(resolved)
-            snapshot_path = self.snapshot(path) if resolved.exists() else None
+            old_content = resolved.read_text(encoding="utf-8", errors="replace") if resolved.exists() else None
+            snapshot_path = self._snapshot_unlocked(resolved) if resolved.exists() else None
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8")
             rel = resolved.relative_to(self.root)
-            if rel not in self.changed_files:
-                self.changed_files.append(rel)
-            return WorkspaceWriteResult(path=resolved, snapshot_path=snapshot_path)
+            self._record_changed(rel)
+            return WorkspaceWriteResult(path=resolved, snapshot_path=snapshot_path, old_content=old_content)
+
+    def write_text_batch(self, changes: dict[str, str]) -> list[WorkspaceWriteResult]:
+        """Apply a validated text change set, rolling every file back on failure."""
+        if not changes:
+            return []
+        resolved_changes = {
+            self.resolve(path): str(content)
+            for path, content in changes.items()
+        }
+        ordered = sorted(resolved_changes, key=lambda path: str(path).casefold())
+        with ExitStack() as stack:
+            for path in ordered:
+                stack.enter_context(self._path_lock(path))
+            originals: dict[Path, tuple[bool, str | None]] = {}
+            results: list[WorkspaceWriteResult] = []
+            for path in ordered:
+                self._ensure_writable(path)
+                existed = path.exists()
+                if existed and not path.is_file():
+                    raise ValueError(f"Refusing to replace non-file path: {path.relative_to(self.root)}")
+                old_content = path.read_text(encoding="utf-8", errors="replace") if existed else None
+                originals[path] = (existed, old_content)
+                snapshot_path = self._snapshot_unlocked(path) if existed else None
+                results.append(WorkspaceWriteResult(path=path, snapshot_path=snapshot_path, old_content=old_content))
+            try:
+                for path in ordered:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(resolved_changes[path], encoding="utf-8")
+            except Exception:
+                for path in reversed(ordered):
+                    existed, old_content = originals[path]
+                    if existed:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(old_content or "", encoding="utf-8")
+                    elif path.exists():
+                        path.unlink()
+                raise
+            for path in ordered:
+                self._record_changed(path.relative_to(self.root))
+            return results
 
     def apply_text_patch(
         self,
@@ -77,10 +123,10 @@ class WorkspaceService:
         search: str,
         replace: str,
     ) -> WorkspacePatchResult:
-        with self._lock:
+        resolved = self.resolve(path)
+        with self._path_lock(resolved):
             if not search:
                 raise ValueError("Patch search text must not be empty")
-            resolved = self.resolve(path)
             self._ensure_writable(resolved)
             if not resolved.exists() or not resolved.is_file():
                 raise FileNotFoundError(f"File not found: {path}")
@@ -88,16 +134,22 @@ class WorkspaceService:
             count = original.count(search)
             if count != 1:
                 raise ValueError(f"Patch search text must match exactly once; found {count}")
-            snapshot_path = self.snapshot(path)
-            resolved.write_text(original.replace(search, replace, 1), encoding="utf-8")
+            snapshot_path = self._snapshot_unlocked(resolved)
+            updated = original.replace(search, replace, 1)
+            resolved.write_text(updated, encoding="utf-8")
             rel = resolved.relative_to(self.root)
-            if rel not in self.changed_files:
-                self.changed_files.append(rel)
-            return WorkspacePatchResult(path=resolved, snapshot_path=snapshot_path, replacements=1)
+            self._record_changed(rel)
+            return WorkspacePatchResult(
+                path=resolved,
+                snapshot_path=snapshot_path,
+                replacements=1,
+                old_content=original,
+                new_content=updated,
+            )
 
     def rollback_latest_snapshot(self, path: str | Path) -> WorkspaceWriteResult:
-        with self._lock:
-            resolved = self.resolve(path)
+        resolved = self.resolve(path)
+        with self._path_lock(resolved):
             self._ensure_writable(resolved)
             rel = resolved.relative_to(self.root)
             snapshot_dir = self.snapshots_dir / rel.parent
@@ -109,28 +161,41 @@ class WorkspaceService:
             )
             if not snapshots:
                 raise FileNotFoundError(f"No snapshot found for: {rel}")
-            rollback_snapshot = self.snapshot(path) if resolved.exists() else None
+            old_content = resolved.read_text(encoding="utf-8", errors="replace") if resolved.exists() else None
+            rollback_snapshot = self._snapshot_unlocked(resolved) if resolved.exists() else None
             resolved.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(snapshots[0], resolved)
-            if rel not in self.changed_files:
-                self.changed_files.append(rel)
-            return WorkspaceWriteResult(path=resolved, snapshot_path=rollback_snapshot)
+            self._record_changed(rel)
+            return WorkspaceWriteResult(path=resolved, snapshot_path=rollback_snapshot, old_content=old_content)
 
     def snapshot(self, path: str | Path) -> Path | None:
-        with self._lock:
-            resolved = self.resolve(path)
-            if not resolved.exists() or not resolved.is_file():
-                return None
-            rel = resolved.relative_to(self.root)
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            snapshot_path = self.snapshots_dir / rel.parent / f"{resolved.name}.{stamp}.bak"
-            suffix = 1
-            while snapshot_path.exists():
-                snapshot_path = self.snapshots_dir / rel.parent / f"{resolved.name}.{stamp}.{suffix}.bak"
-                suffix += 1
-            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(resolved, snapshot_path)
-            return snapshot_path
+        resolved = self.resolve(path)
+        with self._path_lock(resolved):
+            return self._snapshot_unlocked(resolved)
+
+    def _snapshot_unlocked(self, resolved: Path) -> Path | None:
+        if not resolved.exists() or not resolved.is_file():
+            return None
+        rel = resolved.relative_to(self.root)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        snapshot_path = self.snapshots_dir / rel.parent / f"{resolved.name}.{stamp}.bak"
+        suffix = 1
+        while snapshot_path.exists():
+            snapshot_path = self.snapshots_dir / rel.parent / f"{resolved.name}.{stamp}.{suffix}.bak"
+            suffix += 1
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(resolved, snapshot_path)
+        return snapshot_path
+
+    def _path_lock(self, resolved: Path) -> threading.RLock:
+        key = str(resolved).casefold()
+        with self._path_locks_lock:
+            return self._path_locks.setdefault(key, threading.RLock())
+
+    def _record_changed(self, rel: Path) -> None:
+        with self._metadata_lock:
+            if rel not in self.changed_files:
+                self.changed_files.append(rel)
 
     _SAFE_ENV_SUFFIXES: ClassVar[set] = {'.example', '.template', '.sample', '.default', '.dist'}
 

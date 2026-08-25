@@ -90,8 +90,8 @@ class TerminalProfile(BaseProfile):
                     "Follow the task's exact external contract: preserve literal field/function names, hosts, "
                     "ports, URLs, protocols, branches, paths, filenames, shapes, signals/process behavior, "
                     "formats, and exact output. "
-                    "Prefer command-driven evidence and syntax that matches the active shell. run_bash uses one "
-                    "persistent shell session, so preserve useful cwd and environment state deliberately. For "
+                    "Prefer command-driven evidence and syntax that matches the active shell. Each run_bash call "
+                    "starts from the workspace root with fresh shell state, so keep dependent steps in one command. For "
                     "background services, verify readiness separately and capture the exact process, port, or "
                     "path evidence. When the task gives a user-visible workflow or command sequence, validation "
                     "should replay that literal workflow; do not replace it with a local substitute unless you "
@@ -117,7 +117,7 @@ class TerminalProfile(BaseProfile):
                     "mutations; constrain shell writes to the task workspace, preview or explain broad edits "
                     "before applying them, and follow mutations with verification or a convergence check. "
                     "Use delegation for parallel exploration, test design, independent review, verification, "
-                    "or isolated patch proposals when that reduces hidden-verifier risk; never treat delegated "
+                    "or isolated worker proposals when that reduces hidden-verifier risk; never treat delegated "
                     "output as completed work until you integrate and verify it yourself."
                 ),
                 completion=(

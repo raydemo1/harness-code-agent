@@ -10,11 +10,18 @@ from __future__ import annotations
 import os
 
 from .. import config
-from ..agent.delegation import (
-    DELEGATE_AGENT_PROFILES,
-    DelegatePolicyMiddleware,
-    delegate_agent,
-    delegate_tool_schemas_for_profile,
+from .builtins.agents import (
+    apply_agent_changes,
+    close_agent,
+    followup_agent,
+    interrupt_agent,
+    list_agents,
+    read_agent_changes,
+    read_agent_conflicts,
+    resolve_agent_conflicts,
+    send_agent_message,
+    spawn_agent,
+    wait_agents,
 )
 from .builtins.browser import browser_test, stop_dev_server
 from .builtins.discovery import tool_search
@@ -31,7 +38,6 @@ from .builtins.filesystem import (
 )
 from .builtins.interaction import ask_user
 from .builtins.memory_tools import memory_search, read_memory_file, remember_memory
-from .builtins.parallel import parallel_agents, parallel_commands
 from .builtins.planning import update_plan_state
 from .builtins.registry import BUILTIN_TOOL_REGISTRY, TOOL_SCHEMAS
 from .builtins.schemas import BROWSER_TOOL_SCHEMAS, CORE_TOOL_SCHEMAS
@@ -43,8 +49,13 @@ from .builtins.shell import (
     stop_shell_job,
 )
 from .builtins.web import web_fetch, web_search
+from .execution_planner import (
+    CallEffect,
+    ExecutionPlanner,
+    ResourceClaim,
+    ResourceCoordinator,
+)
 from .tool_registry import (
-    ToolExecutionLane,
     ToolRegistry,
     ToolSpec,
     tool_schemas_for_profile,
