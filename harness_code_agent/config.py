@@ -40,6 +40,16 @@ BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 BASE_MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
 PROVIDER = os.environ.get("HARNESS_PROVIDER", "auto")
 STREAM = os.environ.get("HARNESS_STREAM", "auto")
+MODEL_INPUT_MODE = os.environ.get("HARNESS_MODEL_INPUT_MODE", "text").strip().lower()
+if MODEL_INPUT_MODE not in {"text", "multimodal"}:
+    raise ValueError("HARNESS_MODEL_INPUT_MODE must be 'text' or 'multimodal'")
+
+# A streaming response must make progress periodically.  This is deliberately
+# shorter than the general client timeout so a half-open model stream cannot
+# occupy the agent worker for several retry windows.
+LLM_STREAM_IDLE_TIMEOUT_SECONDS = float(
+    os.environ.get("HARNESS_LLM_STREAM_IDLE_TIMEOUT_SECONDS", "60")
+)
 
 MODEL_INTENSITIES = ("fast", "normal", "hard", "max")
 MODEL_OVERRIDES = {
@@ -54,6 +64,7 @@ class ModelProfile:
     model: str
     thinking: bool | None = None
     reasoning_effort: str | None = None
+    input_mode: str = "text"
 
 
 def _normalize_model_intensity(value: str | None) -> str:
@@ -110,6 +121,15 @@ def resolve_model_profile(intensity: str) -> ModelProfile:
             model=override_model,
             thinking=profile.thinking,
             reasoning_effort=profile.reasoning_effort,
+            input_mode=MODEL_INPUT_MODE,
+        )
+    elif profile.input_mode != MODEL_INPUT_MODE:
+        profile = ModelProfile(
+            provider=profile.provider,
+            model=profile.model,
+            thinking=profile.thinking,
+            reasoning_effort=profile.reasoning_effort,
+            input_mode=MODEL_INPUT_MODE,
         )
     return profile
 

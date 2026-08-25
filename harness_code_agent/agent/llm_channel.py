@@ -17,6 +17,58 @@ from .utils import _usage_to_dict
 log = logging.getLogger("harness")
 
 
+class LlmStreamTimeoutError(TimeoutError):
+    """Raised when a streaming model response stops making progress."""
+
+
+class MultimodalRequestError(RuntimeError):
+    """Configured endpoint rejected an image request."""
+
+
+def _is_multimodal_rejection(exc: Exception, messages: object) -> bool:
+    if not isinstance(messages, list) or not any(
+        isinstance(message, dict)
+        and isinstance(message.get("content"), list)
+        and any(
+            isinstance(block, dict) and block.get("type") in {"image_url", "file"}
+            for block in message["content"]
+        )
+        for message in messages
+    ):
+        return False
+    status_code = getattr(exc, "status_code", None)
+    if status_code in {400, 415, 422}:
+        return True
+    detail = str(exc).lower()
+    return any(token in detail for token in ("unsupported", "image", "pdf", "file", "content type", "multimodal"))
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    error_name = type(exc).__name__.lower()
+    return (
+        isinstance(exc, TimeoutError)
+        or "timeout" in error_name
+        or "timed out" in str(exc).lower()
+    )
+
+
+def _stream_client(client):
+    timeout = max(1.0, config.LLM_STREAM_IDLE_TIMEOUT_SECONDS)
+    with_options = getattr(client, "with_options", None)
+    if not callable(with_options):
+        return client
+    return with_options(timeout=timeout, max_retries=0)
+
+
+def _reset_client_after_stream_timeout(conv) -> None:
+    try:
+        conv.client.close()
+    except (OSError, RuntimeError):
+        pass
+    reset_client()
+    conv._client_needs_refresh = True
+
+
 def llm_call_simple(messages: list[dict]) -> str:
     """Simple LLM call without tools — used for summarization.
     Retries on rate limits to avoid crashing the agent during context compaction."""
@@ -65,6 +117,21 @@ class LlmChannel:
             conv.emitter.emit_llm_request_started(call_id, streamed=True, model=str(stream_kwargs.get("model") or config.MODEL))
             saw_chunk = False
             thought_start_time: float | None = None
+            thought_finished = False
+
+            def finish_thought() -> None:
+                nonlocal thought_finished
+                if thought_start_time is None or thought_finished:
+                    return
+                thought_finished = True
+                if conv.event_bus is not None:
+                    from ..sessions.events import ThoughtFinishedEvent
+                    conv.event_bus.emit_event(
+                        ThoughtFinishedEvent(
+                            duration_seconds=time.time() - thought_start_time,
+                            source=conv.provider.name,
+                        ).to_event()
+                    )
 
             def on_chunk() -> None:
                 nonlocal saw_chunk
@@ -72,6 +139,7 @@ class LlmChannel:
 
             def on_text_delta(delta: str) -> None:
                 nonlocal first_token_ms
+                finish_thought()
                 if first_token_ms is None:
                     first_token_ms = int((time.perf_counter() - request_started) * 1000)
                     conv.emitter.emit_llm_first_token(call_id, first_token_ms, model=str(stream_kwargs.get("model") or config.MODEL))
@@ -80,6 +148,8 @@ class LlmChannel:
 
             def on_reasoning_start() -> None:
                 nonlocal thought_start_time
+                if thought_start_time is not None or thought_finished:
+                    return
                 thought_start_time = time.time()
                 if conv.event_bus is not None:
                     from ..sessions.events import ThoughtStartedEvent
@@ -92,7 +162,7 @@ class LlmChannel:
             try:
                 if conv.provider.supports_prompt_cache_key:
                     stream_kwargs.setdefault("stream_options", {"include_usage": True})
-                stream = conv.client.chat.completions.create(**stream_kwargs)
+                stream = _stream_client(conv.client).chat.completions.create(**stream_kwargs)
                 result = conv.provider.assistant_message_from_stream(
                     stream,
                     on_text_delta=on_text_delta,
@@ -101,15 +171,7 @@ class LlmChannel:
                     on_reasoning_delta=on_reasoning_delta,
                     cancellation_token=cancellation_token,
                 )
-                if thought_start_time is not None and conv.event_bus is not None:
-                    duration = time.time() - thought_start_time
-                    from ..sessions.events import ThoughtFinishedEvent
-                    conv.event_bus.emit_event(
-                        ThoughtFinishedEvent(
-                            duration_seconds=duration,
-                            source=conv.provider.name,
-                        ).to_event()
-                    )
+                finish_thought()
                 conv.emitter.emit_llm_response_finished(
                     call_id,
                     int((time.perf_counter() - request_started) * 1000),
@@ -125,6 +187,14 @@ class LlmChannel:
             except Exception as exc:
                 if cancellation_token is not None and cancellation_token.is_cancelled:
                     raise CancelledError("Turn cancelled by user") from exc
+                if _is_timeout_error(exc):
+                    _reset_client_after_stream_timeout(conv)
+                    raise LlmStreamTimeoutError("模型响应等待超时，请重试") from exc
+                if _is_multimodal_rejection(exc, kwargs.get("messages")):
+                    raise MultimodalRequestError(
+                        "当前 endpoint 拒绝了图片输入。请检查模型的多模态能力和 "
+                        "HARNESS_MODEL_INPUT_MODE 配置；VeriForge 不会自动切换模型或本地降级。"
+                    ) from exc
                 if saw_chunk:
                     raise
                 conv.trace.error("stream_fallback", str(exc))
@@ -141,6 +211,11 @@ class LlmChannel:
         except Exception as exc:
             if cancellation_token is not None and cancellation_token.is_cancelled:
                 raise CancelledError("Turn cancelled by user") from exc
+            if _is_multimodal_rejection(exc, kwargs.get("messages")):
+                raise MultimodalRequestError(
+                    "当前 endpoint 拒绝了图片输入。请检查模型的多模态能力和 "
+                    "HARNESS_MODEL_INPUT_MODE 配置；VeriForge 不会自动切换模型或本地降级。"
+                ) from exc
             raise
         finally:
             remove_cancel_callback()
@@ -159,7 +234,6 @@ class LlmChannel:
         conv.record_llm_usage(_usage_to_dict(getattr(response, "usage", None)), kwargs.get("prompt_cache_key"))
 
         return conv.provider.assistant_message_from_response(choice.message), choice.finish_reason
-
     def _interrupt_client_on_cancel(self, cancellation_token):
         if cancellation_token is None:
             return lambda: None

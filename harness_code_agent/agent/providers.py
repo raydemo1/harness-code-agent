@@ -87,7 +87,7 @@ class ProviderAdapter:
             raise ValueError("model or profile is required")
         kwargs = {
             "model": model,
-            "messages": _strip_response_only_message_fields(messages),
+            "messages": _strip_response_only_message_fields(messages, provider_name=self.name),
             "max_tokens": max_tokens,
         }
         if tools is not None:
@@ -244,17 +244,42 @@ def _reasoning_content_from(value) -> str | None:
     return reasoning_content
 
 
-def _strip_response_only_message_fields(messages: list[dict]) -> list[dict]:
+def _strip_response_only_message_fields(
+    messages: list[dict],
+    *,
+    provider_name: str | None = None,
+) -> list[dict]:
     """Return provider-bound messages without response-only bookkeeping fields."""
     cleaned: list[dict] = []
     for message in messages:
         if not isinstance(message, dict):
             cleaned.append(message)
             continue
-        if "reasoning_content" not in message:
+        content = message.get("content")
+        has_internal_attachment_metadata = isinstance(content, list) and any(
+            isinstance(block, dict) and "attachment" in block for block in content
+        )
+        if "reasoning_content" not in message and not has_internal_attachment_metadata:
             cleaned.append(message)
             continue
         outbound = dict(message)
         outbound.pop("reasoning_content", None)
+        if has_internal_attachment_metadata:
+            outbound["content"] = [_provider_content_block(block, provider_name) for block in content]
         cleaned.append(outbound)
+    return cleaned
+
+
+def _provider_content_block(block, provider_name: str | None):
+    if not isinstance(block, dict):
+        return block
+    cleaned = {key: value for key, value in block.items() if key != "attachment"}
+    if provider_name == "deepseek" and cleaned.get("type") == "file":
+        file_payload = cleaned.pop("file", None)
+        if isinstance(file_payload, dict):
+            cleaned.update({
+                key: file_payload[key]
+                for key in ("file_id", "file_data", "filename")
+                if file_payload.get(key) is not None
+            })
     return cleaned

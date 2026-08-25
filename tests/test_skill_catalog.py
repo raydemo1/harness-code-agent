@@ -110,6 +110,8 @@ class SkillCatalogTests(unittest.TestCase):
             "code-review",
             "frontend-debugging",
             "writing-for-agents",
+            "pdf",
+            "docx",
         ]:
             with self.subTest(skill=skill_name):
                 self.assertIn(f"**{skill_name}**", prompt)
@@ -136,6 +138,25 @@ class SkillCatalogTests(unittest.TestCase):
                 result = read_skill_file(skill["path"])
                 self.assertEqual(result.status, "success", result.output)
                 self.assertIn("name:", result.output)
+
+    def test_document_skills_and_references_are_repository_builtin(self):
+        registry = SkillRegistry()
+        model_names = {item["name"] for item in registry.model_catalog}
+
+        self.assertTrue({"pdf", "docx"} <= model_names)
+        for path, marker in [
+            ("catalog/pdf/REFERENCE.md", "Capability map"),
+            ("catalog/docx/REFERENCE.md", "Content coverage"),
+        ]:
+            with self.subTest(path=path):
+                result = read_skill_file(path)
+                self.assertEqual(result.status, "success", result.output)
+                self.assertIn(marker, result.output)
+
+        for skill_name in ["pdf", "docx"]:
+            text = (SKILLS_DIR / skill_name / "SKILL.md").read_text(encoding="utf-8")
+            self.assertNotIn("disable-model-invocation", text)
+            self.assertNotIn(".codex/skills", text)
 
     def test_removed_and_replaced_workflows_are_not_registered(self):
         names = {skill.name for skill in SkillRegistry().skills}

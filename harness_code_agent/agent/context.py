@@ -60,9 +60,9 @@ def count_tokens(messages: list[dict]) -> int:
     for msg in messages:
         content = msg.get("content") or ""
         if isinstance(content, list):
-            content = " ".join(
-                block.get("text", "") for block in content if isinstance(block, dict)
-            )
+            text, attachment_tokens = _content_text_and_attachment_tokens(content)
+            content = text
+            total += attachment_tokens
         text = str(content)
         if enc:
             total += len(enc.encode(text)) + 4
@@ -334,9 +334,7 @@ def _messages_to_text(messages: list[dict]) -> str:
         role = msg.get("role", "?")
         content = msg.get("content") or ""
         if isinstance(content, list):
-            content = " ".join(
-                block.get("text", "") for block in content if isinstance(block, dict)
-            )
+            content, _attachment_tokens = _content_text_and_attachment_tokens(content)
         if content:
             parts.append(f"[{role}] {content[:3000]}")
         for tc in msg.get("tool_calls", []):
@@ -348,11 +346,42 @@ def _messages_to_text(messages: list[dict]) -> str:
 def _sanitize_message_for_rebuild(message: dict) -> dict:
     msg = dict(message)
     content = msg.get("content")
-    if msg.get("role") == "tool" and isinstance(content, str):
+    if isinstance(content, list):
+        safe_content, _attachment_tokens = _content_text_and_attachment_tokens(content)
+        msg["content"] = safe_content
+    elif msg.get("role") == "tool" and isinstance(content, str):
         msg["content"] = _strip_tool_output_detail(content)
     elif isinstance(content, str) and len(content) > 2_000:
         msg["content"] = _fold_long_text(content, 2_000, label="REBUILD_CONTEXT_MESSAGE_SUMMARY")
     return msg
+
+
+def _content_text_and_attachment_tokens(content: list) -> tuple[str, int]:
+    """Flatten multimodal content without ever copying encoded binary data."""
+    parts: list[str] = []
+    attachment_tokens = 0
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            parts.append(str(block.get("text") or ""))
+            continue
+        metadata = block.get("attachment")
+        if not isinstance(metadata, dict):
+            parts.append("[binary attachment omitted]")
+            attachment_tokens += 1_000
+            continue
+        name = str(metadata.get("name") or "attachment")
+        mime_type = str(metadata.get("mimeType") or metadata.get("mime_type") or "application/octet-stream")
+        size = int(metadata.get("size") or 0)
+        sha256 = str(metadata.get("sha256") or "")
+        parts.append(
+            f"[attachment name={name} mime={mime_type} size={size} sha256={sha256[:12]}]"
+        )
+        # Binary inputs have provider-specific token costs. Use a bounded estimate
+        # derived from metadata, never from the Base64 payload itself.
+        attachment_tokens += min(16_384, max(256, size // 4_096))
+    return " ".join(part for part in parts if part), attachment_tokens
 
 
 def _strip_tool_output_detail(content: str) -> str:

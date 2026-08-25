@@ -137,6 +137,7 @@ def run_batch(
     stream_sink=None,
     profile_explicit: bool = False,
 ) -> int:
+    from .attachments import AttachmentError
     from .core.interactive import print_turn_result
     from .core.mentions import MentionResolutionError
 
@@ -168,8 +169,9 @@ def run_batch(
             print(f"veriforge session: {session.session_id}")
         print(f"workspace: {session.cwd}")
         print_turn_result(result)
-    except MentionResolutionError as e:
+    except (AttachmentError, MentionResolutionError) as e:
         _print_error(f"Error: {e}")
+        return 1
     except KeyboardInterrupt:
         _print_error("\nInterrupted.")
         return 130
@@ -258,12 +260,13 @@ def observe_session(cwd: Path, args: list[str]) -> int:
 
 
 def _submit_and_print(session: InteractiveSession, line: str) -> None:
+    from .attachments import AttachmentError
     from .core.interactive import print_turn_result
     from .core.mentions import MentionResolutionError
 
     try:
         result = session.submit(line)
-    except MentionResolutionError as e:
+    except (AttachmentError, MentionResolutionError) as e:
         _print_error(f"Error: {e}")
         return
     print_turn_result(result)

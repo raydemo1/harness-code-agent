@@ -8,8 +8,10 @@ terminal renderer can be replaced without moving agent/runtime code into Bun.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
+import mimetypes
 import os
 import queue
 import sys
@@ -21,8 +23,17 @@ from typing import Any
 
 from . import config
 from .agent.cancellation import CancellationToken, CancelledError
+from .attachments import (
+    AttachmentError,
+    ExternalPathConfirmationRequired,
+    PreparedTurn,
+    TurnSubmission,
+    classify_attachment,
+    model_input_mode,
+)
 from .core.interactive import InteractiveSession
 from .runtime.approvals import ApprovalRequest, ApprovalResult
+from .runtime.permissions import PermissionPolicy
 from .runtime.questions import (
     QuestionRequest,
     QuestionResult,
@@ -38,7 +49,7 @@ from .sessions.observability import (
 from .tui.approval import ApprovalAllowlist, _persistent_prefix_for_request
 from .tui.commands import default_command_registry
 from .tui.completion import mention_candidates
-from .tui.state import SessionStatusSnapshot, TranscriptBlock, TuiState
+from .tui.state import SessionStatusSnapshot, TranscriptBlock, TuiState, _localize_error
 
 log = logging.getLogger("harness.opentui")
 
@@ -48,6 +59,12 @@ _PROFILE_COPY = {
     "plan": ("规划", "调查现状并形成决策完整的实施方案"),
     "app-builder": ("应用构建", "端到端构建并验证应用界面"),
     "review": ("审查", "只读检查代码并优先报告问题"),
+}
+
+_PERMISSION_COPY = {
+    PermissionPolicy.WORKSPACE_WRITE: ("请求批准", "编辑外部文件和使用互联网时始终询问"),
+    PermissionPolicy.LLM_AUTO: ("替我审批", "由模型判断风险并自动批准具体、范围明确的安全操作"),
+    PermissionPolicy.DANGER_FULL_ACCESS: ("完全访问权限", "不受限制地访问互联网和电脑上的任何文件"),
 }
 
 
@@ -216,13 +233,15 @@ class BridgeServer:
         self.profile_name = profile_name
         self.profile_explicit = profile_explicit
         self._write_lock = threading.Lock()
-        self._tasks: queue.Queue[str | None] = queue.Queue()
+        self._tasks: queue.Queue[PreparedTurn | None] = queue.Queue()
         self._active_token: CancellationToken | None = None
         self._active_lock = threading.Lock()
         self._stopping = threading.Event()
         self._closing = threading.Event()
         self._session: InteractiveSession | None = None
         self._session_error: str | None = None
+        self._assistant_group_id: str | None = None
+        self._assistant_group_counter = 0
         self._assistant_id: str | None = None
         self._assistant_text = ""
         self._assistant_counter = 0
@@ -239,12 +258,20 @@ class BridgeServer:
         )
         self._interactions = BridgeInteractionProvider(self._send_event, project_root=self.cwd)
         self._send_event({"type": "progress", "status": "starting", "detail": "正在准备 Python 会话…"})
-        self._session_thread = threading.Thread(target=self._construct_session, name="opentui-session", daemon=True)
-        self._session_thread.start()
+        self._start_session_construction()
         self._worker = threading.Thread(target=self._worker_loop, name="opentui-submit", daemon=True)
         self._worker.start()
 
-    def _construct_session(self) -> None:
+    def _start_session_construction(self, *, reset_ui: bool = False) -> None:
+        self._session_thread = threading.Thread(
+            target=self._construct_session,
+            kwargs={"reset_ui": reset_ui},
+            name="opentui-session",
+            daemon=True,
+        )
+        self._session_thread.start()
+
+    def _construct_session(self, *, reset_ui: bool = False) -> None:
         try:
             self._session = InteractiveSession(
                 cwd=self.cwd,
@@ -263,9 +290,11 @@ class BridgeServer:
                 return
             self._emit_commands()
             self._send_snapshot()
+            if reset_ui:
+                self._send_event({"type": "session_reset", "snapshot": self._snapshot_payload(), "items": []})
             self._send_event({"type": "progress", "status": "ready", "detail": "Python 会话已就绪。"})
         except Exception as exc:  # pragma: no cover - exercised by real startup failures
-            self._session_error = f"{type(exc).__name__}: {exc}"
+            self._session_error = _localize_error(exc, "会话启动失败，请稍后重试")
             self._notice("error", self._session_error)
             log.debug("OpenTUI bridge session construction failed\n%s", traceback.format_exc())
 
@@ -295,27 +324,35 @@ class BridgeServer:
             block = self.state.apply_event(event)
             event_type = event.type
             if event_type == "turn_started":
-                self._begin_assistant()
+                self._begin_assistant_group(int(event.payload.get("turn") or self.state.snapshot.turn))
                 if not self._stopping.is_set():
                     self._send_event({"type": "turn_state", "state": "running"})
             elif event_type == "turn_finished":
+                self._close_assistant_group("success")
                 self._send_event({"type": "turn_state", "state": "idle"})
             elif event_type == "session_started":
                 self._send_snapshot()
             elif event_type == "session_finished":
+                self._close_assistant_group("success")
                 self._send_event({"type": "turn_state", "state": "idle"})
 
-            if event_type == "assistant_message" and self._assistant_id is not None:
-                # Streaming already created this transcript item; deltas own its body.
-                self._send_event(
-                    {
-                        "type": "transcript_update",
-                        "id": self._assistant_id,
-                        "body": str(event.payload.get("text") or ""),
-                        "state": "success",
-                    }
-                )
-                block = None
+            if event_type == "assistant_message":
+                if self._assistant_id is not None:
+                    # Streaming already created this child item; deltas own its body.
+                    self._send_event(
+                        {
+                            "type": "transcript_update",
+                            "id": self._assistant_id,
+                            "body": str(event.payload.get("text") or ""),
+                            "state": "success",
+                        }
+                    )
+                    block = None
+                self._reset_assistant_segment()
+            elif event_type in {"tool_call", "tool_result"}:
+                # A tool boundary ends the current model-text child, but not
+                # the parent assistant group for this user turn.
+                self._reset_assistant_segment("success")
             if block is not None and event_type != "user_input":
                 self.state.add_block(block)
                 self._send_transcript(block)
@@ -336,22 +373,67 @@ class BridgeServer:
             self._assistant_counter += 1
             self._assistant_id = f"assistant-{self._assistant_counter}"
             self._assistant_text = ""
+            item: dict[str, Any] = {
+                "id": self._assistant_id,
+                "kind": "assistant",
+                "title": "助手",
+                "body": "",
+                "state": "running",
+                "role": "message",
+            }
+            if self._assistant_group_id:
+                item["parentId"] = self._assistant_group_id
+            self._send_event({"type": "transcript", "item": item})
+
+    def _begin_assistant_group(self, turn: int) -> None:
+        self._assistant_group_counter += 1
+        self._assistant_group_id = f"assistant-group-{turn}-{self._assistant_group_counter}"
+        self._reset_assistant_segment()
+        self._send_event(
+            {
+                "type": "transcript",
+                "item": {
+                    "id": self._assistant_group_id,
+                    "kind": "assistant",
+                    "title": "助手",
+                    "body": "",
+                    "state": "running",
+                    "role": "group",
+                },
+            }
+        )
+
+    def _close_assistant_group(self, status: str) -> None:
+        if self._assistant_group_id is None:
+            return
+        self._reset_assistant_segment(status)
+        self._send_event(
+            {
+                "type": "transcript_update",
+                "id": self._assistant_group_id,
+                "body": "",
+                "state": status,
+            }
+        )
+        self._assistant_group_id = None
+        self._reset_assistant_segment()
+
+    def _reset_assistant_segment(self, status: str | None = None) -> None:
+        if self._assistant_id is not None and status is not None:
             self._send_event(
                 {
-                    "type": "transcript",
-                    "item": {
-                        "id": self._assistant_id,
-                        "kind": "assistant",
-                        "title": "助手",
-                        "body": "",
-                        "state": "running",
-                    },
+                    "type": "transcript_update",
+                    "id": self._assistant_id,
+                    "body": self._assistant_text,
+                    "state": status,
                 }
             )
+        self._assistant_id = None
+        self._assistant_text = ""
 
     def _finish_interrupted_assistant(self) -> None:
         if self._assistant_id is None:
-            return
+            self._begin_assistant()
         body = self._assistant_text.rstrip()
         body = f"{body}\n\n已停止" if body else "已停止"
         self._send_event({
@@ -360,6 +442,8 @@ class BridgeServer:
             "body": body,
             "state": "failed",
         })
+        self._reset_assistant_segment()
+        self._close_assistant_group("failed")
 
     def _send_transcript(self, block: TranscriptBlock) -> None:
         self._send_event({"type": "transcript", "item": self._block_item(block)})
@@ -385,13 +469,16 @@ class BridgeServer:
             "cancelled": "failed",
             "pending": "pending",
         }.get(block.status, "success")
-        return {
-            "id": f"block-{self.state.snapshot.turn}-{len(self.state.blocks)}-{block.title}",
+        item = {
+            "id": block.id or f"block-{self.state.snapshot.turn}-{len(self.state.blocks)}-{block.title}",
             "kind": kind,
             "title": block.title,
             "body": block.body,
             "state": state,
         }
+        if self._assistant_group_id:
+            item["parentId"] = self._assistant_group_id
+        return item
 
     def _send_snapshot(self) -> None:
         self._send_event({"type": "snapshot", "snapshot": self._snapshot_payload()})
@@ -415,6 +502,7 @@ class BridgeServer:
             "sessionId": snapshot.session_id,
             "routingMode": getattr(self._session, "display_routing_mode", "auto"),
             "dirtyCount": snapshot.dirty_count,
+            "inputMode": model_input_mode(),
         }
 
     def _notice(self, level: str, text: str) -> None:
@@ -457,7 +545,7 @@ class BridgeServer:
                 self._finish_interrupted_assistant()
             except Exception as exc:  # runtime errors stay inside the protocol
                 self._finish_interrupted_assistant()
-                self._notice("error", f"回合失败：{type(exc).__name__}: {exc}")
+                self._notice("error", _localize_error(exc, "回合执行失败，请稍后重试"))
                 log.debug("OpenTUI submit failed\n%s", traceback.format_exc())
             finally:
                 with self._active_lock:
@@ -468,16 +556,17 @@ class BridgeServer:
                 self._send_event({"type": "turn_state", "state": "idle"})
                 self._tasks.task_done()
 
-    def _run_task(self, text: str, token: CancellationToken) -> None:
+    def _run_task(self, task: PreparedTurn, token: CancellationToken) -> None:
         session = self._session
         if session is None:
             if self._session_thread.is_alive():
                 self._session_thread.join(timeout=30)
             session = self._session
         if session is None:
-            raise RuntimeError(self._session_error or "Python session is not ready")
+            raise RuntimeError(self._session_error or "会话尚未准备好，请稍候")
+        text = task.text
         registry = default_command_registry(skill_registry=session.skill_registry)
-        if text.lstrip().startswith("/") and not registry.is_agent_command(text):
+        if not task.attachments and text.lstrip().startswith("/") and not registry.is_agent_command(text):
             should_continue = session.handle_slash_command(text)
             result = getattr(session, "last_command_result", None)
             if result is not None:
@@ -493,8 +582,7 @@ class BridgeServer:
             if not should_continue:
                 self._closing.set()
             return
-        self._begin_assistant()
-        result = session.submit(text, cancellation_token=token)
+        result = session.submit_prepared(task, cancellation_token=token)
         if getattr(result, "notice", ""):
             self._notice("info", str(result.notice))
         checkpoint = str(getattr(result, "checkpoint", "") or "").strip()
@@ -537,7 +625,6 @@ class BridgeServer:
             "title": "历史会话",
             "options": options,
             "searchable": True,
-            "footer": "Enter 恢复 · Esc 关闭",
             "body": "" if options else "还没有包含用户任务的历史会话。",
         }
 
@@ -553,6 +640,7 @@ class BridgeServer:
                     "label": "自动路由",
                     "description": "根据当前任务选择工作模式",
                     "tone": "success" if current == "auto" else "default",
+                    "selected": current == "auto",
                 }
             ]
             options.extend({
@@ -560,8 +648,30 @@ class BridgeServer:
                 "label": _PROFILE_COPY.get(item["name"], (item["name"], item["description"]))[0],
                 "description": _PROFILE_COPY.get(item["name"], (item["name"], item["description"]))[1],
                 "tone": "success" if current == item["name"] else "default",
+                "selected": current == item["name"],
             } for item in list_profiles())
-            return {"kind": "profile", "title": "工作模式", "options": options, "footer": "选择后固定模式；自动路由可恢复自动判断。"}
+            return {"kind": "profile", "title": "工作模式", "options": options}
+        if kind == "permission":
+            current = session.permission_mode
+            options = []
+            for mode in (
+                PermissionPolicy.WORKSPACE_WRITE,
+                PermissionPolicy.LLM_AUTO,
+                PermissionPolicy.DANGER_FULL_ACCESS,
+            ):
+                label, description = _PERMISSION_COPY[mode]
+                options.append({
+                    "id": mode,
+                    "label": label,
+                    "description": description,
+                    "tone": "success" if current == mode else ("danger" if mode == PermissionPolicy.DANGER_FULL_ACCESS else "default"),
+                    "selected": current == mode,
+                })
+            return {
+                "kind": "permission",
+                "title": "审批模式",
+                "options": options,
+            }
         if kind == "checkpoint":
             checkpoint = session.checkpoint
             return {
@@ -587,7 +697,7 @@ class BridgeServer:
                 state = "已停用" if status is None else ("已连接" if status.state == "connected" else "连接失败")
                 options.append({"id": f"reconnect:{name}", "label": f"重新连接 {name}", "description": state})
                 options.append({"id": f"toggle:{name}", "label": f"切换启用 {name}"})
-            options.append({"id": "open_config", "label": "显示 mcp.json 路径"})
+            options.append({"id": "open_config", "label": "显示 MCP 配置路径"})
             connected = sum(getattr(status, "state", "") == "connected" for status in statuses.values())
             return {
                 "kind": "mcp",
@@ -606,14 +716,13 @@ class BridgeServer:
                     {"id": "observe:project", "label": "切换到项目概览"},
                     {"id": "observe:export-current", "label": "导出当前会话报告"},
                 ],
-                "footer": "选择操作 · Esc 关闭",
             }
         if kind == "help":
             commands = default_command_registry(skill_registry=session.skill_registry).candidates()
             return {
                 "kind": "help",
                 "title": "快捷键与命令",
-                "body": "Enter 提交 · Shift+Enter 换行 · Ctrl+C 取消/退出 · Ctrl+R 历史 · Ctrl+N 新会话 · Ctrl+O 运行观察 · Ctrl+P 切换权限\n\n"
+                "body": "Enter 提交  Shift+Enter 换行  Ctrl+C 取消/退出  Ctrl+O 运行观察  Ctrl+P 打开审批模式\n\n"
                 + "\n".join(f"{item.usage:<18} {item.description}" for item in commands),
             }
         raise ValueError(f"unknown panel: {kind}")
@@ -634,6 +743,8 @@ class BridgeServer:
                 raise ValueError(f"unknown command action: {action}")
         elif panel == "profile":
             message = session.enable_auto_profile_routing() if action == "auto" else session.switch_profile(action)
+        elif panel == "permission":
+            message = session.set_permission_mode(action)
         elif panel == "checkpoint":
             if action == "create":
                 message = session.create_checkpoint(manual=True)
@@ -679,6 +790,8 @@ class BridgeServer:
         else:
             raise ValueError(f"unknown panel action: {panel}")
         self._send_snapshot()
+        if panel in {"profile", "permission"}:
+            return {"ok": True}
         return {"ok": True, "message": str(message or "")}
 
     def _history_items(self, session_id: str) -> list[dict[str, Any]]:
@@ -701,7 +814,9 @@ class BridgeServer:
 
     def _new_session(self) -> dict[str, Any]:
         if self._active_token is not None:
-            raise RuntimeError("cannot start a new session while a turn is running")
+            raise RuntimeError("当前回合仍在执行，暂时无法新建会话")
+        if self._session_thread.is_alive():
+            raise RuntimeError("新会话正在启动，请稍候")
         old_session = self._session
         if old_session is not None:
             old_session.close()
@@ -718,15 +833,12 @@ class BridgeServer:
             status="starting",
         ))
         self._send_event({"type": "progress", "status": "starting", "detail": "正在创建新会话…"})
-        self._construct_session()
-        if self._session is None:
-            raise RuntimeError(self._session_error or "new session failed to start")
-        self._send_event({"type": "session_reset", "snapshot": self._snapshot_payload(), "items": []})
-        return {"ok": True, "message": "新会话已就绪"}
+        self._start_session_construction(reset_ui=True)
+        return {"ok": True, "message": "新会话正在启动…"}
 
     def _require_session(self) -> InteractiveSession:
         if self._session is None:
-            raise RuntimeError(self._session_error or "Python session is not ready")
+            raise RuntimeError(self._session_error or "会话尚未准备好，请稍候")
         return self._session
 
     def _action(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -739,43 +851,107 @@ class BridgeServer:
         if name == "panel_action":
             return self._panel_action(str(params.get("panel") or ""), str(params.get("action") or ""))
         if name == "toggle_permission":
-            message = self._require_session().toggle_permission_mode()
+            self._require_session().toggle_permission_mode()
             self._send_snapshot()
-            return {"ok": True, "message": message}
+            return {"ok": True}
         if name == "complete_mention":
             session = self._require_session()
             candidates = mention_candidates(self.cwd, str(params.get("prefix") or ""), session.session_store, limit=30)
-            return {"ok": True, "candidates": [{"insertText": item.insert_text, "display": item.display, "description": item.description} for item in candidates]}
-        raise ValueError(f"unknown action: {name}")
+            mode = model_input_mode()
+            filtered = []
+            for item in candidates:
+                if item.kind != "file":
+                    filtered.append(item)
+                    continue
+                name = item.insert_text.removeprefix("file:")
+                try:
+                    kind, _mime_type = classify_attachment(name, mimetypes.guess_type(name)[0])
+                except AttachmentError:
+                    continue
+                if mode == "text" and kind == "image":
+                    continue
+                filtered.append(item)
+            candidates = filtered
+            return {"ok": True, "candidates": [{"insertText": item.insert_text, "display": item.display, "description": item.description, "kind": item.kind} for item in candidates]}
+        if name == "stage_attachments":
+            session = self._require_session()
+            attachments = []
+            paths = params.get("paths") or []
+            if not isinstance(paths, list):
+                raise AttachmentError("文件路径格式错误")
+            source = str(params.get("source") or "picker")
+            for path in paths:
+                attachments.append(session.stage_attachment_path(str(path), source=source))
+            clipboard = params.get("clipboard")
+            if clipboard is not None:
+                if not isinstance(clipboard, dict):
+                    raise AttachmentError("剪贴板附件格式错误")
+                try:
+                    data = base64.b64decode(str(clipboard.get("dataBase64") or ""), validate=True)
+                except ValueError as exc:
+                    raise AttachmentError("剪贴板图片数据无效") from exc
+                attachments.append(session.stage_attachment_bytes(
+                    data,
+                    name=str(clipboard.get("name") or "clipboard.png"),
+                    mime_type=str(clipboard.get("mimeType") or "application/octet-stream"),
+                    source="clipboard",
+                ))
+            return {"ok": True, "attachments": [item.public_dict() for item in attachments]}
+        if name == "remove_attachment":
+            removed = self._require_session().remove_attachment(str(params.get("attachmentId") or ""))
+            return {"ok": removed}
+        raise ValueError("不支持的操作，请重试")
 
     def _handle_request(self, message: dict[str, Any]) -> bool:
         request_id = str(message.get("id") or "")
         method = str(message.get("method") or "")
         params = message.get("params") or {}
         if not isinstance(params, dict):
-            self._response(request_id, error="request params must be an object")
+            self._response(request_id, error="请求格式错误，请重试")
             return True
         if method == "initialize":
             if self._session_thread.is_alive():
                 self._session_thread.join(timeout=30)
             if self._session is None:
-                self._response(request_id, error=self._session_error or "Python session failed to start")
+                self._response(request_id, error=self._session_error or "会话启动失败，请稍后重试")
             else:
-                self._response(request_id, result={"version": 2, "cwd": str(self.cwd)})
+                self._response(request_id, result={"version": 3, "cwd": str(self.cwd)})
             return True
         if method == "submit":
             text = str(params.get("text") or "").strip()
-            if not text:
-                self._response(request_id, error="empty task")
+            attachment_ids = params.get("attachmentIds") or []
+            authorized_paths = params.get("authorizedPaths") or []
+            if not isinstance(attachment_ids, list) or not isinstance(authorized_paths, list):
+                self._response(request_id, error="附件参数格式错误，请重试")
+            elif not text and not attachment_ids:
+                self._response(request_id, error="请输入任务或添加附件后再提交")
             elif self._stopping.is_set():
-                self._response(request_id, error="current turn is stopping")
+                self._response(request_id, error="当前回合正在停止，请稍候")
             else:
-                self._tasks.put(text)
+                try:
+                    prepared = self._require_session().prepare_submission(TurnSubmission(
+                        text=text,
+                        attachment_ids=tuple(str(item) for item in attachment_ids),
+                        authorized_paths=tuple(str(item) for item in authorized_paths),
+                    ))
+                except ExternalPathConfirmationRequired as exc:
+                    self._response(request_id, result={
+                        "accepted": False,
+                        "confirmation": {"kind": "external_paths", "paths": exc.paths},
+                    })
+                    return True
+                except Exception as exc:
+                    self._response(request_id, error=_localize_error(exc, "附件校验失败，请重试"))
+                    return True
+                self._tasks.put(prepared)
                 with self._active_lock:
                     active = self._active_token is not None
                 if active:
                     self._send_event({"type": "turn_state", "state": "queued", "queueDepth": self._tasks.qsize()})
-                self._response(request_id, result={"accepted": True})
+                self._response(request_id, result={
+                    "accepted": True,
+                    "attachments": [item.public_dict() for item in prepared.attachments],
+                })
             return True
         if method == "cancel":
             with self._active_lock:
@@ -806,7 +982,7 @@ class BridgeServer:
             try:
                 result = self._action(name, action_params)
             except Exception as exc:
-                self._response(request_id, error=f"{type(exc).__name__}: {exc}")
+                self._response(request_id, error=_localize_error(exc))
             else:
                 self._response(request_id, result=result)
             return True
@@ -814,9 +990,9 @@ class BridgeServer:
             interaction_id = str(params.get("id") or "")
             result = params.get("result")
             if not isinstance(result, dict):
-                self._response(request_id, error="interaction result must be an object")
+                self._response(request_id, error="操作结果格式错误，请重试")
             elif not self._interactions.resolve(interaction_id, result):
-                self._response(request_id, error=f"interaction not found: {interaction_id}")
+                self._response(request_id, error="交互已失效，请重新操作")
             else:
                 self._response(request_id, result={"resolved": True})
                 self._send_event({"type": "interaction_closed", "id": interaction_id})
@@ -825,7 +1001,7 @@ class BridgeServer:
             self._response(request_id, result={"closing": True})
             self.close()
             return False
-        self._response(request_id, error=f"unknown method: {method}")
+        self._response(request_id, error="不支持的请求，请重试")
         return True
 
     def _discard_queued_tasks(self) -> int:

@@ -12,6 +12,26 @@ export type Snapshot = {
   sessionId?: string;
   routingMode?: "auto" | "pinned";
   dirtyCount?: number;
+  inputMode?: "text" | "multimodal";
+};
+
+export type AttachmentItem = {
+  id: string;
+  name: string;
+  path: string;
+  source: "clipboard" | "picker" | "mention" | "path";
+  mimeType: string;
+  size: number;
+  sha256: string;
+  kind: "text" | "docx" | "image" | "pdf";
+  cached: boolean;
+};
+
+export type TurnSubmission = { text: string; attachmentIds: string[]; authorizedPaths?: string[] };
+export type SubmitResult = {
+  accepted: boolean;
+  attachments?: AttachmentItem[];
+  confirmation?: { kind: "external_paths"; paths: string[] };
 };
 
 export type CommandItem = { name: string; description: string; category?: string };
@@ -21,6 +41,8 @@ export type TranscriptItem = {
   title: string;
   body: string;
   state?: "running" | "success" | "failed" | "pending" | "changed";
+  role?: "group" | "message";
+  parentId?: string;
 };
 
 export type ApprovalInteraction = {
@@ -37,22 +59,22 @@ export type QuestionInteraction = {
 };
 export type Interaction = ApprovalInteraction | QuestionInteraction;
 
-export type PanelOption = { id: string; label: string; description?: string; tone?: "default" | "success" | "warning" | "danger" };
+export type PanelOption = { id: string; label: string; description?: string; tone?: "default" | "success" | "warning" | "danger"; selected?: boolean };
 export type PanelSpec = {
-  kind: "sessions" | "profile" | "checkpoint" | "mcp" | "observe" | "help";
+  kind: "sessions" | "profile" | "permission" | "checkpoint" | "mcp" | "observe" | "help";
   title: string;
   body?: string;
   options?: PanelOption[];
-  footer?: string;
   searchable?: boolean;
 };
 
-export type ActionName = "open_sessions" | "new_session" | "open_panel" | "panel_action" | "toggle_permission" | "complete_mention";
+export type ActionName = "open_sessions" | "new_session" | "open_panel" | "panel_action" | "toggle_permission" | "complete_mention" | "stage_attachments" | "remove_attachment";
 export type ActionResult = {
   ok: boolean;
   message?: string;
   panel?: PanelSpec;
-  candidates?: Array<{ insertText: string; display: string; description: string }>;
+  candidates?: Array<{ insertText: string; display: string; description: string; kind: "file" | "session" }>;
+  attachments?: AttachmentItem[];
 };
 
 export type UiEvent =
@@ -82,7 +104,6 @@ export type BridgeMessage =
   | { type: "event"; event: UiEvent };
 
 export const DEFAULT_COMMANDS: CommandItem[] = [
-  { name: "/profile", category: "工作流", description: "选择工作模式并固定后续路由" },
   { name: "/checkpoint", category: "工作流", description: "打开检查点管理" },
   { name: "/mcp", category: "工作流", description: "打开 MCP 服务与工具管理" },
   { name: "/compact", category: "工作流", description: "压缩当前对话上下文" },

@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..runtime.approvals import ApprovalRequest
-from ..runtime.shell_classification import classify_safe_shell_command
 
 _PYTHON_COMMANDS = {"python", "python3", "python.exe", "python3.exe", "py", "py.exe"}
 
@@ -181,7 +180,7 @@ def _is_literal_expression(command: str) -> bool:
 
 
 def _is_ignorable_safe_segment(command: str) -> bool:
-    return _is_literal_expression(command) or classify_safe_shell_command(command) == "read"
+    return _is_literal_expression(command)
 
 
 def _tokenize_command(command: str) -> list[str]:

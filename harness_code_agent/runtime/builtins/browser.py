@@ -1,7 +1,10 @@
 """Headless browser testing tools."""
 from __future__ import annotations
 
+import os
+import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -16,6 +19,59 @@ except ImportError:
 
 
 _dev_server_proc: subprocess.Popen | None = None
+
+
+def _playwright_browser_roots() -> list[Path]:
+    """Return browser cache roots without assuming a particular browser version."""
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if configured and configured != "0":
+        return [Path(configured).expanduser()]
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        return [Path(local_app_data) / "ms-playwright"] if local_app_data else []
+    if sys.platform == "darwin":
+        return [Path.home() / "Library" / "Caches" / "ms-playwright"]
+    return [Path.home() / ".cache" / "ms-playwright"]
+
+
+def _installed_chromium_executables() -> list[Path]:
+    """Find installed Chromium binaries, ordered by detected build number."""
+    patterns = (
+        "chromium_headless_shell-*/*/chrome-headless-shell.exe",
+        "chromium_headless_shell-*/*/chrome-headless-shell",
+        "chromium-*/*/chrome.exe",
+        "chromium-*/*/chrome",
+        "chromium-*/*/Chromium.app/Contents/MacOS/Chromium",
+    )
+    candidates: dict[str, Path] = {}
+    for root in _playwright_browser_roots():
+        if not root.is_dir():
+            continue
+        for pattern in patterns:
+            for executable in root.glob(pattern):
+                if executable.is_file():
+                    candidates[str(executable.resolve()).lower()] = executable
+
+    def sort_key(executable: Path) -> tuple[tuple[int, ...], int, str]:
+        numbers = tuple(int(value) for value in re.findall(r"\d+", str(executable.parent.parent)))
+        headless = 1 if "headless" in executable.name.lower() else 0
+        return numbers, headless, str(executable).lower()
+
+    return sorted(candidates.values(), key=sort_key, reverse=True)
+
+
+def _launch_chromium(playwright):
+    """Launch Playwright's browser, adapting to an already-installed local build."""
+    try:
+        return playwright.chromium.launch(headless=True), None
+    except Exception:
+        for executable in _installed_chromium_executables():
+            try:
+                browser = playwright.chromium.launch(headless=True, executable_path=str(executable))
+                return browser, f"Browser: detected local Chromium ({executable})"
+            except Exception:  # noqa: S112 - try the next detected browser binary
+                continue
+        raise
 
 
 def _ensure_dev_server(start_command: str, port: int, startup_wait: int = 8) -> str:
@@ -108,7 +164,9 @@ def browser_test(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser, browser_detail = _launch_chromium(p)
+            if browser_detail:
+                report_lines.append(browser_detail)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
 
             # Navigate

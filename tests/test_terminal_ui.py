@@ -23,9 +23,9 @@ from harness_code_agent.tui.state import SessionStatusSnapshot, TuiState
 class TerminalUiTests(unittest.TestCase):
     def test_command_registry_exposes_structured_panel_actions(self):
         registry = default_command_registry(skill_registry=SimpleNamespace(user_commands=[]))
-        self.assertEqual(registry.execute("/profile", SimpleNamespace()).action, "profile")
         self.assertEqual(registry.execute("/observe", SimpleNamespace()).action, "observe")
         self.assertIn("/checkpoint", registry.command_names())
+        self.assertNotIn("/profile", registry.command_names())
 
     def test_mentions_search_files_and_replace_only_active_fragment(self):
         with tempfile.TemporaryDirectory() as tmp:

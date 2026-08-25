@@ -1,9 +1,10 @@
 import type { CommandItem, Interaction, Snapshot, TranscriptItem, UiEvent } from "./protocol.ts";
 import { DEFAULT_COMMANDS } from "./protocol.ts";
+import { formatUserError } from "./errors.ts";
 
 export const initialSnapshot: Snapshot = {
   profile: "general", permissionMode: "workspace-write", model: "starting", provider: "auto",
-  contextPercent: 100, status: "starting", cwd: "工作区",
+  contextPercent: 100, status: "starting", cwd: "工作区", inputMode: "text",
 };
 export type AppState = {
   snapshot: Snapshot; items: TranscriptItem[]; commands: CommandItem[];
@@ -24,12 +25,19 @@ export function reduceEvent(state: AppState, event: UiEvent): AppState {
     items: state.items.map((item) => item.id === "welcome" ? { ...item, body: event.detail || event.status, state: event.status === "ready" ? "success" : "running" } : item),
   };
   if (event.type === "turn_state") return { ...state, turnState: event.state, queueDepth: event.queueDepth ?? (event.state === "queued" ? state.queueDepth + 1 : 0) };
-  if (event.type === "transcript") return { ...state, items: [...state.items, event.item] };
+  if (event.type === "transcript") {
+    const existingIndex = state.items.findIndex((item) => item.id === event.item.id);
+    if (existingIndex < 0) return { ...state, items: [...state.items, event.item] };
+    return {
+      ...state,
+      items: state.items.map((item, index) => index === existingIndex ? event.item : item),
+    };
+  }
   if (event.type === "transcript_update") return { ...state, items: state.items.map((item) => item.id === event.id ? { ...item, body: event.body, state: event.state ?? item.state } : item) };
   if (event.type === "assistant_delta") return { ...state, items: state.items.map((item) => item.id === event.id ? { ...item, body: item.body + event.text } : item) };
   if (event.type === "notice") return {
     ...state,
-    items: [...state.items, { id: `notice-${state.items.length}-${Date.now()}`, kind: event.level === "error" ? "error" : "status", title: event.level === "error" ? "错误" : "提示", body: event.text, state: event.level === "error" ? "failed" : "success" }],
+    items: [...state.items, { id: `notice-${state.items.length}-${Date.now()}`, kind: event.level === "error" ? "error" : "status", title: event.level === "error" ? "错误" : "提示", body: event.level === "error" ? formatUserError(event.text) : event.text, state: event.level === "error" ? "failed" : "success" }],
   };
   if (event.type === "interaction") return { ...state, interaction: event };
   if (event.type === "interaction_closed" && state.interaction?.id === event.id) return { ...state, interaction: null };

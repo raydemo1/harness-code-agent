@@ -1,22 +1,27 @@
 import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { stringWidth } from "bun";
-import { CliRenderEvents } from "@opentui/core";
-import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
+import { CliRenderEvents, SyntaxStyle } from "@opentui/core";
+import type { ClipboardReadResult, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { resolveIcons } from "./icons.ts";
 import type { IconSet } from "./icons.ts";
-import type { ActionName, ActionResult, CommandItem, IconPreference, Interaction, PanelSpec, ThemePreference, TranscriptItem, UiEvent } from "./protocol.ts";
+import { formatUserError } from "./errors.ts";
+import { clipboardFilePaths, formatBytes } from "./attachment-utils.ts";
+import type { ActionName, ActionResult, AttachmentItem, CommandItem, IconPreference, Interaction, PanelSpec, SubmitResult, ThemePreference, TranscriptItem, TurnSubmission, UiEvent } from "./protocol.ts";
 import { initialState, reduceEvent, withOptimisticUserMessage } from "./state.ts";
 import { resolveTheme } from "./theme.ts";
 import type { Theme, ThemeMode } from "./theme.ts";
 
 type AppProps = {
   events?: AsyncIterable<UiEvent>;
-  onSubmit?: (text: string) => void;
+  onSubmit?: (submission: TurnSubmission) => Promise<SubmitResult>;
   onCancel?: () => void;
   onExit?: () => void;
   onAction?: (name: ActionName, params?: Record<string, unknown>) => Promise<ActionResult>;
   onResolveInteraction?: (id: string, result: Record<string, unknown>) => void;
+  onPickFiles?: (inputMode: "text" | "multimodal") => Promise<string[]>;
+  onReadClipboard?: () => Promise<ClipboardReadResult>;
+  onCopyText?: (text: string) => Promise<boolean>;
   initialTask?: string;
   themePreference?: ThemePreference;
   iconPreference?: IconPreference;
@@ -40,7 +45,10 @@ function commandMatches(command: CommandItem, query: string): boolean {
   return true;
 }
 
-function markerFor(item: TranscriptItem, icons: IconSet): string {
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+function markerFor(item: TranscriptItem, icons: IconSet, spinnerFrame = 0): string {
+  if (item.state === "running" && (item.kind === "tool" || item.kind === "thought")) return SPINNER_FRAMES[spinnerFrame];
   if (item.state === "success") return icons.success;
   if (item.state === "failed") return icons.failure;
   if (item.state === "pending") return icons.pending;
@@ -58,11 +66,129 @@ function toneFor(item: TranscriptItem, theme: Theme): string {
   return theme.accent;
 }
 
+const MARKDOWN_SYNTAX_STYLE = SyntaxStyle.fromStyles({
+  default: {},
+  "markup.heading": { bold: true },
+  "markup.strong": { bold: true },
+  "markup.italic": { italic: true },
+  "markup.strikethrough": { dim: true },
+  "markup.raw": { bold: true },
+  "markup.link.label": { underline: true },
+  "markup.link.url": { underline: true },
+});
+
+function MarkdownText({ text, color, streaming = false }: { text: string; color: string; streaming?: boolean }) {
+  return (
+    <markdown
+      content={text}
+      syntaxStyle={MARKDOWN_SYNTAX_STYLE}
+      fg={color}
+      conceal
+      concealCode
+      streaming={streaming}
+      internalBlockMode="coalesced"
+      style={{ flexGrow: 0, flexShrink: 1 }}
+    />
+  );
+}
+
+const MAX_DIFF_LINES = 50;
+type FileDiffLine = { kind: "add" | "delete" | "context"; content: string };
+
+function parseFileDiff(diff: string): FileDiffLine[] {
+  return diff.split(/\r?\n/).reduce<FileDiffLine[]>((lines, rawLine, index, allLines) => {
+    if (index === allLines.length - 1 && rawLine === "") return lines;
+    if (rawLine.startsWith("@@") || rawLine.startsWith("--- ") || rawLine.startsWith("+++ ")) return lines;
+    if (rawLine.startsWith("… ") && rawLine.endsWith(" more diff lines")) return lines;
+    if (rawLine.startsWith("+")) return [...lines, { kind: "add", content: rawLine.slice(1) }];
+    if (rawLine.startsWith("-")) return [...lines, { kind: "delete", content: rawLine.slice(1) }];
+    if (rawLine.startsWith(" ")) return [...lines, { kind: "context", content: rawLine.slice(1) }];
+    return [...lines, { kind: "context", content: rawLine }];
+  }, []);
+}
+
+function FileDiffTitle({ title, theme, icons }: { title: string; theme: Theme; icons: IconSet }) {
+  const match = title.match(/^(.*?)(?:  \+(\d+)  -(\d+))$/);
+  const label = match?.[1] ?? title;
+  return (
+    <text>
+      <span fg={theme.diffAdd}>{`${icons.file} ${label}`}</span>
+      {match ? <span fg={theme.diffAdd}>{`  +${match[2]}`}</span> : null}
+      {match ? <span fg={theme.diffDelete}>{`  -${match[3]}`}</span> : null}
+    </text>
+  );
+}
+
+function FileDiffBlock({ item, theme, icons }: { item: TranscriptItem; theme: Theme; icons: IconSet }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = useMemo(() => parseFileDiff(item.body), [item.body]);
+  const visibleLines = expanded ? lines : lines.slice(0, MAX_DIFF_LINES);
+  const remaining = Math.max(0, lines.length - visibleLines.length);
+  const toggle = () => setExpanded((value) => !value);
+  return (
+    <box border borderStyle="rounded" borderColor={theme.border} style={{ flexDirection: "column", maxWidth: 110, marginLeft: item.parentId ? 2 : 0, paddingLeft: 1, paddingRight: 1, paddingTop: 1, paddingBottom: 1, backgroundColor: theme.surfaceRaised }}>
+      <FileDiffTitle title={item.title} theme={theme} icons={icons} />
+      {visibleLines.length ? (
+        <box style={{ flexDirection: "column", marginTop: 1, backgroundColor: theme.surface }}>
+          {visibleLines.map((line, index) => {
+            const added = line.kind === "add";
+            const deleted = line.kind === "delete";
+            const backgroundColor = added ? theme.diffAddBackground : deleted ? theme.diffDeleteBackground : theme.surface;
+            const markerColor = added ? theme.diffAdd : deleted ? theme.diffDelete : theme.subtle;
+            const marker = added ? "+" : deleted ? "-" : " ";
+            return (
+              <box key={`${index}-${line.kind}`} style={{ flexDirection: "row", width: "100%", backgroundColor }}>
+                <text fg={markerColor}>{`${marker} `}</text>
+                <text fg={theme.text}>{line.content}</text>
+              </box>
+            );
+          })}
+        </box>
+      ) : null}
+      {lines.length > MAX_DIFF_LINES ? (
+        <box
+          focusable
+          onMouseDown={toggle}
+          onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") { key.preventDefault(); toggle(); } }}
+          style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: theme.surfaceRaised }}
+        >
+          <text fg={theme.muted}>{expanded ? "收起" : `余 ${remaining} 行`}</text>
+          <text fg={theme.accent}>{expanded ? "⌃" : "▸"}</text>
+        </box>
+      ) : null}
+    </box>
+  );
+}
+
 function Transcript({ items, theme, icons }: { items: TranscriptItem[]; theme: Theme; icons: IconSet }) {
+  const hasRunningTool = items.some((item) => item.kind === "tool" && item.state === "running");
+  const hasRunningThought = items.some((item) => item.kind === "thought" && item.state === "running");
+  const [spinnerFrame, setSpinnerFrame] = useState(0);
+  useEffect(() => {
+    setSpinnerFrame(0);
+    if (!hasRunningTool && !hasRunningThought) return;
+    const timer = setInterval(() => setSpinnerFrame((value) => (value + 1) % SPINNER_FRAMES.length), 180);
+    return () => clearInterval(timer);
+  }, [hasRunningTool, hasRunningThought]);
+
   return (
     <scrollbox stickyScroll focused style={{ height: 1, flexGrow: 1, flexShrink: 1, minHeight: 0, paddingLeft: 2, paddingRight: 2 }}>
       <box style={{ flexDirection: "column", gap: 1, paddingTop: 1, paddingBottom: 1 }}>
         {items.map((item) => {
+          if (item.kind === "assistant" && item.role === "group") {
+            return (
+              <box key={item.id} style={{ flexDirection: "column", maxWidth: 96 }}>
+                <text fg={theme.success}><strong>{`${icons.assistant} 助手`}</strong></text>
+              </box>
+            );
+          }
+          if (item.kind === "assistant" && item.parentId) {
+            return (
+              <box key={item.id} style={{ flexDirection: "column", maxWidth: 110, marginLeft: 2 }}>
+                <MarkdownText text={item.body} color={theme.text} streaming={item.state === "running"} />
+              </box>
+            );
+          }
           if (item.kind === "user" || item.kind === "assistant") {
             const assistant = item.kind === "assistant";
             return (
@@ -70,21 +196,14 @@ function Transcript({ items, theme, icons }: { items: TranscriptItem[]; theme: T
                 <text fg={assistant ? theme.success : theme.accent}>
                   <strong>{`${assistant ? icons.assistant : icons.prompt} ${assistant ? "助手" : "你"}`}</strong>
                 </text>
-                <text fg={theme.text}>{item.body}</text>
+                {assistant ? <MarkdownText text={item.body} color={theme.text} streaming={item.state === "running"} /> : <text fg={theme.text}>{item.body}</text>}
               </box>
             );
           }
-          if (item.kind === "file" && item.body) {
-            return (
-              <box key={item.id} style={{ flexDirection: "column", maxWidth: 110 }}>
-                <text fg={theme.diffAdd}>{`  ${icons.file} ${item.title}`}</text>
-                <text fg={theme.muted}>{item.body}</text>
-              </box>
-            );
-          }
+          if (item.kind === "file") return <FileDiffBlock key={item.id} item={item} theme={theme} icons={icons} />;
           return (
-            <box key={item.id} style={{ flexDirection: "column", maxWidth: 110 }}>
-              <text fg={toneFor(item, theme)}>{`  ${markerFor(item, icons)} ${item.title}${item.body ? `  ${item.body}` : ""}`}</text>
+            <box key={item.id} style={{ flexDirection: "column", maxWidth: 110, marginLeft: item.parentId ? 2 : 0 }}>
+              <text fg={toneFor(item, theme)}>{`  ${markerFor(item, icons, spinnerFrame)} ${item.title}${item.body ? `  ${item.body}` : ""}`}</text>
             </box>
           );
         })}
@@ -97,28 +216,24 @@ const headerIconSources = {
   dark: {
     history: {
       normal: new URL("./assets/header-history-dark.png", import.meta.url),
-      hovered: new URL("./assets/header-history-dark-hover.png", import.meta.url),
     },
     newSession: {
       normal: new URL("./assets/header-new-session-dark.png", import.meta.url),
-      hovered: new URL("./assets/header-new-session-dark-hover.png", import.meta.url),
     },
   },
   light: {
     history: {
       normal: new URL("./assets/header-history-light.png", import.meta.url),
-      hovered: new URL("./assets/header-history-light-hover.png", import.meta.url),
     },
     newSession: {
       normal: new URL("./assets/header-new-session-light.png", import.meta.url),
-      hovered: new URL("./assets/header-new-session-light-hover.png", import.meta.url),
     },
   },
 };
 
-type HeaderIcon = { normal: URL; hovered: URL };
+type HeaderIcon = { normal: URL };
 
-function IconAction({ icon, label, shortcut, theme, onInvoke }: { icon: HeaderIcon; label: string; shortcut: string; theme: Theme; onInvoke: () => void }) {
+function IconAction({ icon, label, theme, onInvoke }: { icon: HeaderIcon; label: string; theme: Theme; onInvoke: () => void }) {
   const [hovered, setHovered] = useState(false);
   return (
     <box
@@ -129,8 +244,8 @@ function IconAction({ icon, label, shortcut, theme, onInvoke }: { icon: HeaderIc
       onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onInvoke(); }}
       style={{ flexDirection: "row", minWidth: 5, height: 1, alignItems: "center", justifyContent: "center", paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.background }}
     >
-      <image source={hovered ? icon.hovered : icon.normal} fit="fit" protocol="auto" style={{ width: 3, height: 1 }} />
-      {hovered ? <text fg={theme.subtle}>{` ${label} ${shortcut}`}</text> : null}
+      <image source={icon.normal} fit="fit" protocol="auto" style={{ width: 3, height: 1 }} />
+      {hovered ? <text fg={theme.subtle}>{` ${label}`}</text> : null}
     </box>
   );
 }
@@ -142,38 +257,59 @@ function Header({ cwd, theme, compact, onHistory, onNew }: { cwd: string; theme:
     <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 1 }}>
       <text fg={theme.subtle}>{label}</text>
       <box style={{ flexDirection: "row", gap: 1 }}>
-        <IconAction icon={actionIcons.history} label="历史" shortcut="Ctrl+R" theme={theme} onInvoke={onHistory} />
-        <IconAction icon={actionIcons.newSession} label="新会话" shortcut="Ctrl+N" theme={theme} onInvoke={onNew} />
+        <IconAction icon={actionIcons.history} label="历史" theme={theme} onInvoke={onHistory} />
+        <IconAction icon={actionIcons.newSession} label="新会话" theme={theme} onInvoke={onNew} />
       </box>
     </box>
   );
 }
 
-function PanelView({ panel, theme, icons, onClose, onSelect }: { panel: PanelSpec; theme: Theme; icons: IconSet; onClose: () => void; onSelect: (id: string) => void }) {
+function panelIcon(kind: PanelSpec["kind"], icons: IconSet): string {
+  if (kind === "sessions") return icons.session;
+  if (kind === "observe") return icons.observe;
+  if (kind === "permission") return icons.approval;
+  if (kind === "checkpoint") return icons.checkpoint;
+  return icons.profile;
+}
+
+type PanelAnchor = "history" | "profile" | "permission" | "top-right";
+
+function defaultPanelAnchor(panel: PanelSpec): PanelAnchor {
+  if (panel.kind === "sessions") return "history";
+  if (panel.kind === "profile") return "profile";
+  if (panel.kind === "permission") return "permission";
+  return "top-right";
+}
+
+function PanelView({ panel, theme, icons, onSelect }: { panel: PanelSpec; theme: Theme; icons: IconSet; onSelect: (id: string) => void }) {
   const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState(0);
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const options = useMemo(() => (panel.options ?? []).filter((item) => `${item.label} ${item.description ?? ""}`.toLowerCase().includes(query.toLowerCase())), [panel.options, query]);
+  const currentOptionId = panel.options?.find((item) => item.selected || item.tone === "success")?.id;
+  const initialSelected = Math.max(0, (panel.options ?? []).findIndex((item) => item.id === currentOptionId));
+  const [selected, setSelected] = useState(initialSelected);
+  useEffect(() => {
+    const currentIndex = options.findIndex((item) => item.id === currentOptionId);
+    setSelected(currentIndex >= 0 ? currentIndex : 0);
+  }, [currentOptionId, panel.kind, panel.options]);
   useEffect(() => setSelected((value) => Math.min(value, Math.max(0, options.length - 1))), [options.length]);
   useEffect(() => scrollRef.current?.scrollChildIntoView(`panel-option-${selected}`), [selected]);
   useKeyboard((key) => {
-    if (key.name === "escape") onClose();
-    else if (key.name === "up" && options.length) setSelected((value) => (value - 1 + options.length) % options.length);
+    if (key.name === "up" && options.length) setSelected((value) => (value - 1 + options.length) % options.length);
     else if (key.name === "down" && options.length) setSelected((value) => (value + 1) % options.length);
     else if (key.name === "pageup") setSelected((value) => Math.max(0, value - 8));
     else if (key.name === "pagedown") setSelected((value) => Math.min(options.length - 1, value + 8));
     else if (isEnterKey(key.name) && options[selected]) onSelect(options[selected].id);
   });
   return (
-    <box style={{ flexDirection: "column", height: 1, flexGrow: 1, flexShrink: 1, minHeight: 0, marginLeft: 2, marginRight: 2, backgroundColor: theme.surface }}>
-      <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: theme.surfaceRaised }}>
-        <text fg={theme.accent}><strong>{`${panel.kind === "sessions" ? icons.session : panel.kind === "observe" ? icons.observe : icons.profile} ${panel.title}`}</strong></text>
-        <text fg={theme.subtle}>{`${icons.close} Esc`}</text>
+    <box style={{ flexDirection: "column", width: "100%", maxHeight: "100%", minHeight: 3, backgroundColor: theme.surface }}>
+      <box style={{ flexDirection: "row", height: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: theme.surfaceRaised }}>
+        <text fg={theme.accent}><strong>{`${panelIcon(panel.kind, icons)} ${panel.title}`}</strong></text>
       </box>
       {panel.searchable ? <input value={query} placeholder={`${icons.search} 搜索会话…`} focused onInput={setQuery} style={{ paddingLeft: 1, paddingRight: 1, backgroundColor: theme.surface, textColor: theme.text, cursorColor: theme.accent, placeholderColor: theme.muted }} /> : null}
-      {panel.body ? <scrollbox style={{ maxHeight: options.length ? 10 : "100%", paddingLeft: 1, paddingRight: 1 }}><text fg={theme.muted}>{panel.body}</text></scrollbox> : null}
+      {panel.body ? <scrollbox style={{ maxHeight: options.length ? 5 : 8, flexShrink: 1, paddingLeft: 1, paddingRight: 1 }}><text fg={theme.muted}>{panel.body}</text></scrollbox> : null}
       {options.length ? (
-        <scrollbox ref={scrollRef} style={{ flexGrow: 1, minHeight: 1, paddingTop: 1, paddingBottom: 1 }}>
+        <scrollbox ref={scrollRef} style={{ maxHeight: panel.searchable ? 10 : 12, flexShrink: 1, minHeight: 1, paddingTop: 1, paddingBottom: 1 }}>
           {options.map((option, index) => {
             const active = index === selected;
             const tone = option.tone === "danger" ? theme.error : option.tone === "warning" ? theme.warning : option.tone === "success" ? theme.success : active ? theme.focus : theme.text;
@@ -186,7 +322,51 @@ function PanelView({ panel, theme, icons, onClose, onSelect }: { panel: PanelSpe
           })}
         </scrollbox>
       ) : null}
-      {panel.footer ? <text fg={theme.subtle}>{` ${panel.footer}`}</text> : null}
+    </box>
+  );
+}
+
+function PanelOverlay({ panel, anchor, theme, icons, terminalWidth, terminalHeight, onClose, onSelect }: {
+  panel: PanelSpec;
+  anchor: PanelAnchor;
+  theme: Theme;
+  icons: IconSet;
+  terminalWidth: number;
+  terminalHeight: number;
+  onClose: () => void;
+  onSelect: (id: string) => void;
+}) {
+  const modalWidth = Math.min(60, Math.max(30, terminalWidth - 12));
+  const modalHeight = Math.min(18, Math.max(7, terminalHeight - 4));
+  const footerLeft = anchor === "profile" ? 2 : Math.max(2, Math.min(12, terminalWidth - modalWidth - 2));
+  const placement = anchor === "history"
+    ? { top: 1, right: 2 }
+    : anchor === "top-right"
+      ? { top: 2, right: 2 }
+      : { bottom: 2, left: footerLeft };
+  return (
+    <box
+      position="absolute"
+      top={0}
+      left={0}
+      width="100%"
+      height="100%"
+      zIndex={20}
+      onMouseDown={onClose}
+      style={{ width: "100%", height: "100%" }}
+    >
+      <box position="absolute" top={0} left={0} width="100%" height="100%" style={{ backgroundColor: theme.background, opacity: 0.35 }} />
+      <box
+        position="absolute"
+        {...placement}
+        border
+        borderStyle="rounded"
+        borderColor={theme.border}
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{ width: modalWidth, maxWidth: "100%", maxHeight: modalHeight, flexShrink: 1, backgroundColor: theme.surface, zIndex: 21 }}
+      >
+        <PanelView key={panel.kind} panel={panel} theme={theme} icons={icons} onSelect={onSelect} />
+      </box>
     </box>
   );
 }
@@ -214,24 +394,31 @@ function InteractionView({ interaction, theme, icons, onResolve }: { interaction
     }
     else if (/^[1-9]$/.test(key.name)) {
       const index = Number(key.name) - 1;
-      if (index < options.length) select(index);
+      if (index < options.length) {
+        if (index === selectedRef.current) {
+          if (interaction.kind === "approval") onResolve({ decision: approvalOptions[selectedRef.current].value });
+          else onResolve({ selectedIndex: selectedRef.current, customText });
+        } else {
+          select(index);
+        }
+      }
     }
   });
   const otherSelected = interaction.kind === "question" && Boolean(questionOptions[selected]?.is_other);
   return (
-    <box style={{ flexDirection: "column", flexShrink: 0, marginLeft: 2, marginRight: 2, paddingLeft: 1, paddingRight: 1, paddingTop: 1, paddingBottom: 1, backgroundColor: theme.surfaceRaised }}>
-      <text fg={interaction.kind === "approval" ? theme.warning : theme.accent}><strong>{`${interaction.kind === "approval" ? icons.approval : icons.question} ${interaction.kind === "approval" ? "需要确认" : interaction.payload.question}`}</strong></text>
-      {interaction.kind === "approval" ? <text fg={theme.muted}>{`${interaction.payload.toolName} · ${interaction.payload.risk}\n${interaction.payload.reason}\n${JSON.stringify(interaction.payload.args, null, 2)}`}</text> : null}
+    <box border borderStyle="rounded" borderColor={interaction.kind === "approval" ? theme.warning : theme.accent} style={{ flexDirection: "column", flexShrink: 0, marginLeft: 2, marginRight: 2, paddingLeft: 1, paddingRight: 1, paddingTop: 1, paddingBottom: 1, backgroundColor: theme.surfaceRaised }}>
+      <text fg={interaction.kind === "approval" ? theme.warning : theme.accent}><strong>{interaction.kind === "approval" ? "需要确认" : interaction.payload.question}</strong></text>
+      {interaction.kind === "approval" ? <text fg={theme.muted}>{`${interaction.payload.toolName}  ${interaction.payload.risk}\n${interaction.payload.reason}\n${JSON.stringify(interaction.payload.args, null, 2)}`}</text> : null}
       <box style={{ flexDirection: "column", paddingTop: 1 }}>
         {options.map((option, index) => <text key={`${option.value}-${index}`} fg={index === selected ? theme.focus : (interaction.kind === "approval" && option.value === "deny" ? theme.error : theme.text)}>{`${index === selected ? icons.prompt : " "} [${index + 1}] ${option.label}${interaction.kind === "question" && questionOptions[index]?.description ? ` — ${questionOptions[index].description}` : ""}`}</text>)}
       </box>
       {otherSelected ? <input value={customText} placeholder="其他说明…" focused onInput={setCustomText} style={{ backgroundColor: theme.surface, textColor: theme.text, cursorColor: theme.accent, placeholderColor: theme.muted }} /> : null}
-      <text fg={theme.subtle}>↑↓ 选择 · Enter 确认 · Esc 取消</text>
     </box>
   );
 }
 
-type Completion = { id: string; label: string; description: string; insert: string };
+type Completion = { id: string; label: string; description: string; insert: string; kind: "command" | "file" | "session" };
+type CompletionSection = { title: string; items: Completion[] };
 
 const COMMAND_LABEL_WIDTH = 30;
 
@@ -267,38 +454,65 @@ function StopAction({ icon, theme, onStop }: { icon: string; theme: Theme; onSto
   );
 }
 
-function Composer({ value, onChange, onSubmit, onCancel, onExit, running, stopping, queueDepth, commands, theme, icons, compact, terminalWidth, disabled, onAction }: { value: string; onChange: (value: string) => void; onSubmit: () => void; onCancel: () => void; onExit?: () => void; running: boolean; stopping: boolean; queueDepth: number; commands: CommandItem[]; theme: Theme; icons: IconSet; compact: boolean; terminalWidth: number; disabled: boolean; onAction?: AppProps["onAction"] }) {
+function Composer({ value, onChange, onSubmit, onCancel, running, stopping, queueDepth, commands, theme, icons, compact, terminalWidth, disabled, sessionReady, onAction, attachments, onAddFiles, onStagePaths, onPaste, onRemoveAttachment }: { value: string; onChange: (value: string) => void; onSubmit: () => void; onCancel: () => void; running: boolean; stopping: boolean; queueDepth: number; commands: CommandItem[]; theme: Theme; icons: IconSet; compact: boolean; terminalWidth: number; disabled: boolean; sessionReady: boolean; onAction?: AppProps["onAction"]; attachments: AttachmentItem[]; onAddFiles: () => void; onStagePaths: (paths: string[], source: "mention" | "clipboard") => Promise<boolean>; onPaste: (editor: TextareaRenderable | null) => void; onRemoveAttachment: (id: string) => void }) {
   const [selected, setSelected] = useState(0);
   const [mentions, setMentions] = useState<Completion[]>([]);
   const editorRef = useRef<TextareaRenderable | null>(null);
   const paletteRef = useRef<ScrollBoxRenderable | null>(null);
   const slashQuery = value.trimStart().startsWith("/") && !value.includes(" ") ? value.trim() : "";
   const mentionMatch = value.match(/(?:^|\s)@([^\s]*)$/);
+  const mentionQuery = mentionMatch?.[1];
   useEffect(() => {
     let active = true;
-    if (!mentionMatch || !onAction) { setMentions([]); return; }
-    void onAction("complete_mention", { prefix: mentionMatch[1] }).then((result) => {
-      if (active) setMentions((result.candidates ?? []).map((item) => ({ id: item.insertText, label: item.display, description: item.description, insert: `@${item.insertText} ` })));
+    if (!mentionMatch || !onAction || !sessionReady) { setMentions([]); return; }
+    void onAction("complete_mention", { prefix: mentionQuery ?? "" }).then((result) => {
+      if (active) setMentions((result.candidates ?? []).map((item) => ({ id: item.insertText, label: item.display, description: item.description, insert: `@${item.insertText} `, kind: item.kind })));
     }).catch(() => { if (active) setMentions([]); });
     return () => { active = false; };
-  }, [mentionMatch?.[1], onAction]);
+  }, [mentionQuery, onAction, sessionReady]);
   const candidates = useMemo<Completion[]>(() => {
-    if (slashQuery) return commands.filter((command) => commandMatches(command, slashQuery)).map((command) => ({ id: command.name, label: command.name, description: command.description, insert: `${command.name} ` }));
+    if (slashQuery) return commands.filter((command) => commandMatches(command, slashQuery)).map((command) => ({ id: command.name, label: command.name, description: command.description, insert: `${command.name} `, kind: "command" }));
     return mentionMatch ? mentions : [];
-  }, [commands, slashQuery, mentionMatch?.[1], mentions]);
+  }, [commands, slashQuery, mentionQuery, mentions]);
   const commandMode = Boolean(slashQuery);
-  const descriptionWidth = Math.max(1, terminalWidth - COMMAND_LABEL_WIDTH - 8);
+  const candidateLabelWidth = commandMode ? COMMAND_LABEL_WIDTH + 2 : Math.min(42, Math.max(18, Math.floor(terminalWidth * 0.55)));
+  const descriptionWidth = Math.max(1, terminalWidth - candidateLabelWidth - 8);
+  const mentionSections = useMemo<CompletionSection[]>(() => {
+    if (commandMode) return [];
+    const sessions = candidates.filter((item) => item.kind === "session");
+    const files = candidates.filter((item) => item.kind === "file");
+    return [
+      sessions.length ? { title: "历史会话", items: sessions } : null,
+      files.length ? { title: "当前工作区文件", items: files } : null,
+    ].filter((section): section is CompletionSection => section !== null);
+  }, [candidates, commandMode]);
   const paletteOpen = !disabled && candidates.length > 0 && Boolean(slashQuery || mentionMatch);
-  useEffect(() => setSelected((value) => Math.min(value, Math.max(0, candidates.length - 1))), [candidates.length, slashQuery, mentionMatch?.[1]]);
+  useEffect(() => setSelected((value) => Math.min(value, Math.max(0, candidates.length - 1))), [candidates.length, slashQuery, mentionQuery]);
   useEffect(() => { if (paletteOpen) paletteRef.current?.scrollChildIntoView(`completion-${selected}`); }, [paletteOpen, selected]);
   useEffect(() => { if (editorRef.current && editorRef.current.plainText !== value) editorRef.current.setText(value); }, [value]);
   const applyCompletion = (completion: Completion) => {
-    const next = mentionMatch ? value.slice(0, value.lastIndexOf("@")) + completion.insert : completion.insert;
-    editorRef.current?.setText(next);
+    if (completion.kind === "file") {
+      const path = completion.insert.replace(/^@file:/, "").trim();
+      void onStagePaths([path], "mention").then((accepted) => {
+        if (!accepted) return;
+        const next = mentionMatch ? value.slice(0, value.lastIndexOf("@")) : value;
+        editorRef.current?.replaceText(next);
+        onChange(next);
+      });
+      return;
+    }
+    const replacement = completion.kind === "command" ? completion.insert : `@${completion.insert.replace(/^@/, "")}`;
+    const next = mentionMatch ? value.slice(0, value.lastIndexOf("@")) + replacement : replacement;
+    editorRef.current?.replaceText(next);
     onChange(next);
   };
   useKeyboard((key) => {
     if (disabled) return;
+    if (key.ctrl && key.name === "v") {
+      key.preventDefault();
+      onPaste(editorRef.current);
+      return;
+    }
     if (paletteOpen) {
       let handled = true;
       if (key.name === "up") setSelected((value) => (value - 1 + candidates.length) % candidates.length);
@@ -316,33 +530,56 @@ function Composer({ value, onChange, onSubmit, onCancel, onExit, running, stoppi
       onCancel();
     }
   });
+  const renderCandidate = (item: Completion, index: number) => (
+    <box id={`completion-${index}`} key={item.id} style={{ flexDirection: "row", backgroundColor: index === selected ? theme.surfaceSelected : theme.surfaceRaised }}>
+      <box style={{ width: candidateLabelWidth, flexDirection: "row", flexShrink: 0, justifyContent: "flex-start", paddingLeft: 1, paddingRight: 1 }}>
+        <text fg={index === selected ? theme.focus : theme.accent}>{truncateLabel(item.label, candidateLabelWidth - 2)}</text>
+      </box>
+      {compact ? null : (
+        <text fg={index === selected ? theme.text : theme.subtle} wrapMode="none" truncate>
+          {truncateText(item.description, descriptionWidth)}
+        </text>
+      )}
+    </box>
+  );
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 2, paddingRight: 2 }}>
-      {paletteOpen ? (
-        <box style={{ flexDirection: "column", backgroundColor: theme.surfaceRaised, paddingLeft: 1, paddingRight: 1 }}>
-          <scrollbox ref={paletteRef} style={{ height: Math.min(candidates.length, 8), backgroundColor: theme.surfaceRaised }}>
-            {candidates.map((item, index) => (
-              <box id={`completion-${index}`} key={item.id} style={{ flexDirection: "row", backgroundColor: index === selected ? theme.surfaceSelected : theme.surfaceRaised }}>
-                <box style={{ width: commandMode ? COMMAND_LABEL_WIDTH + 2 : 16, flexDirection: "row", flexShrink: 0, justifyContent: "flex-start", paddingLeft: 1, paddingRight: 1 }}>
-                  <text fg={index === selected ? theme.focus : theme.accent}>{commandMode ? truncateLabel(item.label, COMMAND_LABEL_WIDTH) : item.label}</text>
-                </box>
-                {compact ? null : (
-                  <text fg={index === selected ? theme.text : theme.subtle} wrapMode="none" truncate>
-                    {truncateText(item.description, descriptionWidth)}
-                  </text>
-                )}
+      {attachments.length ? (
+        <box style={{ flexDirection: "column", gap: 0, paddingLeft: 1, paddingRight: 1 }}>
+          {attachments.map((attachment) => (
+            <box key={attachment.id} style={{ flexDirection: "row", justifyContent: "space-between" }}>
+              <text fg={theme.subtle}>{`${attachment.kind.toUpperCase()}  ${attachment.name}  ${formatBytes(attachment.size)}`}</text>
+              <box focusable onMouseDown={() => onRemoveAttachment(attachment.id)} onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onRemoveAttachment(attachment.id); }}>
+                <text fg={theme.error}>×</text>
               </box>
-            ))}
-          </scrollbox>
-          <text fg={theme.subtle}>{` ${selected + 1}/${candidates.length} · ↑↓ 选择 · Enter/Tab 使用 · Esc 关闭`}</text>
+            </box>
+          ))}
         </box>
       ) : null}
-      <box style={{ flexDirection: "row", backgroundColor: theme.surface, paddingTop: 1, paddingBottom: 1 }}>
+      {paletteOpen ? (
+        <box border borderStyle="rounded" borderColor={theme.border} style={{ flexDirection: "column", backgroundColor: theme.surfaceRaised, paddingLeft: 1, paddingRight: 1 }}>
+          <scrollbox ref={paletteRef} style={{ height: Math.min(candidates.length + (commandMode ? 0 : mentionSections.length), 10), backgroundColor: theme.surfaceRaised }}>
+            {commandMode
+              ? candidates.map(renderCandidate)
+              : mentionSections.map((section) => (
+                <React.Fragment key={section.title}>
+                  <text fg={theme.muted}><strong>{section.title}</strong></text>
+                  {section.items.map((item) => renderCandidate(item, candidates.indexOf(item)))}
+                </React.Fragment>
+              ))}
+          </scrollbox>
+          <text fg={theme.subtle}>{` ${selected + 1}/${candidates.length}  ↑↓ 选择  Enter/Tab 使用  Esc 关闭`}</text>
+        </box>
+      ) : null}
+      <box border borderStyle="rounded" borderColor={theme.border} style={{ flexDirection: "row", backgroundColor: theme.surface, paddingTop: 1, paddingBottom: 1 }}>
+        <box focusable onMouseDown={onAddFiles} onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onAddFiles(); }} style={{ paddingLeft: 1 }}>
+          <text fg={theme.accent}><strong>＋</strong></text>
+        </box>
         <text fg={theme.accent}><strong>{` ${icons.prompt} `}</strong></text>
         <textarea
           ref={editorRef}
           initialValue={value}
-          placeholder="输入任务  ·  / 命令  ·  @ 文件"
+          placeholder="输入任务  / 命令  @ 文件"
           keyBindings={[
             { name: "return", action: "submit" },
             { name: "kpenter", action: "submit" },
@@ -357,36 +594,80 @@ function Composer({ value, onChange, onSubmit, onCancel, onExit, running, stoppi
           style={{ flexGrow: 1, minHeight: 3, maxHeight: 7, backgroundColor: theme.surface, textColor: theme.text, cursorColor: theme.accent, placeholderColor: theme.muted }}
         />
       </box>
-      <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1 }}>
-        <text fg={theme.subtle}>{stopping ? " 正在停止当前回合…" : running ? ` Ctrl+C 中断${queueDepth ? ` · 已排队 ${queueDepth} 条` : ""}` : " ? 帮助 · Ctrl+R 历史 · Ctrl+N 新会话"}</text>
-        {running
-          ? (stopping ? null : <StopAction icon={icons.stop} theme={theme} onStop={onCancel} />)
-          : <text fg={theme.subtle}>Enter 提交 · Shift+Enter 换行</text>}
-      </box>
+      {running ? <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1 }}>
+        {stopping ? <text fg={theme.subtle}>正在停止当前回合…</text> : (
+          <box style={{ flexDirection: "row", gap: 2 }}>
+            <text fg={theme.subtle}>Ctrl+C 中断</text>
+            {queueDepth ? <text fg={theme.subtle}>{`已排队 ${queueDepth} 条`}</text> : null}
+          </box>
+        )}
+        {stopping ? null : <StopAction icon={icons.stop} theme={theme} onStop={onCancel} />}
+      </box> : null}
     </box>
   );
 }
 
-function Footer({ theme, snapshot, compact, onPermission }: { theme: Theme; snapshot: typeof initialState.snapshot; compact: boolean; onPermission: () => void }) {
-  const permission = snapshot.permissionMode === "workspace-write" ? "工作区可写" : snapshot.permissionMode === "danger-full-access" ? "完全访问" : snapshot.permissionMode;
+function profileLabel(profile: string): string {
+  return ({
+    general: "通用",
+    "coding-agent": "编码",
+    plan: "规划",
+    "app-builder": "应用构建",
+    review: "审查",
+  } as Record<string, string>)[profile] ?? profile;
+}
+
+function permissionLabel(permissionMode: string): string {
+  return permissionMode === "workspace-write" ? "工作区可写" : permissionMode === "llm-auto" ? "替我审批" : permissionMode === "danger-full-access" ? "完全访问" : permissionMode;
+}
+
+function FooterAction({ label, theme, tone, onInvoke }: { label: string; theme: Theme; tone: string; onInvoke: () => void }) {
+  const [hovered, setHovered] = useState(false);
   return (
-    <box style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 2 }}>
-      <text fg={theme.accent}>{snapshot.profile}</text><text fg={theme.subtle}> · </text>
-      <text fg={snapshot.permissionMode === "danger-full-access" ? theme.error : theme.muted} onMouseDown={onPermission}>{permission}</text>
-      <text fg={theme.subtle}> · </text><text fg={theme.muted}>{`${snapshot.contextPercent}% 上下文`}</text>
-      {!compact ? <><text fg={theme.subtle}> · </text><text fg={theme.text}>{snapshot.model}</text><text fg={theme.subtle}>{snapshot.sessionId ? ` · ${snapshot.sessionId.slice(0, 8)}` : ""}</text></> : null}
+    <box
+      focusable
+      onMouseOver={() => setHovered(true)}
+      onMouseOut={() => setHovered(false)}
+      onMouseDown={onInvoke}
+      onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onInvoke(); }}
+      style={{ paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.background }}
+    >
+      <text fg={tone}><strong>{label}</strong></text>
     </box>
   );
 }
 
-export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInteraction, initialTask, themePreference = "auto", iconPreference = "auto" }: AppProps) {
+function Footer({ theme, snapshot, running, onProfile, onPermission }: { theme: Theme; snapshot: typeof initialState.snapshot; running: boolean; onProfile: () => void; onPermission: () => void }) {
+  const permission = permissionLabel(snapshot.permissionMode);
+  return (
+    <box style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", height: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 2 }}>
+      <box style={{ flexDirection: "row", alignItems: "center", gap: 1, flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
+        <FooterAction label={`${profileLabel(snapshot.profile)} ▾`} theme={theme} tone={theme.focus} onInvoke={onProfile} />
+        <FooterAction label={`${permission} ▾`} theme={theme} tone={snapshot.permissionMode === "danger-full-access" ? theme.error : theme.focus} onInvoke={onPermission} />
+        <text fg={theme.muted}>{`${snapshot.contextPercent}% 上下文`}</text>
+        <box style={{ flexShrink: 1, minWidth: 0 }}>
+          <text fg={theme.accent} wrapMode="none" truncate>{snapshot.model}</text>
+        </box>
+      </box>
+      {!running ? <box style={{ flexDirection: "row", gap: 2, flexShrink: 0, marginLeft: 2 }}>
+        <text fg={theme.subtle}>Enter 提交</text>
+        <text fg={theme.subtle}>Shift+Enter 换行</text>
+      </box> : null}
+    </box>
+  );
+}
+
+export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInteraction, onPickFiles, onReadClipboard, onCopyText, initialTask, themePreference = "auto", iconPreference = "auto" }: AppProps) {
   const [state, dispatch] = useReducer(reduceEvent, initialState);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
+  const [externalPaths, setExternalPaths] = useState<string[] | null>(null);
   const [composerVersion, setComposerVersion] = useState(0);
   const [panel, setPanel] = useState<PanelSpec | null>(null);
+  const [panelAnchor, setPanelAnchor] = useState<PanelAnchor>("top-right");
   const [detectedTheme, setDetectedTheme] = useState<ThemeMode | null>(null);
   const renderer = useRenderer();
-  const { width } = useTerminalDimensions();
+  const { width, height } = useTerminalDimensions();
   const theme = resolveTheme(themePreference, detectedTheme);
   const icons = resolveIcons(iconPreference);
   const compact = width < 96;
@@ -406,11 +687,16 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
     void (async () => {
       for await (const event of events) {
         if (!active) return;
-        if (event.type === "panel") setPanel(event.panel);
+        if (event.type === "panel") {
+          setPanel(event.panel);
+          setPanelAnchor(defaultPanelAnchor(event.panel));
+        }
         else {
           if (event.type === "session_reset") {
             setPanel(null);
             setDraft("");
+            setAttachments([]);
+            setExternalPaths(null);
             setComposerVersion((version) => version + 1);
           }
           dispatch(event);
@@ -420,11 +706,14 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
     return () => { active = false; };
   }, [events]);
 
-  const invoke = async (name: ActionName, params?: Record<string, unknown>) => {
+  const invoke = async (name: ActionName, params?: Record<string, unknown>, anchor?: PanelAnchor) => {
     if (!onAction) return;
     try {
       const result = await onAction(name, params);
-      if (result.panel) setPanel(result.panel);
+      if (result.panel) {
+        setPanel(result.panel);
+        setPanelAnchor(anchor ?? defaultPanelAnchor(result.panel));
+      }
       else if (name === "new_session") {
         setPanel(null);
         setDraft("");
@@ -432,37 +721,115 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
       }
       if (result.message) dispatch({ type: "notice", text: result.message });
     } catch (error) {
-      dispatch({ type: "notice", level: "error", text: String(error) });
+      dispatch({ type: "notice", level: "error", text: formatUserError(error) });
     }
   };
 
   useKeyboard((key) => {
-    const helpKey = key.name === "?" || (key.name === "/" && key.shift);
-    if (key.ctrl && key.name === "c") { key.preventDefault(); if (stopping) return; if (running) onCancel?.(); else onExit?.(); }
-    else if (key.ctrl && key.name === "r") { key.preventDefault(); void invoke("open_sessions"); }
-    else if (key.ctrl && key.name === "n") { key.preventDefault(); void invoke("new_session"); }
+    if (key.ctrl && key.name === "c") {
+      key.preventDefault();
+      const selection = renderer.getSelection();
+      if (selection) {
+        const text = selection.getSelectedText();
+        if (text && onCopyText) {
+          void onCopyText(text).then((copied) => {
+            if (!copied) dispatch({ type: "notice", level: "error", text: "复制失败，请重试。" });
+          }).catch(() => dispatch({ type: "notice", level: "error", text: "复制失败，请重试。" }));
+        }
+        return;
+      }
+      if (stopping) return;
+      if (running) onCancel?.();
+      else if (draft.length > 0) setDraft("");
+      else onExit?.();
+    }
     else if (key.ctrl && key.name === "o") { key.preventDefault(); void invoke("open_panel", { panel: "observe" }); }
-    else if (key.ctrl && key.name === "p") { key.preventDefault(); void invoke("toggle_permission"); }
-    else if (helpKey && !draft && !panel && !state.interaction) { key.preventDefault(); void invoke("open_panel", { panel: "help" }); }
+    else if (key.ctrl && key.name === "p") { key.preventDefault(); void invoke("open_panel", { panel: "permission" }); }
   });
 
   useEffect(() => {
     const text = initialTask?.trim();
     if (!text) return;
-    dispatch({ type: "transcript", item: { id: `user-${Date.now()}`, kind: "user", title: "你", body: text } });
-    onSubmit?.(text);
+    void onSubmit?.({ text, attachmentIds: [] }).then((result) => {
+      if (result.accepted) dispatch({ type: "transcript", item: { id: `user-${Date.now()}`, kind: "user", title: "你", body: text } });
+    }).catch((error) => dispatch({ type: "notice", level: "error", text: formatUserError(error) }));
   }, [initialTask, onSubmit]);
 
-  const submit = () => {
-    const text = draft.trim();
-    if (!text) return;
-    const panelCommands: Record<string, string> = { "/profile": "profile", "/checkpoint": "checkpoint", "/mcp": "mcp", "/observe": "observe" };
-    if (panelCommands[text]) { setDraft(""); void invoke("open_panel", { panel: panelCommands[text] }); return; }
-    if (text === "/compact" || text === "/fork") { setDraft(""); void invoke("panel_action", { panel: "command", action: text.slice(1) }); return; }
-    dispatch({ type: "transcript", item: withOptimisticUserMessage(state, text).items.at(-1)! });
-    setDraft("");
-    onSubmit?.(text);
+  const stagePaths = async (paths: string[], source: "picker" | "mention" | "clipboard"): Promise<boolean> => {
+    if (!onAction || !paths.length) return false;
+    try {
+      const result = await onAction("stage_attachments", { paths, source });
+      setAttachments((current) => {
+        const merged = new Map(current.map((item) => [item.id, item]));
+        for (const item of result.attachments ?? []) merged.set(item.id, item);
+        return [...merged.values()];
+      });
+      return true;
+    } catch (error) {
+      dispatch({ type: "notice", level: "error", text: formatUserError(error) });
+      return false;
+    }
   };
+  const addFiles = () => {
+    if (!onPickFiles) return;
+    void onPickFiles(state.snapshot.inputMode ?? "text").then((paths) => stagePaths(paths, "picker")).catch((error) => {
+      dispatch({ type: "notice", level: "error", text: formatUserError(error) });
+    });
+  };
+  const paste = (editor: TextareaRenderable | null) => {
+    if (!onReadClipboard || !onAction) return;
+    void onReadClipboard().then(async (result) => {
+      if (result.status !== "read") return;
+      const { mimeType, bytes } = result.representation;
+      if (mimeType.startsWith("image/")) {
+        const response = await onAction("stage_attachments", { clipboard: { dataBase64: Buffer.from(bytes).toString("base64"), mimeType, name: `clipboard.${mimeType.split("/")[1] === "jpeg" ? "jpg" : mimeType.split("/")[1]}` } });
+        setAttachments((current) => {
+          const merged = new Map(current.map((item) => [item.id, item]));
+          for (const item of response.attachments ?? []) merged.set(item.id, item);
+          return [...merged.values()];
+        });
+        return;
+      }
+      const text = new TextDecoder().decode(bytes);
+      const paths = clipboardFilePaths(text);
+      if (mimeType === "text/uri-list") {
+        await stagePaths(paths, "clipboard");
+        return;
+      }
+      editor?.insertText(text);
+      setDraft(editor?.plainText ?? `${draft}${text}`);
+    }).catch((error) => dispatch({ type: "notice", level: "error", text: formatUserError(error) }));
+  };
+  const removeAttachment = (id: string) => {
+    void onAction?.("remove_attachment", { attachmentId: id }).then(() => setAttachments((current) => current.filter((item) => item.id !== id))).catch((error) => {
+      dispatch({ type: "notice", level: "error", text: formatUserError(error) });
+    });
+  };
+  const submitWithAuthorization = async (authorizedPaths: string[] = []) => {
+    const text = draft.trim();
+    if (!text && !attachments.length) return;
+    const panelCommands: Record<string, string> = { "/checkpoint": "checkpoint", "/mcp": "mcp", "/observe": "observe" };
+    if (!attachments.length && panelCommands[text]) { setDraft(""); void invoke("open_panel", { panel: panelCommands[text] }); return; }
+    if (!attachments.length && (text === "/compact" || text === "/fork")) { setDraft(""); void invoke("panel_action", { panel: "command", action: text.slice(1) }); return; }
+    if (!onSubmit) return;
+    try {
+      const result = await onSubmit({ text, attachmentIds: attachments.map((item) => item.id), authorizedPaths });
+      if (!result.accepted) {
+        setExternalPaths(result.confirmation?.paths ?? null);
+        return;
+      }
+      const submittedAttachments = result.attachments ?? attachments;
+      const summary = submittedAttachments.map((item) => `[${item.kind}] ${item.name} (${formatBytes(item.size)})`).join("\n");
+      const body = [text, summary].filter(Boolean).join("\n");
+      dispatch({ type: "transcript", item: withOptimisticUserMessage(state, body).items.at(-1)! });
+      setDraft("");
+      setAttachments([]);
+      setExternalPaths(null);
+    } catch (error) {
+      dispatch({ type: "notice", level: "error", text: formatUserError(error) });
+    }
+  };
+  const submit = () => { void submitWithAuthorization(); };
   const selectPanel = (id: string) => {
     if (!panel) return;
     void (async () => {
@@ -472,7 +839,7 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
         if (result.panel) setPanel(result.panel);
         else setPanel(null);
         if (result.message) dispatch({ type: "notice", text: result.message });
-      } catch (error) { dispatch({ type: "notice", level: "error", text: String(error) }); }
+      } catch (error) { dispatch({ type: "notice", level: "error", text: formatUserError(error) }); }
     })();
   };
   const resolveInteraction = (result: Record<string, unknown>) => {
@@ -483,10 +850,20 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
 
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%", backgroundColor: theme.background }}>
-      <Header cwd={state.snapshot.cwd} theme={theme} compact={compact} onHistory={() => void invoke("open_sessions")} onNew={() => void invoke("new_session")} />
-      {panel ? <PanelView panel={panel} theme={theme} icons={icons} onClose={() => setPanel(null)} onSelect={selectPanel} /> : <Transcript items={state.items} theme={theme} icons={icons} />}
-      {state.interaction ? <InteractionView interaction={state.interaction} theme={theme} icons={icons} onResolve={resolveInteraction} /> : panel ? null : <Composer key={composerVersion} value={draft} onChange={setDraft} onSubmit={submit} onCancel={onCancel ?? (() => undefined)} onExit={onExit} running={running} stopping={stopping} queueDepth={state.queueDepth} commands={state.commands} theme={theme} icons={icons} compact={compact} terminalWidth={width} disabled={stopping} onAction={onAction} />}
-      <Footer theme={theme} snapshot={state.snapshot} compact={compact} onPermission={() => void invoke("toggle_permission")} />
+      <Header cwd={state.snapshot.cwd} theme={theme} compact={compact} onHistory={() => void invoke("open_sessions", undefined, "history")} onNew={() => void invoke("new_session")} />
+      <Transcript items={state.items} theme={theme} icons={icons} />
+      {state.interaction ? <InteractionView interaction={state.interaction} theme={theme} icons={icons} onResolve={resolveInteraction} /> : panel ? null : externalPaths ? (
+        <box border borderStyle="rounded" borderColor={theme.warning} style={{ flexDirection: "column", marginLeft: 2, marginRight: 2, paddingLeft: 1, paddingRight: 1 }}>
+          <text fg={theme.warning}><strong>允许读取工作区外文件？</strong></text>
+          {externalPaths.map((path) => <text key={path} fg={theme.text}>{path}</text>)}
+          <box style={{ flexDirection: "row", gap: 2 }}>
+            <box focusable onMouseDown={() => void submitWithAuthorization(externalPaths)} onKeyDown={(key) => { if (isEnterKey(key.name)) void submitWithAuthorization(externalPaths); }}><text fg={theme.success}>允许本次读取</text></box>
+            <box focusable onMouseDown={() => setExternalPaths(null)} onKeyDown={(key) => { if (isEnterKey(key.name)) setExternalPaths(null); }}><text fg={theme.error}>拒绝</text></box>
+          </box>
+        </box>
+      ) : <Composer key={composerVersion} value={draft} onChange={setDraft} onSubmit={submit} onCancel={onCancel ?? (() => undefined)} running={running} stopping={stopping} queueDepth={state.queueDepth} commands={state.commands} theme={theme} icons={icons} compact={compact} terminalWidth={width} disabled={stopping} sessionReady={state.snapshot.status === "ready"} onAction={onAction} attachments={attachments} onAddFiles={addFiles} onStagePaths={stagePaths} onPaste={paste} onRemoveAttachment={removeAttachment} />}
+      <Footer theme={theme} snapshot={state.snapshot} running={running} onProfile={() => void invoke("open_panel", { panel: "profile" })} onPermission={() => void invoke("open_panel", { panel: "permission" })} />
+      {panel ? <PanelOverlay panel={panel} anchor={panelAnchor} theme={theme} icons={icons} terminalWidth={width} terminalHeight={height} onClose={() => setPanel(null)} onSelect={selectPanel} /> : null}
     </box>
   );
 }

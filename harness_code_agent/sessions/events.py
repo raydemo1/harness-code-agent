@@ -60,6 +60,7 @@ class UserInputEvent:
     text: str
     turn: int | None = None
     mentions: list[str] | None = None
+    attachments: list[dict[str, Any]] | None = None
     agent: str | None = "main_agent"
 
     def to_event(self) -> StructuredEvent:
@@ -68,6 +69,8 @@ class UserInputEvent:
             payload["turn"] = self.turn
         if self.mentions is not None:
             payload["mentions"] = self.mentions
+        if self.attachments is not None:
+            payload["attachments"] = self.attachments
         return StructuredEvent("user_input", payload, self.agent)
 
 
@@ -131,6 +134,8 @@ class FileChangeEvent:
     operation: str | None = None
     snapshot_path: str | None = None
     diff: str | None = None
+    additions: int | None = None
+    deletions: int | None = None
     agent: str | None = "main_agent"
 
     def to_event(self) -> StructuredEvent:
@@ -141,6 +146,10 @@ class FileChangeEvent:
             payload["snapshot_path"] = self.snapshot_path
         if self.diff:
             payload["diff"] = self.diff
+        if self.additions is not None:
+            payload["additions"] = self.additions
+        if self.deletions is not None:
+            payload["deletions"] = self.deletions
         return StructuredEvent("file_change", payload, self.agent)
 
 
