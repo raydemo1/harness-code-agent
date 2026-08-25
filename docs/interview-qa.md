@@ -135,9 +135,9 @@ Claude Code 选择 TS 有它自己的产品、团队和分发生态背景，但�
 
 Agent 决策循环的核心流程还是串行的：发 LLM 请求 → 等响应 → 执行这一批工具调用 → 把结果写回上下文 → 再发下一次请求。模型只有看到上一批工具结果后，才应该做下一步决策。
 
-但"执行这一批工具调用"不再是傻傻全串行。`ToolExecutor` 会按 `ToolExecutionLane` 分组：连续的读文件、网络读取、只读子 agent、verify shell 可以并发；遇到写文件、控制操作、有副作用 shell 就打屏障。这保证主控循环仍然可预测，同时减少无意义等待。
+但"执行这一批工具调用"不再是傻傻全串行。`ExecutionPlanner` 会为内置工具、MCP 和 `run_bash` 统一解析 `CallEffect`，根据精确文件、目录子树、全局资源和控制屏障建立依赖图。不同文件的结构化写可以并行，重叠资源的读写按模型原始顺序执行；结果仍按原始 tool-call 顺序写回。
 
-循环在 `AgentConversation.run_until_idle()` 中实现，是一个 bounded for 循环（默认最多 60 次迭代）。每次迭代：取消检查 → 中间件钩子 → 上下文生命周期检查 → LLM 调用 → `ToolExecutor` 按 lane 执行工具 → 后处理。
+循环在 `AgentConversation.run_until_idle()` 中实现，是一个 bounded for 循环（默认最多 60 次迭代）。每次迭代：取消检查 → 中间件钩子 → 上下文生命周期检查 → LLM 调用 → `ToolExecutor` 按资源计划执行工具 → 后处理。
 
 ### 后台线程边界
 
@@ -146,21 +146,16 @@ Agent 决策循环的核心流程还是串行的：发 LLM 请求 → 等响应 
 仍然存在的线程边界主要是工具执行、取消和 UI/运行时通信：
 
 1. **CancellationToken** — 用 `threading.Event` 实现跨线程取消信号。TUI 线程调用 `cancel()`，Agent 循环在每个迭代边界检查。
-2. **ToolExecutor worker** — 只读 lane 会放进线程池并发执行，结果仍然回到主线程按原始 tool call 顺序写入 conversation。
+2. **ToolExecutor worker** — 当前 wave 中无资源冲突的调用会放进线程池并发执行，结果仍然回到主线程按原始 tool call 顺序写入 conversation。
 3. **MCP / shell 等 runtime 边界** — 这些组件可能有自己的 reader 或事件线程，但它们不参与上下文压缩决策。
 
-### 如果要支持并发任务
+### 子代理如何运行
 
-如果未来需要并发 Agent，有两种路线：
+`spawn_agent` 会创建 session 级后台 Agent，主 Agent 不必等它结束。多个 Agent 共享并发限流器和资源协调器，但各自有独立对话与取消令牌。
 
-- **多 Agent 进程**：每个任务一个独立进程，共享文件系统但不共享内存。这是最安全的方式，类似 Docker 容器的思路。
-- **异步 Agent 循环**：把 `run_until_idle()` 改成 async，工具执行用 `asyncio.to_thread()` 包装。但这需要重构整个中间件链和工具系统，工作量大。
+只读角色直接读取主工作区。`worker` 使用隔离副本，只生成可审查的 `ChangeProposal`。主 Agent 通过 `apply_agent_changes` 三方合并；真正冲突要显式解决。
 
-目前没有这个需求 — coding agent 的典型用法是"一个任务做到底"，不是"同时处理 10 个任务"。
-
-### 如果面试官追问"那 delegated agents 不就是并发 Agent？"
-
-`delegate_agent` 和 `parallel_agents` 确实会创建有界子 Agent，但它们不是多个顶层任务同时运行。`explore`、`test_design`、`review`、`verify` 只读角色可以并发调查；`patch` 角色只在临时复制的隔离工作区产生 proposed patch，不直接修改主工作区。最终报告回到主 Agent 后，仍由单一 orchestrator 决定是否采纳和执行。
+`send_agent_message` 会在下一次迭代边界注入补充信息。它不会等待整个子任务结束，也不会中断已有工作。
 
 ---
 
@@ -210,7 +205,7 @@ Agent 决策循环的核心流程还是串行的：发 LLM 请求 → 等响应 
 
 ## Q: 如果一个工具跑了 5 分钟，用户只能干等？
 
-> 要分情况。普通短工具会等结果返回；读类工具可以按 lane 并发；长运行 shell 命令会后台化，不会一直卡住主循环。
+> 要分情况。普通短工具会等结果返回；资源不冲突的工具可以并发；长运行 shell 命令会后台化，不会一直卡住主循环。
 
 ### 工具执行模型
 
@@ -221,7 +216,7 @@ Agent 决策循环的核心流程还是串行的：发 LLM 请求 → 等响应 
 ### 超时保护
 
 - **`run_bash`** 有 per-command 超时（默认 300 秒）。普通命令超时后会尝试 interrupt；长运行服务命令会更早返回 job id。
-- **`delegate_agent`** 默认最多 6 turns、300 秒，参数还会被硬限制在 1–20 turns、30–1800 秒之间；子 Agent 不能继续递归委派。
+- **`spawn_agent`** 默认最多 6 turns、300 秒，参数限制为 1–20 turns、30–1800 秒；子 Agent 不能递归委派。
 - **`browser_test`** 使用 Playwright 的同步 API，Playwright 自身有超时机制。
 
 ### 时间预算中间件
@@ -276,9 +271,9 @@ Python 侧仍由 `InteractiveSession`、Agent worker、EventBus 和同步 approv
 | 前端状态与交互 | `frontend/opentui/src/state.test.ts`, `frontend/opentui/src/app.test.tsx` | reducer、主题/图标、首帧、输入提交、命令补全、快捷键、鼠标、审批/问题面板、响应式布局 |
 | Python UI bridge | `test_opentui_bridge.py`, `test_terminal_ui.py`, `test_interactive_cli.py` | NDJSON 请求/事件、panel action、命令 registry、session 初始化与交互入口 |
 | 中间件 | `test_product_runtime.py`, `test_task_tracking.py`, `test_recovery_strategy.py`, `test_acceptance_planning.py`, `test_tool_policy.py` | 中间件链、权限审批、错误恢复、任务追踪、acceptance checks、shell policy |
-| 工具运行时 | `test_tool_executor.py`, `test_parallel_tool.py`, `test_shell_session.py`, `test_shell_jobs.py`, `test_mcp_runtime.py`, `test_skill_catalog.py` | tool lane、并行执行、后台 job、MCP 工具、deferred tool reveal、skill registry 和 skill 文件读取 |
+| 工具运行时 | `test_tool_executor.py`, `test_parallel_tool.py`, `test_shell_session.py`, `test_shell_jobs.py`, `test_mcp_runtime.py`, `test_skill_catalog.py` | 资源规划、并行执行、后台 job、MCP 工具、deferred tool reveal、skill registry 和 skill 文件读取 |
 | 会话 / 评估 / 记忆 | `test_observability.py`, `test_eval_suite.py`, `test_eval_ledger.py`, `test_terminal_bench_launcher.py`, `test_terminal_runner_artifacts.py`, `test_memory.py` | 事件记录、评估汇总、ledger、Terminal-Bench launcher / artifacts、记忆检索 |
-| Agent 循环 | `test_compaction.py`, `test_profiles.py`, `test_delegate_agent.py`, `test_terminal_agent_flow.py`, `test_tool_policy.py` | 上下文压缩、路由与共享 conversation、有界委派/隔离 Patch、terminal 流程与工具策略 |
+| Agent 循环 | `test_compaction.py`, `test_profiles.py`, `test_delegate_agent.py`, `test_tool_policy.py` | 上下文压缩、路由、后台 Agent、隔离提案、三方合并与工具策略 |
 
 ### Approval 面板怎么测
 
@@ -456,11 +451,11 @@ NORMAL ──[环境错误 ≥2 次]──→ ENV_FIX
 | 模式 | 触发条件 | 工具限制 | 退出条件 |
 |---|---|---|---|
 | `NORMAL` | 默认 | 无限制 | — |
-| `ENV_FIX` | 连续 ≥2 次环境错误（`command not found`、`permission denied`、`no module named` 等） | 禁止 `write_file` 和 `delegate_agent`，只允许诊断和安装命令 | 成功执行一个非只读 shell 命令 |
+| `ENV_FIX` | 连续 ≥2 次环境错误（`command not found`、`permission denied`、`no module named` 等） | 禁止文件修改和 `spawn_agent`，只允许诊断和安装命令 | 成功执行一个非只读 shell 命令 |
 | `SPEC_RECHECK` | 连续 ≥2 次相同错误签名 | **强制只读**：禁止 `write_file`，`run_bash` 只允许只读/验证命令 | 执行 `update_plan_state` 后清除 |
 | `RETHINK` | 在 `SPEC_RECHECK` 中仍然尝试编辑同一文件 ≥2 次 | 必须先 `update_plan_state` 才能执行任何 action 工具 | 执行 `update_plan_state` 后清除 |
 | `PROBE` | required replan 成功提交后 | 只允许一个低成本只读 probe，例如 read/search 或验证命令 | probe 成功后恢复正常执行 |
-| `FINAL_VERIFY` | 手动设置 | 禁止 `delegate_agent`、`web_search`、`web_fetch` | — |
+| `FINAL_VERIFY` | 手动设置 | 禁止 `spawn_agent`、`web_search`、`web_fetch` | — |
 
 关键设计：`_register_failure()` 用错误签名（`result` 字符串）做重复判断。如果连续两次错误的签名相同（比如同一个 `ModuleNotFoundError`），才升级模式；不同类型的错误重置计数器。这避免了"第一次 import error、第二次 syntax error"被误判为重复失败。required replan 的关键点也不在 prompt，而在运行时：`TaskTrackingEnforcementMiddleware` 会阻止继续漂移，`update_plan_state` 会把旧的 `start` 归一化成 `replan`，并把 recovery mode 切进 `PROBE`。
 
@@ -472,7 +467,7 @@ NORMAL ──[环境错误 ≥2 次]──→ ENV_FIX
 
 如果当前任务已经到了 plan handoff，也有专门路径：`plan` profile 生成计划后，用户如果不是回复"继续"，而是输入修改意见，`revise_pending_plan()` 会把这段反馈作为计划修订请求追加进去；用户确认后再 handoff 到 `coding-agent`。
 
-如果 agent 自己发现信息不够，它可以用 `ask_user` 工具问一个结构化问题。这个工具是 `CONTROL_SERIAL` lane，不会和写操作并发；用户回答会作为 tool result 回到同一轮对话里，agent 不需要猜。
+如果 agent 自己发现信息不够，它可以用 `ask_user` 工具问一个结构化问题。这个工具是控制屏障，不会和其他工具并发；用户回答会作为 tool result 回到同一轮对话里，agent 不需要猜。
 
 ### 为什么这样设计
 
@@ -490,7 +485,7 @@ LoopDetection 和 Recovery 的互补关系可以用一句话总结：**LoopDetec
 
 ### TUI 层的 profile 切换
 
-`InteractiveSession.switch_profile()` 在 TUI 的 `/profile` 面板中调用时，会：
+`InteractiveSession.switch_profile()` 在 TUI 的底部 profile 选择面板中调用时，会：
 
 1. 创建或重建目标 profile 的 Agent 运行时
 2. 把同一个 `AgentConversation` 重新绑定到新的 system prompt、tools schema 和 middleware 配置
@@ -526,7 +521,7 @@ class LLMClient(Protocol):
 
 ### 2. 更彻底的 async runtime
 
-现在已经有 `ToolExecutor` 线程池、lane-based 保守并发、长运行 shell job 后台化，但主循环和中间件语义本质上还是同步的。如果重写，我会更早把 runtime 做成 async-first：
+现在已经有 `ToolExecutor` 线程池、资源感知并发、长运行 shell job 后台化，但主循环和中间件语义本质上还是同步的。如果重写，我会更早把 runtime 做成 async-first：
 
 - 工具、MCP、浏览器、shell job 都有统一的 async 调度接口
 - cancellation token 和 progress event 变成工具协议的一部分
@@ -639,7 +634,7 @@ Aider 的核心是"编辑 chat"模式 — 用户和 agent 通过 git diff 对话
 | 层面 | 我在控制什么 | 项目里的落点 |
 | --- | --- | --- |
 | Execution | 命令在哪跑、怎么停、会不会卡死 | host / docker sandbox、`PersistentShellSession`、后台 `ShellJobManager` |
-| Tooling | 模型能调用什么工具、工具能不能并发 | `ToolRegistry` 的 `schema / permission / lane / disclosure`，`ToolExecutor` 保守并行 |
+| Tooling | 模型能调用什么工具、工具能不能并发 | `ToolRegistry` 的 `schema / permission / effect / disclosure`，`ExecutionPlanner` 资源调度 |
 | Context | 模型依据的信息是不是最新、上下文满了怎么办 | 85% auto-compaction、handoff reset、Observation Store |
 | Lifecycle | agent 怎么从任务开始走到退出 | bounded loop、中间件钩子、plan → coding-agent handoff、只读子 agent |
 | Observability | 出问题后能不能复盘 | `.harness/sessions`、`events.jsonl`、TraceWriter、observability metrics |
@@ -648,7 +643,7 @@ Aider 的核心是"编辑 chat"模式 — 用户和 agent 通过 git diff 对话
 
 ### 我会重点举两个例子
 
-第一个是 **Tooling + Governance**。工具不是一个 Python 函数列表，而是带 metadata 的 registry。比如 `run_bash` 是 shell 权限，`write_file` 是 edit 权限，`delegate_agent` 是 read 权限；同时还有 lane，决定它能不能和其他工具并发。真正执行前还会经过 `PermissionMiddleware`，在 `workspace-write` 模式下 risky shell 要审批，`rm -rf /` 这种黑名单命令永远拒绝。
+第一个是 **Tooling + Governance**。工具通过 registry 声明权限与资源 effect。权限决定允许、审批或拒绝；effect 决定并发、排序和隔离。真正执行前还会经过 `PermissionMiddleware`。
 
 第二个是 **Context + Verification**。模型读过一个文件以后，如果后面又修改了这个文件，Observation Store 会把之前那条观察标记为 stale，并注入 `FACT INVALIDATION`，提醒它不要基于旧内容继续写。最后退出时也不信它的自我判断，`PreExitVerificationMiddleware` 会重新注入原始需求，让它按需求跑验证；Python 文件还会过 `ast.parse` 和 `ruff check --diff`。
 
@@ -672,14 +667,14 @@ Aider 的核心是"编辑 chat"模式 — 用户和 agent 通过 git diff 对话
 2. 中间件 `per_iteration` 钩子
 3. 上下文生命周期检查（token 计数 → 压缩/重置决策）
 4. LLM 调用（chat completions + function calling）
-5. `ToolExecutor` 按 lane 执行工具（读类可并发，写 / 控制类串行）
+5. `ToolExecutor` 按资源依赖执行工具（无冲突调用可并发）
 6. 中间件 `pre_exit` 钩子（决定是否继续）
 
 循环退出条件：无工具调用、finish_reason="stop"、迭代上限、API 错误过多、用户取消。
 
 ### 第二层：工具系统（`runtime/tool_registry.py`、`runtime/tool_runner.py`、`runtime/builtins/`）
 
-`ToolRegistry` 管理工具注册表，每个工具有 schema、handler、permission 和 execution lane；还可以标记 deferred disclosure。`execute_tool()` 统一路由：查找 → 预验证（自动修正路径、阻止交互命令）→ 执行 → 结果包装。
+`ToolRegistry` 管理工具注册表，每个工具有 schema、handler、permission 和 effect resolver；还可以标记 deferred disclosure。`execute_tool()` 统一路由：查找 → 预验证（自动修正路径、阻止交互命令）→ 执行 → 结果包装。
 
 工具执行时注入 `runtime_state`（shell 会话、任务板、观察存储）和 `tool_context`（workspace 服务、checkpoint 回调）。
 
@@ -762,39 +757,20 @@ for each tool_call:
 
 但提取只是换位置，真正的难点在后面。
 
-### 第二步：什么可以并行？这是一道分类题
+### 第二步：用资源声明判断并行，而不是给工具贴固定车道
 
-工具并行最大的坑不是怎么写多线程代码，而是**怎么判断一个工具能不能并行**。模型返回的 tool call 顺序有时蕴含语义依赖——`read_file` 在 `write_file` 后面，可能是因为它想读刚写入的内容。
+工具并行最大的坑不是怎么写线程池，而是**怎么表达两个调用是否竞争同一资源**。固定 lane 会把所有写操作一刀切串行，而且内置工具、MCP、Shell 容易各自长出一套调度逻辑。
 
-我的方案是引入 **`ToolExecutionLane` 枚举**，给每个工具分配一个"车道"：
+现在 registry 为每个工具注册 effect resolver，解析成 `CallEffect`：
 
-| Lane | 工具 | 策略 |
-| --- | --- | --- |
-| `WORKSPACE_READ` | read_file, list_files | 可并行 |
-| `NETWORK_READ` | web_search, web_fetch | 可并行（限流） |
-| `SUBAGENT_READ` | delegate_agent, parallel_agents | 可并行（限流） |
-| `SHELL_READ` | grep, git status, cat | 可并行 |
-| `SHELL_VERIFY` | pytest, ruff check, mypy | 可并行（限流） |
-| `SHELL_LONG_RUNNING` | npm run dev, uvicorn | 串行屏障 + 后台化 |
-| `WORKSPACE_WRITE` | write_file, apply_patch | **串行屏障** |
-| `SHELL_SERIAL` | 有副作用的 shell 命令 | **串行屏障** |
-| `CONTROL_SERIAL` | ask_user, update_plan_state | **串行屏障** |
+- `ResourceClaim(domain, key, scope, access)` 表达精确文件、目录子树或全局资源的读写；
+- `barrier` 表达审批、交互、计划控制和未知副作用等不可越过的顺序点；
+- `concurrency_key` 只做 network、subagent 等容量限制，不参与权限判断；
+- 未声明 effect 的工具默认全局独占，缺少信息不会被乐观并行。
 
-分组策略是保守的：
+`ExecutionPlanner` 按模型原始顺序建立冲突边：资源范围重叠且至少一方写入时，后一个依赖前一个；控制屏障依赖全部前序调用，并阻止全部后序调用越过。这样 `write_file(a)` 和 `write_file(b)` 可以同 wave 执行，但同文件读写、目录读取与目录内文件写会严格串行。一个与 `a` 无关的网络读取也可以越过针对 `a` 的等待，不再受邻接分组限制。
 
-```text
-read_file A    ─┐
-read_file B    ─┤ 并行组
-web_search X   ─┘
-                         ← 遇到 write_file，屏障
-write_file C   ─── 串行组
-                         ← 再遇到 read_file，新并行组
-read_file D    ─── 串行组（就一个）
-```
-
-关键设计选择：**只把连续的、安全的工具合并成并行组，遇到任何一个写操作或控制操作就打屏障**。这意味着 `read→write→read` 不能把两个 read 合并——因为模型输出顺序暗示了 C 应该在 A、B 之后执行，即使 C 是只读的。
-
-这是有意为之的保守策略。做成激进并行（拓扑排序、依赖分析）技术上可行，但引入的复杂度远超收益——在 coding agent 场景中，一次 tool call 的等待时间通常只有几秒，而依赖判断出错会直接导致文件冲突。
+同一 assistant response 中的调用被视为数据独立；如果后一个调用需要前一个的输出，模型应在下一轮再发起。调度只约束资源顺序，不把前一个调用的成功当作后一个的隐式前置条件。
 
 ### 第三步：Shell 命令的分类——不能用简单规则
 
@@ -803,7 +779,7 @@ Shell 命令的分类是整个设计中最棘手的部分。一个命令字符�
 我设计了三层分类逻辑（都在 `shell_classification.py` 中）：
 
 1. **先排除明显不是长运行的**——`npm test`、`pytest`、`pip install`、`git` 命令、`black` 格式化——这些绝不应该后台化。
-2. **检查是否有状态依赖操作**——`export`、`source`、`conda activate`、`cd`——有这些就走串行 lane，因为状态必须传递给后续命令。
+2. **检查状态与副作用**——`export`、`source`、`conda activate`、`cd`、未知脚本和普通修改取得工作区全局写声明；每次 `run_bash` 都是新 Shell，因此相关状态必须写进同一条命令。
 3. **白名单匹配长运行命令**——`npm run dev`、`pnpm dev`、`vite`、`next dev`、`uvicorn`、`python manage.py runserver`、`flask run` 等约 20 种模式。
 
 最微妙的一个判断是：**`cd web && npm run dev` 应该识别为长运行**。这意味着需要解析 `cd <dir> && <cmd>` 结构，递归判定内层命令。但如果用户在 `npm run dev` 前面加了 `export FOO=bar`，就不能后台化——因为 export 改变了 shell 状态，而这个状态后续命令可能依赖。
@@ -823,7 +799,7 @@ Shell 命令的分类是整个设计中最棘手的部分。一个命令字符�
 ```text
 run_bash("npm run dev")
     │
-    ├─ 识别为 SHELL_LONG_RUNNING
+    ├─ 识别为 long_running
     ├─ ShellJobManager.start()
     │   ├─ subprocess.Popen(..., stdout=PIPE, stderr=PIPE)
     │   ├─ daemon reader threads → RingBuffer（线程安全环形缓冲区，保留最近 1MB 日志）
@@ -860,7 +836,7 @@ Agent 拿到 `job_id` 后，后续操作完全通过这三个工具完成。`run
 **Docker sandbox**：
 
 - 每个 long-running job 使用**独立容器**——`docker run --rm --name hca-job-<id>`。
-- 不复用持久 shell 的 sandbox 容器——因为一个 job 的停止不应该影响其他 job。
+- 不复用前台 shell 的 sandbox 容器——因为一个 job 的停止不应该影响其他 job。
 - 日志通过 `subprocess.PIPE` 收集，不依赖 Docker 日志驱动。
 - 停止用 `docker rm -f <container>`。
 
@@ -883,7 +859,7 @@ def start(self, command: str) -> ShellJob:
 我用两层限流：
 
 - **全局 `ThreadPoolExecutor(max_workers=8)`**——总并发上限。
-- **每 lane 的 `Semaphore`**——subagent 最多 3 个（因为每个都调用 LLM），verify shell 最多 2 个（因为测试/检查通常 CPU 密集），network read 最多 2 个（避免 API rate limit）。
+- **按 `concurrency_key` 共享的 `Semaphore`**——subagent 最多 3 个，network read 最多 2 个；它只控制容量，不承担安全分类。
 
 ### 第七步：但多线程带来了新问题——事件顺序
 
@@ -904,13 +880,13 @@ Worker 线程（并行）          主线程（串行、按原始 index）
 
 `_record_executed_result()` 是唯一的"回写点"，它在主线程中按原始 index 排序后逐条处理。Worker 干的越快越好，但写入顺序由主线程保证。
 
-这个设计还有一个隐藏收益：**审批时机正确**。如果模型返回 `read_file → run_bash risky → write_file`，用户不会在前面两个工具还在执行时就被弹出审批面板。审批请求发生在该工具真正轮到执行时，而不是预取阶段。
+这个设计还有一个隐藏收益：**审批时机正确**。planner 会先执行 ready 集合中的独立安全项，待 risky 调用真正 ready 后才进入 `PermissionMiddleware` 并发出审批；拒绝只阻止该调用，取消或 fallback 才停止尚未启动的调用。
 
 ### 收获：这件事教会了我什么
 
-1. **并发不是"加线程"就能解决的问题**。最难的不是写 `ThreadPoolExecutor.submit()`，而是定义清楚"什么可以并发"——lane 分类是这个架构里最核心也最需要领域知识的决策。
+1. **并发不是"加线程"就能解决的问题**。最难的是把副作用转换成可比较的资源声明，并把权限、容量限制和资源冲突分开。
 
-2. **保守比聪明更重要**。这个执行器的并行粒度比很多"最佳实践"推荐的更保守——遇到写操作就打屏障，不重排顺序、不做依赖分析。但正是这种保守让它可以安全上线，不需要处理复杂的竞态恢复。
+2. **未知信息必须保守降级**。未声明 effect、未知 Shell 和控制工具默认全局独占；只有能够声明到精确文件的结构化写才获得更细并发。
 
 3. **跨平台进程管理没有银弹**。`psutil` 在 POSIX 上表现很好，Windows 上也能用，但 fallback 到 `taskkill` / `os.killpg` 是必要的。Docker 路径又是完全不同的逻辑。三者统一在同一个接口下，每一条路径都有自己的边界情况。
 
@@ -922,31 +898,29 @@ Worker 线程（并行）          主线程（串行、按原始 index）
 
 ## Q: 你的工具和子代理并行是如何实现的？
 
-> 我做的不是"把所有工具调用都丢进线程池"这种粗暴并行，而是 **lane-based 的保守并行**。主 Agent 的决策循环仍然是串行的，但同一轮 LLM 返回的一批 tool calls 里，如果有连续的、只读的、互不影响的工具，就可以并发执行。
+> 我做的不是"把所有工具调用都丢进线程池"，而是**统一资源感知调度**。主 Agent 的决策循环仍然串行，但同一轮返回的内置工具、MCP 和 Shell 调用会先解析资源声明，再按冲突图组成 execution wave。
 
 ### 用 STAR 讲
 
-**S（背景）**：一开始工具调用是全串行的。模型一次返回 `read_file A`、`read_file B`、`web_search X`、`delegate_agent Y`，这些互相不依赖，但串行跑会让用户白等。另一方面，`write_file`、`apply_patch`、有副作用的 shell 命令又绝对不能随便并发，否则文件状态和上下文顺序会乱。
+**S（背景）**：一开始工具调用是全串行的。模型一次返回多个互不依赖的读取或 Agent 任务时，串行执行会增加等待；共享资源写入又不能随意并发。
 
 **T（任务）**：所以我要解决的是两个目标的平衡：能并发的地方加速，不能并发的地方保持确定性。尤其是子代理，它可以并发调研，但不能变成多个 Agent 同时写代码。
 
 **A（行动）**：
 
-第一步是给工具分 lane。`ToolRegistry` 里每个工具都有一个 `ToolExecutionLane`。比如 `read_file` 是 `WORKSPACE_READ`，`web_search` 是 `NETWORK_READ`，`delegate_agent` / `parallel_agents` 是 `SUBAGENT_READ`，这些属于可并行 lane；`write_file`、`apply_patch` 是 `WORKSPACE_WRITE`，`update_plan_state` 是 `CONTROL_SERIAL`，普通有副作用 shell 是 `SHELL_SERIAL`，这些都是串行屏障。
+第一步是把权限和调度分开。`PermissionPolicy` 只决定 allow / ask / deny；`ToolRegistry` 的 effect resolver 决定资源、屏障和容量 key。未声明 effect 的扩展工具默认全局独占。
 
-第二步是按模型原始顺序分组。`ToolExecutor._build_groups()` 不做重排，只从左到右扫描 tool calls：连续可并行的放进一个 parallel group；一遇到写操作、控制操作、危险 shell，就先 flush 前面的并行组，然后这个工具单独串行执行。这样不会破坏模型输出顺序里隐含的依赖关系。
+第二步是建依赖图。`read_file` 声明精确文件读，`write_file` / `apply_patch` 声明精确文件写，`list_files` / `repo_search` 声明目录子树读。重叠资源且至少一方写入时按原始顺序建边；控制工具、未知副作用和全局 Shell 写是严格屏障。不同文件写入、网络读取和无关本地操作因此可以共享 wave。
 
-第三步是真正执行。parallel group 会进 `ThreadPoolExecutor(max_workers=8)`。同时我还做了 lane 级限流：子代理最多 3 个，verify shell 最多 2 个，network read 最多 2 个。因为子代理本质上会再调 LLM，网络搜索也可能打外部服务，不能无限并发。
+第三步是真正执行。ready wave 进入 `ThreadPoolExecutor(max_workers=8)`；network 和 subagent 使用共享 `concurrency_key` 限流。session-scoped `ResourceCoordinator` 原子申请排序后的多资源读写锁，防止多个 executor 或嵌套调用绕过 planner 形成竞态。
 
-第四步是结果回写。worker 线程只负责执行工具，返回 `ToolResult`；它不直接写 conversation、不发 observation、不跑 `post_tool`。所有结果回到主线程后，按原始 index 排序，再统一写入消息、记录事件、更新 Observation Store、做 fact invalidation、调用 middleware。这样并发执行了，但 transcript 仍然是确定性的。
+第四步是结果回写。worker 线程只返回 `ToolResult`；主线程使用 index buffer，只有从当前最小未回写 index 开始连续就绪时才写入消息、事件、Observation Store 和 middleware。即使后面的独立调用先完成，transcript 仍保持模型原始顺序。
 
 ### 子代理为什么可以并行
 
-`delegate_agent` 提供 `explore`、`test_design`、`review`、`verify`、`patch` 五种角色。前四种只读角色的工具面和 `DelegatePolicyMiddleware` 都会拦截写文件、有副作用 shell、工作流控制和递归委派；`parallel_agents` 也只接受这四种只读角色。
+每次 `spawn_agent` 只启动一个 Agent；同一轮发出多个调用即可并行。全局 limiter 控制总量，路径 ownership 阻止 worker 领取重叠范围。
 
-`patch` 是一个重要例外：它可以写，但写入的是临时复制的隔离工作区，完成后只返回 proposed patch 和 changed files，不会直接把变更合入主工作区。这让子 Agent 可以做执行型探索，同时仍由 orchestrator 审阅并决定是否应用。
-
-所以多个子代理并发时，可以分别调查实现位置、设计测试和做 review；worker 只返回结构化报告，真正的整合、主工作区修改和最终判断仍由 orchestrator 完成。
+只读角色共享主工作区。worker 写隔离副本，完成后保存完整提案。主 Agent 审查并三方合并，冲突文件不会写入主工作区。
 
 **R（结果）**：这个设计带来的好处是，读类工具、搜索、子代理调研可以明显减少等待时间；但写文件、审批、状态更新、最终验证仍然保持单一顺序。面试里我会总结成一句话：**并发的难点不是开线程，而是定义清楚哪些东西永远不能并发。**
 
@@ -985,16 +959,16 @@ Claude Code、Cursor、Aider 都没有这个机制。它们依赖 LLM 自己意�
 从 **Claude Code** 这边，我主要参考了交互体验：
 
 - **CLI 双入口**：`veriforge` 进入 TUI，`veriforge -p "task"` 做批处理。前者适合开发时边看边调整，后者适合 benchmark 或脚本化执行。
-- **工作流入口**：`/profile`、`/checkpoint`、`/mcp`、`/compact`、`/fork`、`/observe` 只保留改变当前工作流的动作；历史会话通过右上角时钟图标选择，查询信息交给自然语言或非交互 CLI。
+- **工作流入口**：`/checkpoint`、`/mcp`、`/compact`、`/fork`、`/observe` 只保留改变当前工作流的动作；profile 通过底部选择面板切换；历史会话通过右上角时钟图标选择，查询信息交给自然语言或非交互 CLI。
 - **项目规则文件**：Claude Code 有 `CLAUDE.md` 这种 repo 约定，Codex 生态也有 `AGENTS.md`。我在 VeriForge 里做成 `HARNESS.md`，由 `PromptPrefixBuilder` 放进稳定 system prefix，让项目规则变成 agent 的稳定上下文。
-- **工具权限心智**：Claude Code 的 read / edit / shell 分类给了我启发，但我把它做得更 runtime 化：每个工具在 `ToolRegistry` 里都有 `permission`、`lane`、`disclosure`，不只是告诉模型有哪些工具，也告诉 runtime 怎么调度和管控。
+- **工具权限心智**：Claude Code 的 read / edit / shell 分类给了我启发，但我把权限和调度拆开：`permission` 决定允许、审批或拒绝，effect resolver 决定资源冲突和容量限制。
 
 从 **Codex** 这边，我主要参考了执行边界：
 
 - **Shell marker 协议**：`workspace/shell_session.py` 里还能看到 `__CODEX_STDOUT_*`、`__CODEX_STDERR_*`、`__CODEX_EXIT_*`。这个设计很朴素但很重要：不要靠猜终端输出，而是明确切分 stdout、stderr 和 exit code。
 - **Sandbox 心智**：VeriForge 支持 `HARNESS_SANDBOX_MODE=host|docker`。host 适合本地开发，docker 适合隔离不可信命令，默认还能关网络、加 `no-new-privileges`。
 - **权限模式命名**：`workspace-write`、`danger-full-access` 明显受 Codex 影响。但 VeriForge 没停在沙箱层，而是每个 tool call 都经过 `PermissionPolicy`，risky shell 需要审批，黑名单 shell 永远阻断。
-- **结构化工具调用**：模型不能随便吐一段 shell 就算执行。`run_bash`、`apply_patch`、`delegate_agent`、MCP tools 都要走 schema、registry、permission、middleware。
+- **结构化工具调用**：`run_bash`、`apply_patch`、Agent 和 MCP 工具都要经过 schema、registry、permission 与 middleware。
 
 ### 我自己做的改造
 
@@ -1016,40 +990,38 @@ Claude Code、Cursor、Aider 都没有这个机制。它们依赖 LLM 自己意�
 
 ## Q: Multi-Agent 在你的项目里有体现吗？怎么做的？
 
-> 有，但采用的是 **分层委派 + 隔离 Patch**，不是多个 Agent 共享工作区自由协作。Orchestrator 拥有最终决策权；只读子 Agent 可以并行调查，Patch 子 Agent 可以在临时工作区提出 Diff，但没有子 Agent 能直接把并行修改写进主工作区。
+> 有，但采用的是 **持久 Agent 线程 + 隔离变更提案**。子 Agent 可以跨主 Agent 回合继续运行，worker 不能直接写主工作区。
 
-### 架构：一个 Orchestrator + 五种有界角色
+### 架构：一个 Orchestrator + 五种角色
 
-每个顶层任务只有一个 orchestrator（`AgentConversation`），由 `InteractiveSession` 创建和管理。它通过 `delegate_agent(agent_profile, task, expected_output, allowed_paths, max_turns, max_seconds)` 按需创建短生命周期子 Agent。
+`AgentCoordinator` 在 session 内管理 Agent 的创建、消息、等待、中断和关闭。每个 Agent 保留独立 conversation，可以用 `followup_agent` 延续。
 
 | Profile | 模式 | 职责 |
 |---|---|---|
-| `explore` | read-only | 调查代码位置和调用链 |
-| `test_design` | read-only | 设计测试与边界案例 |
-| `review` | read-only | 查找 correctness / regression 风险 |
-| `verify` | read-only | 独立核验证据和验收结果 |
-| `patch` | isolated patch | 在临时副本中修改，返回 proposed diff |
+| `explorer` | read-only | 调查代码位置和调用链 |
+| `test_designer` | read-only | 设计测试与边界案例 |
+| `reviewer` | read-only | 查找 correctness / regression 风险 |
+| `verifier` | read-only | 独立核验证据和验收结果 |
+| `worker` | isolated write | 在隔离副本中修改，生成 `ChangeProposal` |
 
-默认上限是 6 turns、300 秒，输出和 Patch 都有长度上限。`allowed_paths` 可以进一步收窄读取或修改范围。
+默认上限是 6 turns、300 秒。`allowed_paths` 定义 worker 的写入范围。
 
 ### 两层安全边界
 
-第一层是工具面：只读角色只拿到读文件、搜索、只读/验证 shell 和 web 工具。第二层是 `DelegatePolicyMiddleware`：即使模型试图绕过 Prompt，仍会阻止写文件、有副作用命令、问用户、控制工作流、管理后台 Job 和再次委派。
-
-`patch` 角色不靠“承诺不污染主工作区”，而是复制工作区到临时目录，在副本中执行，最后计算相对主工作区的 Diff。临时目录销毁后，只把报告和 proposed patch 交回主 Agent。
+第一层是角色工具面：只读角色不能编辑，worker 只能写 ownership 范围。第二层是隔离：worker 使用持久临时副本，主工作区只接受显式 apply。
 
 ### 并行如何发生
 
-主 Agent 可以直接发出多个 `delegate_agent`，它们走 `SUBAGENT_READ` lane；也可以调用 `parallel_agents`，一次并发执行最多四个 `explore` / `test_design` / `review` / `verify` 角色。结果仍按稳定顺序返回，由 orchestrator 综合后决定下一步。`patch` 不进入 `parallel_agents`，避免多个写方案同时竞争。
+主 Agent 在同一轮发出多个 `spawn_agent` 即可并行。所有 Agent 共用 subagent limiter；多个 worker 的 ownership 不能重叠。
 
 ### 为什么不是对等自治 Multi-Agent
 
-- 子 Agent 之间没有消息通道，也不能递归委派。
+- 子 Agent 不能递归委派或控制其他 Agent。
 - 只读角色不能修改文件。
-- Patch 角色只修改临时副本，不直接合并。
+- worker 只修改隔离副本，不直接合并。
 - 任务完成、用户沟通和主工作区写入仍由 orchestrator 决定。
 
-Coding agent 的核心风险是共享状态一致性。与其先引入文件锁、冲突合并和分布式退出条件，不如让并行发生在调查层，让执行型子 Agent 只产出可审阅 Patch。
+应用提案时先做三方合并。无重叠修改自动合并；真实冲突保留为独立制品，由主 Agent 显式解决。源文件不会出现冲突标记。
 
 ### 如果面试官追问"和 AutoGen / CrewAI 有什么区别？"
 
@@ -1308,15 +1280,13 @@ supersede 机制是基于 **file + anchor 匹配**和 **source_paths 交集**的
 | **工具集差异** | `app-builder` 额外暴露 `browser_test`；`plan` 只暴露只读工具和 `update_plan_state`；`review` 限制为只读 + 验证 shell |
 | **Middleware 差异** | 各 profile 组合不同的 middleware 链和不同的阈值参数（通过 `ProfileConfig` 可调） |
 
-此外还有：
-- `subagent_policy()` — 子 Agent 的权限策略（只读角色不能修改；`patch` 只能在隔离副本提议 Diff；任何子 Agent 都不能决定完成）
-- `resolve_task_timeout()` / `resolve_task_metadata()` — 任务超时和 metadata（`terminal` profile 会从 `HARNESS_TERMINAL_TASK_NAME`、workspace 路径或用户 prompt 解析任务名，再读取 `harness_code_agent/profiles/tb2_tasks.json`）
+此外，`AgentCoordinator` 统一管理子 Agent 的角色权限、生命周期与隔离提案。`resolve_task_timeout()` / `resolve_task_metadata()` 管理任务超时和 metadata。
 
 ### 自动路由：`route_profile_for_turn()`
 
 用户不需要每次手动选 profile。系统默认从 `general` 开始，每个用户 turn 进入 agent 前都会先跑本地路由：用高精度规则和 profile prototype 的 BM25 + cosine 匹配生成 `RouteDecision`。本地证据不足时，才调用一次受限的 fast model，并把上一轮任务和回答作为上下文。
 
-这里有一个重要边界：`terminal` 不在产品自动路由候选里。它还在 `PROFILES` 中，所以 eval runner 和 `--profile terminal` 可以显式使用；TUI 的 `/profile` 面板只展示产品 profile。
+这里有一个重要边界：`terminal` 不在产品自动路由候选里。它还在 `PROFILES` 中，所以 eval runner 和 `--profile terminal` 可以显式使用；TUI 的 profile 面板只展示产品 profile。
 
 ### 当前路由动作
 
@@ -1340,11 +1310,11 @@ supersede 机制是基于 **file + anchor 匹配**和 **source_paths 交集**的
 
 1. 创建 `profiles/my_profile.py`，继承 `BaseProfile`，实现 `name()` + `description()` + `main_agent()`（~80-100 行）
 2. 在 `profiles/__init__.py` 的 `PROFILES` 字典里注册
-3. 如果希望它成为产品可见 profile，需要进入 `PRODUCT_PROFILES` / slash command 列表；如果希望自动路由能识别它，还需要把 profile 加进 `profiles/router.py` 的本地 prototype 集合。否则仍可通过显式 `--profile` 使用，但不会被普通产品入口展示或自动选择。
+3. 如果希望它成为产品可见 profile，需要进入 `PRODUCT_PROFILES` 和 profile 面板选项；如果希望自动路由能识别它，还需要把 profile 加进 `profiles/router.py` 的本地 prototype 集合。否则仍可通过显式 `--profile` 使用，但不会被普通产品入口展示或自动选择。
 
 ### 如果面试官追问"profile 切换会丢上下文吗？"
 
-TUI 层的 profile 切换使用 `/profile` 面板：创建或重建目标 Agent 运行时，并把同一个 Conversation 重新绑定到新的 prompt 与 tools。用户选择具体模式后进入 pinned；重新选择自动模式后，才恢复本地优先、fast model 兜底的自动路由。详见 Q12。
+TUI 层的 profile 切换使用底部 profile 选择面板：创建或重建目标 Agent 运行时，并把同一个 Conversation 重新绑定到新的 prompt 与 tools。用户选择具体模式后进入 pinned；重新选择自动模式后，才恢复本地优先、fast model 兜底的自动路由。详见 Q12。
 
 ---
 

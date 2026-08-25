@@ -88,7 +88,7 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 │   ├── core/               # 交互 session、路由、TUI glue
 │   ├── agent/              # conversation state、trace、上下文压缩、provider 适配
 │   ├── runtime/            # 工具、权限、middleware、approval
-│   ├── workspace/          # 路径保护、快照、持久 shell
+│   ├── workspace/          # 路径保护、快照、Shell 与后台任务
 │   ├── sessions/           # session metadata 和事件日志
 │   ├── skills/             # skill registry 与按需加载的 catalog
 │   └── profiles/           # general、coding-agent、app-builder、plan、review 等模式
@@ -200,7 +200,6 @@ veriforge --no-alt-screen
 常用命令：
 
 ```text
-/profile      选择工作模式
 /checkpoint   管理检查点
 /mcp          管理 MCP 服务与工具
 /compact      压缩当前对话上下文
@@ -208,7 +207,7 @@ veriforge --no-alt-screen
 /observe      打开运行观察
 ```
 
-输入 `/` 会打开可滚动命令面板，最多显示 8 行；上下键、PageUp/PageDown、Home/End 都会保持当前选项可见。右上角的历史和新会话图标是可点击的真实入口，也分别支持 `Ctrl+R` 和 `Ctrl+N`；profile 选择使用 `/profile` 面板完成，再切回自动模式时由本地匹配优先、fast model 兜底的路由器判断。
+输入 `/` 会打开可滚动命令面板，最多显示 8 行；上下键、PageUp/PageDown、Home/End 都会保持当前选项可见。右上角的历史和新会话图标是可点击的真实入口；profile 选择直接点击底部状态栏入口完成，再切回自动模式时由本地匹配优先、fast model 兜底的路由器判断。
 
 主题默认跟随终端，可显式指定；Nerd Font 图标需要主动启用，默认使用不会缺字的 Unicode 图标：
 
@@ -270,7 +269,7 @@ veriforge --profile review "Review the current branch"
 veriforge --profile terminal "Fix the broken symlinks in /tmp"
 ```
 
-`/profile` 面板提供自动路由、通用、编码、规划、应用构建和审查模式。选择具体模式后会固定当前工作模式；再次选择自动路由即可交回本地路由器判断。规划完成后，仍可在当前对话中继续执行已确认的计划。
+底部 profile 选择面板提供自动路由、通用、编码、规划、应用构建和审查模式。选择具体模式后会固定当前工作模式；再次选择自动路由即可交回本地路由器判断。规划完成后，仍可在当前对话中继续执行已确认的计划。
 
 ## Skills
 
@@ -319,20 +318,31 @@ veriforge session observe project --export
 
 ## 工具运行时
 
-工具调用统一经过权限、lane、审批和 middleware 管理。
+工具调用统一经过权限检查、审批和并发调度。
 
 内置工具包括：
 
 - repository search 和 bounded file read
 - workspace-scoped 文件写入
 - structured patch
-- persistent shell jobs
+- 独立前台 shell 调用和可管理的后台 shell jobs
 - web search / fetch
-- delegated agents for exploration, review, verification, test design, and isolated patch proposals
-- 并行安全命令和并行只读 delegated agents
+- 后台子代理与隔离 worker 提案
+- 自动并行无冲突的工具调用
 - 用户选择提问
 - 可选浏览器验证
 - MCP server 暴露的 tools
+
+运行规则：
+
+- 同一文件的读写按顺序执行。
+- 不同文件的受控修改可以并行。
+- 测试、构建和代码检查不与文件修改并行。
+- `run_bash` 每次使用新的 Shell，并从 workspace 根目录开始。
+- 需要共享目录或环境变量的步骤应写在同一条命令中。
+- 未声明副作用的扩展工具按独占方式运行。
+- 子代理跨主回合运行；补充消息在下一次迭代生效。
+- worker 改动需显式审查和应用；同文件改动使用三方合并。
 
 Runtime 还会处理循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。
 
@@ -465,6 +475,7 @@ Eval ledger 会从 raw `summary.json`、Harbor `result.json`、VeriForge artifac
 | `HARNESS_MODEL_MAX` | provider 默认 | 覆盖 `max` 档模型 |
 | `HARNESS_PROVIDER` | `auto` | `auto` / `openai` / `deepseek` / `openai-compatible` |
 | `HARNESS_STREAM` | `auto` | streaming：`auto` / `1` / `0` |
+| `HARNESS_MODEL_INPUT_MODE` | `text` | 模型输入能力：两种模式均通过内置 Skill 处理 PDF/DOCX；`multimodal` 额外原文直传 JPEG、PNG、GIF、WebP 图片 |
 | `HARNESS_WINDOWS_SHELL` | `pwsh` | Windows host shell：`pwsh` / `wsl`；严格使用所选后端，不自动降级 |
 | `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式 |
 | `HARNESS_SANDBOX_MODE` | `host` | Shell sandbox：`host` / `docker` |
