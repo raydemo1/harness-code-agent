@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-from ... import config
+from ...agent.cancellation import CancelledError
 from ..tool_result import ToolResult
 
 try:
@@ -16,9 +15,6 @@ try:
     HAS_PLAYWRIGHT = True
 except ImportError:
     HAS_PLAYWRIGHT = False
-
-
-_dev_server_proc: subprocess.Popen | None = None
 
 
 def _playwright_browser_roots() -> list[Path]:
@@ -74,46 +70,60 @@ def _launch_chromium(playwright):
         raise
 
 
-def _ensure_dev_server(start_command: str, port: int, startup_wait: int = 8) -> str:
-    """Start a dev server in the background if not already running."""
-    global _dev_server_proc
-    if _dev_server_proc is not None and _dev_server_proc.poll() is None:
-        return f"Dev server already running (pid={_dev_server_proc.pid})"
-    _dev_server_proc = subprocess.Popen(
-        start_command,
-        shell=True,
-        cwd=config.WORKSPACE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    time.sleep(startup_wait)
-    if _dev_server_proc.poll() is not None:
-        stderr = _dev_server_proc.stderr.read().decode(errors="replace")[:2000]
-        return f"[error] Dev server exited immediately: {stderr}"
-    return f"Dev server started (pid={_dev_server_proc.pid}, port={port})"
+def _ensure_dev_server(runtime_state, start_command: str, port: int, startup_wait: int, cancellation_token) -> str:
+    """Start a conversation-owned dev server and wait cancellably for startup."""
+    manager = getattr(runtime_state, "shell_job_manager", None)
+    if manager is None:
+        return "[error] No background job manager available"
+    existing_id = getattr(runtime_state, "browser_job_id", None)
+    if existing_id:
+        try:
+            existing = manager.get(existing_id)
+        except Exception:
+            existing = None
+        if existing is not None and existing.status == "running":
+            return f"Dev server already running (pid={existing.pid})"
+
+    job = manager.start(start_command)
+    runtime_state.browser_job_id = job.job_id
+    deadline = time.monotonic() + max(0, startup_wait)
+    while time.monotonic() < deadline and job.status == "running":
+        _check_cancelled(cancellation_token)
+        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+    _check_cancelled(cancellation_token)
+    if job.status != "running":
+        detail = manager.read_output(job.job_id, 2_000).strip()
+        return f"[error] Dev server exited immediately: {detail or job.error or job.status}"
+    return f"Dev server started (pid={job.pid}, port={port})"
 
 
-def stop_dev_server() -> ToolResult:
+def stop_dev_server(runtime_state=None) -> ToolResult:
     """Stop the background dev server."""
-    global _dev_server_proc
-    if _dev_server_proc is None:
+    manager = getattr(runtime_state, "shell_job_manager", None)
+    job_id = getattr(runtime_state, "browser_job_id", None)
+    if manager is None or not job_id:
         return ToolResult(
             tool="stop_dev_server",
             status="success",
             output="No dev server running",
             metadata={"status_source": "native"},
         )
-    _dev_server_proc.terminate()
     try:
-        _dev_server_proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _dev_server_proc.kill()
-    _dev_server_proc = None
+        job = manager.stop(job_id)
+    except Exception as exc:
+        return ToolResult(
+            tool="stop_dev_server",
+            status="failed",
+            output=f"[error] Failed to stop dev server: {exc}",
+            error=str(exc),
+            metadata={"status_source": "shell_job", "job_id": job_id},
+        )
+    runtime_state.browser_job_id = None
     return ToolResult(
         tool="stop_dev_server",
         status="success",
-        output="Dev server stopped",
-        metadata={"status_source": "native"},
+        output=f"Dev server stopped (job_id={job_id}, pid={job.pid})",
+        metadata={"status_source": "shell_job", "job_id": job_id},
     )
 
 
@@ -124,6 +134,9 @@ def browser_test(
     start_command: str | None = None,
     port: int = 5173,
     startup_wait: int = 8,
+    runtime_state=None,
+    tool_context=None,
+    cancellation_token=None,
 ) -> ToolResult:
     """
     Launch a headless browser, navigate to a URL, perform actions, and
@@ -156,13 +169,24 @@ def browser_test(
 
     # Optionally start dev server
     if start_command:
-        srv_result = _ensure_dev_server(start_command, port, startup_wait)
+        try:
+            srv_result = _ensure_dev_server(
+                runtime_state,
+                start_command,
+                port,
+                startup_wait,
+                cancellation_token,
+            )
+        except CancelledError:
+            stop_dev_server(runtime_state)
+            raise
         report_lines.append(f"Server: {srv_result}")
         if srv_result.startswith("[error]"):
             failed = True
             error_message = srv_result.removeprefix("[error] ")
 
     try:
+        _check_cancelled(cancellation_token)
         with sync_playwright() as p:
             browser, browser_detail = _launch_chromium(p)
             if browser_detail:
@@ -171,7 +195,9 @@ def browser_test(
 
             # Navigate
             try:
+                _check_cancelled(cancellation_token)
                 page.goto(url, timeout=15000)
+                _check_cancelled(cancellation_token)
                 report_lines.append(f"Navigated to {url} — title: {page.title()}")
             except Exception as e:
                 report_lines.append(f"[error] Navigation failed: {e}")
@@ -190,6 +216,7 @@ def browser_test(
 
             # Execute actions
             for action in (actions or []):
+                _check_cancelled(cancellation_token)
                 action_type = action.get("type", "")
                 selector = action.get("selector", "")
                 value = action.get("value", "")
@@ -203,7 +230,12 @@ def browser_test(
                         page.fill(selector, value, timeout=5000)
                         report_lines.append(f"Filled '{selector}' with '{value[:50]}'")
                     elif action_type == "wait":
-                        page.wait_for_timeout(delay)
+                        remaining = max(0, int(delay))
+                        while remaining:
+                            _check_cancelled(cancellation_token)
+                            chunk = min(100, remaining)
+                            page.wait_for_timeout(chunk)
+                            remaining -= chunk
                         report_lines.append(f"Waited {delay}ms")
                     elif action_type == "evaluate":
                         result = page.evaluate(value)
@@ -218,7 +250,9 @@ def browser_test(
                     failed = True
                     error_message = f"Action {action_type}('{selector}'): {e}"
 
-                page.wait_for_timeout(300)  # brief pause between actions
+                for _ in range(3):
+                    _check_cancelled(cancellation_token)
+                    page.wait_for_timeout(100)
 
             # Gather page info
             report_lines.append(f"Final URL: {page.url}")
@@ -231,9 +265,12 @@ def browser_test(
 
             # Screenshot
             if screenshot:
-                ss_path = Path(config.WORKSPACE) / "_screenshot.png"
+                if tool_context is None:
+                    raise RuntimeError("browser_test requires a workspace context for screenshots")
+                ss_path = Path(tool_context.workspace.root) / ".harness" / "artifacts" / "browser.png"
+                ss_path.parent.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(ss_path), full_page=False)
-                report_lines.append("Screenshot saved to _screenshot.png")
+                report_lines.append(f"Screenshot saved to {ss_path.relative_to(tool_context.workspace.root)}")
 
             browser.close()
 
@@ -249,3 +286,8 @@ def browser_test(
         error=error_message,
         metadata={"url": url, "status_source": "browser"},
     )
+
+
+def _check_cancelled(cancellation_token) -> None:
+    if cancellation_token is not None:
+        cancellation_token.check()

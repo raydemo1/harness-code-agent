@@ -11,7 +11,7 @@ import time
 
 from .. import config
 from .cancellation import CancelledError
-from .providers import ProviderAdapter, get_client, reset_client
+from .providers import ProviderAdapter, client_scope
 from .utils import _usage_to_dict
 
 log = logging.getLogger("harness")
@@ -65,7 +65,6 @@ def _reset_client_after_stream_timeout(conv) -> None:
         conv.client.close()
     except (OSError, RuntimeError):
         pass
-    reset_client()
     conv._client_needs_refresh = True
 
 
@@ -76,11 +75,12 @@ def llm_call_simple(messages: list[dict]) -> str:
     adapter = ProviderAdapter(profile.provider)
     for attempt in range(4):
         try:
-            resp = get_client().chat.completions.create(**adapter.chat_kwargs(
-                profile=profile,
-                messages=messages,
-                max_tokens=10000,
-            ))
+            with client_scope() as client:
+                resp = client.chat.completions.create(**adapter.chat_kwargs(
+                    profile=profile,
+                    messages=messages,
+                    max_tokens=10000,
+                ))
             return resp.choices[0].message.content or ""
         except Exception as e:
             err_str = str(e)
@@ -106,8 +106,7 @@ class LlmChannel:
     def request_assistant_message(self, kwargs: dict, cancellation_token=None) -> tuple[dict, str | None] | None:
         conv = self.conversation
         if getattr(conv, "_client_needs_refresh", False):
-            conv.client = get_client()
-            conv._client_needs_refresh = False
+            conv.refresh_client()
         if conv.agent.stream_callback is not None:
             stream_kwargs = dict(kwargs)
             stream_kwargs["stream"] = True
@@ -246,7 +245,6 @@ class LlmChannel:
             except (OSError, RuntimeError):
                 pass
             finally:
-                reset_client()
                 conv._client_needs_refresh = True
 
         return cancellation_token.add_callback(interrupt)

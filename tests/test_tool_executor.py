@@ -842,6 +842,49 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertIs(seen[0], token)
         self.assertIn("slow_observed_cancel", seen)
 
+    def test_cancelled_turn_tracks_uncooperative_tool_until_it_finishes(self):
+        from harness_code_agent.agent.cancellation import (
+            CancellationToken,
+            CancelledError,
+        )
+
+        registry = tools.ToolRegistry()
+        token = CancellationToken()
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_tool(cancellation_token=None):
+            started.set()
+            release.wait(2)
+            return ToolResult(tool="slow_read", status="success", output="late result")
+
+        def cancel_tool(cancellation_token=None):
+            self.assertTrue(started.wait(1))
+            token.cancel()
+            return ToolResult(tool="cancel_read", status="success", output="cancelled")
+
+        registry.register(_schema("slow_read"), slow_tool, permission="read", effect=_READ_EFFECT)
+        registry.register(_schema("cancel_read"), cancel_tool, permission="read", effect=_READ_EFFECT)
+        tool_calls = [
+            _tool_call("tc_slow", "slow_read"),
+            _tool_call("tc_cancel", "cancel_read"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation, context = _conversation_with_registry(Path(tmp), registry, tool_calls)
+            with (
+                patch("harness_code_agent.agent.conversation.config.MAX_AGENT_ITERATIONS", 2),
+                patch("harness_code_agent.agent.conversation.context.count_tokens", return_value=1),
+                self.assertRaises(CancelledError),
+            ):
+                conversation.run_until_idle(cancellation_token=token)
+
+            self.assertEqual(context.tool_tasks.pending_count, 1)
+            recorded = [msg.get("content", "") for msg in conversation.messages if msg.get("role") == "tool"]
+            self.assertNotIn("late result", recorded)
+            release.set()
+            self.assertTrue(context.tool_tasks.wait_idle(timeout=1))
+
     def test_cancellation_answers_all_pending_tool_calls(self):
         from harness_code_agent.agent.cancellation import (
             CancellationToken,

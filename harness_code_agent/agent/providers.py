@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from threading import Lock
 
 from openai import OpenAI
 
@@ -15,32 +15,25 @@ TextDeltaCallback = Callable[[str], None]
 ChunkCallback = Callable[[], None]
 
 
-_client: OpenAI | None = None
-_client_config: tuple[str | None, str | None, float, int] | None = None
-_client_lock = Lock()
-
-
 def get_client() -> OpenAI:
-    global _client, _client_config
     client_config = _current_client_config()
-    if _client is None or _client_config != client_config:
-        with _client_lock:
-            client_config = _current_client_config()
-            if _client is None or _client_config != client_config:
-                _client = OpenAI(
-                    api_key=client_config[0],
-                    base_url=client_config[1],
-                    timeout=client_config[2],
-                    max_retries=client_config[3],
-                )
-                _client_config = client_config
-    return _client
+    return OpenAI(
+        api_key=client_config[0],
+        base_url=client_config[1],
+        timeout=client_config[2],
+        max_retries=client_config[3],
+    )
 
 
-def reset_client() -> None:
-    global _client, _client_config
-    _client = None
-    _client_config = None
+@contextmanager
+def client_scope():
+    """Yield one independently owned client and always release its transport."""
+    client = get_client()
+    try:
+        yield client
+    finally:
+        with suppress(Exception):
+            client.close()
 
 
 def _current_client_config() -> tuple[str | None, str | None, float, int]:

@@ -340,6 +340,7 @@ class AgentCoordinator:
             allowed_tool_permissions={"read", "network_read", "edit", "shell"},
         )
         sub_context.resource_coordinator = self.context.resource_coordinator
+        sub_context.tool_tasks = self.context.tool_tasks
         middleware = AgentRoleMiddleware(record.role, allowed_paths=record.allowed_paths)
         agent = Agent(
             name=record.name,

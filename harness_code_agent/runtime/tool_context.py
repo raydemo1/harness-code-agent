@@ -9,6 +9,7 @@ from .approvals import ApprovalProvider, NoApprovalProvider
 from .execution_planner import ResourceCoordinator
 from .permissions import PermissionPolicy
 from .questions import NoQuestionProvider, QuestionProvider
+from .task_supervisor import ToolTaskSupervisor
 
 if TYPE_CHECKING:
     from ..agent.coordinator import AgentCoordinator
@@ -28,4 +29,5 @@ class ToolContext:
     blocked_tool_names: set[str] = field(default_factory=set)
     revealed_tool_names: set[str] = field(default_factory=set)
     resource_coordinator: ResourceCoordinator = field(default_factory=ResourceCoordinator)
+    tool_tasks: ToolTaskSupervisor = field(default_factory=ToolTaskSupervisor)
     agent_coordinator: AgentCoordinator | None = None

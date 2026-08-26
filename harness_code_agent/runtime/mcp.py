@@ -9,12 +9,15 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..agent.cancellation import CancelledError
 from .permissions import (
     TOOL_PERMISSION_DANGEROUS,
     TOOL_PERMISSION_NETWORK_READ,
@@ -343,7 +346,13 @@ class McpClientManager:
                 disclosure="core" if _is_exa_search_tool(binding) else "deferred",
             )
 
-    def call_tool(self, exposed_name: str, arguments: dict[str, Any]) -> ToolResult:
+    def call_tool(
+        self,
+        exposed_name: str,
+        arguments: dict[str, Any],
+        *,
+        cancellation_token=None,
+    ) -> ToolResult:
         binding = self._bindings_by_exposed_name.get(exposed_name)
         if binding is None:
             return ToolResult(
@@ -354,7 +363,11 @@ class McpClientManager:
                 metadata={"status_source": "mcp"},
             )
         if self._uses_mcporter_cli(binding):
-            return self._call_via_mcporter(binding, arguments)
+            return self._call_via_mcporter(
+                binding,
+                arguments,
+                cancellation_token=cancellation_token,
+            )
         connection = self._connections.get(binding.server_name)
         if connection is None:
             return ToolResult(
@@ -365,7 +378,12 @@ class McpClientManager:
                 metadata={"status_source": "mcp", "server": binding.server_name, "tool": binding.tool_name},
             )
         try:
-            return self._run(self._call_tool(connection, binding, dict(arguments or {})))
+            return self._run(
+                self._call_tool(connection, binding, dict(arguments or {})),
+                cancellation_token=cancellation_token,
+            )
+        except CancelledError:
+            raise
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             return ToolResult(
@@ -379,7 +397,13 @@ class McpClientManager:
     def _uses_mcporter_cli(self, binding: McpToolBinding) -> bool:
         return self.config.path.name == "mcporter.json" and binding.server_name in self.config.servers
 
-    def _call_via_mcporter(self, binding: McpToolBinding, arguments: dict[str, Any]) -> ToolResult:
+    def _call_via_mcporter(
+        self,
+        binding: McpToolBinding,
+        arguments: dict[str, Any],
+        *,
+        cancellation_token=None,
+    ) -> ToolResult:
         command = _mcporter_cli_command()
         if command is None:
             return ToolResult(
@@ -404,24 +428,21 @@ class McpClientManager:
         if server is not None and _has_literal_authorization(server.headers):
             environment.pop("EXA_API_KEY", None)
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 argv,
                 cwd=str(self.workspace),
                 env=environment,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=self.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return ToolResult(
-                tool=binding.exposed_name,
-                status="failed",
-                output="[error] mcporter call timed out",
-                error="mcporter call timed out",
-                metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+                creationflags=(
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    if os.name == "nt"
+                    else 0
+                ),
+                start_new_session=os.name != "nt",
             )
         except OSError as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -433,9 +454,30 @@ class McpClientManager:
                 metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
             )
 
-        raw_output = completed.stdout.strip()
-        if completed.returncode != 0:
-            error = completed.stderr.strip() or raw_output or f"mcporter exited with code {completed.returncode}"
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                _terminate_process_tree(process)
+                raise CancelledError("Turn cancelled by user")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_tree(process)
+                return ToolResult(
+                    tool=binding.exposed_name,
+                    status="failed",
+                    output="[error] mcporter call timed out",
+                    error="mcporter call timed out",
+                    metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+                )
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.05, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        raw_output = stdout.strip()
+        if process.returncode != 0:
+            error = stderr.strip() or raw_output or f"mcporter exited with code {process.returncode}"
             return ToolResult(
                 tool=binding.exposed_name,
                 status="failed",
@@ -445,7 +487,7 @@ class McpClientManager:
                     "status_source": "mcporter",
                     "server": binding.server_name,
                     "tool": binding.tool_name,
-                    "return_code": completed.returncode,
+                    "return_code": process.returncode,
                 },
             )
         try:
@@ -703,13 +745,17 @@ class McpClientManager:
                 await connection.task
 
     def _handler_for(self, binding: McpToolBinding) -> Callable[..., ToolResult]:
-        def handler(**kwargs) -> ToolResult:
+        def handler(*, cancellation_token=None, **kwargs) -> ToolResult:
             arguments = {
                 key: value
                 for key, value in kwargs.items()
                 if key not in {"runtime_state", "agent_name", "tool_context"}
             }
-            return self.call_tool(binding.exposed_name, arguments)
+            return self.call_tool(
+                binding.exposed_name,
+                arguments,
+                cancellation_token=cancellation_token,
+            )
 
         return handler
 
@@ -717,10 +763,14 @@ class McpClientManager:
         if self._loop_thread is None:
             self._loop_thread = _AsyncLoopThread()
 
-    def _run(self, coro):
+    def _run(self, coro, *, cancellation_token=None):
         self._ensure_loop()
         assert self._loop_thread is not None
-        return self._loop_thread.run(coro, timeout=self.timeout_seconds)
+        return self._loop_thread.run(
+            coro,
+            timeout=self.timeout_seconds,
+            cancellation_token=cancellation_token,
+        )
 
 
 def mcp_result_to_tool_result(
@@ -940,6 +990,31 @@ def _safe_name_segment(value: str) -> str:
     return safe or "tool"
 
 
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(Exception):
+            os.killpg(process.pid, 15)
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            process.kill()
+
+
 def _model_to_dict(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -960,7 +1035,7 @@ class _AsyncLoopThread:
         self._thread.start()
         self._ready.wait(timeout=5)
 
-    def run(self, coro, *, timeout: float):
+    def run(self, coro, *, timeout: float, cancellation_token=None):
         future: Future = Future()
         actor_holder: list[asyncio.Task | None] = [None]
 
@@ -969,14 +1044,25 @@ class _AsyncLoopThread:
             self._queue.put_nowait((coro, future, actor_holder))
 
         self.loop.call_soon_threadsafe(submit)
-        try:
-            return future.result(timeout=timeout)
-        except TimeoutError:
-            future.cancel()
-            actor_task = actor_holder[0]
-            if actor_task is not None and not actor_task.done():
-                self.loop.call_soon_threadsafe(actor_task.cancel)
-            raise
+        deadline = time.monotonic() + timeout
+        while True:
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                self._cancel(future, actor_holder)
+                raise CancelledError("Turn cancelled by user")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._cancel(future, actor_holder)
+                raise TimeoutError("MCP operation timed out and was cancelled")
+            try:
+                return future.result(timeout=min(0.05, remaining))
+            except FutureTimeoutError:
+                continue
+
+    def _cancel(self, future: Future, actor_holder: list[asyncio.Task | None]) -> None:
+        future.cancel()
+        actor_task = actor_holder[0]
+        if actor_task is not None and not actor_task.done():
+            self.loop.call_soon_threadsafe(actor_task.cancel)
 
     def close(self) -> None:
         if self._queue is not None:

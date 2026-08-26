@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import sys
@@ -21,6 +22,7 @@ def _install_fake_openai_module() -> None:
 
 _install_fake_openai_module()
 
+from harness_code_agent.agent.cancellation import CancellationToken
 from harness_code_agent.runtime import tools
 from harness_code_agent.runtime.mcp import McpClientManager, McpToolBinding
 from harness_code_agent.runtime.permissions import PermissionPolicy
@@ -108,6 +110,71 @@ class ParallelToolTests(unittest.TestCase):
 
         self.assertEqual(read_plan.ready({0, 1}, set()), [0, 1])
         self.assertEqual(write_plan.ready({0, 1}, set()), [0])
+
+    def test_mcp_handler_keeps_runtime_context_out_of_server_arguments(self):
+        manager = McpClientManager(workspace=self.root)
+        binding = McpToolBinding("mcp_read", "docs", "read", "", {}, "network_read", {})
+        captured = {}
+
+        def call_tool(name, arguments, cancellation_token=None):
+            captured.update(
+                name=name,
+                arguments=arguments,
+                cancellation_token=cancellation_token,
+            )
+            return "ok"
+
+        manager.call_tool = call_tool
+        token = CancellationToken()
+
+        manager._handler_for(binding)(
+            query="needle",
+            runtime_state=object(),
+            agent_name="reader",
+            tool_context=self.context,
+            cancellation_token=token,
+        )
+
+        self.assertEqual(captured["name"], "mcp_read")
+        self.assertEqual(captured["arguments"], {"query": "needle"})
+        self.assertIs(captured["cancellation_token"], token)
+
+    def test_mcp_loop_cancels_one_call_and_remains_usable(self):
+        from harness_code_agent.agent.cancellation import CancelledError
+        from harness_code_agent.runtime.mcp import _AsyncLoopThread
+
+        loop_thread = _AsyncLoopThread()
+        token = CancellationToken()
+        started = threading.Event()
+
+        async def blocked():
+            started.set()
+            await asyncio.Event().wait()
+
+        errors = []
+
+        def invoke():
+            try:
+                loop_thread.run(blocked(), timeout=5, cancellation_token=token)
+            except Exception as exc:  # noqa: BLE001 - thread records the result for assertion
+                errors.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        self.assertTrue(started.wait(1))
+        token.cancel()
+        worker.join(1)
+        try:
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], CancelledError)
+
+            async def healthy():
+                return "ok"
+
+            self.assertEqual(loop_thread.run(healthy(), timeout=1), "ok")
+        finally:
+            loop_thread.close()
 
     def test_coordinator_allows_different_file_writes_to_overlap(self):
         coordinator = tools.ResourceCoordinator()

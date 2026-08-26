@@ -6,7 +6,6 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import config
 from ..workspace.shell_jobs import ShellJobManager
 from ..workspace.shell_session import PersistentShellSession
 from .acceptance import AcceptanceState
@@ -140,7 +139,8 @@ def _is_business_path(path) -> bool:
 class AgentRuntimeState:
     active_shell_sessions: set[PersistentShellSession] = field(default_factory=set)
     _shell_sessions_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    shell_job_manager: ShellJobManager = field(default_factory=lambda: ShellJobManager(config.WORKSPACE))
+    shell_job_manager: ShellJobManager | None = None
+    browser_job_id: str | None = None
     task_board: TaskBoard = field(default_factory=TaskBoard)
     recovery: RecoveryState = field(default_factory=RecoveryState)
     fallback: AgentFallbackState = field(default_factory=AgentFallbackState)

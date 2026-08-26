@@ -334,11 +334,10 @@ def _classify_with_fast_llm(
     previous_assistant_text: str = "",
 ) -> LlmRouteResult:
     from .. import config
-    from ..agent.providers import ProviderAdapter, get_client
+    from ..agent.providers import ProviderAdapter, client_scope
 
     profile = config.resolve_model_profile("fast")
     adapter = ProviderAdapter(profile.provider)
-    client = get_client().with_options(timeout=LLM_ROUTE_TIMEOUT_SECONDS, max_retries=0)
     request = {
         "current_profile": current_profile,
         "previous_user_task": _truncate_route_context(previous_user_task, 800),
@@ -346,14 +345,16 @@ def _classify_with_fast_llm(
         "user_request": str(user_prompt or ""),
     }
     try:
-        response = client.chat.completions.create(**adapter.chat_kwargs(
-            profile=profile,
-            messages=[
-                {"role": "system", "content": _LLM_ROUTE_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
-            ],
-            max_tokens=160,
-        ))
+        with client_scope() as base_client:
+            client = base_client.with_options(timeout=LLM_ROUTE_TIMEOUT_SECONDS, max_retries=0)
+            response = client.chat.completions.create(**adapter.chat_kwargs(
+                profile=profile,
+                messages=[
+                    {"role": "system", "content": _LLM_ROUTE_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
+                ],
+                max_tokens=160,
+            ))
         raw = response.choices[0].message.content or ""
         parsed = _parse_llm_route_result(raw)
         return LlmRouteResult(

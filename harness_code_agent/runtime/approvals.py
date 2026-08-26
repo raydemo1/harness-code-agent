@@ -53,7 +53,7 @@ class LlmAutoApprovalProvider:
 
     def request(self, request: ApprovalRequest) -> ApprovalResult:
         from .. import config
-        from ..agent.providers import ProviderAdapter, get_client
+        from ..agent.providers import ProviderAdapter, client_scope
 
         profile = config.resolve_model_profile("fast")
         metadata = {
@@ -63,11 +63,12 @@ class LlmAutoApprovalProvider:
         }
         try:
             adapter = ProviderAdapter(profile.provider)
-            response = get_client().chat.completions.create(**adapter.chat_kwargs(
-                profile=profile,
-                messages=_approval_messages(request),
-                max_tokens=300,
-            ))
+            with client_scope() as client:
+                response = client.chat.completions.create(**adapter.chat_kwargs(
+                    profile=profile,
+                    messages=_approval_messages(request),
+                    max_tokens=300,
+                ))
             raw = response.choices[0].message.content or ""
             data = _parse_json_object(raw)
             approved = bool(data.get("approved"))

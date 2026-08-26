@@ -302,6 +302,8 @@ class ToolExecutor:
                         agent_name=self.agent.name,
                     )
                 future = self._executor.submit(self._execute_one, prepared)
+                if self.agent.tool_context is not None:
+                    self.agent.tool_context.tool_tasks.track(future)
                 futures[future] = prepared
                 pending.add(future)
             while pending:

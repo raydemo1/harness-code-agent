@@ -1,6 +1,7 @@
 import shutil
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from typing import ClassVar
@@ -205,6 +206,30 @@ class AgentCoordinatorTests(unittest.TestCase):
             self.assertIs(_ControlledAgent.contexts["first"].resource_coordinator, self.context.resource_coordinator)
             second_conversation.release.set()
             self.assertEqual(self._wait_terminal(second["agent_id"])["status"], "completed")
+
+    def test_agent_runtime_uses_its_tool_context_workspace_for_background_jobs(self):
+        from harness_code_agent.agent.conversation import Agent
+
+        isolated = self.temp / "isolated-worker"
+        isolated.mkdir()
+        context = ToolContext(
+            workspace=WorkspaceService(root=isolated),
+            permission_policy=PermissionPolicy(mode="danger-full-access"),
+            event_bus=EventBus(),
+        )
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=None),
+            close=lambda: None,
+        )
+        with patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client):
+            conversation = Agent("worker", "system", use_tools=False, tool_context=context).start_conversation()
+        try:
+            self.assertEqual(
+                Path(conversation.runtime_state.shell_job_manager.workspace),
+                isolated.resolve(),
+            )
+        finally:
+            conversation.close()
 
     def _wait_conversation(self, name):
         for _ in range(1000):

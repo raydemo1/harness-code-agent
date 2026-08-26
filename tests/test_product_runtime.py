@@ -144,38 +144,33 @@ class ProductRuntimeTests(unittest.TestCase):
             "openai-compatible",
         )
 
-    def test_cached_provider_client_refreshes_when_config_changes(self):
+    def test_provider_clients_are_independent_per_owner(self):
         from harness_code_agent.agent import providers
 
-        providers.reset_client()
         created = []
 
         def fake_openai(**kwargs):
-            client = SimpleNamespace(kwargs=kwargs)
+            client = SimpleNamespace(kwargs=kwargs, closed=False)
+
+            def close():
+                client.closed = True
+
+            client.close = close
             created.append(client)
             return client
 
-        try:
-            with (
-                patch("harness_code_agent.agent.providers.OpenAI", side_effect=fake_openai),
-                patch.object(providers.config, "API_KEY", "key-a"),
-                patch.object(providers.config, "BASE_URL", "https://one.example/v1"),
-            ):
-                first = providers.get_client()
-
-            with (
-                patch("harness_code_agent.agent.providers.OpenAI", side_effect=fake_openai),
-                patch.object(providers.config, "API_KEY", "key-a"),
-                patch.object(providers.config, "BASE_URL", "https://two.example/v1"),
-            ):
-                second = providers.get_client()
-        finally:
-            providers.reset_client()
+        with (
+            patch("harness_code_agent.agent.providers.OpenAI", side_effect=fake_openai),
+            patch.object(providers.config, "API_KEY", "key-a"),
+            patch.object(providers.config, "BASE_URL", "https://one.example/v1"),
+        ):
+            first = providers.get_client()
+            second = providers.get_client()
 
         self.assertIsNot(first, second)
         self.assertEqual(len(created), 2)
         self.assertEqual(created[0].kwargs["base_url"], "https://one.example/v1")
-        self.assertEqual(created[1].kwargs["base_url"], "https://two.example/v1")
+        self.assertEqual(created[1].kwargs["base_url"], "https://one.example/v1")
 
     def test_provider_streaming_normalizes_content_reasoning_and_tool_calls(self):
         from harness_code_agent.agent.providers import ProviderAdapter
@@ -546,7 +541,7 @@ class ProductRuntimeTests(unittest.TestCase):
         fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
         with (
-            patch("harness_code_agent.agent.llm_channel.get_client", return_value=fake_client),
+            patch("harness_code_agent.agent.providers.get_client", return_value=fake_client),
             patch.object(loop.config, "BASE_URL", "https://api.deepseek.com"),
         ):
             result = loop.llm_call_simple([{"role": "user", "content": "summarize"}])

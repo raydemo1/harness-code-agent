@@ -41,7 +41,6 @@ from ..runtime.approvals import (
     ConsoleApprovalProvider,
     LlmAutoApprovalProvider,
 )
-from ..runtime.builtins.browser import stop_dev_server
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
 from ..runtime.mcp import McpClientManager
 from ..runtime.middleware import (
@@ -1360,7 +1359,6 @@ class InteractiveSession:
             if self._closed:
                 return
             self._closed = True
-        stop_dev_server()
         if self.tool_context is not None and self.tool_context.agent_coordinator is not None:
             self.tool_context.agent_coordinator.close()
         conversations = {
@@ -1372,6 +1370,8 @@ class InteractiveSession:
             conversations[id(self.conversation)] = self.conversation
         for conversation in conversations.values():
             conversation.close()
+        if self.tool_context is not None:
+            self.tool_context.tool_tasks.close(timeout=1.0)
         if self.mcp_manager is not None:
             self.mcp_manager.close()
         if self.session is None or self.event_bus is None:

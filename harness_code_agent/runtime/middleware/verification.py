@@ -367,13 +367,14 @@ def classify_exit_intent(
 
     try:
         from ... import config
-        from ...agent.providers import ProviderAdapter, get_client
+        from ...agent.providers import ProviderAdapter, client_scope
 
         profile = config.resolve_model_profile("fast")
         adapter = ProviderAdapter(profile.provider)
-        response = get_client().chat.completions.create(**adapter.chat_kwargs(
-            profile=profile,
-            messages=[
+        with client_scope() as client:
+            response = client.chat.completions.create(**adapter.chat_kwargs(
+                profile=profile,
+                messages=[
                 {
                     "role": "system",
                     "content": (
@@ -403,9 +404,9 @@ def classify_exit_intent(
                         ensure_ascii=False,
                     ),
                 },
-            ],
-            max_tokens=160,
-        ))
+                ],
+                max_tokens=160,
+            ))
         raw = response.choices[0].message.content or ""
         return _parse_exit_intent_decision(raw)
     except Exception as exc:

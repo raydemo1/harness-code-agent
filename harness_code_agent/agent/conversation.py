@@ -1,6 +1,7 @@
 """Agent and conversation loop implementation."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
@@ -15,6 +16,7 @@ from ..runtime.builtins.registry import TOOL_SCHEMAS
 from ..runtime.tool_context import ToolContext
 from ..runtime.tool_result import ToolResult
 from ..runtime.tool_runner import finalize_intercepted_tool_result
+from ..workspace.shell_jobs import ShellJobManager
 from . import context
 from .cancellation import CancelledError
 from .compaction import CompactionGate, compaction_action, get_thresholds
@@ -87,7 +89,11 @@ class Agent:
         self._conversations: weakref.WeakSet[AgentConversation] = weakref.WeakSet()
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
-        return AgentRuntimeState(task_board=self._new_task_board(task))
+        workspace = self.tool_context.workspace.root if self.tool_context is not None else Path.cwd()
+        return AgentRuntimeState(
+            task_board=self._new_task_board(task),
+            shell_job_manager=ShellJobManager(workspace),
+        )
 
     def _new_task_board(self, task: str) -> TaskBoard:
         return TaskBoard(
@@ -144,6 +150,7 @@ class AgentConversation:
             self.runtime_state.permission_mode = agent.tool_context.permission_policy.mode
         self.messages: list[dict] = [{"role": "system", "content": agent.system_prompt}]
         self.client = get_client()
+        self._client_needs_refresh = False
         self.provider: ProviderAdapter = current_adapter()
         self.emitter = SessionEmitter(None, agent.name, self.provider.name)
         self.llm = LlmChannel(self)
@@ -619,6 +626,12 @@ class AgentConversation:
         if cancellation_token is not None:
             cancellation_token.check()
 
+    def refresh_client(self) -> None:
+        with contextlib.suppress(Exception):
+            self.client.close()
+        self.client = get_client()
+        self._client_needs_refresh = False
+
     def record_llm_usage(self, usage: dict | None, prompt_cache_key: str | None) -> None:
         fallback = self.runtime_state.fallback
         fallback.llm_call_count += 1
@@ -1033,6 +1046,8 @@ class AgentConversation:
         self.runtime_state.close_shell_sessions()
         if self.runtime_state.shell_job_manager is not None:
             self.runtime_state.shell_job_manager.close()
+        with contextlib.suppress(Exception):
+            self.client.close()
 
 
 def _safe_tool_summary(tool_name: str, tool_args: dict) -> str:

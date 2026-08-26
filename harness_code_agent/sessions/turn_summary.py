@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import config
-from ..agent.providers import ProviderAdapter, get_client
+from ..agent.providers import ProviderAdapter, client_scope
 from ._event_helpers import changed_files as _changed_files
 from ._event_helpers import event_type as _event_type
 from ._event_helpers import payload as _payload
@@ -87,12 +87,16 @@ def generate_turn_summary(
             checkpoint=checkpoint,
         )
         adapter = ProviderAdapter(profile.provider)
-        create = llm_create or get_client().chat.completions.create
-        response = create(**adapter.chat_kwargs(
+        kwargs = adapter.chat_kwargs(
             profile=profile,
             messages=messages,
             max_tokens=800,
-        ))
+        )
+        if llm_create is not None:
+            response = llm_create(**kwargs)
+        else:
+            with client_scope() as client:
+                response = client.chat.completions.create(**kwargs)
         summary = str(response.choices[0].message.content or "").strip()
         if not summary:
             summary = fallback_summary

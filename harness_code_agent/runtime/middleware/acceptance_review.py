@@ -286,12 +286,11 @@ def _call_fast_reviewer(
     import json
 
     from ... import config
-    from ...agent.providers import ProviderAdapter, get_client
+    from ...agent.providers import ProviderAdapter, client_scope
     from ...agent.utils import _usage_to_dict
 
     profile = config.resolve_model_profile("fast")
     adapter = ProviderAdapter(profile.provider)
-    client = get_client().with_options(timeout=timeout_seconds, max_retries=0)
     review_request = {
         "original_task": task,
         "start_plan": plan_context or {},
@@ -299,22 +298,24 @@ def _call_fast_reviewer(
     }
     if previous_error:
         review_request["previous_invalid_response_error"] = previous_error
-    response = client.chat.completions.create(
-        **adapter.chat_kwargs(
-            profile=profile,
-            messages=[
-                {
-                    "role": "system",
-                    "content": ACCEPTANCE_REVIEW_SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(review_request, ensure_ascii=False),
-                },
-            ],
-            max_tokens=1200,
+    with client_scope() as base_client:
+        client = base_client.with_options(timeout=timeout_seconds, max_retries=0)
+        response = client.chat.completions.create(
+            **adapter.chat_kwargs(
+                profile=profile,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": ACCEPTANCE_REVIEW_SYSTEM_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(review_request, ensure_ascii=False),
+                    },
+                ],
+                max_tokens=1200,
+            )
         )
-    )
     raw = response.choices[0].message.content or ""
     return ReviewOutcome(
         raw=raw,
