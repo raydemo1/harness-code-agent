@@ -50,6 +50,49 @@ class TuiProtocolTests(unittest.TestCase):
         self.assertIsNone(server.responses[0]["result"])
         self.assertIn("版本不兼容", server.responses[0]["error"])
 
+    def test_initialize_returns_starting_without_waiting_for_session_thread(self):
+        server = self._server()
+        server._session = None
+        server._session_thread = SimpleNamespace(
+            is_alive=lambda: True,
+            join=lambda timeout=None: self.fail("initialize must not block on construction"),
+        )
+
+        BridgeServer._handle_request(server, {
+            "id": "init",
+            "method": "initialize",
+            "params": {"protocolVersion": UI_PROTOCOL_VERSION},
+        })
+
+        self.assertEqual(server.responses[0]["result"]["status"], "starting")
+
+    def test_failed_interaction_resolution_still_closes_the_modal(self):
+        server = self._server()
+        server._interactions = SimpleNamespace(resolve=lambda _id, _result: False)
+        events = []
+        server._send_event = events.append
+
+        BridgeServer._handle_request(server, {
+            "id": "resolve",
+            "method": "resolve_interaction",
+            "params": {"id": "expired", "result": {"decision": "allow"}},
+        })
+
+        self.assertIn("交互已失效", server.responses[0]["error"])
+        self.assertEqual(events, [{"type": "interaction_closed", "id": "expired"}])
+
+    def test_broken_output_pipe_is_latched_without_raising(self):
+        server = object.__new__(BridgeServer)
+        server._output_broken = threading.Event()
+        server._write_lock = threading.Lock()
+        output = SimpleNamespace(write=lambda _text: (_ for _ in ()).throw(BrokenPipeError()), flush=lambda: None)
+
+        with patch("harness_code_agent.tui_bridge.sys.stdout", output):
+            server._write({"type": "event"})
+            server._write({"type": "event"})
+
+        self.assertTrue(server._output_broken.is_set())
+
     def test_event_validation_rejects_unknown_and_incomplete_events(self):
         with self.assertRaisesRegex(ValueError, "unsupported"):
             validate_ui_event({"type": "surprise"})

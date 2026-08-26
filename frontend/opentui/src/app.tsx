@@ -18,7 +18,7 @@ type AppProps = {
   onCancel?: () => void;
   onExit?: () => void;
   onAction?: (name: ActionName, params?: Record<string, unknown>) => Promise<ActionResult>;
-  onResolveInteraction?: (id: string, result: Record<string, unknown>) => void;
+  onResolveInteraction?: (id: string, result: Record<string, unknown>) => Promise<void>;
   onPickFiles?: (inputMode: "text" | "multimodal") => Promise<string[]>;
   onReadClipboard?: () => Promise<ClipboardReadResult>;
   onCopyText?: (text: string) => Promise<boolean>;
@@ -212,29 +212,9 @@ function Transcript({ items, theme, icons }: { items: TranscriptItem[]; theme: T
   );
 }
 
-const headerIconSources = {
-  dark: {
-    history: {
-      normal: new URL("./assets/header-history-dark.png", import.meta.url),
-    },
-    newSession: {
-      normal: new URL("./assets/header-new-session-dark.png", import.meta.url),
-    },
-  },
-  light: {
-    history: {
-      normal: new URL("./assets/header-history-light.png", import.meta.url),
-    },
-    newSession: {
-      normal: new URL("./assets/header-new-session-light.png", import.meta.url),
-    },
-  },
-};
-
-type HeaderIcon = { normal: URL };
-
-function IconAction({ icon, label, theme, onInvoke }: { icon: HeaderIcon; label: string; theme: Theme; onInvoke: () => void }) {
+function HeaderAction({ icon, label, theme, onInvoke }: { icon: string; label: string; theme: Theme; onInvoke: () => void }) {
   const [hovered, setHovered] = useState(false);
+  const color = hovered ? theme.text : theme.subtle;
   return (
     <box
       focusable
@@ -242,23 +222,22 @@ function IconAction({ icon, label, theme, onInvoke }: { icon: HeaderIcon; label:
       onMouseOut={() => setHovered(false)}
       onMouseDown={onInvoke}
       onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onInvoke(); }}
-      style={{ flexDirection: "row", minWidth: 5, height: 1, alignItems: "center", justifyContent: "center", paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.background }}
+      style={{ flexDirection: "row", paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.background }}
     >
-      <image source={icon.normal} fit="fit" protocol="auto" style={{ width: 3, height: 1 }} />
-      {hovered ? <text fg={theme.subtle}>{` ${label}`}</text> : null}
+      <text fg={color}>{icon}</text>
+      <text fg={color}>{` ${label}`}</text>
     </box>
   );
 }
 
-function Header({ cwd, theme, compact, onHistory, onNew }: { cwd: string; theme: Theme; compact: boolean; onHistory: () => void; onNew: () => void }) {
+function Header({ cwd, theme, icons, compact, onHistory, onNew }: { cwd: string; theme: Theme; icons: IconSet; compact: boolean; onHistory: () => void; onNew: () => void }) {
   const label = compact ? (cwd.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? cwd) : cwd;
-  const actionIcons = headerIconSources[theme.mode];
   return (
-    <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 1 }}>
+    <box style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", height: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 1 }}>
       <text fg={theme.subtle}>{label}</text>
       <box style={{ flexDirection: "row", gap: 1 }}>
-        <IconAction icon={actionIcons.history} label="历史" theme={theme} onInvoke={onHistory} />
-        <IconAction icon={actionIcons.newSession} label="新会话" theme={theme} onInvoke={onNew} />
+        <HeaderAction icon={icons.session} label="历史" theme={theme} onInvoke={onHistory} />
+        <HeaderAction icon={icons.newSession} label="新会话" theme={theme} onInvoke={onNew} />
       </box>
     </box>
   );
@@ -269,15 +248,20 @@ function panelIcon(kind: PanelSpec["kind"], icons: IconSet): string {
   if (kind === "observe") return icons.observe;
   if (kind === "permission") return icons.approval;
   if (kind === "checkpoint") return icons.checkpoint;
+  if (kind === "model") return icons.assistant;
   return icons.profile;
 }
 
-type PanelAnchor = "history" | "profile" | "permission" | "top-right";
+type PanelAnchor = "history" | "profile" | "permission" | "model" | "effort" | "top-right";
+
+const BOTTOM_PANEL_ANCHORS: ReadonlySet<PanelAnchor> = new Set(["profile", "permission", "model", "effort"]);
 
 function defaultPanelAnchor(panel: PanelSpec): PanelAnchor {
   if (panel.kind === "sessions") return "history";
   if (panel.kind === "profile") return "profile";
   if (panel.kind === "permission") return "permission";
+  if (panel.kind === "model") return "model";
+  if (panel.kind === "effort") return "effort";
   return "top-right";
 }
 
@@ -336,9 +320,14 @@ function PanelOverlay({ panel, anchor, theme, icons, terminalWidth, terminalHeig
   onClose: () => void;
   onSelect: (id: string) => void;
 }) {
+  useKeyboard((key) => {
+    if (key.name !== "escape") return;
+    key.preventDefault();
+    onClose();
+  });
   const modalWidth = Math.min(60, Math.max(30, terminalWidth - 12));
   const modalHeight = Math.min(18, Math.max(7, terminalHeight - 4));
-  const footerLeft = anchor === "profile" ? 2 : Math.max(2, Math.min(12, terminalWidth - modalWidth - 2));
+  const footerLeft = BOTTOM_PANEL_ANCHORS.has(anchor) ? 2 : Math.max(2, Math.min(12, terminalWidth - modalWidth - 2));
   const placement = anchor === "history"
     ? { top: 1, right: 2 }
     : anchor === "top-right"
@@ -380,11 +369,17 @@ function InteractionView({ interaction, theme, icons, onResolve }: { interaction
     : [];
   const questionOptions = interaction.kind === "question" ? interaction.payload.options : [];
   const options = interaction.kind === "approval" ? approvalOptions : questionOptions.map((option, index) => ({ ...option, label: option.label, value: String(index) }));
+  const otherSelected = interaction.kind === "question" && Boolean(questionOptions[selected]?.is_other);
   const select = (index: number) => {
     selectedRef.current = index;
     setSelected(index);
   };
   useKeyboard((key) => {
+    if (otherSelected) {
+      if (key.name === "escape") onResolve({ cancelled: true });
+      else if (isEnterKey(key.name)) onResolve({ selectedIndex: selectedRef.current, customText });
+      return;
+    }
     if (key.name === "escape") onResolve(interaction.kind === "approval" ? { decision: "deny" } : { cancelled: true });
     else if (key.name === "left" || key.name === "up") select((selectedRef.current - 1 + options.length) % options.length);
     else if (key.name === "right" || key.name === "down") select((selectedRef.current + 1) % options.length);
@@ -404,7 +399,6 @@ function InteractionView({ interaction, theme, icons, onResolve }: { interaction
       }
     }
   });
-  const otherSelected = interaction.kind === "question" && Boolean(questionOptions[selected]?.is_other);
   return (
     <box border borderStyle="rounded" borderColor={interaction.kind === "approval" ? theme.warning : theme.accent} style={{ flexDirection: "column", flexShrink: 0, marginLeft: 2, marginRight: 2, paddingLeft: 1, paddingRight: 1, paddingTop: 1, paddingBottom: 1, backgroundColor: theme.surfaceRaised }}>
       <text fg={interaction.kind === "approval" ? theme.warning : theme.accent}><strong>{interaction.kind === "approval" ? "需要确认" : interaction.payload.question}</strong></text>
@@ -454,9 +448,91 @@ function StopAction({ icon, theme, onStop }: { icon: string; theme: Theme; onSto
   );
 }
 
-function Composer({ value, onChange, onSubmit, onCancel, running, stopping, queueDepth, commands, theme, icons, compact, terminalWidth, disabled, sessionReady, onAction, attachments, onAddFiles, onStagePaths, onPaste, onRemoveAttachment }: { value: string; onChange: (value: string) => void; onSubmit: () => void; onCancel: () => void; running: boolean; stopping: boolean; queueDepth: number; commands: CommandItem[]; theme: Theme; icons: IconSet; compact: boolean; terminalWidth: number; disabled: boolean; sessionReady: boolean; onAction?: AppProps["onAction"]; attachments: AttachmentItem[]; onAddFiles: () => void; onStagePaths: (paths: string[], source: "mention" | "clipboard") => Promise<boolean>; onPaste: (editor: TextareaRenderable | null) => void; onRemoveAttachment: (id: string) => void }) {
+const BRAILLE_ROW_BITS = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+const RING_POINTS = [
+  { x: 1, y: 0 }, { x: 2, y: 0 }, { x: 3, y: 1 }, { x: 3, y: 2 },
+  { x: 2, y: 3 }, { x: 1, y: 3 }, { x: 0, y: 2 }, { x: 0, y: 1 },
+];
+
+function brailleRing(litCount: number): [string, string] {
+  const build = (offset: number) => {
+    let bits = 0;
+    RING_POINTS.forEach((point, index) => {
+      if (point.x < offset || point.x >= offset + 2 || index >= litCount) return;
+      bits |= BRAILLE_ROW_BITS[point.y][point.x - offset];
+    });
+    return String.fromCharCode(0x2800 + bits);
+  };
+  return [build(0), build(2)];
+}
+
+function ContextGauge({ percent, theme }: { percent: number; theme: Theme }) {
+  const remaining = Math.max(0, Math.min(100, percent));
+  const litCount = Math.max(1, Math.round((remaining / 100) * RING_POINTS.length));
+  const [left, right] = brailleRing(litCount);
+  const used = 100 - remaining;
+  const color = used < 60 ? theme.success : used < 85 ? theme.warning : theme.error;
+  return (
+    <text>
+      <span fg={color}>{`${left}${right}`}</span>
+      <span fg={theme.subtle}>{` ${remaining}%`}</span>
+    </text>
+  );
+}
+
+function AttachAction({ theme, onAddFiles }: { theme: Theme; onAddFiles: () => void }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <box
+      focusable
+      onMouseOver={() => setHovered(true)}
+      onMouseOut={() => setHovered(false)}
+      onMouseDown={onAddFiles}
+      onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onAddFiles(); }}
+      style={{ flexDirection: "row", paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.surface }}
+    >
+      <text fg={theme.accent}><strong>＋</strong></text>
+    </box>
+  );
+}
+
+function CompletionOverlay({ theme, title, footer, onClose, children }: { theme: Theme; title: string; footer: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <box
+      position="absolute"
+      top={0}
+      left={0}
+      width="100%"
+      height="100%"
+      zIndex={30}
+      onMouseDown={onClose}
+      style={{ width: "100%", height: "100%" }}
+    >
+      <box position="absolute" top={0} left={0} width="100%" height="100%" style={{ backgroundColor: theme.background, opacity: 0.35 }} />
+      <box
+        position="absolute"
+        left={2}
+        right={2}
+        bottom={2}
+        zIndex={31}
+        border
+        borderStyle="rounded"
+        borderColor={theme.border}
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{ flexDirection: "column", maxHeight: 14, backgroundColor: theme.surfaceRaised, paddingLeft: 1, paddingRight: 1 }}
+      >
+        <text fg={theme.accent}><strong>{title}</strong></text>
+        {children}
+        <text fg={theme.subtle}>{footer}</text>
+      </box>
+    </box>
+  );
+}
+
+function Composer({ value, onChange, onSubmit, onCancel, running, stopping, queueDepth, commands, theme, icons, compact, terminalWidth, disabled, sessionReady, onAction, attachments, onAddFiles, onStagePaths, onPaste, onRemoveAttachment, snapshot, onOpenPanel }: { value: string; onChange: (value: string) => void; onSubmit: () => void; onCancel: () => void; running: boolean; stopping: boolean; queueDepth: number; commands: CommandItem[]; theme: Theme; icons: IconSet; compact: boolean; terminalWidth: number; disabled: boolean; sessionReady: boolean; onAction?: AppProps["onAction"]; attachments: AttachmentItem[]; onAddFiles: () => void; onStagePaths: (paths: string[], source: "mention" | "clipboard") => Promise<boolean>; onPaste: (editor: TextareaRenderable | null) => void; onRemoveAttachment: (id: string) => void; snapshot: typeof initialState.snapshot; onOpenPanel: (panel: "profile" | "permission" | "model" | "effort") => void }) {
   const [selected, setSelected] = useState(0);
   const [mentions, setMentions] = useState<Completion[]>([]);
+  const [dismissedCompletionValue, setDismissedCompletionValue] = useState<string | null>(null);
   const editorRef = useRef<TextareaRenderable | null>(null);
   const paletteRef = useRef<ScrollBoxRenderable | null>(null);
   const slashQuery = value.trimStart().startsWith("/") && !value.includes(" ") ? value.trim() : "";
@@ -486,7 +562,12 @@ function Composer({ value, onChange, onSubmit, onCancel, running, stopping, queu
       files.length ? { title: "当前工作区文件", items: files } : null,
     ].filter((section): section is CompletionSection => section !== null);
   }, [candidates, commandMode]);
-  const paletteOpen = !disabled && candidates.length > 0 && Boolean(slashQuery || mentionMatch);
+  const paletteOpen = !disabled && candidates.length > 0 && Boolean(slashQuery || mentionMatch) && dismissedCompletionValue !== value;
+  useEffect(() => {
+    if (dismissedCompletionValue !== null && dismissedCompletionValue !== value) {
+      setDismissedCompletionValue(null);
+    }
+  }, [dismissedCompletionValue, value]);
   useEffect(() => setSelected((value) => Math.min(value, Math.max(0, candidates.length - 1))), [candidates.length, slashQuery, mentionQuery]);
   useEffect(() => { if (paletteOpen) paletteRef.current?.scrollChildIntoView(`completion-${selected}`); }, [paletteOpen, selected]);
   useEffect(() => { if (editorRef.current && editorRef.current.plainText !== value) editorRef.current.setText(value); }, [value]);
@@ -522,7 +603,6 @@ function Composer({ value, onChange, onSubmit, onCancel, running, stopping, queu
       else if (key.name === "home") setSelected(0);
       else if (key.name === "end") setSelected(candidates.length - 1);
       else if (key.name === "tab" || isEnterKey(key.name)) applyCompletion(candidates[selected]);
-      else if (key.name === "escape") { editorRef.current?.setText(""); onChange(""); }
       else handled = false;
       if (handled) key.preventDefault();
     } else if (key.name === "escape") {
@@ -531,7 +611,7 @@ function Composer({ value, onChange, onSubmit, onCancel, running, stopping, queu
     }
   });
   const renderCandidate = (item: Completion, index: number) => (
-    <box id={`completion-${index}`} key={item.id} style={{ flexDirection: "row", backgroundColor: index === selected ? theme.surfaceSelected : theme.surfaceRaised }}>
+    <box id={`completion-${index}`} key={item.id} onMouseDown={() => applyCompletion(item)} style={{ flexDirection: "row", backgroundColor: index === selected ? theme.surfaceSelected : theme.surfaceRaised }}>
       <box style={{ width: candidateLabelWidth, flexDirection: "row", flexShrink: 0, justifyContent: "flex-start", paddingLeft: 1, paddingRight: 1 }}>
         <text fg={index === selected ? theme.focus : theme.accent}>{truncateLabel(item.label, candidateLabelWidth - 2)}</text>
       </box>
@@ -544,20 +624,13 @@ function Composer({ value, onChange, onSubmit, onCancel, running, stopping, queu
   );
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 2, paddingRight: 2 }}>
-      {attachments.length ? (
-        <box style={{ flexDirection: "column", gap: 0, paddingLeft: 1, paddingRight: 1 }}>
-          {attachments.map((attachment) => (
-            <box key={attachment.id} style={{ flexDirection: "row", justifyContent: "space-between" }}>
-              <text fg={theme.subtle}>{`${attachment.kind.toUpperCase()}  ${attachment.name}  ${formatBytes(attachment.size)}`}</text>
-              <box focusable onMouseDown={() => onRemoveAttachment(attachment.id)} onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onRemoveAttachment(attachment.id); }}>
-                <text fg={theme.error}>×</text>
-              </box>
-            </box>
-          ))}
-        </box>
-      ) : null}
       {paletteOpen ? (
-        <box border borderStyle="rounded" borderColor={theme.border} style={{ flexDirection: "column", backgroundColor: theme.surfaceRaised, paddingLeft: 1, paddingRight: 1 }}>
+        <CompletionOverlay
+          theme={theme}
+          title={commandMode ? "命令" : "添加上下文"}
+          footer={` ${selected + 1}/${candidates.length}  ↑↓ 选择  Enter/Tab 使用  点击外层关闭`}
+          onClose={() => setDismissedCompletionValue(value)}
+        >
           <scrollbox ref={paletteRef} style={{ height: Math.min(candidates.length + (commandMode ? 0 : mentionSections.length), 10), backgroundColor: theme.surfaceRaised }}>
             {commandMode
               ? candidates.map(renderCandidate)
@@ -568,41 +641,56 @@ function Composer({ value, onChange, onSubmit, onCancel, running, stopping, queu
                 </React.Fragment>
               ))}
           </scrollbox>
-          <text fg={theme.subtle}>{` ${selected + 1}/${candidates.length}  ↑↓ 选择  Enter/Tab 使用  Esc 关闭`}</text>
+        </CompletionOverlay>
+      ) : null}
+      <box border borderStyle="rounded" borderColor={theme.border} style={{ flexDirection: "column", backgroundColor: theme.surface, paddingTop: 1, paddingBottom: 1 }}>
+        <box style={{ flexDirection: "row", paddingLeft: 1 }}>
+          <text fg={theme.accent}><strong>{`${icons.prompt} `}</strong></text>
+          <textarea
+            ref={editorRef}
+            initialValue={value}
+            placeholder="从这里开始吧，/ 可查看命令，@ 可添加上下文…"
+            keyBindings={[
+              { name: "return", action: "submit" },
+              { name: "kpenter", action: "submit" },
+              { name: "linefeed", action: "submit" },
+              { name: "return", shift: true, action: "newline" },
+              { name: "kpenter", shift: true, action: "newline" },
+              { name: "linefeed", shift: true, action: "newline" },
+            ]}
+            onContentChange={() => onChange(editorRef.current?.plainText ?? "")}
+            onSubmit={() => { if (!paletteOpen) onSubmit(); }}
+            focused={!disabled}
+            style={{ flexGrow: 1, minHeight: 2, maxHeight: 6, backgroundColor: theme.surface, textColor: theme.text, cursorColor: theme.accent, placeholderColor: theme.muted }}
+          />
+        </box>
+        <box style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1 }}>
+          <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 1, minWidth: 0 }}>
+            <AttachAction theme={theme} onAddFiles={onAddFiles} />
+            <ToolbarAction label={`${profileLabel(snapshot.profile)} ▾`} theme={theme} tone={theme.text} onInvoke={() => onOpenPanel("profile")} />
+            <ToolbarAction label={`${permissionLabel(snapshot.permissionMode)} ▾`} theme={theme} tone={snapshot.permissionMode === "danger-full-access" ? theme.error : theme.text} onInvoke={() => onOpenPanel("permission")} />
+          </box>
+          <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 0, marginLeft: 2 }}>
+            <ContextGauge percent={snapshot.contextPercent} theme={theme} />
+            <ToolbarAction label={`${icons.assistant} ${truncateText(snapshot.model, 26)} ▾`} theme={theme} tone={theme.text} onInvoke={() => onOpenPanel("model")} />
+            <ToolbarAction label={`${effortLabel(snapshot.reasoningEffort)} ▾`} theme={theme} tone={theme.text} onInvoke={() => onOpenPanel("effort")} />
+            {queueDepth ? <text fg={theme.subtle}>{` 已排队 ${queueDepth}`}</text> : null}
+            {stopping ? <text fg={theme.subtle}> 停止中…</text> : running ? <StopAction icon={icons.stop} theme={theme} onStop={onCancel} /> : null}
+          </box>
+        </box>
+      </box>
+      {attachments.length ? (
+        <box style={{ flexDirection: "column", alignItems: "flex-start" }}>
+          {attachments.map((attachment) => (
+            <box key={attachment.id} style={{ flexDirection: "row", paddingLeft: 1, gap: 1 }}>
+              <text fg={theme.subtle}>{`${icons.file} ${attachment.name}  ${formatBytes(attachment.size)}`}</text>
+              <box focusable onMouseDown={() => onRemoveAttachment(attachment.id)} onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onRemoveAttachment(attachment.id); }}>
+                <text fg={theme.error}>×</text>
+              </box>
+            </box>
+          ))}
         </box>
       ) : null}
-      <box border borderStyle="rounded" borderColor={theme.border} style={{ flexDirection: "row", backgroundColor: theme.surface, paddingTop: 1, paddingBottom: 1 }}>
-        <box focusable onMouseDown={onAddFiles} onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onAddFiles(); }} style={{ paddingLeft: 1 }}>
-          <text fg={theme.accent}><strong>＋</strong></text>
-        </box>
-        <text fg={theme.accent}><strong>{` ${icons.prompt} `}</strong></text>
-        <textarea
-          ref={editorRef}
-          initialValue={value}
-          placeholder="输入任务  / 命令  @ 文件"
-          keyBindings={[
-            { name: "return", action: "submit" },
-            { name: "kpenter", action: "submit" },
-            { name: "linefeed", action: "submit" },
-            { name: "return", shift: true, action: "newline" },
-            { name: "kpenter", shift: true, action: "newline" },
-            { name: "linefeed", shift: true, action: "newline" },
-          ]}
-          onContentChange={() => onChange(editorRef.current?.plainText ?? "")}
-          onSubmit={() => { if (!paletteOpen) onSubmit(); }}
-          focused={!disabled}
-          style={{ flexGrow: 1, minHeight: 3, maxHeight: 7, backgroundColor: theme.surface, textColor: theme.text, cursorColor: theme.accent, placeholderColor: theme.muted }}
-        />
-      </box>
-      {running ? <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1 }}>
-        {stopping ? <text fg={theme.subtle}>正在停止当前回合…</text> : (
-          <box style={{ flexDirection: "row", gap: 2 }}>
-            <text fg={theme.subtle}>Ctrl+C 中断</text>
-            {queueDepth ? <text fg={theme.subtle}>{`已排队 ${queueDepth} 条`}</text> : null}
-          </box>
-        )}
-        {stopping ? null : <StopAction icon={icons.stop} theme={theme} onStop={onCancel} />}
-      </box> : null}
     </box>
   );
 }
@@ -621,7 +709,11 @@ function permissionLabel(permissionMode: string): string {
   return permissionMode === "workspace-write" ? "工作区可写" : permissionMode === "llm-auto" ? "替我审批" : permissionMode === "danger-full-access" ? "完全访问" : permissionMode;
 }
 
-function FooterAction({ label, theme, tone, onInvoke }: { label: string; theme: Theme; tone: string; onInvoke: () => void }) {
+function effortLabel(effort: string | null | undefined): string {
+  return ({ low: "低", high: "高", max: "最大" } as Record<string, string>)[effort ?? "high"] ?? (effort || "高");
+}
+
+function ToolbarAction({ label, theme, tone, onInvoke }: { label: string; theme: Theme; tone: string; onInvoke: () => void }) {
   const [hovered, setHovered] = useState(false);
   return (
     <box
@@ -630,29 +722,9 @@ function FooterAction({ label, theme, tone, onInvoke }: { label: string; theme: 
       onMouseOut={() => setHovered(false)}
       onMouseDown={onInvoke}
       onKeyDown={(key) => { if (isEnterKey(key.name) || key.name === "space") onInvoke(); }}
-      style={{ paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.background }}
+      style={{ paddingLeft: 1, paddingRight: 1, backgroundColor: hovered ? theme.surfaceSelected : theme.surface }}
     >
       <text fg={tone}><strong>{label}</strong></text>
-    </box>
-  );
-}
-
-function Footer({ theme, snapshot, running, onProfile, onPermission }: { theme: Theme; snapshot: typeof initialState.snapshot; running: boolean; onProfile: () => void; onPermission: () => void }) {
-  const permission = permissionLabel(snapshot.permissionMode);
-  return (
-    <box style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", height: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 2 }}>
-      <box style={{ flexDirection: "row", alignItems: "center", gap: 1, flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
-        <FooterAction label={`${profileLabel(snapshot.profile)} ▾`} theme={theme} tone={theme.focus} onInvoke={onProfile} />
-        <FooterAction label={`${permission} ▾`} theme={theme} tone={snapshot.permissionMode === "danger-full-access" ? theme.error : theme.focus} onInvoke={onPermission} />
-        <text fg={theme.muted}>{`${snapshot.contextPercent}% 上下文`}</text>
-        <box style={{ flexShrink: 1, minWidth: 0 }}>
-          <text fg={theme.accent} wrapMode="none" truncate>{snapshot.model}</text>
-        </box>
-      </box>
-      {!running ? <box style={{ flexDirection: "row", gap: 2, flexShrink: 0, marginLeft: 2 }}>
-        <text fg={theme.subtle}>Enter 提交</text>
-        <text fg={theme.subtle}>Shift+Enter 换行</text>
-      </box> : null}
     </box>
   );
 }
@@ -692,6 +764,7 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
           setPanelAnchor(defaultPanelAnchor(event.panel));
         }
         else {
+          if (event.type === "interaction") setPanel(null);
           if (event.type === "session_reset") {
             setPanel(null);
             setDraft("");
@@ -845,12 +918,17 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
   const resolveInteraction = (result: Record<string, unknown>) => {
     const interaction = state.interaction;
     if (!interaction) return;
-    onResolveInteraction?.(interaction.id, result);
+    const request = onResolveInteraction?.(interaction.id, result);
+    if (!request) return;
+    void request.catch((error) => {
+      dispatch({ type: "notice", level: "error", text: formatUserError(error) });
+      dispatch({ type: "interaction_closed", id: interaction.id });
+    });
   };
 
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%", backgroundColor: theme.background }}>
-      <Header cwd={state.snapshot.cwd} theme={theme} compact={compact} onHistory={() => void invoke("open_sessions", undefined, "history")} onNew={() => void invoke("new_session")} />
+      <Header cwd={state.snapshot.cwd} theme={theme} icons={icons} compact={compact} onHistory={() => void invoke("open_sessions", undefined, "history")} onNew={() => void invoke("new_session")} />
       <Transcript items={state.items} theme={theme} icons={icons} />
       {state.interaction ? <InteractionView interaction={state.interaction} theme={theme} icons={icons} onResolve={resolveInteraction} /> : panel ? null : externalPaths ? (
         <box border borderStyle="rounded" borderColor={theme.warning} style={{ flexDirection: "column", marginLeft: 2, marginRight: 2, paddingLeft: 1, paddingRight: 1 }}>
@@ -861,9 +939,8 @@ export function App({ events, onSubmit, onCancel, onExit, onAction, onResolveInt
             <box focusable onMouseDown={() => setExternalPaths(null)} onKeyDown={(key) => { if (isEnterKey(key.name)) setExternalPaths(null); }}><text fg={theme.error}>拒绝</text></box>
           </box>
         </box>
-      ) : <Composer key={composerVersion} value={draft} onChange={setDraft} onSubmit={submit} onCancel={onCancel ?? (() => undefined)} running={running} stopping={stopping} queueDepth={state.queueDepth} commands={state.commands} theme={theme} icons={icons} compact={compact} terminalWidth={width} disabled={stopping} sessionReady={state.snapshot.status === "ready"} onAction={onAction} attachments={attachments} onAddFiles={addFiles} onStagePaths={stagePaths} onPaste={paste} onRemoveAttachment={removeAttachment} />}
-      <Footer theme={theme} snapshot={state.snapshot} running={running} onProfile={() => void invoke("open_panel", { panel: "profile" })} onPermission={() => void invoke("open_panel", { panel: "permission" })} />
-      {panel ? <PanelOverlay panel={panel} anchor={panelAnchor} theme={theme} icons={icons} terminalWidth={width} terminalHeight={height} onClose={() => setPanel(null)} onSelect={selectPanel} /> : null}
+      ) : <Composer key={composerVersion} value={draft} onChange={setDraft} onSubmit={submit} onCancel={onCancel ?? (() => undefined)} running={running} stopping={stopping} queueDepth={state.queueDepth} commands={state.commands} theme={theme} icons={icons} compact={compact} terminalWidth={width} disabled={stopping} sessionReady={state.snapshot.status === "ready"} onAction={onAction} attachments={attachments} onAddFiles={addFiles} onStagePaths={stagePaths} onPaste={paste} onRemoveAttachment={removeAttachment} snapshot={state.snapshot} onOpenPanel={(panel) => void invoke("open_panel", { panel }, panel)} />}
+      {panel && !state.interaction ? <PanelOverlay panel={panel} anchor={panelAnchor} theme={theme} icons={icons} terminalWidth={width} terminalHeight={height} onClose={() => setPanel(null)} onSelect={selectPanel} /> : null}
     </box>
   );
 }

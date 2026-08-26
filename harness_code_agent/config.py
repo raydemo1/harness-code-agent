@@ -57,6 +57,29 @@ MODEL_OVERRIDES = {
     for intensity in MODEL_INTENSITIES
 }
 
+# Models and reasoning efforts selectable from the TUI.  Values follow the
+# DeepSeek API: reasoning_effort accepts low/high/max (default high).
+AVAILABLE_MODELS = ("deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro")
+REASONING_EFFORTS = ("low", "high", "max")
+
+# Runtime selection made from the TUI; None means "use the intensity preset".
+_MODEL_OVERRIDE = {"model": None, "reasoning_effort": None}
+
+
+def set_model_override(model: str | None = None, reasoning_effort: str | None = None) -> None:
+    if model is not None and model not in AVAILABLE_MODELS:
+        raise ValueError(f"Unsupported model: {model!r}; expected one of: {', '.join(AVAILABLE_MODELS)}")
+    if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
+        raise ValueError(
+            f"Unsupported reasoning effort: {reasoning_effort!r}; expected one of: {', '.join(REASONING_EFFORTS)}"
+        )
+    _MODEL_OVERRIDE["model"] = model
+    _MODEL_OVERRIDE["reasoning_effort"] = reasoning_effort
+
+
+def get_model_override() -> dict[str, str | None]:
+    return dict(_MODEL_OVERRIDE)
+
 
 @dataclass(frozen=True)
 class ModelProfile:
@@ -129,6 +152,17 @@ def resolve_model_profile(intensity: str) -> ModelProfile:
             model=profile.model,
             thinking=profile.thinking,
             reasoning_effort=profile.reasoning_effort,
+            input_mode=MODEL_INPUT_MODE,
+        )
+    runtime_override = get_model_override()
+    if normalized != "fast" and (runtime_override["model"] or runtime_override["reasoning_effort"]):
+        model = runtime_override["model"] or profile.model
+        provider = _resolve_provider_name(provider=PROVIDER, base_url=BASE_URL, model=model)
+        profile = ModelProfile(
+            provider=provider,
+            model=model,
+            thinking=True if runtime_override["reasoning_effort"] else profile.thinking,
+            reasoning_effort=runtime_override["reasoning_effort"] or profile.reasoning_effort or "high",
             input_mode=MODEL_INPUT_MODE,
         )
     return profile

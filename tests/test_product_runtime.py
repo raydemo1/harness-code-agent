@@ -74,6 +74,40 @@ class ProductRuntimeTests(unittest.TestCase):
         finally:
             importlib.reload(config)
 
+    def test_runtime_model_override_applies_to_non_fast_lanes(self):
+        from harness_code_agent import config
+
+        try:
+            with (
+                patch.dict(os.environ, {
+                    "OPENAI_BASE_URL": "https://api.deepseek.com",
+                    "HARNESS_MODEL_INTENSITY": "hard",
+                }, clear=True),
+                patch("pathlib.Path.exists", return_value=False),
+            ):
+                importlib.reload(config)
+
+            config.set_model_override(model="deepseek-v4-flash-vision-exp", reasoning_effort="max")
+            profile = config.resolve_model_profile("normal")
+            self.assertEqual((profile.model, profile.thinking, profile.reasoning_effort), ("deepseek-v4-flash-vision-exp", True, "max"))
+            fast = config.resolve_model_profile("fast")
+            self.assertEqual((fast.model, fast.thinking, fast.reasoning_effort), ("deepseek-v4-flash", False, None))
+
+            config.set_model_override(reasoning_effort="low")
+            profile = config.resolve_model_profile("hard")
+            self.assertEqual((profile.model, profile.reasoning_effort), ("deepseek-v4-pro", "low"))
+
+            with self.assertRaises(ValueError):
+                config.set_model_override(model="gpt-4o")
+            with self.assertRaises(ValueError):
+                config.set_model_override(reasoning_effort="medium")
+
+            config.set_model_override()
+            profile = config.resolve_model_profile("hard")
+            self.assertEqual((profile.model, profile.reasoning_effort), ("deepseek-v4-pro", "high"))
+        finally:
+            importlib.reload(config)
+
     def test_deepseek_reasoning_content_round_trips(self):
         from harness_code_agent.agent.conversation import (
             _assistant_message_from_response,

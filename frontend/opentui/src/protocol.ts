@@ -1,12 +1,13 @@
 export type ThemePreference = "auto" | "dark" | "light";
 export type IconPreference = "auto" | "nerd" | "unicode";
 
-export const UI_PROTOCOL_VERSION = 3;
+export const UI_PROTOCOL_VERSION = 4;
 
 export type Snapshot = {
   profile: string;
   permissionMode: string;
   model: string;
+  reasoningEffort?: string | null;
   provider: string;
   contextPercent: number;
   status: string;
@@ -63,7 +64,7 @@ export type Interaction = ApprovalInteraction | QuestionInteraction;
 
 export type PanelOption = { id: string; label: string; description?: string; tone?: "default" | "success" | "warning" | "danger"; selected?: boolean };
 export type PanelSpec = {
-  kind: "sessions" | "profile" | "permission" | "checkpoint" | "mcp" | "observe" | "help";
+  kind: "sessions" | "profile" | "permission" | "model" | "effort" | "checkpoint" | "mcp" | "observe" | "help";
   title: string;
   body?: string;
   options?: PanelOption[];

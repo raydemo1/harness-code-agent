@@ -68,6 +68,18 @@ _PERMISSION_COPY = {
     PermissionPolicy.DANGER_FULL_ACCESS: ("完全访问权限", "不受限制地访问互联网和电脑上的任何文件"),
 }
 
+_MODEL_COPY = {
+    "deepseek-v4-flash": ("DeepSeek V4 Flash", "通用快速模型，适合日常任务"),
+    "deepseek-v4-flash-vision-exp": ("DeepSeek V4 Flash Vision", "实验性多模态模型，额外支持图片输入"),
+    "deepseek-v4-pro": ("DeepSeek V4 Pro", "旗舰模型，适合复杂推理与编码"),
+}
+
+_EFFORT_COPY = {
+    "low": ("低", "简单任务，响应更快"),
+    "high": ("高", "默认强度，适合日常任务"),
+    "max": ("最大", "最深推理，适合复杂场景"),
+}
+
 
 def _relative_age(value: Any) -> str:
     try:
@@ -127,7 +139,6 @@ class BridgeInteractionProvider:
         self._lock = threading.Lock()
         self._counter = 0
         self._pending: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
-        self._pending_signal = threading.Event()
 
     def request(self, request: ApprovalRequest) -> ApprovalResult:
         if request.tool_name == "run_bash":
@@ -194,13 +205,10 @@ class BridgeInteractionProvider:
             event = threading.Event()
             result: dict[str, Any] = {}
             self._pending[interaction_id] = (event, result)
-            self._pending_signal.set()
         self._emit({"type": "interaction", "id": interaction_id, "kind": kind, "payload": payload})
         event.wait()
         with self._lock:
             self._pending.pop(interaction_id, None)
-            if not self._pending:
-                self._pending_signal.clear()
         return interaction_id, result
 
     def resolve(self, interaction_id: str, result: dict[str, Any]) -> bool:
@@ -221,9 +229,6 @@ class BridgeInteractionProvider:
             result.setdefault("decision", "deny")
             event.set()
 
-    def wait_until_pending(self, *, timeout: float) -> bool:
-        """Test and diagnostics hook; callers do not need pending internals."""
-        return self._pending_signal.wait(timeout)
 
 
 class BridgeServer:
@@ -239,6 +244,7 @@ class BridgeServer:
         self._active_lock = threading.Lock()
         self._stopping = threading.Event()
         self._closing = threading.Event()
+        self._output_broken = threading.Event()
         self._session_lock = threading.Lock()
         self._session_generation = 0
         self._session: InteractiveSession | None = None
@@ -326,6 +332,7 @@ class BridgeServer:
                     self._session_error = error
             if current:
                 self._notice("error", error)
+                self._send_event({"type": "progress", "status": "failed", "detail": error})
             log.debug("OpenTUI bridge session construction failed\n%s", traceback.format_exc())
 
     def _startup_progress(self, stage: str) -> None:
@@ -521,10 +528,12 @@ class BridgeServer:
                 0,
                 min(100, round((1 - snapshot.context_tokens / snapshot.context_window_tokens) * 100)),
             )
+        profile = config.resolve_model_profile(config.MODEL_INTENSITY)
         return {
             "profile": snapshot.profile,
             "permissionMode": snapshot.permission_mode,
-            "model": snapshot.model,
+            "model": profile.model,
+            "reasoningEffort": profile.reasoning_effort,
             "provider": snapshot.provider,
             "contextPercent": context_percent,
             "status": snapshot.status,
@@ -539,16 +548,24 @@ class BridgeServer:
         self._send_event({"type": "notice", "level": level, "text": text})
 
     def _send_event(self, event: dict[str, Any]) -> None:
+        if self._output_broken.is_set():
+            return
         if self._closing.is_set() and event.get("type") != "shutdown":
             return
         validate_ui_event(event)
         self._write({"type": "event", "event": event})
 
     def _write(self, message: dict[str, Any]) -> None:
+        if self._output_broken.is_set():
+            return
         line = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
         with self._write_lock:
-            sys.stdout.write(line + "\n")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write(line + "\n")
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError):
+                self._output_broken.set()
+                log.debug("OpenTUI output pipe closed", exc_info=True)
 
     def _response(self, request_id: str, *, result: Any = None, error: str | None = None) -> None:
         message: dict[str, Any] = {"type": "response", "id": request_id, "ok": error is None}
@@ -703,6 +720,32 @@ class BridgeServer:
                 "title": "审批模式",
                 "options": options,
             }
+        if kind == "model":
+            current = config.resolve_model_profile(config.MODEL_INTENSITY).model
+            options = [
+                {
+                    "id": name,
+                    "label": _MODEL_COPY.get(name, (name, ""))[0],
+                    "description": _MODEL_COPY.get(name, (name, ""))[1],
+                    "tone": "success" if current == name else "default",
+                    "selected": current == name,
+                }
+                for name in config.AVAILABLE_MODELS
+            ]
+            return {"kind": "model", "title": "模型", "options": options}
+        if kind == "effort":
+            current = config.resolve_model_profile(config.MODEL_INTENSITY).reasoning_effort
+            options = [
+                {
+                    "id": effort,
+                    "label": _EFFORT_COPY[effort][0],
+                    "description": _EFFORT_COPY[effort][1],
+                    "tone": "success" if current == effort else "default",
+                    "selected": current == effort,
+                }
+                for effort in config.REASONING_EFFORTS
+            ]
+            return {"kind": "effort", "title": "推理强度", "options": options}
         if kind == "checkpoint":
             checkpoint = session.checkpoint
             return {
@@ -776,6 +819,10 @@ class BridgeServer:
             message = session.enable_auto_profile_routing() if action == "auto" else session.switch_profile(action)
         elif panel == "permission":
             message = session.set_permission_mode(action)
+        elif panel == "model":
+            config.set_model_override(model=action)
+        elif panel == "effort":
+            config.set_model_override(reasoning_effort=action)
         elif panel == "checkpoint":
             if action == "create":
                 message = session.create_checkpoint(manual=True)
@@ -821,7 +868,7 @@ class BridgeServer:
         else:
             raise ValueError(f"unknown panel action: {panel}")
         self._send_snapshot()
-        if panel in {"profile", "permission"}:
+        if panel in {"profile", "permission", "model", "effort"}:
             return {"ok": True}
         return {"ok": True, "message": str(message or "")}
 
@@ -951,14 +998,16 @@ class BridgeServer:
                     ),
                 )
                 return True
-            if self._session_thread.is_alive():
-                self._session_thread.join(timeout=30)
-            if self._session is None:
-                self._response(request_id, error=self._session_error or "会话启动失败，请稍后重试")
+            if self._session_error:
+                self._response(request_id, error=self._session_error)
             else:
                 self._response(
                     request_id,
-                    result={"protocolVersion": UI_PROTOCOL_VERSION, "cwd": str(self.cwd)},
+                    result={
+                        "protocolVersion": UI_PROTOCOL_VERSION,
+                        "cwd": str(self.cwd),
+                        "status": "ready" if self._session is not None else "starting",
+                    },
                 )
             return True
         if method == "submit":
@@ -1035,8 +1084,10 @@ class BridgeServer:
             result = params.get("result")
             if not isinstance(result, dict):
                 self._response(request_id, error="操作结果格式错误，请重试")
+                self._send_event({"type": "interaction_closed", "id": interaction_id})
             elif not self._interactions.resolve(interaction_id, result):
                 self._response(request_id, error="交互已失效，请重新操作")
+                self._send_event({"type": "interaction_closed", "id": interaction_id})
             else:
                 self._response(request_id, result={"resolved": True})
                 self._send_event({"type": "interaction_closed", "id": interaction_id})

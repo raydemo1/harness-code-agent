@@ -56,9 +56,21 @@ type BridgeClient = {
   submit: (submission: TurnSubmission) => Promise<SubmitResult>;
   cancel: () => void;
   action: (name: ActionName, params?: Record<string, unknown>) => Promise<ActionResult>;
-  resolveInteraction: (id: string, result: Record<string, unknown>) => void;
+  resolveInteraction: (id: string, result: Record<string, unknown>) => Promise<void>;
   shutdown: () => void;
 };
+
+function terminateBridgeTree(child: ReturnType<typeof Bun.spawn>): void {
+  if (process.platform === "win32") {
+    Bun.spawnSync(["taskkill", "/PID", String(child.pid), "/T", "/F"], { stdout: "ignore", stderr: "ignore" });
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    child.kill();
+  }
+}
 
 function createBridgeClient(): BridgeClient {
   const python = option("--python") ?? "python";
@@ -79,6 +91,7 @@ function createBridgeClient(): BridgeClient {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "inherit",
+    detached: process.platform !== "win32",
   });
   let requestCounter = 0;
   let ended = false;
@@ -88,6 +101,29 @@ function createBridgeClient(): BridgeClient {
   const eventWaiters: Array<(event: UiEvent | null) => void> = [];
   let resolveClosed: () => void = () => undefined;
   const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+  let readySettled = false;
+  let resolveReady: () => void = () => undefined;
+  let rejectReady: (reason: unknown) => void = () => undefined;
+  let sessionReady = Promise.resolve();
+  const resetReady = () => {
+    readySettled = false;
+    sessionReady = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    void sessionReady.catch(() => undefined);
+  };
+  resetReady();
+  const markReady = () => {
+    if (readySettled) return;
+    readySettled = true;
+    resolveReady();
+  };
+  const markReadyFailed = (reason: unknown) => {
+    if (readySettled) return;
+    readySettled = true;
+    rejectReady(reason);
+  };
 
   const enqueue = (event: UiEvent) => {
     const waiter = eventWaiters.shift();
@@ -97,6 +133,9 @@ function createBridgeClient(): BridgeClient {
 
   const consumeMessage = (message: BridgeMessage) => {
     if (message.type === "event") {
+      if (message.event.type === "progress" && message.event.status === "starting" && readySettled) resetReady();
+      if (message.event.type === "progress" && message.event.status === "ready") markReady();
+      if (message.event.type === "progress" && message.event.status === "failed") markReadyFailed(new Error(message.event.detail));
       enqueue(message.event);
       return;
     }
@@ -129,6 +168,7 @@ function createBridgeClient(): BridgeClient {
       }
     } finally {
       ended = true;
+      markReadyFailed(new Error("OpenTUI bridge exited before the session became ready"));
       for (const waiter of pending.values()) waiter.reject(new Error("OpenTUI bridge exited"));
       pending.clear();
       while (eventWaiters.length) eventWaiters.shift()?.(null);
@@ -146,7 +186,13 @@ function createBridgeClient(): BridgeClient {
     return new Promise<unknown>((resolve, reject) => pending.set(id, { resolve, reject }));
   };
 
-  void request("initialize", { protocolVersion: UI_PROTOCOL_VERSION }).catch((error) => console.error(`桥接初始化失败：${formatUserError(error)}`));
+  void request("initialize", { protocolVersion: UI_PROTOCOL_VERSION }).then((result) => {
+    const status = (result as { status?: string } | undefined)?.status;
+    if (status === "ready") markReady();
+  }).catch((error) => {
+    markReadyFailed(error);
+    console.error(`桥接初始化失败：${formatUserError(error)}`);
+  });
 
   const events: AsyncIterable<UiEvent> = {
     async *[Symbol.asyncIterator]() {
@@ -170,16 +216,16 @@ function createBridgeClient(): BridgeClient {
     if (!ended) fire("shutdown");
   };
   process.once("exit", () => {
-    if (!ended) child.kill();
+    if (!ended) terminateBridgeTree(child);
   });
 
   return {
     events,
     closed,
-    submit: (submission) => request("submit", submission).then((result) => result as SubmitResult),
+    submit: (submission) => sessionReady.then(() => request("submit", submission)).then((result) => result as SubmitResult),
     cancel: () => fire("cancel"),
-    action: (name, params) => request("action", { name, params }).then((result) => result as ActionResult),
-    resolveInteraction: (id, result) => fire("resolve_interaction", { id, result }),
+    action: (name, params) => sessionReady.then(() => request("action", { name, params })).then((result) => result as ActionResult),
+    resolveInteraction: (id, result) => request("resolve_interaction", { id, result }).then(() => undefined),
     shutdown,
   };
 }

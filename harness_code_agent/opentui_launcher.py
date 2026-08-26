@@ -86,5 +86,7 @@ class OpenTuiApp:
         repo_root = str(Path(__file__).resolve().parents[1])
         python_path = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = repo_root if not python_path else repo_root + os.pathsep + python_path
+        env.setdefault("PYTHONUTF8", "1")
+        env["PYTHONIOENCODING"] = "utf-8"
         completed = subprocess.run(command, cwd=frontend_dir, env=env, check=False)
         return completed.returncode
