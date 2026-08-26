@@ -193,13 +193,13 @@ class StaticVerifierMiddleware(AgentMiddleware):
     def __init__(self, workspace_root: str | None = None, workspace=None):
         self._workspace_root = workspace_root
         self._workspace = workspace
-        self._turn_changed_start = len(getattr(workspace, "changed_files", [])) if workspace is not None else 0
+        self._turn_changed_start = _workspace_change_cursor(workspace)
         self._reported_warning_signatures: set[tuple[str, ...]] = set()
 
     def begin_turn(self, task: str, messages: list[dict], runtime_state=None,
                    agent_name: str | None = None) -> None:
         if self._workspace is not None:
-            self._turn_changed_start = len(getattr(self._workspace, "changed_files", []))
+            self._turn_changed_start = _workspace_change_cursor(self._workspace)
         self._reported_warning_signatures.clear()
 
     def pre_exit(self, messages: list[dict], runtime_state=None,
@@ -250,7 +250,11 @@ def _turn_changed_py_files(workspace_root: str | None, workspace, start_index: i
     if workspace is None:
         return _git_diff_changed_py_files(workspace_root)
     root = Path(workspace_root or getattr(workspace, "root", ".")).resolve()
-    changed = getattr(workspace, "changed_files", [])[start_index:]
+    journal = getattr(workspace, "change_journal", None)
+    if journal is not None:
+        changed = journal.paths_since(start_index)
+    else:
+        changed = getattr(workspace, "changed_files", [])[start_index:]
     files: set[str] = set()
     for path in changed:
         rel = Path(path)
@@ -258,6 +262,15 @@ def _turn_changed_py_files(workspace_root: str | None, workspace, start_index: i
         if rel_text.endswith(".py") and (root / rel).exists():
             files.add(rel_text)
     return sorted(files)
+
+
+def _workspace_change_cursor(workspace) -> int:
+    if workspace is None:
+        return 0
+    journal = getattr(workspace, "change_journal", None)
+    if journal is not None:
+        return journal.cursor()
+    return len(getattr(workspace, "changed_files", []))
 
 
 def _git_diff_changed_py_files(workspace_root: str | None) -> list[str]:

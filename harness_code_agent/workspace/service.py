@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
+from .change_journal import WorkspaceChangeJournal
+
 
 @dataclass
 class WorkspaceWriteResult:
@@ -44,7 +46,7 @@ class WorkspaceService:
         self.root = Path(root).resolve()
         self.snapshots_dir = Path(snapshots_dir).resolve() if snapshots_dir else self.root / ".harness" / "snapshots"
         self.protected_names = protected_names or self.DEFAULT_PROTECTED_NAMES
-        self.changed_files: list[Path] = []
+        self.change_journal = WorkspaceChangeJournal()
         self._metadata_lock = threading.RLock()
         self._path_locks_lock = threading.Lock()
         self._path_locks: dict[str, threading.RLock] = {}
@@ -73,7 +75,7 @@ class WorkspaceService:
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8")
             rel = resolved.relative_to(self.root)
-            self._record_changed(rel)
+            self._record_changed(rel, operation="write_file", snapshot_path=snapshot_path)
             return WorkspaceWriteResult(path=resolved, snapshot_path=snapshot_path, old_content=old_content)
 
     def write_text_batch(self, changes: dict[str, str]) -> list[WorkspaceWriteResult]:
@@ -112,8 +114,12 @@ class WorkspaceService:
                     elif path.exists():
                         path.unlink()
                 raise
-            for path in ordered:
-                self._record_changed(path.relative_to(self.root))
+            for result in results:
+                self._record_changed(
+                    result.path.relative_to(self.root),
+                    operation="write_file",
+                    snapshot_path=result.snapshot_path,
+                )
             return results
 
     def apply_text_patch(
@@ -138,7 +144,7 @@ class WorkspaceService:
             updated = original.replace(search, replace, 1)
             resolved.write_text(updated, encoding="utf-8")
             rel = resolved.relative_to(self.root)
-            self._record_changed(rel)
+            self._record_changed(rel, operation="apply_patch", snapshot_path=snapshot_path)
             return WorkspacePatchResult(
                 path=resolved,
                 snapshot_path=snapshot_path,
@@ -165,7 +171,7 @@ class WorkspaceService:
             rollback_snapshot = self._snapshot_unlocked(resolved) if resolved.exists() else None
             resolved.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(snapshots[0], resolved)
-            self._record_changed(rel)
+            self._record_changed(rel, operation="rollback", snapshot_path=rollback_snapshot)
             return WorkspaceWriteResult(path=resolved, snapshot_path=rollback_snapshot, old_content=old_content)
 
     def snapshot(self, path: str | Path) -> Path | None:
@@ -192,10 +198,25 @@ class WorkspaceService:
         with self._path_locks_lock:
             return self._path_locks.setdefault(key, threading.RLock())
 
-    def _record_changed(self, rel: Path) -> None:
+    @property
+    def changed_files(self) -> list[Path]:
+        """Compatibility snapshot; callers cannot mutate journal state through it."""
+
+        return list(self.change_journal.changed_paths())
+
+    def _record_changed(
+        self,
+        rel: Path,
+        *,
+        operation: str,
+        snapshot_path: Path | None,
+    ) -> None:
         with self._metadata_lock:
-            if rel not in self.changed_files:
-                self.changed_files.append(rel)
+            self.change_journal.record(
+                rel,
+                operation=operation,
+                snapshot_path=snapshot_path,
+            )
 
     _SAFE_ENV_SUFFIXES: ClassVar[set] = {'.example', '.template', '.sample', '.default', '.dist'}
 

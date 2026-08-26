@@ -32,6 +32,7 @@ from .runtime_state import (
 from .session_emitter import SessionEmitter
 from .tool_executor import ToolExecutor
 from .trace import TraceWriter
+from .turn_controller import TurnController
 from .utils import (
     _prompt_cache_key,
     _short_hash,
@@ -788,6 +789,7 @@ class AgentConversation:
         agent = self.agent
         self.last_run_streamed_text = False
         run_started = time.monotonic()
+        turn_controller = TurnController(self)
 
         iteration_limit = agent.max_iterations or config.MAX_AGENT_ITERATIONS
         for local_iteration in range(1, iteration_limit + 1):
@@ -798,23 +800,12 @@ class AgentConversation:
             self._drain_queued_messages()
 
             # --- Time budget check ---
-            if agent.time_budget is not None:
-                elapsed = time.monotonic() - run_started
-                if elapsed >= agent.time_budget:
-                    log.warning(
-                        f"[{agent.name}] Time budget exhausted ({elapsed:.0f}s >= {agent.time_budget:.0f}s)."
-                    )
-                    self.runtime_state.fallback.request_stop(
-                        reason="time_budget_exhausted",
-                        limit_type="seconds",
-                        used=int(elapsed),
-                        limit=int(agent.time_budget),
-                        recent_action_summary=self.runtime_state.fallback.recent_action_summary,
-                    )
-                    self.emitter.emit_agent_fallback(self.runtime_state.fallback)
-                    self.last_text = self._fallback_text()
-                    self.trace.finish("time_budget", iteration)
-                    break
+            budget_decision = turn_controller.check_time_budget(
+                run_started=run_started,
+                iteration=iteration,
+            )
+            if budget_decision is not None:
+                break
 
             # --- Middleware: per-iteration hooks ---
             for mw in agent.middlewares:
@@ -935,24 +926,9 @@ class AgentConversation:
 
             # --- If no tool calls, check pre-exit middlewares ---
             if not tool_calls:
-                if self._drain_queued_messages():
+                decision = turn_controller.after_no_tool_calls(iteration=iteration)
+                if decision.continue_loop:
                     continue
-                forced_continue = False
-                for mw in agent.middlewares:
-                    inject = mw.pre_exit(
-                        self.messages,
-                        runtime_state=self.runtime_state,
-                        agent_name=agent.name,
-                    )
-                    if inject:
-                        self._append_message({"role": "user", "content": inject})
-                        self.trace.middleware_inject(type(mw).__name__, "pre_exit", inject)
-                        forced_continue = True
-                        break
-                if forced_continue:
-                    continue
-                log.info(f"[{agent.name}] Finished (no more tool calls).")
-                self.trace.finish("no_tool_calls", iteration)
                 break
 
             if self._request_token_budget_stop_if_needed():
@@ -971,56 +947,15 @@ class AgentConversation:
             if stop_after_tool_loop:
                 break
 
-            if self._drain_queued_messages():
-                continue
-
-            # --- Check finish reason ---
-            if finish_reason == "stop":
-                log.info(f"[{agent.name}] Finished (stop).")
-                self.trace.finish("stop", iteration)
+            decision = turn_controller.after_tool_calls(
+                finish_reason=finish_reason,
+                iteration=iteration,
+            )
+            if not decision.continue_loop:
                 break
 
-            if finish_reason == "length":
-                log.warning(f"[{agent.name}] Output truncated (max_tokens hit).")
-                self.trace.error("length_truncated", "max_tokens hit")
-                # If tool calls were present, they were already executed above.
-                # Only tell the model they weren't executed if none were parsed
-                # (i.e. the truncation cut off the tool call JSON itself).
-                if tool_calls:
-                    self._append_message({
-                        "role": "user",
-                        "content": (
-                            "[SYSTEM] Your response was truncated (token limit), but your tool calls "
-                            "WERE executed successfully. The results are above. "
-                            "If you had more tool calls planned, continue with the remaining ones now. "
-                            "Do NOT re-run the tools that already executed."
-                        ),
-                    })
-                else:
-                    self._append_message({
-                        "role": "user",
-                        "content": (
-                            "[SYSTEM] Your last response was cut off because it exceeded the token limit. "
-                            "No tool calls were executed. "
-                            "Please retry, but split large files into smaller parts:\n"
-                            "1. Write the first half of the file with write_file\n"
-                            "2. Then write the second half as a separate file or append\n"
-                            "Or simplify the implementation to fit in one response."
-                        ),
-                    })
-
         else:
-            log.warning(f"[{agent.name}] Hit max iterations ({iteration_limit}).")
-            self.runtime_state.fallback.request_stop(
-                reason="max_iterations",
-                limit_type="iterations",
-                used=config.MAX_AGENT_ITERATIONS,
-                limit=iteration_limit,
-                recent_action_summary=self.runtime_state.fallback.recent_action_summary,
-            )
-            self.emitter.emit_agent_fallback(self.runtime_state.fallback)
-            self.last_text = self._fallback_text()
-            self.trace.finish("max_iterations", config.MAX_AGENT_ITERATIONS)
+            turn_controller.finish_max_iterations(iteration_limit=iteration_limit)
 
         self._iteration_offset += local_iteration
         return self.last_text

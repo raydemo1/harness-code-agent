@@ -419,6 +419,9 @@ def _planning_state_path(workspace: Path, runtime_state, tool_context: ToolConte
 
 def _planning_changed_files(runtime_state, tool_context: ToolContext | None) -> list[str]:
     if tool_context is not None:
+        journal = getattr(tool_context.workspace, "change_journal", None)
+        if journal is not None:
+            return [str(path) for path in journal.changed_paths()]
         return [str(path) for path in getattr(tool_context.workspace, "changed_files", [])]
     board = runtime_state.task_board
     return [str(path) for path in getattr(board, "changed_files", [])]
