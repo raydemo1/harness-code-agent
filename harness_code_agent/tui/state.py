@@ -48,6 +48,7 @@ class TuiState:
     tool_call_counter: int = 0
     active_thought_block: TranscriptBlock | None = None
     thought_counter: int = 0
+    block_counter: int = 0
 
     def apply_event(self, event: Any) -> TranscriptBlock | None:
         data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
@@ -209,6 +210,9 @@ class TuiState:
     def add_block(self, block: TranscriptBlock | None) -> None:
         if block is None:
             return
+        if not block.id:
+            self.block_counter += 1
+            block.id = f"block-{block.turn or self.snapshot.turn}-{self.block_counter}"
         if block.id and any(existing.id == block.id for existing in self.blocks):
             return
         self.blocks.append(block)

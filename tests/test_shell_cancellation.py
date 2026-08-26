@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import subprocess
 import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from harness_code_agent.agent.cancellation import CancellationToken, CancelledError
 from harness_code_agent.runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
-from harness_code_agent.runtime.builtins.shell import run_bash
+from harness_code_agent.runtime.builtins.shell import _run_one_shot_powershell, run_bash
 from harness_code_agent.runtime.tool_runner import execute_tool_result
 from harness_code_agent.workspace.shell_session import ShellResult
 
@@ -87,6 +88,29 @@ class ShellCancellationTests(unittest.TestCase):
             self.assertRaises(CancelledError),
         ):
             execute_tool_result("cancel_tool", {}, cancellation_token=token)
+
+    def test_one_shot_timeout_has_a_bounded_second_communicate(self):
+        process = MagicMock()
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired("command", 1, output="partial", stderr="warning"),
+            subprocess.TimeoutExpired("command", 5),
+        ]
+        tool_context = SimpleNamespace(workspace=SimpleNamespace(root=Path.cwd()))
+
+        with (
+            patch("harness_code_agent.workspace.shell_session.windows_shell_path", return_value="pwsh"),
+            patch("harness_code_agent.runtime.builtins.shell.subprocess.Popen", return_value=process),
+            patch("harness_code_agent.runtime.builtins.shell._terminate_process_tree") as terminate,
+        ):
+            result = _run_one_shot_powershell("command", 1, tool_context)
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.stdout, "partial")
+        self.assertEqual(result.stderr, "warning")
+        self.assertEqual(process.communicate.call_count, 2)
+        self.assertEqual(terminate.call_count, 2)
+        process.stdout.close.assert_called_once()
+        process.stderr.close.assert_called_once()
 
 
 if __name__ == "__main__":

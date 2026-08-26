@@ -8,7 +8,11 @@ from typing import ClassVar
 from unittest.mock import patch
 
 from harness_code_agent.agent.change_proposal import ChangeProposalStore
-from harness_code_agent.agent.coordinator import AgentCoordinator, _path_allowed
+from harness_code_agent.agent.coordinator import (
+    AgentCoordinator,
+    AgentRecord,
+    _path_allowed,
+)
 from harness_code_agent.runtime import tools
 from harness_code_agent.runtime.permissions import PermissionPolicy
 from harness_code_agent.runtime.tool_context import ToolContext
@@ -206,6 +210,105 @@ class AgentCoordinatorTests(unittest.TestCase):
             self.assertIs(_ControlledAgent.contexts["first"].resource_coordinator, self.context.resource_coordinator)
             second_conversation.release.set()
             self.assertEqual(self._wait_terminal(second["agent_id"])["status"], "completed")
+
+    def test_wait_ignores_unrelated_agent_state_changes(self):
+        selected = AgentRecord(
+            id="agent_selected",
+            name="selected",
+            role="explorer",
+            task="selected task",
+            expected_output="",
+            allowed_paths=[],
+            fork_turns="none",
+            model_intensity=None,
+            max_turns=1,
+            max_seconds=30,
+            state="running",
+        )
+        unrelated = AgentRecord(
+            id="agent_unrelated",
+            name="unrelated",
+            role="explorer",
+            task="unrelated task",
+            expected_output="",
+            allowed_paths=[],
+            fork_turns="none",
+            model_intensity=None,
+            max_turns=1,
+            max_seconds=30,
+            state="running",
+        )
+        with self.coordinator._condition:
+            self.coordinator._records = {
+                selected.id: selected,
+                unrelated.id: unrelated,
+            }
+            self.coordinator._names = {
+                selected.name: selected.id,
+                unrelated.name: unrelated.id,
+            }
+
+        def unrelated_change(predicate, timeout=None):
+            unrelated.state = "completed"
+            self.coordinator._changed_locked()
+            return predicate()
+
+        with patch.object(self.coordinator._condition, "wait_for", side_effect=unrelated_change):
+            payload = self.coordinator.wait([selected.id], timeout_seconds=1)
+
+        self.assertTrue(payload["timed_out"])
+        self.assertEqual(payload["agents"][0]["status"], "running")
+
+    def test_close_agent_cannot_be_revived_by_concurrent_followup(self):
+        closed = threading.Event()
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+        conversation = types.SimpleNamespace(
+            close=lambda: closed.set(),
+            add_user_turn=lambda _task: self.fail("closed agent was revived"),
+        )
+        record = AgentRecord(
+            id="agent_done",
+            name="done",
+            role="explorer",
+            task="task",
+            expected_output="",
+            allowed_paths=[],
+            fork_turns="none",
+            model_intensity=None,
+            max_turns=1,
+            max_seconds=30,
+            state="completed",
+            conversation=conversation,
+        )
+        with self.coordinator._condition:
+            self.coordinator._records[record.id] = record
+            self.coordinator._names[record.name] = record.id
+
+        def block_cleanup(_agent_id, *, discard_changes=False):
+            cleanup_started.set()
+            release_cleanup.wait(timeout=1)
+
+        errors: list[Exception] = []
+
+        def close_record() -> None:
+            try:
+                self.coordinator.close_agent(record.id)
+            except Exception as exc:  # noqa: BLE001 - surfaced by the assertion below
+                errors.append(exc)
+
+        with patch.object(self.coordinator.changes, "close_agent", side_effect=block_cleanup):
+            worker = threading.Thread(target=close_record)
+            worker.start()
+            self.assertTrue(cleanup_started.wait(timeout=1))
+            with self.assertRaises((KeyError, ValueError)):
+                self.coordinator.followup(record.id, "revive")
+            release_cleanup.set()
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(closed.is_set())
 
     def test_agent_runtime_uses_its_tool_context_workspace_for_background_jobs(self):
         from harness_code_agent.agent.conversation import Agent

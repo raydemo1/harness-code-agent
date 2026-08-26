@@ -170,15 +170,15 @@ def _run_one_shot_powershell(command: str, timeout: int, tool_context, cancellat
     if executable is None:
         raise RuntimeError("PowerShell 7 (pwsh) was not found")
     process = subprocess.Popen(
-            [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-            cwd=_workspace_root(tool_context),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-        )
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=_workspace_root(tool_context),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    )
     remove_cancel_callback = lambda: None
     if cancellation_token is not None:
         remove_cancel_callback = cancellation_token.add_callback(
@@ -188,7 +188,16 @@ def _run_one_shot_powershell(command: str, timeout: int, tool_context, cancellat
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         _terminate_process_tree(process)
-        stdout, stderr = process.communicate()
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            stdout = str(exc.stdout or "")
+            stderr = str(exc.stderr or "")
+            for stream in (process.stdout, process.stderr, process.stdin):
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
         return ShellResult(
             stdout=str(stdout or exc.stdout or ""),
             stderr=str(stderr or exc.stderr or ""),

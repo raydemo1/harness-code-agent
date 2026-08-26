@@ -90,15 +90,16 @@ class WorkspaceService:
         with ExitStack() as stack:
             for path in ordered:
                 stack.enter_context(self._path_lock(path))
-            originals: dict[Path, tuple[bool, str | None]] = {}
+            originals: dict[Path, tuple[bool, bytes | None]] = {}
             results: list[WorkspaceWriteResult] = []
             for path in ordered:
                 self._ensure_writable(path)
                 existed = path.exists()
                 if existed and not path.is_file():
                     raise ValueError(f"Refusing to replace non-file path: {path.relative_to(self.root)}")
-                old_content = path.read_text(encoding="utf-8", errors="replace") if existed else None
-                originals[path] = (existed, old_content)
+                old_bytes = path.read_bytes() if existed else None
+                old_content = old_bytes.decode("utf-8", errors="replace") if old_bytes is not None else None
+                originals[path] = (existed, old_bytes)
                 snapshot_path = self._snapshot_unlocked(path) if existed else None
                 results.append(WorkspaceWriteResult(path=path, snapshot_path=snapshot_path, old_content=old_content))
             try:
@@ -107,10 +108,10 @@ class WorkspaceService:
                     path.write_text(resolved_changes[path], encoding="utf-8")
             except Exception:
                 for path in reversed(ordered):
-                    existed, old_content = originals[path]
+                    existed, old_bytes = originals[path]
                     if existed:
                         path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_text(old_content or "", encoding="utf-8")
+                        path.write_bytes(old_bytes or b"")
                     elif path.exists():
                         path.unlink()
                 raise

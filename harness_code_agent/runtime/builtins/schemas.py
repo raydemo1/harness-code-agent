@@ -602,7 +602,7 @@ CORE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "wait_agents",
-            "description": "Wait for selected background agents to change state, then return their current summaries.",
+            "description": "Wait until all selected background agents finish, then return their summaries.",
             "parameters": {"type": "object", "properties": {"agent_ids": {"type": "array", "items": {"type": "string"}}, "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 300, "default": 30}}},
         },
     },

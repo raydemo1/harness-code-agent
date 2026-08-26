@@ -29,7 +29,7 @@ from .change_proposal import ChangeProposalStore
 AGENT_ROLES = {"explorer", "test_designer", "reviewer", "verifier", "worker"}
 READ_ONLY_ROLES = AGENT_ROLES - {"worker"}
 ACTIVE_STATES = {"queued", "running"}
-TERMINAL_STATES = {"completed", "blocked", "failed", "interrupted"}
+TERMINAL_STATES = {"completed", "blocked", "failed", "interrupted", "closed"}
 MAX_OPEN_AGENTS = 8
 MAX_CONCURRENT_AGENTS = 3
 
@@ -198,10 +198,17 @@ class AgentCoordinator:
     def wait(self, agent_ids: list[str] | None = None, *, timeout_seconds: float = 30) -> dict:
         with self._condition:
             selected = self._select_records(agent_ids)
-            initial = self._version
-            if not any(record.state in TERMINAL_STATES for record in selected):
-                self._condition.wait_for(lambda: self._version != initial or self._closed, timeout=max(0.0, float(timeout_seconds)))
-            return {"agents": [self._snapshot(record) for record in selected], "timed_out": self._version == initial}
+            completed = lambda: self._closed or all(
+                record.state in TERMINAL_STATES for record in selected
+            )
+            finished = completed() or self._condition.wait_for(
+                completed,
+                timeout=max(0.0, float(timeout_seconds)),
+            )
+            return {
+                "agents": [self._snapshot(record) for record in selected],
+                "timed_out": not finished,
+            }
 
     def list(self, status: str = "") -> dict:
         with self._condition:
@@ -218,17 +225,31 @@ class AgentCoordinator:
         return self._snapshot(record)
 
     def close_agent(self, agent_id: str, *, discard_changes: bool = False) -> dict:
-        record = self._record(agent_id)
-        if record.state in ACTIVE_STATES:
-            raise ValueError("interrupt the running agent before closing it")
-        self.changes.close_agent(record.id, discard_changes=discard_changes)
-        if record.conversation is not None:
-            record.conversation.close()
         with self._condition:
+            record = self._record(agent_id)
+            if record.state in ACTIVE_STATES:
+                raise ValueError("interrupt the running agent before closing it")
+            previous = record.state
+            record.state = "closing"
             self._records.pop(record.id, None)
             self._names.pop(record.name, None)
             self._changed_locked()
-        self._emit(record, "agent_status", previous=record.state, status="closed")
+        error: Exception | None = None
+        try:
+            self.changes.close_agent(record.id, discard_changes=discard_changes)
+        except Exception as exc:  # noqa: BLE001 - continue closing owned resources
+            error = exc
+        try:
+            if record.conversation is not None:
+                record.conversation.close()
+        except Exception as exc:  # noqa: BLE001 - preserve the first cleanup failure
+            error = error or exc
+        with self._condition:
+            record.state = "closed"
+            self._changed_locked()
+        self._emit(record, "agent_status", previous=previous, status="closed")
+        if error is not None:
+            raise error
         return {"agent_id": record.id, "status": "closed"}
 
     def has_active_agents(self) -> bool:

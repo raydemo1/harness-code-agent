@@ -17,7 +17,11 @@ from harness_code_agent.tui.completion import (
     mention_candidates,
     replace_mention_fragment,
 )
-from harness_code_agent.tui.state import SessionStatusSnapshot, TuiState
+from harness_code_agent.tui.state import (
+    SessionStatusSnapshot,
+    TranscriptBlock,
+    TuiState,
+)
 
 
 class TerminalUiTests(unittest.TestCase):
@@ -88,6 +92,19 @@ class TerminalUiTests(unittest.TestCase):
             allowlist.add_prefix_rule(prefix, command=request.args["command"])
             self.assertTrue(allowlist.matches("python scripts/check.py --all"))
             self.assertFalse(allowlist.matches("python scripts/delete.py --all"))
+
+    def test_fallback_block_ids_are_unique_and_replay_stable(self):
+        def build_ids() -> list[str]:
+            state = TuiState(SessionStatusSnapshot("general", "model", "provider", "workspace-write", "session", Path.cwd()))
+            state.add_block(TranscriptBlock("notice", "same", "first", turn=2))
+            state.add_block(TranscriptBlock("notice", "same", "second", turn=2))
+            return [block.id for block in state.blocks]
+
+        live_ids = build_ids()
+        replay_ids = build_ids()
+
+        self.assertEqual(live_ids, replay_ids)
+        self.assertEqual(len(set(live_ids)), 2)
 
 
 if __name__ == "__main__":
