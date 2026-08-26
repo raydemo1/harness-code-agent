@@ -153,9 +153,11 @@ Agent 决策循环的核心流程还是串行的：发 LLM 请求 → 等响应 
 
 `spawn_agent` 会创建 session 级后台 Agent，主 Agent 不必等它结束。多个 Agent 共享并发限流器和资源协调器，但各自有独立对话与取消令牌。
 
-只读角色直接读取主工作区。`worker` 使用隔离副本，只生成可审查的 `ChangeProposal`。主 Agent 通过 `apply_agent_changes` 三方合并；真正冲突要显式解决。
+只读角色直接读取主工作区。`worker` 使用持久隔离副本，完成后保存完整的 `ChangeProposal`，可通过 `read_agent_changes` 分页复查。主 Agent 通过 `apply_agent_changes` 做三方合并；无重叠修改自动合并，真实冲突返回 conflict id，不直接写入主工作区。
 
-`send_agent_message` 会在下一次迭代边界注入补充信息。它不会等待整个子任务结束，也不会中断已有工作。
+`send_agent_message` 会立即把消息放入运行中 Agent 的队列，并在下一个安全迭代边界注入。它不会等待整个子任务结束，也不会中断当前正在执行的工具；`followup_agent` 则用于继续已结束的 Agent。
+
+`wait_agents` 只根据选中 Agent 的终态判断完成，不会因为另一个 Agent 有状态变化就提前返回。关闭 Agent 时先在协调器锁内标记为 closing，再清理 conversation 和隔离资源，避免和 followup 并发复活同一个 Agent。
 
 ---
 
@@ -243,7 +245,7 @@ Tool runner 会把 `cancellation_token` 注入声明支持它的工具，并让 
 
 OpenTUI 的 textarea 需要显式配置 `keyBindings`，才能稳定实现 Enter 提交、Shift+Enter 换行。更麻烦的是同一个 Enter 在命令补全面板打开时应该“接受候选”，不能同时把旧的 `/` 草稿提交给 Python。
 
-实现上，补全面板先消费 Up/Down/PageUp/PageDown/Home/End、Enter/Tab 和 Esc，并调用 `preventDefault()`；textarea 的 `onSubmit` 还会再次检查 palette 是否打开。这个双层守卫对应了真实回归测试，防止一次按键同时完成补全和提交。
+实现上，补全面板消费 Up/Down/PageUp/PageDown/Home/End、Enter/Tab 并调用 `preventDefault()`；Esc 不再负责关闭补全，点击遮罩外层关闭，清空或修改 `/`、`@` 指令后重新计算是否显示。textarea 的 `onSubmit` 还会再次检查 palette 是否打开，防止一次按键同时完成补全和提交。审批/问题交互出现时，普通面板会卸载，避免键盘事件串扰；自定义输入获得焦点后，数字快捷键和方向导航也会交给输入框。
 
 ### 跨进程状态同步
 
@@ -253,46 +255,48 @@ Python 侧仍由 `InteractiveSession`、Agent worker、EventBus 和同步 approv
 
 ### 其他小坑
 
-- **首帧不能等 Python session**：Bun 先绘制 shell，Python session 在后台初始化；测试用慢事件流验证首帧不被阻塞。
+- **首帧不能等 Python session**：Bun 先绘制 shell，Python session 在后台初始化；bridge 返回 starting，前端等 progress=ready 后才提交任务或执行会话动作。
+- **初始化竞态会丢任务**：首次任务和按钮动作通过 ready gate 排队；session 构造失败会明确拒绝等待中的请求并清理状态。
+- **交互失败不能卡窗**：resolve_interaction 失败时 bridge 和前端都会发出 interaction_closed，避免审批弹窗永久占用输入。
 - **全局快捷键会污染输入**：`?`、Ctrl+N、Ctrl+C 等必须 `preventDefault()`，新会话还要强制 remount composer 才能清掉 textarea 内部草稿。
 - **终端宽度不是字符数**：中文和宽字符的截断用 `stringWidth`，命令名和说明保持单行、左对齐并显示省略号。
-- **两套测试**：Python 测 bridge、session 和协议行为；Bun 用 OpenTUI test renderer 测真实按键、鼠标、面板和响应式布局。
+- **两套测试**：Python 测 bridge、session 和协议行为；Bun 当前测 reducer、主题/图标和附件工具函数。真实终端的按键、鼠标、焦点和响应式布局仍需单独冒烟。
 
 ---
 
 ## Q: 你的测试覆盖了哪些场景？Approval 面板的交互逻辑怎么测的？TUI 的 streaming 怎么测的？
 
-> 测试按 runtime 与 UI 两侧拆分：Python 覆盖 Agent、工具、中间件、会话、bridge 和评测；Bun 覆盖 OpenTUI 的 reducer、键盘、鼠标、面板和响应式渲染。当前仓库不是浏览器式端到端测试，因此我不会把组件渲染测试包装成完整 E2E。
+> 测试按 runtime 与 UI 两侧拆分：Python 覆盖 Agent、工具、中间件、会话、bridge 和评测；Bun 当前覆盖 OpenTUI 的 reducer、主题/图标和附件工具函数。当前仓库没有完整的终端 E2E，因此我不会把单元测试包装成键盘、鼠标和面板的交互证明。
 
-### 测试结构（当前 28 个 Python 测试文件 / 519 个 unittest，另有 18 个 OpenTUI/Bun 测试）
+### 测试结构（数量随提交变化，以实际运行结果为准）
 
 | 层次 | 文件 | 覆盖内容 |
 |------|------|----------|
-| 前端状态与交互 | `frontend/opentui/src/state.test.ts`, `frontend/opentui/src/app.test.tsx` | reducer、主题/图标、首帧、输入提交、命令补全、快捷键、鼠标、审批/问题面板、响应式布局 |
-| Python UI bridge | `test_opentui_bridge.py`, `test_terminal_ui.py`, `test_interactive_cli.py` | NDJSON 请求/事件、panel action、命令 registry、session 初始化与交互入口 |
+| 前端状态与工具函数 | `frontend/opentui/src/state.test.ts`, `frontend/opentui/src/attachment-utils.test.ts` | reducer、session reset、主题/图标、附件路径解析和格式化 |
+| Python UI bridge | `test_attachment_bridge.py`, `test_terminal_ui.py`, `test_tui_protocol.py` | NDJSON 请求/事件、附件、panel/命令入口、session 初始化和交互关闭 |
 | 中间件 | `test_product_runtime.py`, `test_task_tracking.py`, `test_recovery_strategy.py`, `test_acceptance_planning.py`, `test_tool_policy.py` | 中间件链、权限审批、错误恢复、任务追踪、acceptance checks、shell policy |
-| 工具运行时 | `test_tool_executor.py`, `test_parallel_tool.py`, `test_shell_session.py`, `test_shell_jobs.py`, `test_mcp_runtime.py`, `test_skill_catalog.py` | 资源规划、并行执行、后台 job、MCP 工具、deferred tool reveal、skill registry 和 skill 文件读取 |
+| 工具运行时 | `test_tool_executor.py`, `test_parallel_tool.py`, `test_shell_session.py`, `test_shell_jobs.py`, `test_skill_catalog.py` | 资源规划、并行执行、后台 job、工具注册、deferred tool reveal、skill registry 和 skill 文件读取 |
 | 会话 / 评估 / 记忆 | `test_observability.py`, `test_eval_suite.py`, `test_eval_ledger.py`, `test_terminal_bench_launcher.py`, `test_terminal_runner_artifacts.py`, `test_memory.py` | 事件记录、评估汇总、ledger、Terminal-Bench launcher / artifacts、记忆检索 |
 | Agent 循环 | `test_compaction.py`, `test_profiles.py`, `test_delegate_agent.py`, `test_tool_policy.py` | 上下文压缩、路由、后台 Agent、隔离提案、三方合并与工具策略 |
 
 ### Approval 面板怎么测
 
-三层测试：
+当前自动化覆盖 runtime 和协议层，OpenTUI 组件的真实鼠标/焦点冒烟仍需单独执行：
 
 1. **Allowlist 单元测试**：直接测试 `ApprovalAllowlist` 的前缀匹配和持久化，不涉及 UI。
-2. **OpenTUI 组件测试**：把 approval interaction 作为 UI event 送入 `<App>`，用 test renderer 发送方向键/数字键和 Enter，断言 `onResolveInteraction` 收到 `approve`、`persist` 或 `deny`。这测的是前端选择语义，不绕到 Python 内部。
-3. **中间件集成测试**：在 `test_product_runtime.py` 中，用 `FakeClient` 返回 tool_call，用 `StaticApprovalProvider(approved=False)` 验证拒绝后 agent 收到 `[approval_denied]` 阻塞消息。
+2. **协议与状态测试**：`test_tui_protocol.py` 覆盖 initialize、starting、交互失败关闭和 BrokenPipe；Bun `state.test.ts` 覆盖 interaction/session reset reducer。它们不等同于真实终端点击测试。
+3. **中间件集成测试**：在 `test_product_runtime.py` 中，用 `FakeClient` 返回 tool_call，用 `StaticApprovalProvider` 验证批准/拒绝路径和 `[approval_denied]` 阻塞消息。
 
 ### Streaming 怎么测
 
-Python 侧在 `test_opentui_bridge.py` 中验证 session 事件会被映射为协议事件；前端的 `state.test.ts` 直接把 `UiEvent` 喂给 reducer，验证 transcript 和 session reset。交互测试再通过 OpenTUI renderer 捕获字符帧，确认事件最终可见。这样把“协议转换错了”和“React 没渲染”分成两个可定位的失败面。
+Python 侧在 `test_attachment_bridge.py`、`test_tui_protocol.py` 和相关 session 测试中验证 bridge 请求、事件和 session 状态；前端的 `state.test.ts` 直接把 `UiEvent` 喂给 reducer，验证 transcript、interaction 和 session reset。当前没有把字符帧渲染冒烟伪装成完整 E2E，真实鼠标/焦点行为需要交互检查。
 
 ### Mock 模式
 
 - `FakeClient` / `SimpleNamespace` — 构造确定性的 Chat Completions、session 和事件对象，不访问真实 API。
 - `StaticApprovalProvider` / `StaticQuestionProvider` — Python runtime 的确定性交互替身。
 - `FakeConversation` / fake session — 记录提交、动作和事件，隔离 bridge 测试。
-- OpenTUI test renderer + mock input — 在无真实终端时发送键盘、鼠标和 resize 事件并捕获字符帧。
+- Bun state/utility tests — 在无真实终端时验证 reducer、主题/图标和附件输入；不把它们当作完整交互 E2E。
 
 ---
 
