@@ -231,6 +231,18 @@ class AgentCoordinatorTests(unittest.TestCase):
         finally:
             conversation.close()
 
+    def test_role_registries_are_derived_from_tool_capabilities(self):
+        explorer = self.coordinator._role_registry("explorer")
+        worker = self.coordinator._role_registry("worker")
+
+        self.assertIsNotNone(explorer.get("read_file"))
+        self.assertIsNone(explorer.get("write_file"))
+        self.assertIsNone(explorer.get("spawn_agent"))
+        self.assertIsNone(explorer.get("tool_search"))
+        self.assertIsNotNone(worker.get("read_file"))
+        self.assertIsNotNone(worker.get("write_file"))
+        self.assertIsNone(worker.get("spawn_agent"))
+
     def _wait_conversation(self, name):
         for _ in range(1000):
             conversation = _ControlledConversation.instances.get(name)

@@ -1,15 +1,13 @@
 """Project-local approval prefix rules shared by terminal frontends."""
+
 from __future__ import annotations
 
 import json
-import re
-import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..runtime.approvals import ApprovalRequest
-
-_PYTHON_COMMANDS = {"python", "python3", "python.exe", "python3.exe", "py", "py.exe"}
+from ..runtime.shell_classification import analyze_shell_command, command_matches_prefix
 
 
 class ApprovalAllowlist:
@@ -18,13 +16,19 @@ class ApprovalAllowlist:
         self.path = self.project_root / ".harness" / "approval_allowlist.json"
 
     def add_prefix_rule(self, prefix: list[str], *, command: str) -> None:
-        clean_prefix = [_normalize_token(token) for token in prefix if _normalize_token(token)]
+        clean_prefix = [
+            _normalize_token(token) for token in prefix if _normalize_token(token)
+        ]
         if not clean_prefix:
             return
         data = self._read()
         rules = data.setdefault("rules", [])
         for rule in rules:
-            if rule.get("tool") == "run_bash" and rule.get("kind") == "prefix" and rule.get("prefix") == clean_prefix:
+            if (
+                rule.get("tool") == "run_bash"
+                and rule.get("kind") == "prefix"
+                and rule.get("prefix") == clean_prefix
+            ):
                 return
         rules.append(
             {
@@ -42,7 +46,7 @@ class ApprovalAllowlist:
             if rule.get("tool") != "run_bash" or rule.get("kind") != "prefix":
                 continue
             prefix = [str(token) for token in rule.get("prefix", [])]
-            if prefix and _command_matches_prefix(command, prefix):
+            if prefix and command_matches_prefix(command, prefix):
                 return rule
         return None
 
@@ -74,129 +78,8 @@ class ApprovalAllowlist:
 def _persistent_prefix_for_request(request: ApprovalRequest) -> list[str] | None:
     if request.tool_name != "run_bash":
         return None
-    return _derive_persistent_prefix(str(request.args.get("command", "")))
-
-
-def _derive_persistent_prefix(command: str) -> list[str] | None:
-    segments = _split_simple_compound(command)
-    if len(segments) > 1:
-        prefixes = [
-            prefix
-            for segment in segments
-            if not _is_ignorable_safe_segment(segment)
-            for prefix in [_derive_single_prefix(segment)]
-        ]
-        if prefixes and all(prefix == prefixes[0] for prefix in prefixes):
-            return prefixes[0]
-        return None
-    return _derive_single_prefix(command)
-
-
-def _derive_single_prefix(command: str) -> list[str] | None:
-    tokens = _tokenize_command(command)
-    if len(tokens) < 2:
-        return None
-    normalized = [_normalize_token(token) for token in tokens]
-    python_index = _first_python_token_index(normalized)
-    if python_index is not None:
-        if len(normalized) <= python_index + 1:
-            return None
-        launcher = normalized[python_index + 1]
-        if launcher in {"-", "-c", "-i"}:
-            return None
-        if launcher == "-m":
-            if len(normalized) <= python_index + 2:
-                return None
-            return normalized[: python_index + 3]
-        if launcher.startswith("-"):
-            return None
-        return normalized[: python_index + 2]
-    prefix_len = min(3, len(normalized))
-    if prefix_len < 2:
-        return None
-    return normalized[:prefix_len]
-
-
-def _command_matches_prefix(command: str, prefix: list[str]) -> bool:
-    segments = _split_simple_compound(command)
-    if not segments:
-        return False
-    matched = False
-    for segment in segments:
-        if _is_ignorable_safe_segment(segment):
-            continue
-        tokens = [_normalize_token(token) for token in _tokenize_command(segment)]
-        if not tokens or tokens[: len(prefix)] != prefix:
-            return False
-        matched = True
-    return matched
-
-
-def _split_simple_compound(command: str) -> list[str]:
-    """Split simple semicolon/&& compounds whose quoting is unambiguous."""
-    parts: list[str] = []
-    current: list[str] = []
-    quote = ""
-    text = command.strip()
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if quote:
-            current.append(char)
-            if char == quote:
-                quote = ""
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            quote = char
-            current.append(char)
-        elif char == ";":
-            part = "".join(current).strip()
-            if part:
-                parts.append(part)
-            current = []
-        elif char == "&" and index + 1 < len(text) and text[index + 1] == "&":
-            part = "".join(current).strip()
-            if part:
-                parts.append(part)
-            current = []
-            index += 1
-        elif char in "|&<>":
-            return []
-        else:
-            current.append(char)
-        index += 1
-    if quote:
-        return []
-    tail = "".join(current).strip()
-    if tail:
-        parts.append(tail)
-    return parts
-
-
-def _is_literal_expression(command: str) -> bool:
-    text = command.strip()
-    return len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}
-
-
-def _is_ignorable_safe_segment(command: str) -> bool:
-    return _is_literal_expression(command)
-
-
-def _tokenize_command(command: str) -> list[str]:
-    if not command.strip() or re.search(r"[|;&<>]", command):
-        return []
-    try:
-        return shlex.split(command, posix=False)
-    except ValueError:
-        return []
-
-
-def _first_python_token_index(tokens: list[str]) -> int | None:
-    for index, token in enumerate(tokens):
-        if token in _PYTHON_COMMANDS:
-            return index
-    return None
+    prefix = analyze_shell_command(str(request.args.get("command", ""))).approval_prefix
+    return list(prefix) if prefix else None
 
 
 def _normalize_token(token: object) -> str:

@@ -1162,6 +1162,7 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertTrue(tools.BUILTIN_TOOL_REGISTRY.effect_for("read_shell_output", {}).barrier)
         self.assertTrue(tools.BUILTIN_TOOL_REGISTRY.effect_for("stop_shell_job", {}).barrier)
         self.assertTrue(all(spec.permission for spec in tools.BUILTIN_TOOL_REGISTRY.specs()))
+        self.assertTrue(all(spec.capabilities for spec in tools.BUILTIN_TOOL_REGISTRY.specs()))
         self.assertIsNone(tools.BUILTIN_TOOL_REGISTRY.get("missing_tool"))
 
     def test_run_bash_long_running_uses_shell_job_manager(self):

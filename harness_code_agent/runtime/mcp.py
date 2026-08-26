@@ -21,6 +21,7 @@ from ..agent.cancellation import CancelledError
 from .permissions import (
     TOOL_PERMISSION_DANGEROUS,
     TOOL_PERMISSION_NETWORK_READ,
+    TOOL_PERMISSION_READ,
     VALID_TOOL_PERMISSIONS,
 )
 from .tool_result import ToolResult
@@ -325,6 +326,11 @@ class McpClientManager:
 
     def register_tools(self, registry) -> None:
         from .execution_planner import CallEffect, ResourceClaim
+        from .tool_registry import (
+            TOOL_CAPABILITY_MAIN,
+            TOOL_CAPABILITY_READONLY_AGENT,
+            TOOL_CAPABILITY_WORKER_AGENT,
+        )
 
         for binding in self.tool_bindings:
             if binding.annotations.get("readOnlyHint") is True:
@@ -344,6 +350,15 @@ class McpClientManager:
                 permission=binding.permission,
                 effect=effect,
                 disclosure="core" if _is_exa_search_tool(binding) else "deferred",
+                capabilities=(
+                    {
+                        TOOL_CAPABILITY_MAIN,
+                        TOOL_CAPABILITY_READONLY_AGENT,
+                        TOOL_CAPABILITY_WORKER_AGENT,
+                    }
+                    if binding.permission in {TOOL_PERMISSION_READ, TOOL_PERMISSION_NETWORK_READ}
+                    else {TOOL_CAPABILITY_MAIN}
+                ),
             )
 
     def call_tool(

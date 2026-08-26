@@ -1,4 +1,5 @@
 """Tool registry and schema filtering primitives."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -12,6 +13,14 @@ if TYPE_CHECKING:
     from .tool_context import ToolContext
 
 EffectResolver = Callable[[dict, "ToolContext | None"], CallEffect]
+TOOL_CAPABILITY_MAIN = "main"
+TOOL_CAPABILITY_READONLY_AGENT = "readonly_agent"
+TOOL_CAPABILITY_WORKER_AGENT = "worker_agent"
+VALID_TOOL_CAPABILITIES = {
+    TOOL_CAPABILITY_MAIN,
+    TOOL_CAPABILITY_READONLY_AGENT,
+    TOOL_CAPABILITY_WORKER_AGENT,
+}
 
 
 @dataclass(frozen=True)
@@ -22,6 +31,7 @@ class ToolSpec:
     permission: str
     effect_resolver: EffectResolver
     disclosure: str = "core"
+    capabilities: frozenset[str] = frozenset({TOOL_CAPABILITY_MAIN})
 
 
 VALID_TOOL_DISCLOSURES = {"core", "deferred"}
@@ -31,11 +41,7 @@ class ToolRegistry:
     """Thin registry boundary for built-in and future profile-provided tools."""
 
     def __init__(self):
-        self._schemas: dict[str, dict] = {}
-        self._handlers: dict[str, Callable] = {}
-        self._permissions: dict[str, str] = {}
-        self._effects: dict[str, EffectResolver] = {}
-        self._disclosures: dict[str, str] = {}
+        self._specs: dict[str, ToolSpec] = {}
 
     def register(
         self,
@@ -45,6 +51,7 @@ class ToolRegistry:
         permission: str | None = None,
         effect: EffectResolver | CallEffect | None = None,
         disclosure: str = "core",
+        capabilities: set[str] | frozenset[str] | None = None,
     ) -> None:
         name = schema.get("function", {}).get("name")
         if not name:
@@ -52,62 +59,83 @@ class ToolRegistry:
         if permission is None:
             raise ValueError(f"Tool {name} missing permission classification")
         if permission not in VALID_TOOL_PERMISSIONS:
-            raise ValueError(f"Tool {name} has unknown permission classification: {permission}")
+            raise ValueError(
+                f"Tool {name} has unknown permission classification: {permission}"
+            )
         if disclosure not in VALID_TOOL_DISCLOSURES:
-            raise ValueError(f"Tool {name} has unknown disclosure classification: {disclosure}")
-        self._schemas[name] = schema
-        self._handlers[name] = handler
-        self._permissions[name] = permission
+            raise ValueError(
+                f"Tool {name} has unknown disclosure classification: {disclosure}"
+            )
+        resolved_capabilities = frozenset(capabilities or {TOOL_CAPABILITY_MAIN})
+        unknown_capabilities = resolved_capabilities - VALID_TOOL_CAPABILITIES
+        if unknown_capabilities:
+            names = ", ".join(sorted(unknown_capabilities))
+            raise ValueError(f"Tool {name} has unknown capabilities: {names}")
         if isinstance(effect, CallEffect):
-            self._effects[name] = lambda _args, _context, value=effect: value
+            resolver = lambda _args, _context, value=effect: value
         elif effect is not None:
-            self._effects[name] = effect
+            resolver = effect
         else:
-            self._effects[name] = lambda _args, _context: CallEffect.global_exclusive()
-        self._disclosures[name] = disclosure
+            resolver = lambda _args, _context: CallEffect.global_exclusive()
+        self._specs[name] = ToolSpec(
+            name=name,
+            schema=schema,
+            handler=handler,
+            permission=permission,
+            effect_resolver=resolver,
+            disclosure=disclosure,
+            capabilities=resolved_capabilities,
+        )
+
+    def register_spec(self, spec: ToolSpec) -> None:
+        self.register(
+            spec.schema,
+            spec.handler,
+            permission=spec.permission,
+            effect=spec.effect_resolver,
+            disclosure=spec.disclosure,
+            capabilities=spec.capabilities,
+        )
 
     def get(self, name: str) -> Callable | None:
-        return self._handlers.get(name)
+        spec = self._specs.get(name)
+        return spec.handler if spec is not None else None
 
     def permission_for(self, name: str) -> str | None:
-        return self._permissions.get(name)
+        spec = self._specs.get(name)
+        return spec.permission if spec is not None else None
 
-    def effect_for(self, name: str, args: dict, context: ToolContext | None = None) -> CallEffect:
-        resolver = self._effects.get(name)
-        return resolver(dict(args or {}), context) if resolver is not None else CallEffect.global_exclusive()
+    def effect_for(
+        self, name: str, args: dict, context: ToolContext | None = None
+    ) -> CallEffect:
+        spec = self._specs.get(name)
+        resolver = spec.effect_resolver if spec is not None else None
+        return (
+            resolver(dict(args or {}), context)
+            if resolver is not None
+            else CallEffect.global_exclusive()
+        )
 
     def effect_resolver_for(self, name: str) -> EffectResolver | None:
-        return self._effects.get(name)
+        spec = self._specs.get(name)
+        return spec.effect_resolver if spec is not None else None
 
     def disclosure_for(self, name: str) -> str | None:
-        return self._disclosures.get(name)
+        spec = self._specs.get(name)
+        return spec.disclosure if spec is not None else None
 
     def specs(self) -> list[ToolSpec]:
-        return [
-            ToolSpec(
-                name,
-                self._schemas[name],
-                self._handlers[name],
-                self._permissions[name],
-                self._effects[name],
-                self._disclosures.get(name, "core"),
-            )
-            for name in sorted(self._schemas)
-        ]
+        return [self._specs[name] for name in sorted(self._specs)]
 
     def schemas(self) -> list[dict]:
-        return [self._schemas[name] for name in sorted(self._schemas)]
+        return [self._specs[name].schema for name in sorted(self._specs)]
 
     def dispatch(self) -> dict[str, Callable]:
-        return dict(self._handlers)
+        return {name: spec.handler for name, spec in self._specs.items()}
 
     def copy(self) -> ToolRegistry:
         clone = ToolRegistry()
-        clone._schemas = dict(self._schemas)
-        clone._handlers = dict(self._handlers)
-        clone._permissions = dict(self._permissions)
-        clone._effects = dict(self._effects)
-        clone._disclosures = dict(self._disclosures)
+        clone._specs = dict(self._specs)
         return clone
 
 
@@ -123,7 +151,9 @@ def tool_schemas_for_profile(
         from .builtins.registry import BUILTIN_TOOL_REGISTRY
 
         registry = BUILTIN_TOOL_REGISTRY
-    allowed_permissions = set(allowed_permissions) if allowed_permissions is not None else None
+    allowed_permissions = (
+        set(allowed_permissions) if allowed_permissions is not None else None
+    )
     include_names = set(include_names or set())
     exclude_names = set(exclude_names or set())
     disclosures = {"core"} if disclosure is None else set(disclosure)
@@ -131,7 +161,9 @@ def tool_schemas_for_profile(
         unknown_permissions = allowed_permissions - VALID_TOOL_PERMISSIONS
         if unknown_permissions:
             names = ", ".join(sorted(unknown_permissions))
-            raise ValueError(f"Unknown tool permission classification for profile: {names}")
+            raise ValueError(
+                f"Unknown tool permission classification for profile: {names}"
+            )
     unknown_disclosures = disclosures - VALID_TOOL_DISCLOSURES
     if unknown_disclosures:
         names = ", ".join(sorted(unknown_disclosures))

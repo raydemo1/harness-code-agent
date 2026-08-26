@@ -16,7 +16,11 @@ from ..runtime.permission_middleware import PermissionMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.shell_classification import analyze_shell_command
 from ..runtime.tool_context import ToolContext
-from ..runtime.tool_registry import ToolRegistry
+from ..runtime.tool_registry import (
+    TOOL_CAPABILITY_READONLY_AGENT,
+    TOOL_CAPABILITY_WORKER_AGENT,
+    ToolRegistry,
+)
 from ..runtime.tool_result import ToolResult
 from ..workspace.service import WorkspaceService
 from .cancellation import CancellationToken, CancelledError
@@ -28,22 +32,6 @@ ACTIVE_STATES = {"queued", "running"}
 TERMINAL_STATES = {"completed", "blocked", "failed", "interrupted"}
 MAX_OPEN_AGENTS = 8
 MAX_CONCURRENT_AGENTS = 3
-
-_AGENT_TOOLS = {
-    "spawn_agent", "send_agent_message", "followup_agent", "wait_agents", "list_agents",
-    "interrupt_agent", "read_agent_changes", "apply_agent_changes", "read_agent_conflicts",
-    "resolve_agent_conflicts", "close_agent",
-}
-_CONTROL_TOOLS = {
-    "ask_user", "update_plan_state", "list_shell_jobs", "read_shell_output", "stop_shell_job",
-    "remember_memory", "tool_search",
-} | _AGENT_TOOLS
-_READ_TOOL_NAMES = {
-    "read_file", "read_skill_file", "list_files", "repo_search", "memory_search", "read_memory_file",
-    "web_search", "web_fetch", "browser_test", "run_bash",
-}
-_WORKER_TOOL_NAMES = _READ_TOOL_NAMES | {"write_file", "apply_patch"}
-
 
 @dataclass
 class AgentRecord:
@@ -78,8 +66,6 @@ class AgentRoleMiddleware(AgentMiddleware):
         self.allowed_paths = [_normalize_rel(path) for path in allowed_paths]
 
     def before_tool(self, tool_name, tool_args, messages, runtime_state=None, agent_name=None):
-        if tool_name in _CONTROL_TOOLS:
-            return _blocked(tool_name, "subagents cannot control the parent workflow or other agents")
         if self.role in READ_ONLY_ROLES and tool_name in {"write_file", "apply_patch"}:
             return _blocked(tool_name, "this role cannot modify the workspace")
         if self.role == "worker" and tool_name in {"write_file", "apply_patch"}:
@@ -364,20 +350,12 @@ class AgentCoordinator:
         source = self.context.tool_registry
         if source is None:
             raise RuntimeError("parent tool registry is unavailable")
-        allowed_names = _WORKER_TOOL_NAMES if role == "worker" else _READ_TOOL_NAMES
+        capability = TOOL_CAPABILITY_WORKER_AGENT if role == "worker" else TOOL_CAPABILITY_READONLY_AGENT
         registry = ToolRegistry()
         for spec in source.specs():
-            if spec.name not in allowed_names and spec.permission not in {"read", "network_read"}:
+            if capability not in spec.capabilities:
                 continue
-            if spec.name in _CONTROL_TOOLS:
-                continue
-            registry.register(
-                spec.schema,
-                spec.handler,
-                permission=spec.permission,
-                effect=spec.effect_resolver,
-                disclosure=spec.disclosure,
-            )
+            registry.register_spec(spec)
         return registry
 
     def _finish(self, record: AgentRecord, state: str, *, error: str | None = None) -> None:
