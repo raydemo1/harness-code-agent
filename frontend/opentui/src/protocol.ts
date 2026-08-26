@@ -1,6 +1,8 @@
 export type ThemePreference = "auto" | "dark" | "light";
 export type IconPreference = "auto" | "nerd" | "unicode";
 
+export const UI_PROTOCOL_VERSION = 3;
+
 export type Snapshot = {
   profile: string;
   permissionMode: string;

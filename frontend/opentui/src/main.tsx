@@ -3,7 +3,7 @@ import { CliRenderEvents, createCliRenderer, createHostClipboard } from "@opentu
 import { createRoot } from "@opentui/react";
 import { App } from "./app.tsx";
 import { formatUserError } from "./errors.ts";
-import { ActionName, ActionResult, BridgeMessage, BridgeRequest, DEFAULT_COMMANDS, IconPreference, SubmitResult, ThemePreference, TurnSubmission, UiEvent } from "./protocol.ts";
+import { ActionName, ActionResult, BridgeMessage, BridgeRequest, DEFAULT_COMMANDS, IconPreference, SubmitResult, ThemePreference, TurnSubmission, UI_PROTOCOL_VERSION, UiEvent } from "./protocol.ts";
 
 function flag(name: string): boolean {
   return process.argv.includes(name);
@@ -146,7 +146,7 @@ function createBridgeClient(): BridgeClient {
     return new Promise<unknown>((resolve, reject) => pending.set(id, { resolve, reject }));
   };
 
-  void request("initialize").catch((error) => console.error(`桥接初始化失败：${formatUserError(error)}`));
+  void request("initialize", { protocolVersion: UI_PROTOCOL_VERSION }).catch((error) => console.error(`桥接初始化失败：${formatUserError(error)}`));
 
   const events: AsyncIterable<UiEvent> = {
     async *[Symbol.asyncIterator]() {

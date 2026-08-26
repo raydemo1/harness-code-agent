@@ -142,7 +142,10 @@ class AgentConversation:
 
     def __init__(self, agent: Agent, initial_task: str | None = None):
         self.agent = agent
-        self.trace = TraceWriter(agent.name)
+        self.trace = TraceWriter(
+            agent.name,
+            workspace=(agent.tool_context.workspace.root if agent.tool_context is not None else Path.cwd()),
+        )
         self.runtime_state = agent._create_runtime_state(initial_task or "")
         if agent.tool_context is not None and agent.tool_context.session_id:
             self.runtime_state.session_id = agent.tool_context.session_id
@@ -178,10 +181,7 @@ class AgentConversation:
     def _observation_dir(self) -> Path:
         session_id = getattr(self.runtime_state, "session_id", None) or "default"
         safe_session_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
-        if self.agent.tool_context is not None:
-            root = self.agent.tool_context.workspace.root
-        else:
-            root = Path(config.WORKSPACE)
+        root = self._workspace_root()
         return root / ".harness" / "observations" / safe_session_id
 
     def _build_prompt(self) -> list[dict]:
@@ -377,10 +377,7 @@ class AgentConversation:
         if not session_id or session_id == "default":
             return None
         safe_session_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
-        if self.agent.tool_context is not None:
-            root = self.agent.tool_context.workspace.root
-        else:
-            root = Path(config.WORKSPACE)
+        root = self._workspace_root()
         return root / ".harness" / "sessions" / safe_session_id / "compacted"
 
     def _persist_compacted_summary(self, summary: str, *, phase: str) -> None:
@@ -496,11 +493,7 @@ class AgentConversation:
             if self.messages and self.messages[0].get("role") == "system"
             else agent.system_prompt
         )
-        workspace = (
-            str(self.agent.tool_context.workspace.root)
-            if self.agent.tool_context is not None
-            else str(config.WORKSPACE)
-        )
+        workspace = str(self._workspace_root())
         handoff, handoff_path = context.create_handoff_reset(
             self.messages,
             self._working_context_state(),
@@ -594,10 +587,7 @@ class AgentConversation:
         return constraints[-5:]
 
     def _latest_checkpoint_summary(self) -> str:
-        if self.agent.tool_context is not None:
-            root = self.agent.tool_context.workspace.root
-        else:
-            root = Path(config.WORKSPACE)
+        root = self._workspace_root()
         for rel in ("progress.md", ".harness/checkpoints/latest.md"):
             path = root / rel
             if path.exists() and path.is_file():
@@ -625,6 +615,11 @@ class AgentConversation:
     def _check_cancelled(self, cancellation_token) -> None:
         if cancellation_token is not None:
             cancellation_token.check()
+
+    def _workspace_root(self) -> Path:
+        if self.agent.tool_context is not None:
+            return self.agent.tool_context.workspace.root
+        return Path.cwd()
 
     def refresh_client(self) -> None:
         with contextlib.suppress(Exception):

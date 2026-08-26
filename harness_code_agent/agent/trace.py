@@ -20,10 +20,10 @@ class TraceWriter:
     Trace file: {WORKSPACE}/.harness/traces/trace_{agent_name}.jsonl
     """
 
-    def __init__(self, agent_name: str):
+    def __init__(self, agent_name: str, *, workspace: str | Path | None = None):
         self.agent_name = agent_name
         self._start_time = time.time()
-        trace_dir = Path(config.WORKSPACE) / ".harness" / "traces"
+        trace_dir = Path(workspace or Path.cwd()).resolve() / ".harness" / "traces"
         try:
             trace_dir.mkdir(parents=True, exist_ok=True)
             test_file = trace_dir / f"trace_test_{agent_name}"

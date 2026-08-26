@@ -1097,7 +1097,7 @@ class ProductRuntimeTests(unittest.TestCase):
                     fake_client = FakeClient()
                     with (
                         patch("harness_code_agent.agent.conversation.get_client", return_value=fake_client),
-                        patch("harness_code_agent.agent.conversation.config.WORKSPACE", str(root)),
+                        patch("harness_code_agent.agent.conversation.Path.cwd", return_value=root),
                     ):
                         conversation = AgentConversation(Agent("test", "system", use_tools=True))
 
@@ -1129,12 +1129,11 @@ class ProductRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stderr = StringIO()
             with (
-                patch("harness_code_agent.agent.conversation.config.WORKSPACE", tmp),
                 patch("harness_code_agent.agent.conversation.config.TRACE_STDERR", False),
                 redirect_stderr(stderr),
             ):
-                    writer = TraceWriter("main_agent")
-                    writer.iteration(1, 42)
+                writer = TraceWriter("main_agent", workspace=tmp)
+                writer.iteration(1, 42)
 
             trace_path = Path(tmp) / ".harness" / "traces" / "trace_main_agent.jsonl"
             self.assertTrue(trace_path.exists())

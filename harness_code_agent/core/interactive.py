@@ -42,6 +42,7 @@ from ..runtime.approvals import (
     LlmAutoApprovalProvider,
 )
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
+from ..runtime.lifecycle import LifecycleScope
 from ..runtime.mcp import McpClientManager
 from ..runtime.middleware import (
     MemoryMiddleware,
@@ -132,7 +133,7 @@ class InteractiveSession:
         startup_sink: Callable[[str], None] | None = None,
     ):
         self.cwd = Path(cwd).resolve()
-        config.WORKSPACE = str(self.cwd)
+        self.lifecycle = LifecycleScope()
         self.startup_sink = startup_sink
         self._report_startup("checking workspace")
         validate_shell_configuration()
@@ -265,6 +266,8 @@ class InteractiveSession:
     def _prepare_tool_registry(self) -> None:
         self.tool_registry = BUILTIN_TOOL_REGISTRY.copy()
         self.mcp_manager = McpClientManager.from_workspace(self.cwd)
+        manager = self.mcp_manager
+        self.lifecycle.register(f"mcp:{id(manager)}", manager.close, order=10)
         self._mcp_tools_loaded = False
 
     def _ensure_mcp_tools_loaded(self) -> None:
@@ -609,11 +612,21 @@ class InteractiveSession:
             question_provider=self.question_provider,
             tool_registry=self.tool_registry,
         )
+        self.lifecycle.register(
+            "tool_tasks",
+            lambda: self.tool_context.tool_tasks.close(timeout=1.0),
+            order=20,
+        )
         self.tool_context.agent_coordinator = AgentCoordinator(
             self.tool_context,
             parent_messages=lambda: (
                 list(self.conversation.messages) if self.conversation is not None else []
             ),
+        )
+        self.lifecycle.register(
+            "agent_coordinator",
+            self.tool_context.agent_coordinator.close,
+            order=30,
         )
         self._started_at = time.time()
         self._activate_profile_runtime(self.profile.name())
@@ -648,6 +661,7 @@ class InteractiveSession:
             agent = self._build_agent(profile)
             if self.conversation is None:
                 conversation = agent.start_conversation()
+                self.lifecycle.register("conversation", conversation.close, order=40)
                 conversation._event_bus = self.event_bus
                 self.conversation = conversation
             else:
@@ -1359,21 +1373,8 @@ class InteractiveSession:
             if self._closed:
                 return
             self._closed = True
-        if self.tool_context is not None and self.tool_context.agent_coordinator is not None:
-            self.tool_context.agent_coordinator.close()
-        conversations = {
-            id(slot.conversation): slot.conversation
-            for slot in self.profile_runtimes.values()
-            if slot.conversation is not None
-        }
-        if self.conversation is not None:
-            conversations[id(self.conversation)] = self.conversation
-        for conversation in conversations.values():
-            conversation.close()
-        if self.tool_context is not None:
-            self.tool_context.tool_tasks.close(timeout=1.0)
-        if self.mcp_manager is not None:
-            self.mcp_manager.close()
+        for error in self.lifecycle.close():
+            log.warning("Failed to close session resource %s: %s", error.name, error.error)
         if self.session is None or self.event_bus is None:
             return
         try:

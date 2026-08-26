@@ -49,6 +49,7 @@ from .sessions.observability import (
 from .tui.approval import ApprovalAllowlist, _persistent_prefix_for_request
 from .tui.commands import default_command_registry
 from .tui.completion import mention_candidates
+from .tui.protocol import UI_PROTOCOL_VERSION, validate_ui_event
 from .tui.state import SessionStatusSnapshot, TranscriptBlock, TuiState, _localize_error
 
 log = logging.getLogger("harness.opentui")
@@ -238,6 +239,8 @@ class BridgeServer:
         self._active_lock = threading.Lock()
         self._stopping = threading.Event()
         self._closing = threading.Event()
+        self._session_lock = threading.Lock()
+        self._session_generation = 0
         self._session: InteractiveSession | None = None
         self._session_error: str | None = None
         self._assistant_group_id: str | None = None
@@ -263,30 +266,52 @@ class BridgeServer:
         self._worker.start()
 
     def _start_session_construction(self, *, reset_ui: bool = False) -> None:
-        self._session_thread = threading.Thread(
+        with self._session_lock:
+            self._session_generation += 1
+            generation = self._session_generation
+        thread = threading.Thread(
             target=self._construct_session,
-            kwargs={"reset_ui": reset_ui},
+            kwargs={"generation": generation, "reset_ui": reset_ui},
             name="opentui-session",
             daemon=True,
         )
-        self._session_thread.start()
+        self._session_thread = thread
+        thread.start()
 
-    def _construct_session(self, *, reset_ui: bool = False) -> None:
+    def _is_current_generation(self, generation: int) -> bool:
+        with self._session_lock:
+            return generation == self._session_generation and not self._closing.is_set()
+
+    def _construct_session(self, *, generation: int, reset_ui: bool = False) -> None:
+        session: InteractiveSession | None = None
         try:
-            self._session = InteractiveSession(
+            session = InteractiveSession(
                 cwd=self.cwd,
                 profile_name=self.profile_name,
                 profile_explicit=self.profile_explicit,
-                stream_sink=self._stream_delta,
-                event_listener=self._event_listener,
+                stream_sink=lambda text: (
+                    self._stream_delta(text) if self._is_current_generation(generation) else None
+                ),
+                event_listener=lambda event: (
+                    self._event_listener(event) if self._is_current_generation(generation) else None
+                ),
                 approval_provider=self._interactions,
                 question_provider=self._interactions,
-                output_sink=lambda text: self._notice("info", str(text)),
+                output_sink=lambda text: (
+                    self._notice("info", str(text)) if self._is_current_generation(generation) else None
+                ),
                 enable_turn_summary=False,
-                startup_sink=self._startup_progress,
+                startup_sink=lambda stage: (
+                    self._startup_progress(stage) if self._is_current_generation(generation) else None
+                ),
             )
-            if self._closing.is_set():
-                self._session.close()
+            with self._session_lock:
+                stale = generation != self._session_generation or self._closing.is_set()
+                if not stale:
+                    self._session = session
+                    self._session_error = None
+            if stale:
+                session.close()
                 return
             self._emit_commands()
             self._send_snapshot()
@@ -294,8 +319,13 @@ class BridgeServer:
                 self._send_event({"type": "session_reset", "snapshot": self._snapshot_payload(), "items": []})
             self._send_event({"type": "progress", "status": "ready", "detail": "Python 会话已就绪。"})
         except Exception as exc:  # pragma: no cover - exercised by real startup failures
-            self._session_error = _localize_error(exc, "会话启动失败，请稍后重试")
-            self._notice("error", self._session_error)
+            error = _localize_error(exc, "会话启动失败，请稍后重试")
+            with self._session_lock:
+                current = generation == self._session_generation and not self._closing.is_set()
+                if current:
+                    self._session_error = error
+            if current:
+                self._notice("error", error)
             log.debug("OpenTUI bridge session construction failed\n%s", traceback.format_exc())
 
     def _startup_progress(self, stage: str) -> None:
@@ -511,6 +541,7 @@ class BridgeServer:
     def _send_event(self, event: dict[str, Any]) -> None:
         if self._closing.is_set() and event.get("type") != "shutdown":
             return
+        validate_ui_event(event)
         self._write({"type": "event", "event": event})
 
     def _write(self, message: dict[str, Any]) -> None:
@@ -910,12 +941,25 @@ class BridgeServer:
             self._response(request_id, error="请求格式错误，请重试")
             return True
         if method == "initialize":
+            client_version = params.get("protocolVersion")
+            if client_version != UI_PROTOCOL_VERSION:
+                self._response(
+                    request_id,
+                    error=(
+                        f"TUI 协议版本不兼容：客户端 {client_version!r}，"
+                        f"服务端 {UI_PROTOCOL_VERSION}"
+                    ),
+                )
+                return True
             if self._session_thread.is_alive():
                 self._session_thread.join(timeout=30)
             if self._session is None:
                 self._response(request_id, error=self._session_error or "会话启动失败，请稍后重试")
             else:
-                self._response(request_id, result={"version": 3, "cwd": str(self.cwd)})
+                self._response(
+                    request_id,
+                    result={"protocolVersion": UI_PROTOCOL_VERSION, "cwd": str(self.cwd)},
+                )
             return True
         if method == "submit":
             text = str(params.get("text") or "").strip()
@@ -1023,17 +1067,24 @@ class BridgeServer:
         if self._closing.is_set():
             return
         self._closing.set()
+        with self._session_lock:
+            self._session_generation += 1
+            session = self._session
+            self._session = None
+            session_thread = self._session_thread
         with self._active_lock:
             token = self._active_token
         if token is not None:
             token.cancel()
         self._interactions.cancel_all()
         self._tasks.put(None)
-        if self._session is not None:
+        if session is not None:
             try:
-                self._session.close()
+                session.close()
             except Exception:
                 log.debug("Failed to close OpenTUI session", exc_info=True)
+        if session_thread is not threading.current_thread():
+            session_thread.join(timeout=2)
         if self._worker is not threading.current_thread():
             self._worker.join(timeout=2)
         self._send_event({"type": "shutdown", "reason": "bridge closed"})
