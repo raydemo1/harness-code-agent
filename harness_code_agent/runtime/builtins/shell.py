@@ -1,12 +1,14 @@
 """Shell execution and background shell job tools."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import subprocess
 
 from ... import config
+from ...agent.cancellation import CancelledError
 from ...workspace.shell_jobs import ShellJobNotFound
 from ..shell_classification import analyze_shell_command
 from ..tool_result import ToolResult
@@ -19,8 +21,11 @@ def run_bash(
     runtime_state=None,
     agent_name: str | None = None,
     tool_context=None,
+    cancellation_token=None,
 ) -> ToolResult:
     """Run one self-contained shell command from the workspace root."""
+    if cancellation_token is not None:
+        cancellation_token.check()
     expected_codes = _normalize_expected_exit_codes(expected_exit_codes)
     if analyze_shell_command(command).long_running:
         manager = _shell_job_manager(runtime_state)
@@ -73,14 +78,29 @@ def run_bash(
 
     from ...workspace.shell_session import PersistentShellSession
 
+    one_shot_powershell = _requires_one_shot_powershell(command)
     shell_session = PersistentShellSession(_workspace_root(tool_context))
+    remove_cancel_callback = lambda: None
     if runtime_state is not None and hasattr(runtime_state, "register_shell_session"):
         runtime_state.register_shell_session(shell_session)
+    if cancellation_token is not None and not one_shot_powershell:
+        remove_cancel_callback = cancellation_token.add_callback(
+            lambda: _interrupt_shell_session(shell_session)
+        )
     try:
-        if _requires_one_shot_powershell(command):
-            shell_result = _run_one_shot_powershell(command, timeout, tool_context)
+        if cancellation_token is not None:
+            cancellation_token.check()
+        if one_shot_powershell:
+            shell_result = _run_one_shot_powershell(
+                command,
+                timeout,
+                tool_context,
+                cancellation_token,
+            )
         else:
             shell_result = shell_session.run(command, timeout=timeout)
+        if cancellation_token is not None:
+            cancellation_token.check()
         if shell_result.timed_out:
             output = (
                 f"[error] Command timed out after {timeout}s. "
@@ -111,6 +131,8 @@ def run_bash(
                 "exit_code_expected": ok,
             },
         )
+    except CancelledError:
+        raise
     except Exception as e:
         metadata = {"status_source": "exception"}
         return ToolResult(
@@ -121,6 +143,7 @@ def run_bash(
             metadata=metadata,
         )
     finally:
+        remove_cancel_callback()
         if runtime_state is not None and hasattr(runtime_state, "unregister_shell_session"):
             runtime_state.unregister_shell_session(shell_session)
         shell_session.close()
@@ -135,35 +158,62 @@ def _requires_one_shot_powershell(command: str) -> bool:
     return sandbox_mode() == "host" and windows_shell_kind() == "pwsh"
 
 
-def _run_one_shot_powershell(command: str, timeout: int, tool_context):
+def _interrupt_shell_session(shell_session) -> None:
+    with contextlib.suppress(Exception):
+        shell_session.interrupt()
+
+
+def _run_one_shot_powershell(command: str, timeout: int, tool_context, cancellation_token=None):
     from ...workspace.shell_session import ShellResult, windows_shell_path
 
     executable = windows_shell_path()
     if executable is None:
         raise RuntimeError("PowerShell 7 (pwsh) was not found")
-    try:
-        completed = subprocess.run(
+    process = subprocess.Popen(
             [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
             cwd=_workspace_root(tool_context),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
-            check=False,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
+    remove_cancel_callback = lambda: None
+    if cancellation_token is not None:
+        remove_cancel_callback = cancellation_token.add_callback(
+            lambda: _terminate_process_tree(process)
+        )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        stdout, stderr = process.communicate()
         return ShellResult(
-            stdout=str(exc.stdout or ""),
-            stderr=str(exc.stderr or ""),
+            stdout=str(stdout or exc.stdout or ""),
+            stderr=str(stderr or exc.stderr or ""),
             exit_code=130,
             timed_out=True,
         )
-    return ShellResult(
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        exit_code=completed.returncode,
-    )
+    finally:
+        remove_cancel_callback()
+    return ShellResult(stdout=stdout, stderr=stderr, exit_code=process.returncode)
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            process.kill()
 
 
 def list_shell_jobs(runtime_state=None) -> ToolResult:

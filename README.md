@@ -181,7 +181,7 @@ veriforge
 ```
 
 交互前端使用 Bun + React + TypeScript 的 OpenTUI；Python 负责
-`InteractiveSession`、工具、权限和会话持久化，二者通过本地 NDJSON 协议通信。
+`InteractiveSession`、工具、权限和会话持久化，二者通过带版本校验的本地 NDJSON 协议通信。
 历史恢复、新会话、工作模式、检查点、MCP、运行观察、审批、问题选择、命令和
 `@` 文件补全均在 OpenTUI 内完成。
 

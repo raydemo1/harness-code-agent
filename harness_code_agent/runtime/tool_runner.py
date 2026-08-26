@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from ..agent.cancellation import CancelledError
 from ..sessions.events import (
     FailureEvent,
     FileChangeEvent,
@@ -190,6 +191,8 @@ def execute_tool_result(
             tool_context=tool_context,
             cancellation_token=cancellation_token,
         )
+    except CancelledError:
+        raise
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
         tool_result = ToolResult(

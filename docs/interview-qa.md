@@ -221,17 +221,17 @@ Agent 决策循环的核心流程还是串行的：发 LLM 请求 → 等响应 
 
 ### 时间预算中间件
 
-`TimeBudgetMiddleware` 跟踪从任务开始的墙上时间。在 60% 时注入一次"请准备收尾"的提示，在 85% 时注入一次"时间紧迫"的警告。预算用完后注入"TIME IS UP"。这些都是通过用户消息注入实现的，不是强制杀死 — agent 会看到这些消息并主动结束。
+`TimeBudgetMiddleware` 在 60% 和 85% 时提示收尾；达到硬预算后，`TurnController` 终止当前回合并记录 fallback 原因。
 
 ### Ctrl-C 取消
 
-用户按 Ctrl-C 时，`CancellationToken.cancel()` 设置标志。Agent 循环在每个迭代边界（LLM 调用前后、每个工具调用前后）检查这个标志。如果检测到取消，抛出 `CancelledError`，循环立即退出。
+用户按 Ctrl-C 时，`CancellationToken` 会停止等待并触发已注册的清理回调。LLM stream、MCP、浏览器和前台 Shell 都接收同一个令牌；通用工具仍在执行时由 session 级 supervisor 跟踪到结束。
 
-**但是**：取消不是万能杀进程。Agent 会在 LLM 调用前后、工具组之间、等待并发结果时检查取消；如果某个底层工具已经进了不可中断的系统调用，仍然要等它返回或超时。`run_bash` 这类命令有额外的 interrupt / background job 机制，体验会好很多。
+后台 Shell job 不会因一次回合取消而自动删除，仍由 `job_id` 管理，并在显式停止或 session 关闭时清理。
 
 ### 如果面试官追问"为什么不在工具内部也检查取消？"
 
-因为工具函数是通用的 `fn(**kwargs)` 调用，框架层只能在工具组之间做取消检查，不能保证每个工具内部都 cooperative cancel。`run_bash` 已经有 interrupt 和 background job 机制；更彻底的方案是给长工具统一传 `cancellation_token` 和 progress callback，让工具内部也能主动收尾。
+Tool runner 会把 `cancellation_token` 注入声明支持它的工具，并让 `CancelledError` 直接向上传播。无法协作取消的第三方调用不会再写回当前回合，但仍需等待自身返回或超时后才能释放底层资源。
 
 ---
 
