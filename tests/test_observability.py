@@ -26,7 +26,9 @@ class ObservabilityAggregationTests(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_session_observability_aggregates_tokens_tools_and_audit_events(self):
-        from harness_code_agent.sessions.observability import build_session_observability
+        from harness_code_agent.sessions.observability import (
+            build_session_observability,
+        )
 
         metadata = {
             "id": "session-a",
@@ -93,7 +95,9 @@ class ObservabilityAggregationTests(unittest.TestCase):
         self.assertEqual(snapshot.performance.turn_duration_ms.p99, 2500)
 
     def test_project_observability_aggregates_sessions_and_skips_bad_records(self):
-        from harness_code_agent.sessions.observability import build_project_observability
+        from harness_code_agent.sessions.observability import (
+            build_project_observability,
+        )
 
         store = SessionStore(self.root / ".harness")
         first = store.create(profile="coding-agent", cwd=self.root, model="model-a", permission_mode="workspace-write")

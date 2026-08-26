@@ -6,20 +6,31 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from .permissions import TOOL_PERMISSION_DANGEROUS, VALID_TOOL_PERMISSIONS
+from ..agent.cancellation import CancelledError
+from .permissions import (
+    TOOL_PERMISSION_DANGEROUS,
+    TOOL_PERMISSION_NETWORK_READ,
+    TOOL_PERMISSION_READ,
+    VALID_TOOL_PERMISSIONS,
+)
 from .tool_result import ToolResult
-
 
 MCP_CONFIG_RELATIVE_PATH = Path(".harness") / "mcp.json"
 MCP_TOOL_PREFIX = "mcp__"
 MCP_TOOL_NAME_LIMIT = 64
 MCP_OUTPUT_LIMIT = 60_000
+MCPORTER_CONFIG_ENV = "HARNESS_MCPORTER_CONFIG"
 
 
 class McpConfigError(ValueError):
@@ -60,11 +71,14 @@ class McpToolBinding:
         parameters = self.input_schema or {"type": "object", "properties": {}}
         if parameters.get("type") != "object":
             parameters = {"type": "object", "properties": {}, "additionalProperties": True}
+        description = self.description or f"MCP tool {self.server_name}/{self.tool_name}"
+        if _is_exa_search_tool(self):
+            description += "\n\nPreferred search tool for web research."
         return {
             "type": "function",
             "function": {
                 "name": self.exposed_name,
-                "description": self.description or f"MCP tool {self.server_name}/{self.tool_name}",
+                "description": description,
                 "parameters": parameters,
             },
         }
@@ -90,14 +104,19 @@ def load_mcp_config(workspace: str | Path) -> McpConfig:
     root = Path(workspace).resolve()
     path = root / MCP_CONFIG_RELATIVE_PATH
     if not path.exists():
-        return McpConfig(path=path)
+        mcporter_path = _find_mcporter_config(root)
+        if mcporter_path is None:
+            return McpConfig(path=path)
+        path = mcporter_path
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise McpConfigError(f"Invalid MCP config JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise McpConfigError("MCP config must be a JSON object")
-    raw_servers = data.get("servers", {})
+    raw_servers = data.get("servers")
+    if raw_servers is None and path.name == "mcporter.json":
+        raw_servers = data.get("mcpServers", {})
     if not isinstance(raw_servers, dict):
         raise McpConfigError("MCP config field 'servers' must be an object")
 
@@ -109,15 +128,22 @@ def load_mcp_config(workspace: str | Path) -> McpConfig:
             raise McpConfigError(f"MCP server {name!r} must be an object")
         if raw.get("enabled", True) is False:
             continue
+        if path.name == "mcporter.json" and name.lower() == "exa" and not _mcporter_exa_has_credentials(raw):
+            continue
 
         expanded = _expand_env(raw)
         transport = str(expanded.get("transport") or "").strip()
+        if not transport and path.name == "mcporter.json":
+            transport = _mcporter_transport(expanded)
         if transport == "streamable-http":
             transport = "streamable_http"
         if transport not in {"stdio", "streamable_http"}:
             raise McpConfigError(f"MCP server {name!r} has unsupported transport: {transport!r}")
 
-        permission = str(expanded.get("permission") or TOOL_PERMISSION_DANGEROUS)
+        default_permission = TOOL_PERMISSION_DANGEROUS
+        if path.name == "mcporter.json" and name.lower() == "exa":
+            default_permission = TOOL_PERMISSION_NETWORK_READ
+        permission = str(expanded.get("permission") or default_permission)
         _validate_permission(permission, f"server {name!r}")
         tool_permissions = _string_dict(expanded.get("tool_permissions") or {}, f"server {name!r} tool_permissions")
         for tool_name, tool_permission in tool_permissions.items():
@@ -142,7 +168,7 @@ def load_mcp_config(workspace: str | Path) -> McpConfig:
                 tool_permissions=tool_permissions,
             )
         else:
-            url = str(expanded.get("url") or "").strip()
+            url = str(expanded.get("url") or expanded.get("baseUrl") or "").strip()
             if not url:
                 raise McpConfigError(f"MCP streamable_http server {name!r} requires url")
             servers[name] = McpServerConfig(
@@ -155,6 +181,55 @@ def load_mcp_config(workspace: str | Path) -> McpConfig:
             )
 
     return McpConfig(path=path, servers=servers)
+
+
+def _find_mcporter_config(workspace: Path) -> Path | None:
+    """Find an existing MC Porter config without creating a second API config.
+
+    A workspace-local VeriForge config always wins.  The global MC Porter config
+    is intentionally considered only for the active process workspace, so unit
+    tests and programmatic sessions pointed at another directory do not
+    unexpectedly connect to the user's personal MCP servers.
+    """
+    configured = os.environ.get(MCPORTER_CONFIG_ENV, "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(workspace / ".mcporter" / "mcporter.json")
+    if workspace == Path.cwd().resolve():
+        candidates.append(Path.home() / ".mcporter" / "mcporter.json")
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _mcporter_transport(server: dict[str, Any]) -> str:
+    if server.get("command"):
+        return "stdio"
+    if server.get("baseUrl") or server.get("url"):
+        return "streamable_http"
+    return ""
+
+
+def _mcporter_exa_has_credentials(server: dict[str, Any]) -> bool:
+    """Allow Exa when its MC Porter entry contains a literal credential.
+
+    MC Porter may still use an environment placeholder in other setups, so
+    that form remains supported.  This check only prevents registering an Exa
+    server whose configured Authorization header is empty or unresolved.
+    """
+    headers = server.get("headers")
+    if not isinstance(headers, dict):
+        return False
+    authorization = headers.get("Authorization") or headers.get("authorization")
+    if not isinstance(authorization, str):
+        return False
+    value = authorization.strip()
+    if not value or "${EXA_API_KEY}" in value:
+        return bool(os.environ.get("EXA_API_KEY", "").strip())
+    return True
 
 
 class McpClientManager:
@@ -177,7 +252,7 @@ class McpClientManager:
         self._loop_thread: _AsyncLoopThread | None = None
 
     @classmethod
-    def from_workspace(cls, workspace: str | Path) -> "McpClientManager":
+    def from_workspace(cls, workspace: str | Path) -> McpClientManager:
         try:
             config = load_mcp_config(workspace)
             return cls(workspace=workspace, config=config)
@@ -230,30 +305,69 @@ class McpClientManager:
             self.tool_bindings.extend(bindings)
             self._bindings_by_exposed_name.update({binding.exposed_name: binding for binding in bindings})
 
-    async def _connect_one(self, server: McpServerConfig) -> tuple["_McpConnection", list[McpToolBinding]]:
+    async def _connect_one(self, server: McpServerConfig) -> tuple[_McpConnection, list[McpToolBinding]]:
         """Connect to a single server with a per-server timeout."""
         request_queue: asyncio.Queue = asyncio.Queue()
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
         task = asyncio.create_task(self._connection_worker(server, request_queue, ready))
         try:
             bindings = await asyncio.wait_for(asyncio.shield(ready), timeout=self.timeout_seconds)
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise
+        except Exception:
+            task.cancel()
+            with contextlib.suppress(Exception):
                 await task
             raise
         return _McpConnection(config=server, request_queue=request_queue, task=task), bindings
 
     def register_tools(self, registry) -> None:
+        from .execution_planner import CallEffect, ResourceClaim
+        from .tool_registry import (
+            TOOL_CAPABILITY_MAIN,
+            TOOL_CAPABILITY_READONLY_AGENT,
+            TOOL_CAPABILITY_WORKER_AGENT,
+        )
+
         for binding in self.tool_bindings:
+            if binding.annotations.get("readOnlyHint") is True:
+                effect = CallEffect(
+                    (ResourceClaim("mcp", binding.server_name, "exact", "read"),),
+                    concurrency_key="network",
+                    kind="mcp_read",
+                )
+            else:
+                effect = CallEffect(
+                    (ResourceClaim("mcp", binding.server_name, "exact", "write"),),
+                    kind="mcp_server_write",
+                )
             registry.register(
                 binding.schema(),
                 self._handler_for(binding),
                 permission=binding.permission,
-                disclosure="deferred",
+                effect=effect,
+                disclosure="core" if _is_exa_search_tool(binding) else "deferred",
+                capabilities=(
+                    {
+                        TOOL_CAPABILITY_MAIN,
+                        TOOL_CAPABILITY_READONLY_AGENT,
+                        TOOL_CAPABILITY_WORKER_AGENT,
+                    }
+                    if binding.permission in {TOOL_PERMISSION_READ, TOOL_PERMISSION_NETWORK_READ}
+                    else {TOOL_CAPABILITY_MAIN}
+                ),
             )
 
-    def call_tool(self, exposed_name: str, arguments: dict[str, Any]) -> ToolResult:
+    def call_tool(
+        self,
+        exposed_name: str,
+        arguments: dict[str, Any],
+        *,
+        cancellation_token=None,
+    ) -> ToolResult:
         binding = self._bindings_by_exposed_name.get(exposed_name)
         if binding is None:
             return ToolResult(
@@ -262,6 +376,12 @@ class McpClientManager:
                 output=f"[error] Unknown MCP tool: {exposed_name}",
                 error=f"Unknown MCP tool: {exposed_name}",
                 metadata={"status_source": "mcp"},
+            )
+        if self._uses_mcporter_cli(binding):
+            return self._call_via_mcporter(
+                binding,
+                arguments,
+                cancellation_token=cancellation_token,
             )
         connection = self._connections.get(binding.server_name)
         if connection is None:
@@ -273,7 +393,12 @@ class McpClientManager:
                 metadata={"status_source": "mcp", "server": binding.server_name, "tool": binding.tool_name},
             )
         try:
-            return self._run(self._call_tool(connection, binding, dict(arguments or {})))
+            return self._run(
+                self._call_tool(connection, binding, dict(arguments or {})),
+                cancellation_token=cancellation_token,
+            )
+        except CancelledError:
+            raise
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             return ToolResult(
@@ -283,6 +408,115 @@ class McpClientManager:
                 error=error,
                 metadata={"status_source": "mcp", "server": binding.server_name, "tool": binding.tool_name},
             )
+
+    def _uses_mcporter_cli(self, binding: McpToolBinding) -> bool:
+        return self.config.path.name == "mcporter.json" and binding.server_name in self.config.servers
+
+    def _call_via_mcporter(
+        self,
+        binding: McpToolBinding,
+        arguments: dict[str, Any],
+        *,
+        cancellation_token=None,
+    ) -> ToolResult:
+        command = _mcporter_cli_command()
+        if command is None:
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output="[error] mcporter command not found",
+                error="mcporter command not found",
+                metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+            )
+        argv = command + [
+            "--config",
+            str(self.config.path),
+            "call",
+            f"{binding.server_name}.{binding.tool_name}",
+            "--args",
+            json.dumps(dict(arguments or {}), ensure_ascii=False, separators=(",", ":")),
+            "--output",
+            "json",
+        ]
+        environment = os.environ.copy()
+        server = self.config.servers.get(binding.server_name)
+        if server is not None and _has_literal_authorization(server.headers):
+            environment.pop("EXA_API_KEY", None)
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=str(self.workspace),
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=(
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    if os.name == "nt"
+                    else 0
+                ),
+                start_new_session=os.name != "nt",
+            )
+        except OSError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output=f"[error] mcporter call failed: {error}",
+                error=error,
+                metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+            )
+
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                _terminate_process_tree(process)
+                raise CancelledError("Turn cancelled by user")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_tree(process)
+                return ToolResult(
+                    tool=binding.exposed_name,
+                    status="failed",
+                    output="[error] mcporter call timed out",
+                    error="mcporter call timed out",
+                    metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+                )
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.05, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        raw_output = stdout.strip()
+        if process.returncode != 0:
+            error = stderr.strip() or raw_output or f"mcporter exited with code {process.returncode}"
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output=f"[error] {error}",
+                error=error,
+                metadata={
+                    "status_source": "mcporter",
+                    "server": binding.server_name,
+                    "tool": binding.tool_name,
+                    "return_code": process.returncode,
+                },
+            )
+        try:
+            payload = json.loads(raw_output)
+        except json.JSONDecodeError as exc:
+            error = f"mcporter returned invalid JSON: {exc}"
+            return ToolResult(
+                tool=binding.exposed_name,
+                status="failed",
+                output=f"[error] {error}",
+                error=error,
+                metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+            )
+        return _mcporter_json_to_tool_result(binding, payload)
 
     def status_report(self) -> str:
         lines = ["MCP status"]
@@ -317,6 +551,80 @@ class McpClientManager:
             )
         return "\n".join(lines)
 
+    def configured_server_names(self) -> list[str]:
+        """Return server names from the raw config, including disabled ones."""
+        if not self.config.path.exists():
+            return sorted(self.config.servers)
+        try:
+            data = json.loads(self.config.path.read_text(encoding="utf-8"))
+            servers = data.get("servers") if isinstance(data, dict) else None
+            if servers is None and self.config.path.name == "mcporter.json":
+                servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
+            return sorted(str(name) for name in servers if isinstance(name, str))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return sorted(self.config.servers)
+
+    def reload_server(self, server_name: str) -> str:
+        """Reconnect the requested MCP server without requiring a new TUI session.
+
+        The connection loop is deliberately rebuilt as a small, deterministic
+        operation. This keeps tool bindings in sync and avoids leaving stale
+        handlers behind after a failed reconnect.
+        """
+        if server_name not in self.config.servers:
+            return f"MCP 服务不存在或未启用：{server_name}"
+        self.close()
+        self.statuses.clear()
+        self.tool_bindings.clear()
+        self._bindings_by_exposed_name.clear()
+        self.connect_all()
+        return f"MCP 服务已重新连接：{server_name}"
+
+    async def _connect_one_and_store(self, server: McpServerConfig) -> None:
+        try:
+            connection, bindings = await self._connect_one(server)
+        except Exception as exc:
+            self.statuses[server.name] = McpServerStatus(
+                name=server.name,
+                transport=server.transport,
+                state="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        self._connections[server.name] = connection
+        self.statuses[server.name] = McpServerStatus(
+            name=server.name,
+            transport=server.transport,
+            state="connected",
+            tool_count=len(bindings),
+        )
+        self.tool_bindings.extend(bindings)
+        self._bindings_by_exposed_name.update({item.exposed_name: item for item in bindings})
+
+    def set_server_enabled(self, server_name: str, enabled: bool) -> str:
+        """Toggle one raw config entry while preserving environment placeholders."""
+        path = self.config.path
+        if not path.exists():
+            return f"MCP 配置不存在：{path}"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise McpConfigError(f"无法读取 MCP 配置：{exc}") from exc
+        servers = data.get("servers") if isinstance(data, dict) else None
+        if servers is None and self.config.path.name == "mcporter.json":
+            servers = data.get("mcpServers") if isinstance(data, dict) else None
+        if not isinstance(servers, dict) or server_name not in servers:
+            return f"MCP 服务不存在：{server_name}"
+        entry = servers[server_name]
+        if not isinstance(entry, dict):
+            return f"MCP 服务配置无效：{server_name}"
+        if enabled:
+            entry.pop("enabled", None)
+        else:
+            entry["enabled"] = False
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return f"MCP 服务已{'启用' if enabled else '停用'}：{server_name}"
+
     def doctor_status(self) -> tuple[bool, str]:
         if self.config_error:
             return False, self.config_error
@@ -350,6 +658,7 @@ class McpClientManager:
 
         stack = contextlib.AsyncExitStack()
         close_response: asyncio.Future | None = None
+        active_calls: set[asyncio.Task] = set()
         try:
             if server.transport == "stdio":
                 params = StdioServerParameters(
@@ -376,18 +685,9 @@ class McpClientManager:
             if not ready.done():
                 ready.set_result(bindings)
 
-            while True:
-                kind, payload, response = await request_queue.get()
-                if kind == "close":
-                    close_response = response
-                    break
-                if kind != "call":
-                    if not response.done():
-                        response.set_exception(ValueError(f"Unknown MCP worker request: {kind}"))
-                    continue
-                binding, arguments = payload
+            async def execute_call(binding, arguments, response) -> None:
                 if response.cancelled():
-                    continue
+                    return
                 try:
                     result = await session.call_tool(binding.tool_name, arguments)
                     tool_result = mcp_result_to_tool_result(binding.exposed_name, result, binding=binding)
@@ -397,12 +697,32 @@ class McpClientManager:
                 else:
                     if not response.done():
                         response.set_result(tool_result)
+
+            while True:
+                kind, payload, response = await request_queue.get()
+                if kind == "close":
+                    close_response = response
+                    if active_calls:
+                        await asyncio.gather(*active_calls, return_exceptions=True)
+                    break
+                if kind != "call":
+                    if not response.done():
+                        response.set_exception(ValueError(f"Unknown MCP worker request: {kind}"))
+                    continue
+                binding, arguments = payload
+                task = asyncio.create_task(execute_call(binding, arguments, response))
+                active_calls.add(task)
+                task.add_done_callback(active_calls.discard)
         except Exception as exc:
             if not ready.done():
                 ready.set_exception(exc)
             raise
         finally:
             close_error: Exception | None = None
+            for task in active_calls:
+                task.cancel()
+            if active_calls:
+                await asyncio.gather(*active_calls, return_exceptions=True)
             try:
                 await stack.aclose()
             except Exception as exc:
@@ -440,13 +760,17 @@ class McpClientManager:
                 await connection.task
 
     def _handler_for(self, binding: McpToolBinding) -> Callable[..., ToolResult]:
-        def handler(**kwargs) -> ToolResult:
+        def handler(*, cancellation_token=None, **kwargs) -> ToolResult:
             arguments = {
                 key: value
                 for key, value in kwargs.items()
                 if key not in {"runtime_state", "agent_name", "tool_context"}
             }
-            return self.call_tool(binding.exposed_name, arguments)
+            return self.call_tool(
+                binding.exposed_name,
+                arguments,
+                cancellation_token=cancellation_token,
+            )
 
         return handler
 
@@ -454,10 +778,14 @@ class McpClientManager:
         if self._loop_thread is None:
             self._loop_thread = _AsyncLoopThread()
 
-    def _run(self, coro):
+    def _run(self, coro, *, cancellation_token=None):
         self._ensure_loop()
         assert self._loop_thread is not None
-        return self._loop_thread.run(coro, timeout=self.timeout_seconds)
+        return self._loop_thread.run(
+            coro,
+            timeout=self.timeout_seconds,
+            cancellation_token=cancellation_token,
+        )
 
 
 def mcp_result_to_tool_result(
@@ -519,6 +847,78 @@ def _bindings_for_server(server: McpServerConfig, mcp_tools: list[Any]) -> list[
             )
         )
     return bindings
+
+
+def _is_exa_search_tool(binding: McpToolBinding) -> bool:
+    identity = f"{binding.server_name} {binding.tool_name}".lower()
+    return "exa" in identity and "search" in identity
+
+
+def _mcporter_cli_command() -> list[str] | None:
+    executable = shutil.which("mcporter")
+    if not executable:
+        return None
+    path = Path(executable)
+    suffix = path.suffix.lower()
+    if suffix == ".ps1":
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        return [shell, "-NoProfile", "-NonInteractive", "-File", str(path)] if shell else None
+    if suffix in {".cmd", ".bat"}:
+        shell = shutil.which("cmd.exe") or shutil.which("cmd")
+        return [shell, "/d", "/c", str(path)] if shell else None
+    return [str(path)]
+
+
+def _has_literal_authorization(headers: dict[str, str]) -> bool:
+    authorization = headers.get("Authorization") or headers.get("authorization") or ""
+    return bool(authorization.strip()) and "${" not in authorization
+
+
+def _mcporter_json_to_tool_result(binding: McpToolBinding, payload: Any) -> ToolResult:
+    if not isinstance(payload, dict):
+        output = str(payload)
+        return ToolResult(
+            tool=binding.exposed_name,
+            status="success",
+            output=output,
+            metadata={"status_source": "mcporter", "server": binding.server_name, "tool": binding.tool_name},
+        )
+    parts = [
+        _mcporter_content_item_to_text(item)
+        for item in list(payload.get("content") or [])
+        if isinstance(item, dict)
+    ]
+    structured = payload.get("structuredContent")
+    if structured is not None:
+        parts.append("structuredContent:\n" + json.dumps(structured, ensure_ascii=False, indent=2, sort_keys=True))
+    output = "\n\n".join(part for part in parts if part)
+    if len(output) > MCP_OUTPUT_LIMIT:
+        output = output[:MCP_OUTPUT_LIMIT] + f"\n\n[TRUNCATED: {len(output) - MCP_OUTPUT_LIMIT} chars omitted]"
+    is_error = bool(payload.get("isError"))
+    return ToolResult(
+        tool=binding.exposed_name,
+        status="failed" if is_error else "success",
+        output=output,
+        error="mcporter tool returned isError=true" if is_error else None,
+        metadata={
+            "status_source": "mcporter",
+            "server": binding.server_name,
+            "tool": binding.tool_name,
+        },
+    )
+
+
+def _mcporter_content_item_to_text(item: dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "")
+    if item_type == "text":
+        return str(item.get("text") or "")
+    if item_type in {"image", "audio"}:
+        data = str(item.get("data") or "")
+        mime = str(item.get("mimeType") or "application/octet-stream")
+        return f"[{item_type} {mime}, {len(data)} base64 chars omitted]"
+    if item_type == "resource_link":
+        return f"[resource_link {item.get('name') or ''} {item.get('uri') or ''}]"
+    return f"[{item_type or 'unknown'} content omitted]"
 
 
 def _content_item_to_text(item: Any) -> str:
@@ -586,7 +986,7 @@ def _exposed_tool_name(server_name: str, tool_name: str, used_names: set[str]) -
     safe_tool = _safe_name_segment(tool_name)
     base = f"{MCP_TOOL_PREFIX}{safe_server}__{safe_tool}"
     if len(base) > MCP_TOOL_NAME_LIMIT:
-        digest = hashlib.sha256(f"{server_name}/{tool_name}".encode("utf-8")).hexdigest()[:8]
+        digest = hashlib.sha256(f"{server_name}/{tool_name}".encode()).hexdigest()[:8]
         server_budget = min(len(safe_server), 20)
         tool_budget = max(1, MCP_TOOL_NAME_LIMIT - len(MCP_TOOL_PREFIX) - server_budget - len("__") - len("__") - 8)
         base = f"{MCP_TOOL_PREFIX}{safe_server[:server_budget]}__{safe_tool[:tool_budget]}__{digest}"
@@ -603,6 +1003,31 @@ def _safe_name_segment(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", value.strip())
     safe = re.sub(r"_+", "_", safe).strip("_")
     return safe or "tool"
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(Exception):
+            os.killpg(process.pid, 15)
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            process.kill()
 
 
 def _model_to_dict(value: Any) -> dict[str, Any]:
@@ -625,7 +1050,7 @@ class _AsyncLoopThread:
         self._thread.start()
         self._ready.wait(timeout=5)
 
-    def run(self, coro, *, timeout: float):
+    def run(self, coro, *, timeout: float, cancellation_token=None):
         future: Future = Future()
         actor_holder: list[asyncio.Task | None] = [None]
 
@@ -634,14 +1059,25 @@ class _AsyncLoopThread:
             self._queue.put_nowait((coro, future, actor_holder))
 
         self.loop.call_soon_threadsafe(submit)
-        try:
-            return future.result(timeout=timeout)
-        except TimeoutError:
-            future.cancel()
-            actor_task = actor_holder[0]
-            if actor_task is not None and not actor_task.done():
-                self.loop.call_soon_threadsafe(actor_task.cancel)
-            raise
+        deadline = time.monotonic() + timeout
+        while True:
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                self._cancel(future, actor_holder)
+                raise CancelledError("Turn cancelled by user")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._cancel(future, actor_holder)
+                raise TimeoutError("MCP operation timed out and was cancelled")
+            try:
+                return future.result(timeout=min(0.05, remaining))
+            except FutureTimeoutError:
+                continue
+
+    def _cancel(self, future: Future, actor_holder: list[asyncio.Task | None]) -> None:
+        future.cancel()
+        actor_task = actor_holder[0]
+        if actor_task is not None and not actor_task.done():
+            self.loop.call_soon_threadsafe(actor_task.cancel)
 
     def close(self) -> None:
         if self._queue is not None:
@@ -652,10 +1088,8 @@ class _AsyncLoopThread:
                 self._queue.put_nowait((None, future))
 
             self.loop.call_soon_threadsafe(submit_stop)
-            try:
+            with contextlib.suppress(Exception):
                 future.result(timeout=5)
-            except Exception:
-                pass
         self.loop.call_soon_threadsafe(self.loop.stop)
         self._thread.join(timeout=5)
         self.loop.close()

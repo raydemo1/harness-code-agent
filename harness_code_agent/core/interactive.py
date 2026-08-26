@@ -2,71 +2,94 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import logging
+import os
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
 
 from .. import config
 from ..agent.conversation import AgentConversation
+from ..agent.coordinator import AgentCoordinator
 from ..agent.prompts import GlobalRulesDoc, PromptPrefixBuilder
-from ..profiles import get_profile, list_profiles
+from ..attachments import (
+    Attachment,
+    AttachmentError,
+    AttachmentManager,
+    ExternalPathConfirmationRequired,
+    PreparedTurn,
+    TurnSubmission,
+    build_model_content,
+    model_input_mode,
+)
+from ..profiles import get_profile
 from ..profiles.base import BaseProfile
 from ..profiles.router import (
     ROUTE_ACTION_SWITCH_PROFILE,
+    ROUTING_MODE_AUTO,
+    ROUTING_MODE_PINNED,
     TURN_MODE_DIRECT_ANSWER,
     RouteDecision,
     route_profile_for_turn,
 )
-from ..runtime.builtins.browser import stop_dev_server
+from ..runtime.approvals import (
+    ApprovalProvider,
+    ApprovalRequest,
+    ConsoleApprovalProvider,
+    LlmAutoApprovalProvider,
+)
 from ..runtime.builtins.registry import BUILTIN_TOOL_REGISTRY
-from ..runtime.approvals import ApprovalProvider, ConsoleApprovalProvider, LlmAutoApprovalProvider
-from ..runtime.middleware import MemoryMiddleware, StaticVerifierMiddleware, TimeBudgetMiddleware, ToolPolicyMiddleware
-from ..runtime.mcp import McpClientManager, McpConfigError, load_mcp_config
+from ..runtime.lifecycle import LifecycleScope
+from ..runtime.mcp import McpClientManager
+from ..runtime.middleware import (
+    MemoryMiddleware,
+    StaticVerifierMiddleware,
+    TimeBudgetMiddleware,
+    ToolPolicyMiddleware,
+)
 from ..runtime.permission_middleware import PermissionMiddleware
 from ..runtime.permissions import PermissionPolicy
 from ..runtime.questions import ConsoleQuestionProvider, QuestionProvider
 from ..runtime.tool_context import ToolContext
 from ..runtime.tool_registry import tool_schemas_for_profile
-from ..sessions.events import AssistantMessageEvent, FinalReportEvent, SessionFinishedEvent, TurnSummaryEvent, UserInputEvent
+from ..sessions.events import (
+    AssistantMessageEvent,
+    FinalReportEvent,
+    SessionFinishedEvent,
+    TurnSummaryEvent,
+    UserInputEvent,
+)
 from ..sessions.report import build_final_report
-from ..sessions._event_helpers import is_ignored_changed_file
-from ..sessions.summary import load_session_summary
 from ..sessions.store import Session, SessionStore
 from ..sessions.turn_summary import generate_turn_summary, should_summarize_turn
 from ..skills import SkillRegistry
 from ..workspace.service import WorkspaceService
-from ..workspace.shell_session import docker_cli_path, docker_info_check, docker_shell_hint, sandbox_mode, validate_shell_configuration, windows_shell_hint, windows_shell_path
-from .mentions import MentionResolutionError, ResolvedMention, render_mention_context, resolve_mentions
+from ..workspace.shell_session import (
+    validate_shell_configuration,
+)
+from .mentions import (
+    ResolvedMention,
+    render_mention_context,
+    resolve_mentions,
+)
 
-
-GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 PRODUCT_DEFAULT_PROFILE = "general"
 DIRECT_ANSWER_TURN_INSTRUCTION = (
     "Turn handling instruction: answer this turn directly and briefly. "
     "Do not create or edit files, run commands, launch browsers, or continue prior implementation work "
     "unless the user explicitly asks for that in this turn."
 )
-CHECKPOINT_EXCLUDES = [".harness", "global_plan", config.PROGRESS_FILE]
 TURN_INLINE_CHAR_LIMIT = 40_000
 TURN_EXCERPT_CHARS = 2_000
-PROFILE_SLASH_ALIASES = {
-    "/general": "general",
-    "/code": "coding-agent",
-    "/app": "app-builder",
-    "/plan": "plan",
-    "/review": "review",
-}
 log = logging.getLogger("harness")
 
 
 @dataclass
 class CheckpointConfig:
-    auto: bool = True
+    auto: bool = False
     every_turns: int = 1
 
 
@@ -86,7 +109,7 @@ class ProfileSwitchEvent:
 
 
 @dataclass
-class ProfileSlot:
+class ProfileRuntime:
     profile: BaseProfile
     agent: object
     conversation: AgentConversation
@@ -98,7 +121,6 @@ class InteractiveSession:
         *,
         cwd: str | Path,
         profile_name: str = PRODUCT_DEFAULT_PROFILE,
-        resume_session_id: str | None = None,
         stream_sink: Callable[[str], None] | None = None,
         event_listener: Callable[[object], None] | None = None,
         approval_provider: ApprovalProvider | None = None,
@@ -108,9 +130,12 @@ class InteractiveSession:
         profile_explicit: bool | None = None,
         enable_turn_summary: bool = True,
         allow_checkpoint_init_failure: bool = False,
+        startup_sink: Callable[[str], None] | None = None,
     ):
         self.cwd = Path(cwd).resolve()
-        config.WORKSPACE = str(self.cwd)
+        self.lifecycle = LifecycleScope()
+        self.startup_sink = startup_sink
+        self._report_startup("checking workspace")
         validate_shell_configuration()
         self.stream_sink = stream_sink or stream_callback
         self.event_listener = event_listener
@@ -121,44 +146,36 @@ class InteractiveSession:
         self.question_provider = question_provider or ConsoleQuestionProvider()
         self.output_sink = output_sink or print
         self.enable_turn_summary = enable_turn_summary
+        self.checkpoint = CheckpointConfig()
+        self._allow_checkpoint_init_failure = allow_checkpoint_init_failure
         self.checkpoint_init_error: str = ""
+        self._report_startup("loading skills")
         self.skill_registry = SkillRegistry()
+        self._slash_registry = None
+        self.last_command_result = None
         self.session_store = SessionStore(self.cwd / ".harness")
         self.session_store.root.mkdir(parents=True, exist_ok=True)
-        self.resume_session_id = resume_session_id
+        self.resume_session_id: str | None = None
         self.resume_context: str | None = None
         inferred_explicit = profile_name != PRODUCT_DEFAULT_PROFILE
         self.profile_explicit = inferred_explicit if profile_explicit is None else profile_explicit
+        self.routing_mode = ROUTING_MODE_PINNED if self.profile_explicit else ROUTING_MODE_AUTO
         self._pending_profile_name = profile_name
         self._profile_source = "explicit" if self.profile_explicit else "default"
-        if resume_session_id:
-            metadata = self.session_store.read_metadata(resume_session_id)
-            self.cwd = Path(metadata["cwd"]).resolve()
-            config.WORKSPACE = str(self.cwd)
-            self.session_store = SessionStore(self.cwd / ".harness")
-            self.session_store.root.mkdir(parents=True, exist_ok=True)
-            self._pending_profile_name = metadata.get("profile") or profile_name
-            self._profile_source = "resume"
-            self.resume_context = _build_resume_context(self.session_store, resume_session_id)
-
         self.profile = get_profile(self._pending_profile_name)
-        try:
-            _ensure_git_repository(self.cwd)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            if not allow_checkpoint_init_failure:
-                raise
-            self.checkpoint_init_error = f"{type(exc).__name__}: {exc}"
         self.session: Session | None = None
+        self.attachment_manager: AttachmentManager | None = None
         self.event_bus = None
         self.tool_context: ToolContext | None = None
         self.tool_registry = None
         self.mcp_manager = None
+        self._mcp_tools_loaded = False
+        self._mcp_load_lock = threading.Lock()
         self.agent = None
         self.conversation: AgentConversation | None = None
-        self.profile_slots: dict[str, ProfileSlot] = {}
+        self.profile_runtimes: dict[str, ProfileRuntime] = {}
         self._active_profile_name: str | None = None
         self.turn_count = 0
-        self.checkpoint = CheckpointConfig()
         self.pending_plan_markdown: str | None = None
         self.pending_plan_revision = 0
         self.last_user_task: str = ""
@@ -168,7 +185,13 @@ class InteractiveSession:
         self._resolved_task_timeout: float | None = None
         self._closed = False
         self._close_lock = threading.Lock()
+        self._report_startup("connecting tools")
         self._bind_profile(self._pending_profile_name, source=self._profile_source)
+        self._report_startup("ready")
+
+    def _report_startup(self, stage: str) -> None:
+        if self.startup_sink is not None:
+            self.startup_sink(stage)
 
     @property
     def is_bound(self) -> bool:
@@ -181,6 +204,10 @@ class InteractiveSession:
     @property
     def display_profile(self) -> str:
         return self.profile.name()
+
+    @property
+    def display_routing_mode(self) -> str:
+        return self.routing_mode
 
     def _build_agent(self, profile: BaseProfile):
         from ..agent.conversation import Agent
@@ -230,16 +257,35 @@ class InteractiveSession:
         )
 
     def _load_mcp_tools(self) -> None:
-        self.tool_registry = BUILTIN_TOOL_REGISTRY.copy()
-        self.mcp_manager = McpClientManager.from_workspace(self.cwd)
+        if self.tool_registry is None or self.mcp_manager is None:
+            self._prepare_tool_registry()
         self.mcp_manager.connect_all()
         self.mcp_manager.register_tools(self.tool_registry)
+        self._mcp_tools_loaded = True
+
+    def _prepare_tool_registry(self) -> None:
+        self.tool_registry = BUILTIN_TOOL_REGISTRY.copy()
+        self.mcp_manager = McpClientManager.from_workspace(self.cwd)
+        manager = self.mcp_manager
+        self.lifecycle.register(f"mcp:{id(manager)}", manager.close, order=10)
+        self._mcp_tools_loaded = False
 
     def _ensure_mcp_tools_loaded(self) -> None:
-        if self.mcp_manager is None or self.tool_registry is None:
+        if self._mcp_tools_loaded:
+            return
+        with self._mcp_load_lock:
+            if self._mcp_tools_loaded:
+                return
+            self._report_startup("connecting external tools")
             self._load_mcp_tools()
+            self._refresh_agent_tool_schemas()
+            self._report_startup("external tools ready")
 
-    def _tool_schemas_for_agent_config(self, cfg) -> list[dict]:
+    def warm_mcp_tools(self) -> None:
+        """Connect configured MCP servers after the core session is usable."""
+        self._ensure_mcp_tools_loaded()
+
+    def _tool_schemas_for_agent_config(self, cfg, *, update_context: bool = True) -> list[dict]:
         core_schemas = tool_schemas_for_profile(
             allowed_permissions=cfg.allowed_tool_permissions,
             include_names=cfg.allowed_tool_names,
@@ -247,7 +293,7 @@ class InteractiveSession:
             registry=self.tool_registry,
         )
         revealed = set()
-        if self.tool_context is not None:
+        if self.tool_context is not None and update_context:
             self.tool_context.allowed_tool_permissions = set(cfg.allowed_tool_permissions)
             self.tool_context.blocked_tool_names = set(cfg.blocked_tool_names)
             revealed = set(self.tool_context.revealed_tool_names)
@@ -272,11 +318,15 @@ class InteractiveSession:
         ]
 
     def _refresh_agent_tool_schemas(self) -> None:
-        if not self.profile_slots:
+        if not self.profile_runtimes:
             return
-        for slot in self.profile_slots.values():
+        active_name = self.profile.name() if self.profile is not None else None
+        for slot in self.profile_runtimes.values():
             cfg = slot.profile.main_agent()
-            schemas = self._tool_schemas_for_agent_config(cfg)
+            schemas = self._tool_schemas_for_agent_config(
+                cfg,
+                update_context=slot.profile.name() == active_name,
+            )
             slot.agent.update_tool_schemas(schemas)
 
     def _sync_time_budget(self) -> None:
@@ -354,7 +404,71 @@ class InteractiveSession:
     def format_task(self, user_prompt: str) -> str:
         return f"Task:\n{user_prompt}"
 
-    def submit(self, user_prompt: str, cancellation_token=None) -> TurnResult:
+    def prepare_submission(self, submission: TurnSubmission | str) -> PreparedTurn:
+        if isinstance(submission, str):
+            submission = TurnSubmission(submission)
+        if self.attachment_manager is None:
+            self.ensure_profile_bound_for_first_task(submission.text)
+        if self.attachment_manager is None:
+            raise RuntimeError("附件模块尚未准备好，请稍候")
+        return self.attachment_manager.prepare(submission)
+
+    def stage_attachment_path(self, path: str | Path, *, source: str = "picker") -> Attachment:
+        if self.attachment_manager is None:
+            self.ensure_profile_bound_for_first_task("")
+        if self.attachment_manager is None:
+            raise RuntimeError("附件模块尚未准备好，请稍候")
+        return self.attachment_manager.stage_path(
+            path,
+            source=source,  # type: ignore[arg-type]
+            copy_to_session=None,
+        )
+
+    def stage_attachment_bytes(
+        self,
+        data: bytes,
+        *,
+        name: str,
+        mime_type: str,
+        source: str = "clipboard",
+    ) -> Attachment:
+        if self.attachment_manager is None:
+            self.ensure_profile_bound_for_first_task("")
+        if self.attachment_manager is None:
+            raise RuntimeError("附件模块尚未准备好，请稍候")
+        return self.attachment_manager.stage_bytes(
+            data,
+            name=name,
+            mime_type=mime_type,
+            source=source,  # type: ignore[arg-type]
+        )
+
+    def remove_attachment(self, attachment_id: str) -> bool:
+        return bool(self.attachment_manager and self.attachment_manager.remove(attachment_id))
+
+    def submit(self, user_prompt: str | TurnSubmission, cancellation_token=None) -> TurnResult:
+        submission = user_prompt if isinstance(user_prompt, TurnSubmission) else TurnSubmission(user_prompt)
+        try:
+            prepared = self.prepare_submission(submission)
+        except ExternalPathConfirmationRequired as exc:
+            approval = self.approval_provider.request(ApprovalRequest(
+                tool_name="read_external_attachment",
+                args={"paths": exc.paths},
+                risk="读取工作区外文件并复制到当前会话附件缓存",
+                reason="用户提示词中引用了工作区外的文件",
+                agent_name="main_agent",
+                session_id=getattr(self.session, "id", None),
+            ))
+            if not approval.approved:
+                raise AttachmentError("已拒绝读取工作区外文件，本次任务未提交")
+            prepared = self.prepare_submission(replace(
+                submission,
+                authorized_paths=tuple(exc.paths),
+            ))
+        return self.submit_prepared(prepared, cancellation_token=cancellation_token)
+
+    def submit_prepared(self, prepared: PreparedTurn, cancellation_token=None) -> TurnResult:
+        user_prompt = prepared.text
         self.ensure_profile_bound_for_first_task(user_prompt)
         skill_invocation = self.skill_registry.build_user_invocation(user_prompt)
         if skill_invocation is not None:
@@ -362,17 +476,19 @@ class InteractiveSession:
                 user_prompt,
                 cancellation_token=cancellation_token,
                 turn_instruction=skill_invocation.prompt,
+                attachments=prepared.attachments,
             )
         if self.pending_plan_markdown and self.profile.name() == "plan":
             if _is_plan_execution_confirmation(user_prompt):
-                return self.execute_pending_plan()
-            return self.revise_pending_plan(user_prompt)
+                return self.execute_pending_plan(attachments=prepared.attachments)
+            return self.revise_pending_plan(user_prompt, attachments=prepared.attachments)
         route_decision = self._maybe_auto_route_profile(user_prompt)
         turn_instruction = _turn_instruction_for_route(route_decision)
         return self._submit_to_current_agent(
             user_prompt,
             cancellation_token=cancellation_token,
             turn_instruction=turn_instruction,
+            attachments=prepared.attachments,
         )
 
     def ensure_profile_bound_for_first_task(self, user_prompt: str) -> None:
@@ -381,10 +497,20 @@ class InteractiveSession:
         self._bind_profile(self._pending_profile_name, source=self._profile_source)
 
     def _maybe_auto_route_profile(self, user_prompt: str) -> RouteDecision | None:
-        if not self.is_bound or self.event_bus is None:
+        if (
+            not self.is_bound
+            or self.event_bus is None
+            or self.routing_mode != ROUTING_MODE_AUTO
+        ):
             return None
         current = self.profile.name()
-        decision = route_profile_for_turn(user_prompt, current_profile=current)
+        decision = route_profile_for_turn(
+            user_prompt,
+            current_profile=current,
+            routing_mode=self.routing_mode,
+            previous_user_task=self.last_user_task,
+            previous_assistant_text=self.last_assistant_text,
+        )
         switched = decision.action == ROUTE_ACTION_SWITCH_PROFILE and decision.profile_name != current
         self.event_bus.emit(
             "profile_route_decision",
@@ -403,9 +529,26 @@ class InteractiveSession:
                 "elapsed_ms": round(float(getattr(decision, "elapsed_ms", 0.0)), 1),
                 "source": decision.source,
                 "switched": switched,
+                "routing_mode": self.routing_mode,
+                "decisive_signal": getattr(decision, "decisive_signal", ""),
+                "local_candidate": getattr(decision, "local_candidate", ""),
+                "local_confidence": getattr(decision, "local_confidence", 0.0),
+                "local_margin": getattr(decision, "local_margin", 0.0),
+                "llm_called": getattr(decision, "llm_called", False),
+                "llm_confidence": getattr(decision, "llm_confidence", 0.0),
+                "llm_provider": getattr(decision, "llm_provider", ""),
+                "llm_model": getattr(decision, "llm_model", ""),
+                "failure_type": getattr(decision, "failure_type", ""),
             },
         )
         if switched:
+            if getattr(decision, "decisive_signal", "") == "explicit_mode":
+                self.routing_mode = ROUTING_MODE_PINNED
+                if self.session is not None:
+                    self.session_store.update_routing_mode(
+                        self.session.id,
+                        self.routing_mode,
+                    )
             self._switch_profile(decision.profile_name, reason="auto route")
         return decision
 
@@ -414,7 +557,6 @@ class InteractiveSession:
         profile_name: str,
         *,
         source: str,
-        route_decision: RouteDecision | None = None,
     ) -> None:
         if self.is_bound:
             return
@@ -428,6 +570,17 @@ class InteractiveSession:
             permission_mode=self.permission_mode,
             resumed_from=self.resume_session_id,
             profile_source=source,
+        )
+        self.attachment_manager = AttachmentManager(
+            self.cwd,
+            self.session.root,
+            model_input_mode(),
+        )
+        metadata = self.session_store.read_metadata(self.session.id)
+        metadata["routing_mode"] = self.routing_mode
+        self.session.metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
         )
         self.event_bus = self.session_store.event_bus(self.session, listener=self.event_listener)
         if self.checkpoint_init_error:
@@ -446,7 +599,7 @@ class InteractiveSession:
                     "error": self.checkpoint_init_error,
                 },
             )
-        self._ensure_mcp_tools_loaded()
+        self._prepare_tool_registry()
         self.tool_context = ToolContext(
             workspace=WorkspaceService(
                 root=self.cwd,
@@ -459,8 +612,24 @@ class InteractiveSession:
             question_provider=self.question_provider,
             tool_registry=self.tool_registry,
         )
+        self.lifecycle.register(
+            "tool_tasks",
+            lambda: self.tool_context.tool_tasks.close(timeout=1.0),
+            order=20,
+        )
+        self.tool_context.agent_coordinator = AgentCoordinator(
+            self.tool_context,
+            parent_messages=lambda: (
+                list(self.conversation.messages) if self.conversation is not None else []
+            ),
+        )
+        self.lifecycle.register(
+            "agent_coordinator",
+            self.tool_context.agent_coordinator.close,
+            order=30,
+        )
         self._started_at = time.time()
-        self._activate_profile_slot(self.profile.name(), create_handoff=False)
+        self._activate_profile_runtime(self.profile.name())
         self.event_bus.emit(
             "session_started",
             agent="main_agent",
@@ -473,65 +642,57 @@ class InteractiveSession:
                 "interactive": True,
             },
         )
-        if route_decision is not None:
-            self.event_bus.emit(
-                "profile_route_decision",
-                agent="main_agent",
-                payload={
-                    "profile": route_decision.profile_name,
-                    "matched_profile": route_decision.matched_profile,
-                    "action": route_decision.action,
-                    "turn_mode": route_decision.turn_mode,
-                    "confidence": route_decision.confidence,
-                    "reason": route_decision.reason,
-                    "fallback_used": route_decision.fallback_used,
-                    "fallback_reason": route_decision.fallback_reason,
-                    "elapsed_ms": round(float(getattr(route_decision, "elapsed_ms", 0.0)), 1),
-                    "margin": getattr(route_decision, "margin", 0.0),
-                    "source": getattr(route_decision, "source", "llm"),
-                    "switched": False,
-                },
-            )
         if self.resume_context:
             self._append_conversation_message({
                 "role": "user",
                 "content": f"Resume context:\n{self.resume_context}",
             })
 
-    def _activate_profile_slot(
+    def _activate_profile_runtime(
         self,
         profile_name: str,
-        *,
-        create_handoff: bool,
-        reason: str = "slash command",
-        previous_profile: str | None = None,
-        plan_markdown: str | None = None,
     ) -> bool:
         if self.session is None or self.event_bus is None or self.tool_context is None:
-            raise RuntimeError("Cannot activate a profile slot before the session is bound.")
+            raise RuntimeError("Cannot activate a profile runtime before the session is bound.")
         created = False
-        slot = self.profile_slots.get(profile_name)
+        profile = get_profile(profile_name)
+        slot = self.profile_runtimes.get(profile_name)
         if slot is None:
-            profile = get_profile(profile_name)
             agent = self._build_agent(profile)
-            conversation = agent.start_conversation()
-            conversation._event_bus = self.event_bus
-            slot = ProfileSlot(profile=profile, agent=agent, conversation=conversation)
-            self.profile_slots[profile.name()] = slot
+            if self.conversation is None:
+                conversation = agent.start_conversation()
+                self.lifecycle.register("conversation", conversation.close, order=40)
+                conversation._event_bus = self.event_bus
+                self.conversation = conversation
+            else:
+                conversation = self.conversation
+                rebind_agent = getattr(conversation, "rebind_agent", None)
+                if callable(rebind_agent):
+                    rebind_agent(agent)
+                else:
+                    # Lightweight test doubles may only expose ``agent``.
+                    # Keep one conversation object and update its active
+                    # runtime instead of creating a second history lane.
+                    if hasattr(conversation, "agent"):
+                        conversation.agent = agent
+            slot = ProfileRuntime(profile=profile, agent=agent, conversation=conversation)
+            self.profile_runtimes[profile.name()] = slot
             created = True
-        self._active_profile_name = slot.profile.name()
-        self.profile = slot.profile
+        else:
+            slot.agent = self._build_agent(profile)
+            slot.conversation = self.conversation
+            if self.conversation is not None:
+                rebind_agent = getattr(self.conversation, "rebind_agent", None)
+                if callable(rebind_agent):
+                    rebind_agent(slot.agent)
+                elif hasattr(self.conversation, "agent"):
+                    self.conversation.agent = slot.agent
+        self._active_profile_name = profile.name()
+        self.profile = profile
         self.agent = slot.agent
         self.conversation = slot.conversation
-        if create_handoff and (created or plan_markdown):
-            handoff = self._build_profile_handoff_context(
-                previous_profile=previous_profile or "",
-                current_profile=self.profile.name(),
-                reason=reason,
-                plan_markdown=plan_markdown,
-            )
-            if handoff:
-                self._append_conversation_message({"role": "user", "content": handoff})
+        # Profile handoff messages used to split the conversation and hide
+        # history. Approved plans are now carried by the execution turn itself.
         self._sync_time_budget()
         return created
 
@@ -540,16 +701,18 @@ class InteractiveSession:
         user_prompt: str,
         cancellation_token=None,
         turn_instruction: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> TurnResult:
+        self._ensure_mcp_tools_loaded()
         turn_started_at = time.time()
-        baseline_dirty = git_dirty_paths(self.cwd)
-        baseline_staged = git_staged_paths(self.cwd)
+        baseline = capture_git_baseline(self.cwd) if self.checkpoint.auto else None
         self._apply_profile_task_timeout(user_prompt)
         resolved = resolve_mentions(
             user_prompt,
             workspace_root=self.cwd,
             session_store=self.session_store,
         )
+        resolved = [item for item in resolved if item.kind != "file"]
         prompt_for_model = self._externalize_large_turn_text(
             "prompt",
             user_prompt,
@@ -568,12 +731,23 @@ class InteractiveSession:
         if turn_instruction:
             prompt_with_mentions = f"{turn_instruction}\n\nUser request:\n{prompt_with_mentions}"
         task = self.format_task(prompt_with_mentions)
+        model_content = build_model_content(
+            task,
+            attachments,
+            text_transform=lambda attachment, content: self._externalize_large_turn_text(
+                f"attachment-{attachment.id}",
+                content,
+                intro=f"The full contents of attachment {attachment.name!r} were too large to inline.",
+            ),
+        )
+        attachment_metadata = [item.public_dict() for item in attachments]
         self.turn_count += 1
         self.event_bus.emit_event(
             UserInputEvent(
                 text=user_prompt,
                 turn=self.turn_count,
                 mentions=[item.raw for item in resolved],
+                attachments=attachment_metadata,
             ).to_event()
         )
         self.event_bus.emit(
@@ -582,10 +756,15 @@ class InteractiveSession:
             payload={
                 "turn": self.turn_count,
                 "mentions": [item.raw for item in resolved],
+                "attachments": attachment_metadata,
             },
         )
         turn_event_start = len(getattr(self.event_bus, "events", []))
-        text = self.conversation.submit(task, cancellation_token=cancellation_token)
+        text = self.conversation.submit(
+            model_content,
+            task_text=task,
+            cancellation_token=cancellation_token,
+        )
         if cancellation_token is not None and cancellation_token.is_cancelled:
             from ..agent.cancellation import CancelledError
             raise CancelledError("Turn cancelled by user")
@@ -601,8 +780,7 @@ class InteractiveSession:
         self.last_assistant_text = text
         notice = self._capture_plan_handoff(text)
         checkpoint = self._maybe_auto_checkpoint(
-            baseline_dirty=baseline_dirty,
-            baseline_staged=baseline_staged,
+            baseline=baseline,
         )
         duration_seconds = time.time() - turn_started_at
         self._maybe_emit_turn_summary(
@@ -669,17 +847,16 @@ class InteractiveSession:
         if self.conversation is None:
             return False
         runtime_state = getattr(self.conversation, "runtime_state", None)
-        shell_session = getattr(runtime_state, "shell_session", None)
-        if shell_session is None:
+        interrupt = getattr(runtime_state, "interrupt_shell_sessions", None)
+        if interrupt is None:
             return False
         try:
-            shell_session.interrupt()
+            return bool(interrupt())
         except Exception as exc:
             log.debug("Failed to interrupt active shell session: %s", exc)
             return False
-        return True
 
-    def execute_pending_plan(self) -> TurnResult:
+    def execute_pending_plan(self, *, attachments: tuple[Attachment, ...] = ()) -> TurnResult:
         if not self.pending_plan_markdown:
             raise ValueError("No pending plan to execute. Switch to /plan and create a plan first.")
         plan_markdown = self.pending_plan_markdown
@@ -688,25 +865,33 @@ class InteractiveSession:
         self._switch_profile(
             "coding-agent",
             reason="execute approved plan",
-            plan_markdown=plan_markdown,
         )
         task = (
             "Execute the approved implementation plan below in coding-agent mode.\n\n"
             "Use the plan as the source of truth, but still inspect the repository, "
-            "make the smallest appropriate code/test changes, and run verification before stopping."
+            "make the smallest appropriate code/test changes, and run verification before stopping.\n\n"
+            f"Approved plan:\n{plan_markdown}"
         )
-        return self._submit_to_current_agent(task)
+        return self._submit_to_current_agent(task, attachments=attachments)
 
-    def revise_pending_plan(self, feedback: str) -> TurnResult:
+    def revise_pending_plan(
+        self,
+        feedback: str,
+        *,
+        attachments: tuple[Attachment, ...] = (),
+    ) -> TurnResult:
         if not self.pending_plan_markdown:
             raise ValueError("No pending plan to revise. Switch to /plan and create a plan first.")
         feedback = feedback.strip()
-        if not feedback:
+        if not feedback and attachments:
+            feedback = "Revise the plan using the attached files as additional feedback and context."
+        elif not feedback:
             raise ValueError("Provide feedback for the pending plan, or say 'continue' to execute it.")
         return self._submit_to_current_agent(
             "Revise the previous Markdown plan using this user feedback. "
             "Return the complete updated plan in the required structured Markdown format.\n\n"
-            f"User feedback:\n{feedback}"
+            f"User feedback:\n{feedback}",
+            attachments=attachments,
         )
 
     def _capture_plan_handoff(self, text: str) -> str:
@@ -741,8 +926,7 @@ class InteractiveSession:
         self,
         profile_name: str,
         *,
-        reason: str = "slash command",
-        plan_markdown: str | None = None,
+        reason: str = "profile picker",
     ) -> None:
         previous = self.profile.name()
         if previous == profile_name:
@@ -752,13 +936,8 @@ class InteractiveSession:
             self._pending_profile_name = self.profile.name()
             self._profile_source = "explicit"
             return
-        target_existed = profile_name in self.profile_slots
-        self._activate_profile_slot(
+        self._activate_profile_runtime(
             profile_name,
-            create_handoff=True,
-            reason=reason,
-            previous_profile=previous,
-            plan_markdown=plan_markdown,
         )
         self.profile_history.append(ProfileSwitchEvent(
             previous=previous,
@@ -778,45 +957,16 @@ class InteractiveSession:
                 "previous_profile": previous,
                 "profile": self.profile.name(),
                 "reason": reason,
-                "handoff_context": (not target_existed) or bool(plan_markdown),
-                "plan_included": bool(plan_markdown),
             },
         )
-
-    def _build_profile_handoff_context(
-        self,
-        *,
-        previous_profile: str,
-        current_profile: str,
-        reason: str,
-        plan_markdown: str | None,
-    ) -> str:
-        lines = [
-            "Profile handoff context:",
-            f"- Workspace: {self.cwd}",
-            f"- Session: {self.session.id if self.session is not None else '<pending>'}",
-            f"- Previous profile: {previous_profile}",
-            f"- Current profile: {current_profile}",
-            f"- Switch reason: {reason}",
-        ]
-        if self.last_user_task:
-            lines.append("")
-            lines.append("Most recent user task:")
-            lines.append(_truncate_handoff_text(self.last_user_task))
-        if self.last_assistant_text and not plan_markdown:
-            lines.append("")
-            lines.append("Most recent assistant summary:")
-            lines.append(_truncate_handoff_text(self.last_assistant_text))
-        if plan_markdown:
-            lines.append("")
-            lines.append("Approved Markdown plan:")
-            lines.append(plan_markdown)
-        return "\n".join(lines)
 
     def handle_slash_command(self, line: str) -> bool:
         from ..tui.commands import default_command_registry
 
-        result = default_command_registry(skill_registry=self.skill_registry).execute(line, self)
+        if self._slash_registry is None:
+            self._slash_registry = default_command_registry(skill_registry=self.skill_registry)
+        result = self._slash_registry.execute(line, self)
+        self.last_command_result = result
         if result.text:
             self.output_sink(result.text)
         return result.should_continue
@@ -830,13 +980,25 @@ class InteractiveSession:
         previous = self.profile.name()
         self.pending_plan_markdown = None
         self.pending_plan_revision = 0
+        self.routing_mode = ROUTING_MODE_PINNED
         self._switch_profile(profile_name)
         current = self.profile.name()
+        if self.session is not None:
+            self.session_store.update_routing_mode(self.session.id, self.routing_mode)
         if current == previous:
             return f"profile already active: {current}"
         if not self.is_bound:
             return f"profile selected: {current}"
         return f"profile switched: {previous} -> {current}"
+
+    def enable_auto_profile_routing(self) -> str:
+        previous_mode = self.routing_mode
+        self.routing_mode = ROUTING_MODE_AUTO
+        if self.session is not None:
+            self.session_store.update_routing_mode(self.session.id, self.routing_mode)
+        if previous_mode == ROUTING_MODE_AUTO:
+            return f"auto profile routing already active: {self.profile.name()}"
+        return f"auto profile routing enabled: {self.profile.name()}"
 
     def set_permission_mode(self, permission_mode: str) -> str:
         PermissionPolicy(mode=permission_mode)
@@ -892,7 +1054,8 @@ class InteractiveSession:
     def reload_mcp(self) -> str:
         self._ensure_mcp_tools_loaded()
         self.mcp_manager.close()
-        self._load_mcp_tools()
+        self._prepare_tool_registry()
+        self._ensure_mcp_tools_loaded()
         if self.tool_context is not None:
             self.tool_context.tool_registry = self.tool_registry
         self._refresh_agent_tool_schemas()
@@ -904,19 +1067,90 @@ class InteractiveSession:
             )
         return "MCP reloaded\n" + self.mcp_manager.status_report()
 
-    def _inject_resume_context(self, session_id: str) -> str:
+    def reload_mcp_server(self, server_name: str) -> str:
+        """Reconnect one configured MCP server and refresh active tool schemas."""
+        self._ensure_mcp_tools_loaded()
+        result = self.mcp_manager.reload_server(server_name)
+        if self.tool_registry is not None:
+            self.tool_registry = BUILTIN_TOOL_REGISTRY.copy()
+            self.mcp_manager.register_tools(self.tool_registry)
+        if self.tool_context is not None:
+            self.tool_context.tool_registry = self.tool_registry
+        self._refresh_agent_tool_schemas()
+        return result
+
+    def toggle_mcp_server(self, server_name: str) -> str:
+        """Toggle one MCP config entry and rebuild the active manager."""
+        self._ensure_mcp_tools_loaded()
+        names = set(self.mcp_manager.configured_server_names())
+        if server_name not in names:
+            return f"MCP 服务不存在：{server_name}"
+        enabled = server_name not in self.mcp_manager.config.servers
+        result = self.mcp_manager.set_server_enabled(server_name, enabled)
+        refreshed = self.reload_mcp()
+        return f"{result}\n{refreshed}"
+
+    def compact_current_context(self) -> str:
+        """Run explicit compaction against the single shared conversation."""
+        self._ensure_mcp_tools_loaded()
+        if self.conversation is None:
+            return "当前还没有可压缩的对话"
+        return self.conversation.compact_now()
+
+    def fork_current_session(self) -> str:
+        """Create a durable branch and continue with the same live context."""
+        if self.session is None or self.conversation is None:
+            return "当前还没有可分支的会话"
+        source = self.session
+        branched = self.session_store.fork(source.id)
+        self.session = branched
+        self.attachment_manager = AttachmentManager(
+            self.cwd,
+            branched.root,
+            model_input_mode(),
+        )
+        self.event_bus = self.session_store.event_bus(
+            branched,
+            listener=self.event_listener,
+        )
+        self.conversation.event_bus = self.event_bus
+        self.conversation._event_bus = self.event_bus
+        emitter = getattr(self.conversation, "emitter", None)
+        if emitter is not None:
+            emitter.event_bus = self.event_bus
+        runtime_state = getattr(self.conversation, "runtime_state", None)
+        if runtime_state is not None:
+            runtime_state.session_id = branched.id
+            runtime_state.event_bus = self.event_bus
+        if self.tool_context is not None:
+            self.tool_context.session_id = branched.id
+            self.tool_context.event_bus = self.event_bus
+        self.session_store.update_profile(
+            branched.id,
+            self.profile.name(),
+            profile_source=self._profile_source,
+        )
+        self.session_store.update_routing_mode(branched.id, self.routing_mode)
+        self.event_bus.emit(
+            "session_forked_active",
+            agent="main_agent",
+            payload={"source_session_id": source.id, "session_id": branched.id},
+        )
+        return f"已进入会话分支：{branched.id}"
+
+    def resume_from_session(self, session_id: str) -> None:
+        """Load a selected history session into the active conversation."""
         context_text = _build_resume_context(self.session_store, session_id)
         self.resume_session_id = session_id
         self.resume_context = context_text
         if not self.is_bound:
-            return f"Resume context queued for session: {session_id}"
+            return
         if self.session is not None:
             self.session_store.update_resumed_from(self.session.id, session_id)
         self._append_conversation_message({
             "role": "user",
             "content": f"Resume context:\n{context_text}",
         })
-        return f"Resumed context injected for session: {session_id}"
 
     def _externalize_large_turn_text(self, label: str, text: str, *, intro: str) -> str:
         limit = _env_int("HARNESS_TURN_INLINE_CHAR_LIMIT", TURN_INLINE_CHAR_LIMIT)
@@ -1010,16 +1244,18 @@ class InteractiveSession:
         if not args:
             return self.create_checkpoint(manual=True)
         if args[:2] == ["auto", "on"]:
-            self.checkpoint.auto = True
-            return "checkpoint auto: on"
+            return self.set_auto_checkpoint(True)
         if args[:2] == ["auto", "off"]:
-            self.checkpoint.auto = False
-            return "checkpoint auto: off"
+            return self.set_auto_checkpoint(False)
         if args[:2] == ["every", "turn"]:
             self.checkpoint.every_turns = 1
             return "checkpoint cadence: every turn"
-        if args and args[0] == "every":
-            if len(args) in (2, 3) and (len(args) == 2 or args[2] in ("turn", "turns")):
+        if (
+            args
+            and args[0] == "every"
+            and len(args) in (2, 3)
+            and (len(args) == 2 or args[2] in ("turn", "turns"))
+        ):
                 try:
                     turns = int(args[1])
                 except ValueError as e:
@@ -1036,19 +1272,57 @@ class InteractiveSession:
             )
         raise ValueError("Usage: /checkpoint [auto on|auto off|every turn|every <N> turns|status]")
 
+    def set_auto_checkpoint(self, enabled: bool) -> str:
+        if enabled and not self._ensure_checkpoint_repository():
+            return "checkpoint unavailable: git repository initialization failed"
+        self.checkpoint.auto = enabled
+        return f"checkpoint auto: {'on' if enabled else 'off'}"
+
+    def _ensure_checkpoint_repository(self) -> bool:
+        if (self.cwd / ".git").exists():
+            return True
+        self._report_startup("preparing checkpoints")
+        try:
+            _ensure_git_repository(self.cwd)
+            self.checkpoint_init_error = ""
+            return True
+        except (OSError, subprocess.CalledProcessError) as exc:
+            if not self._allow_checkpoint_init_failure:
+                raise
+            self.checkpoint.auto = False
+            self.checkpoint_init_error = f"{type(exc).__name__}: {exc}"
+            if self.session is not None and self.event_bus is not None:
+                metadata = self.session_store.read_metadata(self.session.id)
+                metadata["checkpoint_status"] = "disabled"
+                metadata["checkpoint_init_error"] = self.checkpoint_init_error
+                self.session.metadata_path.write_text(
+                    json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                self.event_bus.emit(
+                    "checkpoint_disabled",
+                    agent="main_agent",
+                    payload={
+                        "reason": "git repository initialization failed",
+                        "error": self.checkpoint_init_error,
+                    },
+                )
+            return False
+
     def _maybe_auto_checkpoint(
         self,
         *,
-        baseline_dirty: set[str],
-        baseline_staged: set[str],
+        baseline: GitBaseline | None,
     ) -> str:
         if not self.checkpoint.auto:
             return "checkpoint auto off"
+        if baseline is None:
+            return "checkpoint skipped: git status unavailable"
         if self.turn_count % self.checkpoint.every_turns != 0:
             return "checkpoint cadence skipped"
-        if baseline_staged:
+        if baseline.staged_paths:
             return "checkpoint skipped: staged changes existed before turn"
-        return self.create_checkpoint(manual=False, baseline_dirty=baseline_dirty)
+        return self.create_checkpoint(manual=False, baseline_dirty=set(baseline.dirty_paths))
 
     def create_checkpoint(
         self,
@@ -1058,6 +1332,8 @@ class InteractiveSession:
     ) -> str:
         if self.session is None:
             return "checkpoint skipped: no active session"
+        if not self._ensure_checkpoint_repository():
+            return "checkpoint skipped: git repository unavailable"
         if self.checkpoint_init_error:
             return "checkpoint skipped: git repository unavailable"
         if not git_has_committable_changes(self.cwd):
@@ -1097,11 +1373,8 @@ class InteractiveSession:
             if self._closed:
                 return
             self._closed = True
-        stop_dev_server()
-        for slot in list(self.profile_slots.values()):
-            slot.conversation.close()
-        if self.mcp_manager is not None:
-            self.mcp_manager.close()
+        for error in self.lifecycle.close():
+            log.warning("Failed to close session resource %s: %s", error.name, error.error)
         if self.session is None or self.event_bus is None:
             return
         try:
@@ -1222,15 +1495,6 @@ def _load_harness_rules(workspace: Path) -> GlobalRulesDoc | None:
         return None
     return GlobalRulesDoc(source=str(path), content=content)
 
-
-
-def _truncate_handoff_text(text: str, limit: int = 4000) -> str:
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "\n...[truncated]"
-
-
 def print_turn_result(result: TurnResult) -> None:
     if result.streamed:
         print()
@@ -1241,33 +1505,15 @@ def print_turn_result(result: TurnResult) -> None:
     if result.checkpoint:
         print(result.checkpoint)
 
-
-from .formatters import (
-    _build_resume_context,
-    _event_summary,
-    format_config_show,
-    format_doctor,
-    format_fork,
-    format_profiles,
-    format_rollback_session_file,
-    format_sessions,
-    print_config_show,
-    print_fork,
-    print_help,
-    print_profiles,
-    print_session,
-    print_sessions,
-    rollback_session_file,
-    run_doctor,
-)
+from .formatters import _build_resume_context
 from .git_helpers import (
+    GitBaseline,
     _ensure_git_repository,
+    capture_git_baseline,
     git_add_paths,
     git_add_runtime_excluded,
     git_commit_command,
     git_dirty_paths,
     git_has_committable_changes,
     git_has_staged_changes,
-    git_staged_paths,
-    runtime_excluded_git_command,
 )

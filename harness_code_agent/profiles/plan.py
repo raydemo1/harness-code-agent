@@ -1,12 +1,12 @@
 """Planning profile with constrained planning-artifact writes."""
 from __future__ import annotations
 
-from .base import AgentConfig, BaseProfile, build_profile_prompt
 from ..runtime.permissions import (
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_NETWORK_READ,
     TOOL_PERMISSION_READ,
 )
+from .base import AgentConfig, BaseProfile, build_profile_prompt
 
 
 class PlanProfile(BaseProfile):
@@ -14,11 +14,11 @@ class PlanProfile(BaseProfile):
 
     def acceptance_criteria(self) -> list[str]:
         return [
-            "The plan is decision-complete: it names concrete files, symbols, tests, "
-            "and commands where specificity prevents ambiguity.",
+            ("The plan is decision-complete: it names concrete files, symbols, tests, "
+            "and commands where specificity prevents ambiguity."),
             "Any remaining assumptions are explicitly recorded rather than invented.",
-            "The plan stayed read-only and did not modify source, tests, dependencies, "
-            "configuration, migrations, or build outputs.",
+            ("The plan stayed read-only and did not modify source, tests, dependencies, "
+            "configuration, migrations, or build outputs."),
         ]
 
     def name(self) -> str:

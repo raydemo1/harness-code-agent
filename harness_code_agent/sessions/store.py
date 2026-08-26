@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .events import EventBus
 
@@ -179,6 +180,16 @@ class SessionStore:
         )
         return metadata
 
+    def update_routing_mode(self, session_id: str, routing_mode: str) -> dict[str, Any]:
+        metadata = self.read_metadata(session_id)
+        metadata["routing_mode"] = routing_mode
+        metadata_path = self._session_root(session_id) / "session.json"
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return metadata
+
     def update_resumed_from(self, session_id: str, resumed_from: str) -> dict[str, Any]:
         metadata = self.read_metadata(session_id)
         metadata["resumed_from"] = resumed_from
@@ -210,12 +221,6 @@ class SessionStore:
         summary_path = self._summary_path(session_id)
         summary_path.write_text(summary + "\n", encoding="utf-8")
         return summary
-
-    def read_summary(self, session_id: str) -> str:
-        summary_path = self._summary_path(session_id)
-        if not summary_path.exists():
-            raise FileNotFoundError(f"Session summary not found: {session_id}")
-        return summary_path.read_text(encoding="utf-8")
 
     def read_lineage(self, session_id: str) -> list[dict[str, Any]]:
         lineage = []

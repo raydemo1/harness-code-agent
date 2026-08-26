@@ -6,7 +6,6 @@ from ..runtime.tool_search import SearchDocument, build_bm25_retriever, search_b
 from .query import MemoryQueryComposer
 from .store import MemoryRecord, MemoryStore, _env_float, _env_int
 
-
 DEFAULT_TOP_K = 6
 DEFAULT_MIN_SCORE = 0.3
 

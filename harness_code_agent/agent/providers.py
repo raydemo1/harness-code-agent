@@ -1,9 +1,9 @@
 """Provider adapters for OpenAI-compatible chat completions."""
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from threading import Lock
-from typing import Callable, Iterable
 
 from openai import OpenAI
 
@@ -11,44 +11,36 @@ from .. import config
 from ..provider_resolution import resolve_provider_name
 from .utils import _get, _usage_to_dict
 
-
 TextDeltaCallback = Callable[[str], None]
 ChunkCallback = Callable[[], None]
 
 
-_client: OpenAI | None = None
-_client_config: tuple[str | None, str | None, float, int] | None = None
-_client_lock = Lock()
-
-
 def get_client() -> OpenAI:
-    global _client, _client_config
     client_config = _current_client_config()
-    if _client is None or _client_config != client_config:
-        with _client_lock:
-            client_config = _current_client_config()
-            if _client is None or _client_config != client_config:
-                _client = OpenAI(
-                    api_key=client_config[0],
-                    base_url=client_config[1],
-                    timeout=client_config[2],
-                    max_retries=client_config[3],
-                )
-                _client_config = client_config
-    return _client
+    return OpenAI(
+        api_key=client_config[0],
+        base_url=client_config[1],
+        timeout=client_config[2],
+        max_retries=client_config[3],
+    )
 
 
-def reset_client() -> None:
-    global _client, _client_config
-    _client = None
-    _client_config = None
+@contextmanager
+def client_scope():
+    """Yield one independently owned client and always release its transport."""
+    client = get_client()
+    try:
+        yield client
+    finally:
+        with suppress(Exception):
+            client.close()
 
 
 def _current_client_config() -> tuple[str | None, str | None, float, int]:
     return (config.API_KEY, config.BASE_URL, 300.0, 2)
 
 
-def current_adapter() -> "ProviderAdapter":
+def current_adapter() -> ProviderAdapter:
     return ProviderAdapter(
         name=resolve_provider_name(
             provider=config.PROVIDER,
@@ -88,7 +80,7 @@ class ProviderAdapter:
             raise ValueError("model or profile is required")
         kwargs = {
             "model": model,
-            "messages": _strip_response_only_message_fields(messages),
+            "messages": _strip_response_only_message_fields(messages, provider_name=self.name),
             "max_tokens": max_tokens,
         }
         if tools is not None:
@@ -245,17 +237,42 @@ def _reasoning_content_from(value) -> str | None:
     return reasoning_content
 
 
-def _strip_response_only_message_fields(messages: list[dict]) -> list[dict]:
+def _strip_response_only_message_fields(
+    messages: list[dict],
+    *,
+    provider_name: str | None = None,
+) -> list[dict]:
     """Return provider-bound messages without response-only bookkeeping fields."""
     cleaned: list[dict] = []
     for message in messages:
         if not isinstance(message, dict):
             cleaned.append(message)
             continue
-        if "reasoning_content" not in message:
+        content = message.get("content")
+        has_internal_attachment_metadata = isinstance(content, list) and any(
+            isinstance(block, dict) and "attachment" in block for block in content
+        )
+        if "reasoning_content" not in message and not has_internal_attachment_metadata:
             cleaned.append(message)
             continue
         outbound = dict(message)
         outbound.pop("reasoning_content", None)
+        if has_internal_attachment_metadata:
+            outbound["content"] = [_provider_content_block(block, provider_name) for block in content]
         cleaned.append(outbound)
+    return cleaned
+
+
+def _provider_content_block(block, provider_name: str | None):
+    if not isinstance(block, dict):
+        return block
+    cleaned = {key: value for key, value in block.items() if key != "attachment"}
+    if provider_name == "deepseek" and cleaned.get("type") == "file":
+        file_payload = cleaned.pop("file", None)
+        if isinstance(file_payload, dict):
+            cleaned.update({
+                key: file_payload[key]
+                for key in ("file_id", "file_data", "filename")
+                if file_payload.get(key) is not None
+            })
     return cleaned

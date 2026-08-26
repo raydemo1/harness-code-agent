@@ -153,7 +153,7 @@ def install_artifact_export_hooks(state: dict[str, Any]) -> None:
 
     atexit.register(on_exit)
 
-    def handle_signal(signum, frame) -> None:  # noqa: ARG001
+    def handle_signal(signum, frame) -> None:
         state["runner_error"] = "\n".join(
             part
             for part in (
@@ -263,8 +263,14 @@ def main(argv: list[str] | None = None) -> int:
     install_artifact_export_hooks(hook_state)
     periodic_export_stop = start_periodic_artifact_export(hook_state)
     try:
-        from harness_code_agent.core.interactive import InteractiveSession, print_turn_result
-        from eval.benchmarks.usage_metrics import build_session_eval_metrics, print_eval_metrics
+        from eval.benchmarks.usage_metrics import (
+            build_session_eval_metrics,
+            print_eval_metrics,
+        )
+        from harness_code_agent.core.interactive import (
+            InteractiveSession,
+            print_turn_result,
+        )
 
         session = InteractiveSession(
             cwd=workspace,

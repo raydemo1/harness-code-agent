@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 
-
 _SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",

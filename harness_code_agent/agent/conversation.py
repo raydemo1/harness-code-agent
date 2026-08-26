@@ -1,65 +1,49 @@
 """Agent and conversation loop implementation."""
 from __future__ import annotations
 
-import logging
+import contextlib
 import json
+import logging
+import threading
 import time
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
-from . import context
-from .cancellation import CancelledError
-from .compaction import CompactionGate, compaction_action, get_thresholds
-from .observations import FactTracker, ObservationStore
-from .providers import ProviderAdapter, current_adapter, get_client
-from .runtime_state import AgentFallbackState, AgentRuntimeState, RecoveryState, TaskBoard
-from .tool_executor import ToolExecutor
-from .trace import TraceWriter
-from .utils import (
-    _prompt_cache_key,
-    _short_hash,
-    _usage_to_dict,
-    capture_prompt_cache_shape,
-    compare_prompt_cache_shapes,
-)
 from ..runtime.arg_preview import safe_args_preview
 from ..runtime.builtins.registry import TOOL_SCHEMAS
 from ..runtime.tool_context import ToolContext
 from ..runtime.tool_result import ToolResult
 from ..runtime.tool_runner import finalize_intercepted_tool_result
-
+from ..workspace.shell_jobs import ShellJobManager
+from . import context
+from .cancellation import CancelledError
+from .compaction import CompactionGate, compaction_action, get_thresholds
+from .llm_channel import LlmChannel, LlmStreamTimeoutError, llm_call_simple
+from .observations import FactTracker, ObservationStore
+from .providers import ProviderAdapter, current_adapter, get_client
+from .runtime_state import (
+    AgentFallbackState,
+    AgentRuntimeState,
+    RecoveryState,
+    TaskBoard,
+)
+from .session_emitter import SessionEmitter
+from .tool_executor import ToolExecutor
+from .trace import TraceWriter
+from .turn_controller import TurnController
+from .utils import (
+    _prompt_cache_key,
+    _short_hash,
+    capture_prompt_cache_shape,
+    compare_prompt_cache_shapes,
+)
 
 log = logging.getLogger("harness")
 DYNAMIC_CONTEXT_MARKER = "[HARNESS_DYNAMIC_CONTEXT:"
 
 
-def llm_call_simple(messages: list[dict]) -> str:
-    """Simple LLM call without tools — used for summarization.
-    Retries on rate limits to avoid crashing the agent during context compaction."""
-    import random
-    profile = config.resolve_model_profile("fast")
-    adapter = ProviderAdapter(profile.provider)
-    for attempt in range(4):
-        try:
-            resp = get_client().chat.completions.create(**adapter.chat_kwargs(
-                profile=profile,
-                messages=messages,
-                max_tokens=10000,
-            ))
-            return resp.choices[0].message.content or ""
-        except Exception as e:
-            err_str = str(e)
-            if ("rate_limit" in err_str.lower() or "429" in err_str) and attempt < 3:
-                wait = min(2 ** (attempt + 1), 30) + random.uniform(0, 3)
-                log.warning(f"llm_call_simple rate limited, waiting {wait:.1f}s (attempt {attempt+1}/4)")
-                time.sleep(wait)
-                continue
-            log.error(f"llm_call_simple failed: {e}")
-            # Return a minimal summary rather than crashing
-            return "[context summarization failed — continuing with truncated context]"
-    return "[context summarization failed after retries]"
 
 
 class Agent:
@@ -82,10 +66,12 @@ class Agent:
                  middlewares: list | None = None,
                  time_budget: float | None = None,
                  tool_schemas: list[dict] | None = None,
-                  tool_context: ToolContext | None = None,
-                  stream_callback=None,
-                  prompt_cache_identity: dict[str, str] | None = None,
-                  initial_planning_mode: str = "unset"):
+                 tool_context: ToolContext | None = None,
+                 stream_callback=None,
+                 prompt_cache_identity: dict[str, str] | None = None,
+                 initial_planning_mode: str = "unset",
+                 model_intensity: str | None = None,
+                 max_iterations: int | None = None):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
@@ -98,11 +84,17 @@ class Agent:
         self.stream_callback = stream_callback
         self.prompt_cache_identity = prompt_cache_identity
         self.initial_planning_mode = _normalize_initial_planning_mode(initial_planning_mode)
+        self.model_intensity = model_intensity
+        self.max_iterations = max_iterations
         self.current_task_metadata: dict = {}
         self._conversations: weakref.WeakSet[AgentConversation] = weakref.WeakSet()
 
     def _create_runtime_state(self, task: str) -> AgentRuntimeState:
-        return AgentRuntimeState(task_board=self._new_task_board(task))
+        workspace = self.tool_context.workspace.root if self.tool_context is not None else Path.cwd()
+        return AgentRuntimeState(
+            task_board=self._new_task_board(task),
+            shell_job_manager=ShellJobManager(workspace),
+        )
 
     def _new_task_board(self, task: str) -> TaskBoard:
         return TaskBoard(
@@ -140,7 +132,7 @@ class Agent:
         for conversation in list(self._conversations):
             conversation._cached_prompt_cache_key = None
 
-    def start_conversation(self, initial_task: str | None = None) -> "AgentConversation":
+    def start_conversation(self, initial_task: str | None = None) -> AgentConversation:
         conversation = AgentConversation(self, initial_task)
         self._conversations.add(conversation)
         return conversation
@@ -151,7 +143,10 @@ class AgentConversation:
 
     def __init__(self, agent: Agent, initial_task: str | None = None):
         self.agent = agent
-        self.trace = TraceWriter(agent.name)
+        self.trace = TraceWriter(
+            agent.name,
+            workspace=(agent.tool_context.workspace.root if agent.tool_context is not None else Path.cwd()),
+        )
         self.runtime_state = agent._create_runtime_state(initial_task or "")
         if agent.tool_context is not None and agent.tool_context.session_id:
             self.runtime_state.session_id = agent.tool_context.session_id
@@ -159,15 +154,21 @@ class AgentConversation:
             self.runtime_state.permission_mode = agent.tool_context.permission_policy.mode
         self.messages: list[dict] = [{"role": "system", "content": agent.system_prompt}]
         self.client = get_client()
+        self._client_needs_refresh = False
         self.provider: ProviderAdapter = current_adapter()
+        self.emitter = SessionEmitter(None, agent.name, self.provider.name)
+        self.llm = LlmChannel(self)
         self.consecutive_errors = 0
         self.last_text = ""
         self.last_run_streamed_text = False
         self._closed = False
+        self._queued_messages: list[str] = []
+        self._queued_messages_lock = threading.Lock()
         self._iteration_offset = 0
         self.compaction_gate = CompactionGate()
-        self._event_bus = agent.tool_context.event_bus if agent.tool_context is not None else None
-        self.runtime_state.event_bus = self._event_bus
+        self.event_bus = agent.tool_context.event_bus if agent.tool_context is not None else None
+        self.runtime_state.event_bus = self.event_bus
+        self.emitter.event_bus = self.event_bus
         self.fact_tracker = FactTracker()
         self.observation_store = ObservationStore(self._observation_dir())
         self._cached_prompt_cache_key: str | None = None
@@ -181,10 +182,7 @@ class AgentConversation:
     def _observation_dir(self) -> Path:
         session_id = getattr(self.runtime_state, "session_id", None) or "default"
         safe_session_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
-        if self.agent.tool_context is not None:
-            root = self.agent.tool_context.workspace.root
-        else:
-            root = Path(config.WORKSPACE)
+        root = self._workspace_root()
         return root / ".harness" / "observations" / safe_session_id
 
     def _build_prompt(self) -> list[dict]:
@@ -195,9 +193,72 @@ class AgentConversation:
         """
         return self.messages
 
-    def add_user_turn(self, task: str) -> None:
+    def rebind_agent(self, agent: Agent) -> None:
+        """Keep this conversation while changing the active profile runtime.
+
+        Profile switching is a session-level policy change, not a new chat.
+        The message history and runtime state stay intact; only the system
+        contract, tool policy and middleware set come from the new agent.
+        """
+        if agent is self.agent:
+            return
+        previous = self.agent
+        conversations = getattr(previous, "_conversations", None)
+        if conversations is not None:
+            conversations.discard(self)
+        new_conversations = getattr(agent, "_conversations", None)
+        if new_conversations is not None:
+            new_conversations.add(self)
+        self.agent = agent
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0] = {"role": "system", "content": agent.system_prompt}
+        self._cached_prompt_cache_key = None
+        self._last_prompt_cache_shape = None
+        self._pending_prompt_cache_shape = None
+
+    def compact_now(self) -> str:
+        """Compact the current conversation on explicit user request.
+
+        Unlike automatic compaction this does not wait for a token threshold;
+        it still uses the existing summarizer and persistence/event pipeline.
+        """
+        if len(self.messages) <= 2:
+            return "当前对话内容还不足以压缩"
+        messages_before = len(self.messages)
+        token_count_before = context.count_request_tokens(
+            self.messages,
+            tool_schemas=_tool_schemas_for_agent(self.agent),
+        )
+        self._strip_dynamic_context_messages()
+        summarized = context.summarize_older_conversation(
+            self.messages,
+            llm_call_simple,
+            current_turn_start_index=max(1, self.runtime_state.current_turn_start_index),
+        )
+        if summarized == self.messages:
+            return "当前对话暂时无需压缩"
+        self._replace_messages(summarized)
+        self.compaction_gate.mark_compacted()
+        summary_text = _first_compacted_summary(summarized)
+        self._emit_compaction_committed(
+            messages_before=messages_before,
+            token_count_before=token_count_before,
+            summary_chars=len(summary_text),
+            summary_text=summary_text,
+            phase="manual",
+        )
+        self._refresh_dynamic_context_after_compaction(phase="manual")
+        return f"已压缩对话：{messages_before} 条消息 → {len(self.messages)} 条"
+
+    def add_user_turn(
+        self,
+        task: str | list[dict],
+        *,
+        task_text: str | None = None,
+    ) -> None:
+        logical_task = task_text if task_text is not None else str(task)
         self.runtime_state.current_turn_start_index = len(self.messages)
-        self.runtime_state.task_board = self.agent._new_task_board(task)
+        self.runtime_state.task_board = self.agent._new_task_board(logical_task)
         self.runtime_state.action_tool_count = 0
         self.runtime_state.fallback = AgentFallbackState()
         self.runtime_state.auto_compaction_turn_start_index = -1
@@ -205,12 +266,36 @@ class AgentConversation:
         self.runtime_state.context_anxiety_turn_start_index = -1
         for mw in self.agent.middlewares:
             mw.begin_turn(
-                task,
+                logical_task,
                 self.messages,
                 runtime_state=self.runtime_state,
                 agent_name=self.agent.name,
             )
         self._append_message({"role": "user", "content": task})
+
+    def queue_message(self, message: str) -> None:
+        """Queue steering text for the next valid model-request boundary."""
+        text = str(message or "").strip()
+        if not text:
+            raise ValueError("queued message must not be empty")
+        with self._queued_messages_lock:
+            self._queued_messages.append(text)
+
+    def has_queued_messages(self) -> bool:
+        with self._queued_messages_lock:
+            return bool(self._queued_messages)
+
+    def _drain_queued_messages(self) -> bool:
+        with self._queued_messages_lock:
+            pending = self._queued_messages
+            self._queued_messages = []
+        for message in pending:
+            self._append_message({
+                "role": "user",
+                "content": f"[PARENT STEERING MESSAGE]\n{message}",
+            })
+            self.trace.middleware_inject("AgentInbox", "safe_boundary", message)
+        return bool(pending)
 
     def _append_message(self, message: dict) -> None:
         self.messages.append(message)
@@ -245,7 +330,7 @@ class AgentConversation:
         changed = False
         turn_start = self.runtime_state.current_turn_start_index
         for idx, message in enumerate(self.messages):
-            content = str(message.get("content") or "")
+            content = _safe_message_content(message)
             if content.startswith(DYNAMIC_CONTEXT_MARKER):
                 changed = True
                 if idx < turn_start:
@@ -293,10 +378,7 @@ class AgentConversation:
         if not session_id or session_id == "default":
             return None
         safe_session_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
-        if self.agent.tool_context is not None:
-            root = self.agent.tool_context.workspace.root
-        else:
-            root = Path(config.WORKSPACE)
+        root = self._workspace_root()
         return root / ".harness" / "sessions" / safe_session_id / "compacted"
 
     def _persist_compacted_summary(self, summary: str, *, phase: str) -> None:
@@ -318,52 +400,22 @@ class AgentConversation:
         except OSError as exc:
             log.debug("Failed to persist compacted summary: %s", exc)
 
-    def _emit_compaction_started(self, *, token_count: int, threshold: int, phase: str) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import ContextCompactionStartedEvent
-        self._event_bus.emit_event(
-            ContextCompactionStartedEvent(
-                token_count=token_count,
-                threshold=threshold,
-                forced=False,
-                phase=phase,
-            ).to_event()
-        )
-
     def _emit_compaction_committed(self, *, messages_before: int, token_count_before: int,
                                    summary_chars: int = 0, summary_text: str = "",
                                    phase: str = "compact") -> None:
         if summary_text:
             self._persist_compacted_summary(summary_text, phase=phase)
-        if self._event_bus is None:
+        if self.emitter.event_bus is None:
             return
-        from ..sessions.events import ContextCompactionCommittedEvent
         tokens_after = context.count_request_tokens(
             self.messages,
             tool_schemas=_tool_schemas_for_agent(self.agent),
         )
-        self._event_bus.emit_event(
-            ContextCompactionCommittedEvent(
-                summary_chars=summary_chars,
-                messages_before=messages_before,
-                messages_after=len(self.messages),
-                tokens_saved=max(0, token_count_before - tokens_after),
-            ).to_event()
-        )
-
-    def _emit_context_anxiety_observed(self, *, token_count: int, threshold: int, signal) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import ContextAnxietyObservedEvent
-        self._event_bus.emit_event(
-            ContextAnxietyObservedEvent(
-                token_count=token_count,
-                threshold=threshold,
-                score=getattr(signal, "score", 0),
-                reasons=list(getattr(signal, "reasons", [])),
-                source=getattr(signal, "source", "assistant_recent_messages"),
-            ).to_event()
+        self.emitter.emit_compaction_committed(
+            messages_before=messages_before,
+            messages_after=len(self.messages),
+            tokens_saved=max(0, token_count_before - tokens_after),
+            summary_chars=summary_chars,
         )
 
     def _maybe_auto_compact(self, agent: Agent, *, token_count: int, thresholds) -> None:
@@ -384,7 +436,7 @@ class AgentConversation:
         self._strip_dynamic_context_messages()
 
         # Layer 1 — summarize older conversation via lightweight LLM call
-        self._emit_compaction_started(
+        self.emitter.emit_compaction_started(
             token_count=token_count,
             threshold=thresholds.compact,
             phase="summarizing_history",
@@ -421,7 +473,7 @@ class AgentConversation:
         # Layer 2 — reset context from a persisted handoff document
         state.context_refill_streak += 1
         state.auto_compaction_suspended = True
-        self._emit_compaction_started(
+        self.emitter.emit_compaction_started(
             token_count=tokens_after_summary,
             threshold=thresholds.compact,
             phase="auto_compaction_suspended",
@@ -431,7 +483,7 @@ class AgentConversation:
             self._handoff_reset_context(agent, token_count=tokens_after_summary, thresholds=thresholds)
 
     def _handoff_reset_context(self, agent: Agent, *, token_count: int, thresholds) -> None:
-        self._emit_compaction_started(
+        self.emitter.emit_compaction_started(
             token_count=token_count,
             threshold=thresholds.compact,
             phase="handoff_reset",
@@ -442,11 +494,7 @@ class AgentConversation:
             if self.messages and self.messages[0].get("role") == "system"
             else agent.system_prompt
         )
-        workspace = (
-            str(self.agent.tool_context.workspace.root)
-            if self.agent.tool_context is not None
-            else str(config.WORKSPACE)
-        )
+        workspace = str(self._workspace_root())
         handoff, handoff_path = context.create_handoff_reset(
             self.messages,
             self._working_context_state(),
@@ -502,7 +550,7 @@ class AgentConversation:
     def _latest_user_message(self) -> str:
         for msg in reversed(self.messages):
             if msg.get("role") == "user" and msg.get("content"):
-                return str(msg.get("content"))
+                return _safe_message_content(msg)
         return ""
 
     def _task_board_status(self) -> str:
@@ -522,7 +570,7 @@ class AgentConversation:
         errors: list[str] = []
         failed_commands: list[str] = []
         for msg in self.messages[-30:]:
-            content = str(msg.get("content") or "")
+            content = _safe_message_content(msg)
             lowered = content.lower()
             if "[error]" in lowered or "failed" in lowered or "traceback" in lowered:
                 errors.append(content[:500])
@@ -533,17 +581,14 @@ class AgentConversation:
     def _active_constraints(self) -> list[str]:
         constraints = []
         for msg in self.messages[-20:]:
-            content = str(msg.get("content") or "")
+            content = _safe_message_content(msg)
             lowered = content.lower()
             if "constraint" in lowered or "不要" in content or "must" in lowered or "only" in lowered:
                 constraints.append(content[:300])
         return constraints[-5:]
 
     def _latest_checkpoint_summary(self) -> str:
-        if self.agent.tool_context is not None:
-            root = self.agent.tool_context.workspace.root
-        else:
-            root = Path(config.WORKSPACE)
+        root = self._workspace_root()
         for rel in ("progress.md", ".harness/checkpoints/latest.md"):
             path = root / rel
             if path.exists() and path.is_file():
@@ -555,168 +600,35 @@ class AgentConversation:
                     continue
         return "none"
 
-    def submit(self, task: str, cancellation_token=None) -> str:
-        self.add_user_turn(task)
+    def submit(
+        self,
+        task: str | list[dict],
+        cancellation_token=None,
+        *,
+        task_text: str | None = None,
+    ) -> str:
+        self.add_user_turn(task, task_text=task_text)
         return self.run_until_idle(cancellation_token=cancellation_token)
+
+    def next_call_id(self) -> str:
+        return f"{self.agent.name}-{time.time_ns()}"
 
     def _check_cancelled(self, cancellation_token) -> None:
         if cancellation_token is not None:
             cancellation_token.check()
 
-    def _request_assistant_message(self, kwargs: dict, cancellation_token=None) -> tuple[dict, str | None] | None:
-        if self.agent.stream_callback is not None:
-            stream_kwargs = dict(kwargs)
-            stream_kwargs["stream"] = True
-            call_id = self._next_llm_call_id()
-            request_started = time.perf_counter()
-            first_token_ms: int | None = None
-            self._emit_llm_request_started(call_id, streamed=True, kwargs=stream_kwargs)
-            saw_chunk = False
-            thought_start_time: float | None = None
+    def _workspace_root(self) -> Path:
+        if self.agent.tool_context is not None:
+            return self.agent.tool_context.workspace.root
+        return Path.cwd()
 
-            def on_chunk() -> None:
-                nonlocal saw_chunk
-                saw_chunk = True
+    def refresh_client(self) -> None:
+        with contextlib.suppress(Exception):
+            self.client.close()
+        self.client = get_client()
+        self._client_needs_refresh = False
 
-            def on_text_delta(delta: str) -> None:
-                nonlocal first_token_ms
-                if first_token_ms is None:
-                    first_token_ms = int((time.perf_counter() - request_started) * 1000)
-                    self._emit_llm_first_token(call_id, first_token_ms, kwargs=stream_kwargs)
-                self.last_run_streamed_text = True
-                self.agent.stream_callback(delta)
-
-            def on_reasoning_start() -> None:
-                nonlocal thought_start_time
-                thought_start_time = time.time()
-                if self._event_bus is not None:
-                    from ..sessions.events import ThoughtStartedEvent
-                    self._event_bus.emit_event(ThoughtStartedEvent().to_event())
-
-            def on_reasoning_delta(delta: str) -> None:
-                pass  # Reasoning content collected silently, not displayed
-
-            try:
-                if self.provider.supports_prompt_cache_key:
-                    stream_kwargs.setdefault("stream_options", {"include_usage": True})
-                stream = self.client.chat.completions.create(**stream_kwargs)
-                result = self.provider.assistant_message_from_stream(
-                    stream,
-                    on_text_delta=on_text_delta,
-                    on_chunk=on_chunk,
-                    on_reasoning_start=on_reasoning_start,
-                    on_reasoning_delta=on_reasoning_delta,
-                    cancellation_token=cancellation_token,
-                )
-                # Emit thought finished event if reasoning was detected
-                if thought_start_time is not None and self._event_bus is not None:
-                    duration = time.time() - thought_start_time
-                    from ..sessions.events import ThoughtFinishedEvent
-                    self._event_bus.emit_event(
-                        ThoughtFinishedEvent(
-                            duration_seconds=duration,
-                            source=self.provider.name,
-                        ).to_event()
-                    )
-                self._emit_llm_response_finished(
-                    call_id,
-                    int((time.perf_counter() - request_started) * 1000),
-                    finish_reason=result.finish_reason,
-                    streamed=True,
-                    first_token_ms=first_token_ms,
-                    kwargs=stream_kwargs,
-                )
-                self._emit_llm_usage(result.usage, kwargs.get("prompt_cache_key"))
-                return result.assistant_message, result.finish_reason
-            except CancelledError:
-                raise
-            except Exception as exc:
-                if saw_chunk:
-                    raise
-                self.trace.error("stream_fallback", str(exc))
-
-        self._check_cancelled(cancellation_token)
-        call_id = self._next_llm_call_id()
-        request_started = time.perf_counter()
-        self._emit_llm_request_started(call_id, streamed=False, kwargs=kwargs)
-        response = self.client.chat.completions.create(**kwargs)
-        self._check_cancelled(cancellation_token)
-        if not response.choices:
-            return None
-        choice = response.choices[0]
-        self._emit_llm_response_finished(
-            call_id,
-            int((time.perf_counter() - request_started) * 1000),
-            finish_reason=choice.finish_reason,
-            streamed=False,
-            first_token_ms=None,
-            kwargs=kwargs,
-        )
-        self._emit_llm_usage(_usage_to_dict(getattr(response, "usage", None)), kwargs.get("prompt_cache_key"))
-
-        return self.provider.assistant_message_from_response(choice.message), choice.finish_reason
-
-    def _next_llm_call_id(self) -> str:
-        return f"{self.agent.name}-{time.time_ns()}"
-
-    def _emit_llm_request_started(self, call_id: str, *, streamed: bool, kwargs: dict) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import LlmRequestStartedEvent
-
-        self._event_bus.emit_event(
-            LlmRequestStartedEvent(
-                call_id=call_id,
-                provider=self.provider.name,
-                model=str(kwargs.get("model") or config.MODEL),
-                streamed=streamed,
-                agent=self.agent.name,
-            ).to_event()
-        )
-
-    def _emit_llm_first_token(self, call_id: str, elapsed_ms: int, *, kwargs: dict) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import LlmFirstTokenEvent
-
-        self._event_bus.emit_event(
-            LlmFirstTokenEvent(
-                call_id=call_id,
-                elapsed_ms=elapsed_ms,
-                provider=self.provider.name,
-                model=str(kwargs.get("model") or config.MODEL),
-                agent=self.agent.name,
-            ).to_event()
-        )
-
-    def _emit_llm_response_finished(
-        self,
-        call_id: str,
-        duration_ms: int,
-        *,
-        finish_reason: str | None,
-        streamed: bool,
-        first_token_ms: int | None,
-        kwargs: dict,
-    ) -> None:
-        if self._event_bus is None:
-            return
-        from ..sessions.events import LlmResponseFinishedEvent
-
-        self._event_bus.emit_event(
-            LlmResponseFinishedEvent(
-                call_id=call_id,
-                duration_ms=max(0, int(duration_ms)),
-                provider=self.provider.name,
-                model=str(kwargs.get("model") or config.MODEL),
-                streamed=streamed,
-                finish_reason=finish_reason,
-                first_token_ms=first_token_ms,
-                agent=self.agent.name,
-            ).to_event()
-        )
-
-    def _emit_llm_usage(self, usage: dict | None, prompt_cache_key: str | None) -> None:
+    def record_llm_usage(self, usage: dict | None, prompt_cache_key: str | None) -> None:
         fallback = self.runtime_state.fallback
         fallback.llm_call_count += 1
         if usage:
@@ -731,7 +643,7 @@ class AgentConversation:
                 fallback.total_tokens,
                 config.MAX_AGENT_TOTAL_TOKENS,
             )
-        if not usage or self._event_bus is None:
+        if not usage or self.event_bus is None:
             return
         from ..sessions.events import LlmUsageEvent
 
@@ -750,7 +662,7 @@ class AgentConversation:
         )
         self._last_prompt_cache_shape = cache_shape
         self._pending_prompt_cache_shape = None
-        self._event_bus.emit_event(
+        self.event_bus.emit_event(
             LlmUsageEvent(
                 provider=getattr(self.provider, "name", "unknown"),
                 model=config.MODEL,
@@ -766,7 +678,7 @@ class AgentConversation:
             ).to_event()
         )
 
-    def _limit_enabled(self, limit: int | float | None) -> bool:
+    def _limit_enabled(self, limit: float | None) -> bool:
         try:
             return limit is not None and float(limit) > 0
         except (TypeError, ValueError):
@@ -785,11 +697,11 @@ class AgentConversation:
         if used < threshold:
             return
         fallback.budget_warnings.add(limit_type)
-        if self._event_bus is None:
+        if self.event_bus is None:
             return
         from ..sessions.events import AgentBudgetWarningEvent
 
-        self._event_bus.emit_event(
+        self.event_bus.emit_event(
             AgentBudgetWarningEvent(
                 limit_type=limit_type,
                 used=int(used),
@@ -830,28 +742,6 @@ class AgentConversation:
         fallback.record_action(_safe_tool_summary(tool_name, tool_args))
         self._maybe_emit_budget_warning("tool_calls", fallback.tool_call_count, limit)
         return True
-
-    def _emit_agent_fallback(self) -> None:
-        fallback = self.runtime_state.fallback
-        if fallback.fallback_event_emitted or not fallback.stop_requested:
-            return
-        fallback.fallback_event_emitted = True
-        if self._event_bus is None:
-            return
-        from ..sessions.events import AgentFallbackEvent
-
-        self._event_bus.emit_event(
-            AgentFallbackEvent(
-                reason=fallback.stop_reason,
-                limit_type=fallback.stop_limit_type or None,
-                used=fallback.stop_used,
-                limit=fallback.stop_limit,
-                last_tool=fallback.stop_last_tool or None,
-                fingerprint_hash=fallback.stop_fingerprint_hash or None,
-                recent_action_summary=fallback.recent_action_summary,
-                agent=self.agent.name,
-            ).to_event()
-        )
 
     def _fallback_text(self) -> str:
         fallback = self.runtime_state.fallback
@@ -898,13 +788,24 @@ class AgentConversation:
     def run_until_idle(self, cancellation_token=None) -> str:
         agent = self.agent
         self.last_run_streamed_text = False
-        self._cancellation_token = cancellation_token
+        run_started = time.monotonic()
+        turn_controller = TurnController(self)
 
-        for local_iteration in range(1, config.MAX_AGENT_ITERATIONS + 1):
+        iteration_limit = agent.max_iterations or config.MAX_AGENT_ITERATIONS
+        for local_iteration in range(1, iteration_limit + 1):
             iteration = self._iteration_offset + local_iteration
 
             # --- Cancellation check ---
             self._check_cancelled(cancellation_token)
+            self._drain_queued_messages()
+
+            # --- Time budget check ---
+            budget_decision = turn_controller.check_time_budget(
+                run_started=run_started,
+                iteration=iteration,
+            )
+            if budget_decision is not None:
+                break
 
             # --- Middleware: per-iteration hooks ---
             for mw in agent.middlewares:
@@ -931,7 +832,7 @@ class AgentConversation:
                 self.runtime_state.context_anxiety_turn_start_index = self.runtime_state.current_turn_start_index
                 score = getattr(anxiety, "score", 0)
                 self.trace.context_event("context_anxiety", f"tokens={token_count} score={score}")
-                self._emit_context_anxiety_observed(
+                self.emitter.emit_context_anxiety_observed(
                     token_count=token_count,
                     threshold=thresholds.compact,
                     signal=anxiety,
@@ -941,7 +842,7 @@ class AgentConversation:
 
             # --- Build prompt and LLM call ---
             prompt_messages = self._build_prompt()
-            profile = config.resolve_model_profile(config.MODEL_INTENSITY)
+            profile = config.resolve_model_profile(agent.model_intensity or config.MODEL_INTENSITY)
             chat_args = {
                 "profile": profile,
                 "messages": prompt_messages,
@@ -964,8 +865,12 @@ class AgentConversation:
             kwargs = self.provider.chat_kwargs(**chat_args)
 
             try:
-                completion = self._request_assistant_message(kwargs, cancellation_token=cancellation_token)
+                completion = self.llm.request_assistant_message(kwargs, cancellation_token=cancellation_token)
             except CancelledError:
+                raise
+            except LlmStreamTimeoutError as e:
+                self.trace.error("api_timeout", str(e))
+                self.trace.finish("llm_timeout", iteration)
                 raise
             except Exception as e:
                 err_str = str(e)
@@ -1021,26 +926,13 @@ class AgentConversation:
 
             # --- If no tool calls, check pre-exit middlewares ---
             if not tool_calls:
-                forced_continue = False
-                for mw in agent.middlewares:
-                    inject = mw.pre_exit(
-                        self.messages,
-                        runtime_state=self.runtime_state,
-                        agent_name=agent.name,
-                    )
-                    if inject:
-                        self._append_message({"role": "user", "content": inject})
-                        self.trace.middleware_inject(type(mw).__name__, "pre_exit", inject)
-                        forced_continue = True
-                        break
-                if forced_continue:
+                decision = turn_controller.after_no_tool_calls(iteration=iteration)
+                if decision.continue_loop:
                     continue
-                log.info(f"[{agent.name}] Finished (no more tool calls).")
-                self.trace.finish("no_tool_calls", iteration)
                 break
 
             if self._request_token_budget_stop_if_needed():
-                self._emit_agent_fallback()
+                self.emitter.emit_agent_fallback(self.runtime_state.fallback)
                 self.last_text = self._fallback_text()
                 self._append_blocked_tool_results(tool_calls, self.runtime_state.fallback.stop_reason)
                 self.trace.finish("agent_fallback", iteration)
@@ -1055,53 +947,15 @@ class AgentConversation:
             if stop_after_tool_loop:
                 break
 
-            # --- Check finish reason ---
-            if finish_reason == "stop":
-                log.info(f"[{agent.name}] Finished (stop).")
-                self.trace.finish("stop", iteration)
+            decision = turn_controller.after_tool_calls(
+                finish_reason=finish_reason,
+                iteration=iteration,
+            )
+            if not decision.continue_loop:
                 break
 
-            if finish_reason == "length":
-                log.warning(f"[{agent.name}] Output truncated (max_tokens hit).")
-                self.trace.error("length_truncated", "max_tokens hit")
-                # If tool calls were present, they were already executed above.
-                # Only tell the model they weren't executed if none were parsed
-                # (i.e. the truncation cut off the tool call JSON itself).
-                if tool_calls:
-                    self._append_message({
-                        "role": "user",
-                        "content": (
-                            "[SYSTEM] Your response was truncated (token limit), but your tool calls "
-                            "WERE executed successfully. The results are above. "
-                            "If you had more tool calls planned, continue with the remaining ones now. "
-                            "Do NOT re-run the tools that already executed."
-                        ),
-                    })
-                else:
-                    self._append_message({
-                        "role": "user",
-                        "content": (
-                            "[SYSTEM] Your last response was cut off because it exceeded the token limit. "
-                            "No tool calls were executed. "
-                            "Please retry, but split large files into smaller parts:\n"
-                            "1. Write the first half of the file with write_file\n"
-                            "2. Then write the second half as a separate file or append\n"
-                            "Or simplify the implementation to fit in one response."
-                        ),
-                    })
-
         else:
-            log.warning(f"[{agent.name}] Hit max iterations ({config.MAX_AGENT_ITERATIONS}).")
-            self.runtime_state.fallback.request_stop(
-                reason="max_iterations",
-                limit_type="iterations",
-                used=config.MAX_AGENT_ITERATIONS,
-                limit=config.MAX_AGENT_ITERATIONS,
-                recent_action_summary=self.runtime_state.fallback.recent_action_summary,
-            )
-            self._emit_agent_fallback()
-            self.last_text = self._fallback_text()
-            self.trace.finish("max_iterations", config.MAX_AGENT_ITERATIONS)
+            turn_controller.finish_max_iterations(iteration_limit=iteration_limit)
 
         self._iteration_offset += local_iteration
         return self.last_text
@@ -1119,18 +973,22 @@ class AgentConversation:
                 runtime_state=self.runtime_state,
                 agent_name=self.agent.name,
             )
-        if self.runtime_state.shell_session is not None:
-            self.runtime_state.shell_session.close()
+        self.runtime_state.close_shell_sessions()
         if self.runtime_state.shell_job_manager is not None:
             self.runtime_state.shell_job_manager.close()
-
-
-def _truncate(s: str, n: int) -> str:
-    return s[:n] + "..." if len(s) > n else s
+        with contextlib.suppress(Exception):
+            self.client.close()
 
 
 def _safe_tool_summary(tool_name: str, tool_args: dict) -> str:
     return f"{tool_name}({_safe_args_preview(tool_args)})"
+
+
+def _safe_message_content(message: dict) -> str:
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        return context._messages_to_text([message])
+    return str(content)
 
 
 def _safe_args_preview(tool_args: dict) -> str:
@@ -1150,8 +1008,7 @@ def _first_compacted_summary(messages: list[dict]) -> str:
     for message in messages:
         content = str(message.get("content") or "")
         if not (
-            content.startswith("[COMPACTED CONTEXT")
-            or content.startswith("[HANDOFF RESET]")
+            content.startswith(("[COMPACTED CONTEXT", "[HANDOFF RESET]"))
         ):
             continue
         _header, _sep, body = content.partition("\n")
@@ -1175,20 +1032,5 @@ def _normalize_initial_planning_mode(value: str) -> str:
     return mode
 
 
-def _tool_result_from_before_tool_block(tool_name: str, message: str) -> ToolResult:
-    status_source = "approval" if message.startswith("[approval_denied]") else "permission"
-    return ToolResult(
-        tool=tool_name,
-        status="failed",
-        output=message,
-        error=message,
-        metadata={"status_source": status_source},
-    )
-
-
 def _assistant_message_from_response(msg) -> dict:
     return current_adapter().assistant_message_from_response(msg)
-
-
-def _requires_reasoning_content_roundtrip() -> bool:
-    return current_adapter().requires_reasoning_content_roundtrip

@@ -1,15 +1,23 @@
 """Git helpers for interactive sessions and checkpoints."""
 from __future__ import annotations
 
+import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config
 from ..sessions._event_helpers import is_ignored_changed_file
 
-
 GIT_COMMIT_AUTHOR = ("Harness", "harness@example.invalid")
 CHECKPOINT_EXCLUDES = [".harness", "global_plan", config.PROGRESS_FILE]
+GIT_STATUS_TIMEOUT_SECONDS = 0.5
+
+
+@dataclass(frozen=True)
+class GitBaseline:
+    dirty_paths: frozenset[str]
+    staged_paths: frozenset[str]
 
 
 def _ensure_git_repository(workspace: Path) -> None:
@@ -79,32 +87,36 @@ def git_dirty_paths(workspace: Path) -> set[str]:
     result = _run_git_status(workspace)
     if result is None:
         return set()
-    paths: set[str] = set()
-    for line in result.stdout.splitlines():
-        if not line:
+    return set(_parse_git_baseline(result.stdout).dirty_paths)
+
+
+def git_staged_paths(workspace: Path) -> set[str]:
+    baseline = capture_git_baseline(workspace)
+    return set(baseline.staged_paths) if baseline is not None else set()
+
+
+def capture_git_baseline(workspace: Path) -> GitBaseline | None:
+    result = _run_git_status(workspace)
+    if result is None:
+        return None
+    return _parse_git_baseline(result.stdout)
+
+
+def _parse_git_baseline(output: str) -> GitBaseline:
+    dirty_paths: set[str] = set()
+    staged_paths: set[str] = set()
+    for line in output.splitlines():
+        if len(line) < 4:
             continue
         path = line[3:].strip()
         if " -> " in path:
             path = path.rsplit(" -> ", 1)[1]
-        if path and not is_ignored_changed_file(path):
-            paths.add(path)
-    return paths
-
-
-def git_staged_paths(workspace: Path) -> set[str]:
-    if not _is_git_repository(workspace):
-        return set()
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return set()
-    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        if not path or is_ignored_changed_file(path):
+            continue
+        dirty_paths.add(path)
+        if line[0] not in {" ", "?"}:
+            staged_paths.add(path)
+    return GitBaseline(frozenset(dirty_paths), frozenset(staged_paths))
 
 
 def git_has_staged_changes(workspace: Path) -> bool:
@@ -115,6 +127,7 @@ def git_has_staged_changes(workspace: Path) -> bool:
         cwd=workspace,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=False,
     )
     return result.returncode == 1
 
@@ -133,9 +146,22 @@ def _run_git_status(workspace: Path) -> subprocess.CompletedProcess[str] | None:
             capture_output=True,
             text=True,
             check=True,
+            timeout=GIT_STATUS_TIMEOUT_SECONDS,
+            **_background_git_options(),
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
+
+
+def _background_git_options() -> dict:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "Never"
+    return {
+        "stdin": subprocess.DEVNULL,
+        "env": env,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
 
 
 def runtime_excluded_git_command(*args: str) -> list[str]:

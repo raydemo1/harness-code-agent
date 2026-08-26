@@ -40,12 +40,45 @@ BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 BASE_MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
 PROVIDER = os.environ.get("HARNESS_PROVIDER", "auto")
 STREAM = os.environ.get("HARNESS_STREAM", "auto")
+MODEL_INPUT_MODE = os.environ.get("HARNESS_MODEL_INPUT_MODE", "text").strip().lower()
+if MODEL_INPUT_MODE not in {"text", "multimodal"}:
+    raise ValueError("HARNESS_MODEL_INPUT_MODE must be 'text' or 'multimodal'")
+
+# A streaming response must make progress periodically.  This is deliberately
+# shorter than the general client timeout so a half-open model stream cannot
+# occupy the agent worker for several retry windows.
+LLM_STREAM_IDLE_TIMEOUT_SECONDS = float(
+    os.environ.get("HARNESS_LLM_STREAM_IDLE_TIMEOUT_SECONDS", "60")
+)
 
 MODEL_INTENSITIES = ("fast", "normal", "hard", "max")
 MODEL_OVERRIDES = {
     intensity: os.environ.get(f"HARNESS_MODEL_{intensity.upper()}")
     for intensity in MODEL_INTENSITIES
 }
+
+# Models and reasoning efforts selectable from the TUI.  Values follow the
+# DeepSeek API: reasoning_effort accepts low/high/max (default high).
+AVAILABLE_MODELS = ("deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro")
+REASONING_EFFORTS = ("low", "high", "max")
+
+# Runtime selection made from the TUI; None means "use the intensity preset".
+_MODEL_OVERRIDE = {"model": None, "reasoning_effort": None}
+
+
+def set_model_override(model: str | None = None, reasoning_effort: str | None = None) -> None:
+    if model is not None and model not in AVAILABLE_MODELS:
+        raise ValueError(f"Unsupported model: {model!r}; expected one of: {', '.join(AVAILABLE_MODELS)}")
+    if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
+        raise ValueError(
+            f"Unsupported reasoning effort: {reasoning_effort!r}; expected one of: {', '.join(REASONING_EFFORTS)}"
+        )
+    _MODEL_OVERRIDE["model"] = model
+    _MODEL_OVERRIDE["reasoning_effort"] = reasoning_effort
+
+
+def get_model_override() -> dict[str, str | None]:
+    return dict(_MODEL_OVERRIDE)
 
 
 @dataclass(frozen=True)
@@ -54,6 +87,7 @@ class ModelProfile:
     model: str
     thinking: bool | None = None
     reasoning_effort: str | None = None
+    input_mode: str = "text"
 
 
 def _normalize_model_intensity(value: str | None) -> str:
@@ -110,6 +144,26 @@ def resolve_model_profile(intensity: str) -> ModelProfile:
             model=override_model,
             thinking=profile.thinking,
             reasoning_effort=profile.reasoning_effort,
+            input_mode=MODEL_INPUT_MODE,
+        )
+    elif profile.input_mode != MODEL_INPUT_MODE:
+        profile = ModelProfile(
+            provider=profile.provider,
+            model=profile.model,
+            thinking=profile.thinking,
+            reasoning_effort=profile.reasoning_effort,
+            input_mode=MODEL_INPUT_MODE,
+        )
+    runtime_override = get_model_override()
+    if normalized != "fast" and (runtime_override["model"] or runtime_override["reasoning_effort"]):
+        model = runtime_override["model"] or profile.model
+        provider = _resolve_provider_name(provider=PROVIDER, base_url=BASE_URL, model=model)
+        profile = ModelProfile(
+            provider=provider,
+            model=model,
+            thinking=True if runtime_override["reasoning_effort"] else profile.thinking,
+            reasoning_effort=runtime_override["reasoning_effort"] or profile.reasoning_effort or "high",
+            input_mode=MODEL_INPUT_MODE,
         )
     return profile
 
@@ -128,10 +182,6 @@ COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", str(int(CONTEXT_WI
 # inlined as usual.
 TOOL_OUTPUT_INLINE_LIMIT = int(os.environ.get("HARNESS_TOOL_OUTPUT_INLINE_LIMIT", "4000"))
 
-# --- Harness loop ---
-MAX_HARNESS_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "5"))
-PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
-
 # --- Agent limits ---
 MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "60"))
 MAX_AGENT_TOTAL_TOKENS = int(os.environ.get("MAX_AGENT_TOTAL_TOKENS", "0"))
@@ -147,7 +197,4 @@ DOCKER_USER = os.environ.get("HARNESS_DOCKER_USER", "")
 
 # --- Paths ---
 WORKSPACE = os.path.abspath(os.environ.get("HARNESS_WORKSPACE", "./workspace"))
-SPEC_FILE = "spec.md"
-FEEDBACK_FILE = "feedback.md"
-CONTRACT_FILE = "contract.md"
 PROGRESS_FILE = "progress.md"

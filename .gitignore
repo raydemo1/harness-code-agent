@@ -28,6 +28,10 @@ venv/
 env/
 ENV/
 
+# TypeScript / Bun frontend dependencies
+node_modules/
+.bun/
+
 # Build and packaging output
 build/
 dist/

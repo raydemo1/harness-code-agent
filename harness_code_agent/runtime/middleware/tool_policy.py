@@ -6,8 +6,7 @@ import re
 import shlex
 
 from ..tool_result import ToolResult
-from .base import AgentMiddleware
-
+from .base import AgentMiddleware, tool_blocked
 
 REPEATED_FAILURE_THRESHOLD = 2
 SEARCH_TIMEOUT_SECONDS = 15
@@ -165,7 +164,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
             batch_key=batch_key,
         )
 
-    def post_tool(self, tool_name: str, tool_args: dict, result: str,
+    def post_tool(self, tool_name: str, tool_args: dict, result: ToolResult,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
         category = _result_failure_category(result)
@@ -220,7 +219,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
                 return None
             return self._blocked(
                 "run_bash",
-                "Bare rg without an explicit search path is blocked because persistent shells can leave rg waiting on stdin. "
+                "Bare rg without an explicit search path is blocked because it can wait on stdin. "
                 "Use repo_search(pattern=..., path=...) or provide an explicit bounded path.",
                 runtime_state,
                 category="bare_rg",
@@ -390,8 +389,7 @@ def _is_broad_recursive_grep(command: str) -> bool:
 
     for index, token in enumerate(tokens):
         executable = token.strip("\"'").lower()
-        if executable.endswith(".exe"):
-            executable = executable[:-4]
+        executable = executable.removesuffix(".exe")
         if executable != "grep":
             continue
 
@@ -506,8 +504,7 @@ def _looks_like_shell_search_without_path(command: str) -> bool:
     if not tokens:
         return False
     executable = tokens[0].strip("\"'").lower()
-    if executable.endswith(".exe"):
-        executable = executable[:-4]
+    executable = executable.removesuffix(".exe")
     if executable == "grep":
         non_options = [token for token in tokens[1:] if not str(token).startswith("-")]
         return len(non_options) < 2
@@ -522,30 +519,15 @@ def _looks_like_shell_search_without_path(command: str) -> bool:
     return False
 
 
-def _result_failure_category(result: str) -> str | None:
-    lowered = (result or "").lower()
-    if "[blocked]" in lowered or "status_source" in lowered and "tool_policy" in lowered:
+def _result_failure_category(result: ToolResult) -> str | None:
+    if result.status != "failed":
+        return None
+    if tool_blocked(result):
         return "blocked"
-    if _looks_like_timeout_failure(lowered):
+    text = (result.error or result.output or "").lower()
+    if "timed out" in text or "timeout" in text:
         return "timeout"
     return None
-
-
-def _looks_like_timeout_failure(lowered_result: str) -> bool:
-    if "timed out" not in lowered_result and "timeout" not in lowered_result:
-        return False
-    failure_markers = (
-        "[error]",
-        "[timeout]",
-        "status: failed",
-        "status=failed",
-        "return_code: 124",
-        "returncode: 124",
-        "exit code: 124",
-        "timed out after",
-        "case exceeded",
-    )
-    return any(marker in lowered_result for marker in failure_markers)
 
 
 def _args_shape(tool_name: str, tool_args: dict) -> str:
@@ -553,7 +535,7 @@ def _args_shape(tool_name: str, tool_args: dict) -> str:
         return _command_family(str((tool_args or {}).get("command") or ""))
     if tool_name in {"read_file", "list_files", "repo_search"}:
         return _shape_path(str((tool_args or {}).get("path") or (tool_args or {}).get("directory") or "."))
-    return ",".join(sorted(str(key) for key in (tool_args or {}).keys()))
+    return ",".join(sorted(str(key) for key in (tool_args or {})))
 
 
 def _command_family(command: str) -> str:
@@ -561,8 +543,7 @@ def _command_family(command: str) -> str:
     if not tokens:
         return "empty"
     executable = tokens[0].strip("\"'").lower()
-    if executable.endswith(".exe"):
-        executable = executable[:-4]
+    executable = executable.removesuffix(".exe")
     return executable
 
 

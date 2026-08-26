@@ -2,15 +2,14 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
-
 from pathlib import Path
+from unittest.mock import patch
 
 from harness_code_agent import config
 from harness_code_agent.workspace.shell_session import (
     PersistentShellSession,
-    _DockerShellBackend,
     _docker_user_arg,
+    _DockerShellBackend,
     docker_shell_hint,
     sandbox_mode,
     validate_shell_configuration,
@@ -117,14 +116,15 @@ class PersistentShellSessionTests(unittest.TestCase):
             self.skipTest("Windows-only shell selection")
         from harness_code_agent.workspace import shell_session
 
-        with patch.object(config, "WINDOWS_SHELL", "auto"):
-            with self.assertRaisesRegex(ValueError, "must be pwsh or wsl"):
-                shell_session.windows_shell_path()
+        with (
+            patch.object(config, "WINDOWS_SHELL", "auto"),
+            self.assertRaisesRegex(ValueError, "must be pwsh or wsl"),
+        ):
+            shell_session.windows_shell_path()
 
     def test_windows_shell_wsl_uses_dedicated_backend(self):
         if os.name != "nt":
             self.skipTest("Windows-only shell selection")
-        from harness_code_agent.workspace import shell_session
 
         temp_dir = self._make_temp_dir()
         try:
@@ -152,9 +152,9 @@ class PersistentShellSessionTests(unittest.TestCase):
             patch.object(config, "SANDBOX_MODE", "host"),
             patch.object(config, "WINDOWS_SHELL", "pwsh"),
             patch("harness_code_agent.workspace.shell_session.shutil.which", return_value=None),
+            self.assertRaisesRegex(RuntimeError, "pwsh selected.*not found"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "pwsh selected.*not found"):
-                validate_shell_configuration()
+            validate_shell_configuration()
 
     def test_windows_powershell_backend_preserves_utf8_output(self):
         if os.name != "nt" or windows_shell_kind() != "pwsh":
@@ -170,8 +170,25 @@ class PersistentShellSessionTests(unittest.TestCase):
             shell.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_windows_powershell_backend_uses_final_statement_status(self):
+        if os.name != "nt" or windows_shell_kind() != "pwsh":
+            self.skipTest("PowerShell backend not active")
+        temp_dir = self._make_temp_dir()
+        shell = PersistentShellSession(cwd=temp_dir)
+        try:
+            recovered = shell.run(
+                'python -c "import sys; sys.exit(2)"; Write-Output recovered'
+            )
+            failed = shell.run('python -c "import sys; sys.exit(2)"')
+
+            self.assertEqual(recovered.exit_code, 0)
+            self.assertIn("recovered", recovered.stdout)
+            self.assertEqual(failed.exit_code, 2)
+        finally:
+            shell.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_docker_sandbox_mode_uses_docker_backend(self):
-        from harness_code_agent.workspace import shell_session
 
         temp_dir = self._make_temp_dir()
         try:
@@ -278,9 +295,11 @@ class PersistentShellSessionTests(unittest.TestCase):
             self.assertEqual(result, [])
 
     def test_sandbox_mode_invalid_value_raises(self):
-        with patch.object(config, "SANDBOX_MODE", "lxc"):
-            with self.assertRaises(ValueError):
-                sandbox_mode()
+        with (
+            patch.object(config, "SANDBOX_MODE", "lxc"),
+            self.assertRaises(ValueError),
+        ):
+            sandbox_mode()
 
     def test_docker_shell_hint_host_mode(self):
         with patch.object(config, "SANDBOX_MODE", "host"):
@@ -316,14 +335,13 @@ class PersistentShellSessionTests(unittest.TestCase):
             self.assertIn("user=1000:1000", hint)
 
     def test_docker_cleanup_swallows_docker_rm_errors(self):
-        import subprocess as sp
 
         backend = _DockerShellBackend.__new__(_DockerShellBackend)
         backend.container_name = "hca-test-xyz"
         backend._container_started = True
 
         def fake_run(*args, **kwargs):
-            raise Exception("docker rm failed")
+            raise RuntimeError("docker rm failed")
 
         with patch("harness_code_agent.workspace.shell_session.subprocess.run", side_effect=fake_run):
             # Should not raise

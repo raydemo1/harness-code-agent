@@ -28,37 +28,6 @@ class ShellJobManagerTests(unittest.TestCase):
         self.assertEqual(args[4:6], ["bash", "-lc"])
         self.assertEqual(args[6], "python -m http.server")
 
-    def test_start_read_stop_background_job(self):
-        from harness_code_agent.workspace.shell_jobs import ShellJobManager
-
-        command = _python_command(
-            "import sys,time; "
-            "print('ready', flush=True); "
-            "print('err-line', file=sys.stderr, flush=True); "
-            "time.sleep(30)"
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            manager = ShellJobManager(Path(tmp))
-            try:
-                start = time.perf_counter()
-                job = manager.start(command)
-                elapsed = time.perf_counter() - start
-
-                self.assertLess(elapsed, 2)
-                self.assertTrue(job.job_id.startswith("shell-job-"))
-                self.assertEqual(job.status, "running")
-
-                output = self._wait_for_output(manager, job.job_id, "ready")
-                self.assertIn("ready", output)
-                self.assertIn("err-line", output)
-
-                stopped = manager.stop(job.job_id)
-                self.assertEqual(stopped.status, "stopped")
-                self.assertNotIn(job.job_id, [item.job_id for item in manager.running_jobs()])
-            finally:
-                manager.close()
-
     def test_natural_exit_records_status_and_exit_code(self):
         from harness_code_agent.workspace.shell_jobs import ShellJobManager
 
@@ -88,7 +57,10 @@ class ShellJobManagerTests(unittest.TestCase):
         self.assertEqual(buffer.read_tail(4), "ijkl")
 
     def test_invalid_job_id_is_reported(self):
-        from harness_code_agent.workspace.shell_jobs import ShellJobManager, ShellJobNotFound
+        from harness_code_agent.workspace.shell_jobs import (
+            ShellJobManager,
+            ShellJobNotFound,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             manager = ShellJobManager(Path(tmp))

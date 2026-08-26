@@ -7,9 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..runtime.permissions import PermissionPolicy
+from ..runtime.shell_classification import analyze_shell_command
 from ..runtime.tool_result import ToolResult
-
 
 FRESH_DETAIL_LIMIT = 12_000
 _OBS_ID_PREFIX = "[OBS "
@@ -57,7 +56,6 @@ class FactTracker:
         self.file_generation: dict[str, int] = {}
         self.workspace_generation = 0
         self.invalidation_notices: list[str] = []
-        self._policy = PermissionPolicy()
 
     def resource_keys_for(self, tool: str, args: dict[str, Any]) -> list[str]:
         if tool in {"read_file", "write_file", "apply_patch"} and args.get("path"):
@@ -128,7 +126,7 @@ class FactTracker:
         return False
 
     def _shell_may_mutate(self, command: str) -> bool:
-        return self._policy.classify_shell_command(command) != "shell_safe"
+        return analyze_shell_command(command).risk != "shell_safe"
 
 
 class ObservationStore:
@@ -223,20 +221,6 @@ class ObservationStore:
             + "\n--- end preview ---"
         )
 
-    def historical_message(self, observation: ToolObservation) -> str:
-        stale = "stale" if observation.stale else "historical"
-        return (
-            f"[OBS {observation.id} {stale}]\n"
-            f"tool: {observation.tool}\n"
-            f"args: {observation.args_summary}\n"
-            f"output_chars: {observation.output_chars}\n"
-            f"output_sha256: {observation.output_hash}\n"
-            f"resource_keys: {', '.join(observation.resource_keys) or 'none'}\n"
-            f"observed_workspace_generation: {observation.observed_workspace_generation}\n"
-            f"summary: {observation.summary}\n"
-            "current truth rule: This is a historical observation, not current truth. Re-read files or rerun commands before relying on exact/current facts."
-        )
-
 def _args_summary(args: dict[str, Any]) -> str:
     redacted = dict(args or {})
     if "content" in redacted:
@@ -256,32 +240,3 @@ def _summary_for(tool: str, args: dict[str, Any], result: ToolResult, output_has
 
 def _norm_path(path: object) -> str:
     return str(path).replace("\\", "/").strip()
-
-
-def _indent(text: str, first_prefix: str) -> str:
-    lines = text.splitlines() or [""]
-    if len(lines) == 1:
-        return first_prefix + lines[0]
-    continuation = " " * len(first_prefix)
-    return "\n".join(
-        (first_prefix if idx == 0 else continuation) + line
-        for idx, line in enumerate(lines)
-    )
-
-
-def _observation_id_from_header(content: str) -> str | None:
-    parsed = _observation_header(content)
-    return parsed[0] if parsed is not None else None
-
-
-def _observation_header(content: str) -> tuple[str, str] | None:
-    if not content.startswith(_OBS_ID_PREFIX):
-        return None
-    header_end = content.find("]", 5)
-    if header_end < 0:
-        return None
-    header = content[5:header_end].strip()
-    parts = header.split()
-    if len(parts) < 2:
-        return None
-    return parts[0], parts[1]

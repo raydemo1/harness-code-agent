@@ -6,12 +6,11 @@ outside the normal task workspace contract.
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
-import os
 
-from .base import AgentMiddleware, MAIN_AGENT_NAMES
-
+from .base import MAIN_AGENT_NAMES, AgentMiddleware
 
 _SYSTEM_WRITE_PATH = r"(?:/etc/|/usr/|/bin/|/sbin/|/var/|~[/\\]|%USERPROFILE%|%WINDIR%|c:\\)"
 _SYSTEM_PATH_WRITE_PATTERNS = (

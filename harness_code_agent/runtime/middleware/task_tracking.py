@@ -3,72 +3,23 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import ClassVar
 
 from ...agent.acceptance import AcceptanceError
-from ..shell_classification import classify_safe_shell_command
-from .base import AgentMiddleware, MAIN_AGENT_NAMES
-
+from ..permissions import is_workspace_write_command
+from ..tool_result import ToolResult
+from .base import MAIN_AGENT_NAMES, AgentMiddleware
 
 log = logging.getLogger("harness")
-
-
-class TaskTrackingMiddleware(AgentMiddleware):
-    """
-    Encourages the agent to maintain explicit task tracking for multi-step work.
-
-    After the agent has made several tool calls without writing any tracking
-    artifact, injects a reminder to decompose and track progress.
-
-    Inspired by ForgeCode's todo_write enforcement, which was their single
-    biggest improvement (38% → 66% on TB2).
-
-    This is a softer version — it nudges rather than hard-blocks, since
-    not all tasks need decomposition. But for complex multi-step tasks,
-    the nudge is enough to trigger the behavior.
-    """
-
-    def __init__(self, nudge_after_n_tools: int = 8):
-        self.nudge_after_n_tools = nudge_after_n_tools
-        self.tool_call_count = 0
-        self._nudged = False
-
-    def post_tool(self, tool_name: str, tool_args: dict, result: str,
-                  messages: list[dict], runtime_state=None,
-                  agent_name: str | None = None) -> str | None:
-        self.tool_call_count += 1
-
-        if self._nudged or self.tool_call_count < self.nudge_after_n_tools:
-            return None
-
-        # Check if agent has already written any tracking/progress notes
-        for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str) and "progress" in content.lower():
-                # Agent seems to be tracking already
-                return None
-            # Check if agent wrote to a tracking file
-            if msg.get("role") == "assistant":
-                for tc in msg.get("tool_calls", []):
-                    fn = tc.get("function", {})
-                    if fn.get("name") == "write_file":
-                        args_str = fn.get("arguments", "")
-                        if any(kw in args_str.lower() for kw in ["todo", "progress", "checklist", "tracker"]):
-                            return None
-
-        self._nudged = True
-        log.info("Task tracking: nudging agent to track progress")
-        return (
-            "[SYSTEM] You have made several tool calls. For complex tasks, "
-            "tracking your progress helps avoid skipping steps or repeating work.\n"
-            "Consider: What steps remain? What have you completed? What still needs verification?\n"
-            "Keep a mental checklist and verify each requirement before finishing."
-        )
 
 
 class TaskTrackingEnforcementMiddleware(AgentMiddleware):
     """Hard-require planning updates for tracked mode."""
 
-    ACTION_TOOLS = {"run_bash", "write_file", "apply_patch", "delegate_agent", "browser_test"}
+    ACTION_TOOLS: ClassVar[set] = {
+        "run_bash", "write_file", "apply_patch", "spawn_agent", "apply_agent_changes",
+        "resolve_agent_conflicts", "browser_test",
+    }
 
     def __init__(
         self,
@@ -94,7 +45,16 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             if not self.enforce_acceptance:
                 return None
             update_kind = str(tool_args.get("update_kind") or "").strip().lower()
-            if update_kind == "start" and not tool_args.get("acceptance_checks"):
+            requested_mode = str(
+                tool_args.get("mode") or runtime_state.task_board.planning_mode or ""
+            ).strip().lower()
+            if requested_mode == "todo":
+                return None
+            if (
+                requested_mode == "tracked"
+                and update_kind == "start"
+                and not tool_args.get("acceptance_checks")
+            ):
                 return (
                     "[blocked] Tracked planning start requires 1-10 acceptance_checks "
                     "with text, source, and verification_command."
@@ -113,7 +73,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
                 "Call update_plan_state with mode=\"tracked\", update_kind=\"start\", "
                 "and concrete acceptance_checks before more edits or commands."
             )
-        if board.planning_mode in {"unset", "skip"}:
+        if board.planning_mode in {"unset", "skip", "todo"}:
             return None
         if board.replan_required:
             reason = f" Reason: {board.replan_reason}" if board.replan_reason else ""
@@ -128,12 +88,12 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
             )
         return None
 
-    def post_tool(self, tool_name: str, tool_args: dict, result: str,
+    def post_tool(self, tool_name: str, tool_args: dict, result: ToolResult,
                   messages: list[dict], runtime_state=None,
                   agent_name: str | None = None) -> str | None:
         if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
-        if result.startswith("[error]") or result.startswith("[blocked]"):
+        if result.status == "failed":
             return None
 
         board = runtime_state.task_board
@@ -151,7 +111,7 @@ class TaskTrackingEnforcementMiddleware(AgentMiddleware):
                 board.planning_mode == "tracked"
                 and board.update_count == 0
                 and tool_name == "run_bash"
-                and _is_read_only_probe(tool_args.get("command", ""))
+                and _is_non_workspace_write_probe(tool_args.get("command", ""))
             ):
                 return None
             runtime_state.action_tool_count += 1
@@ -269,14 +229,14 @@ def _weak_acceptance_command(checks: list[dict]) -> dict | None:
     return None
 
 
-def _is_read_only_probe(command: str) -> bool:
-    return classify_safe_shell_command(command) == "read"
+def _is_non_workspace_write_probe(command: str) -> bool:
+    return not is_workspace_write_command(command)
 
 
 def _is_pre_start_read_only_delegate(tool_name: str, tool_args: dict, board) -> bool:
     return (
-        tool_name == "delegate_agent"
-        and str((tool_args or {}).get("agent_profile") or "").strip().lower().replace("-", "_") != "patch"
+        tool_name == "spawn_agent"
+        and str((tool_args or {}).get("role") or "").strip().lower() != "worker"
         and board.update_count == 0
         and board.planning_mode in {"unset", "skip", "tracked"}
     )

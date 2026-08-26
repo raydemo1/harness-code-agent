@@ -4,7 +4,6 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-
 OTHER_LABELS = {"other", "其他"}
 
 

@@ -18,7 +18,6 @@ if str(PROJECT_ROOT_BOOTSTRAP) not in sys.path:
 
 from eval.benchmarks.usage_metrics import collect_harbor_job_usage
 
-
 DATASET_ARCHIVE_URL = (
     "https://github.com/harbor-framework/terminal-bench-2-1/archive/refs/heads/main.zip"
 )
@@ -246,6 +245,7 @@ def pre_pull_task_images(
                 capture_output=True,
                 text=True,
                 timeout=timeout_sec,
+                check=False,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
@@ -371,6 +371,7 @@ def _docker_image_exists(image: str) -> bool:
             capture_output=True,
             text=True,
             timeout=120,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -384,6 +385,7 @@ def _docker_image_present(image: str) -> bool:
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -533,7 +535,7 @@ def main() -> int:
     jobs_root = (args.jobs_dir or (repo_root / "jobs")).resolve()
     jobs_root.mkdir(parents=True, exist_ok=True)
     before_jobs = _job_names(jobs_root)
-    completed = subprocess.run(command, cwd=repo_root, env=env)
+    completed = subprocess.run(command, cwd=repo_root, env=env, check=False)
     for job_dir in _new_job_dirs(jobs_root, before_jobs):
         summary = collect_harbor_job_usage(job_dir)
         print("HCA_TERMINAL_BENCH_RESULT:" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
@@ -547,6 +549,7 @@ def docker_daemon_running() -> bool:
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return False

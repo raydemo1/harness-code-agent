@@ -1,8 +1,7 @@
 import os
 import shutil
 import unittest
-from unittest.mock import Mock
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from harness_code_agent import config
 from harness_code_agent.agent.runtime_state import AgentRuntimeState
@@ -11,8 +10,19 @@ from harness_code_agent.runtime.middleware.acceptance_review import (
     AcceptanceReviewMiddleware,
     ReviewOutcome,
 )
+from harness_code_agent.runtime.tool_result import ToolResult
 from harness_code_agent.runtime.tools import execute_tool_result
 from harness_code_agent.sessions.events import EventBus
+
+
+def _result(text: str, *, status: str | None = None) -> ToolResult:
+    """Build a ToolResult from the legacy text conventions used in these tests."""
+    if status is None:
+        status = "failed" if text.startswith(("[error]", "[blocked]")) else "success"
+    metadata = {"status_source": "permission"} if text.startswith("[blocked]") else {}
+    error = text.removeprefix("[error] ").removeprefix("[blocked] ") if status == "failed" else None
+    return ToolResult(tool="run_bash", status=status, output=text, error=error, metadata=metadata)
+
 
 
 class AcceptancePlanningTests(unittest.TestCase):
@@ -313,17 +323,20 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             self._args(),
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
         )
-        notice = middleware.before_tool(
+        self.assertIsNone(middleware.before_tool(
             "write_file",
             {"path": "target.py", "content": "fixed"},
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
+        ))
+        notice = middleware.per_iteration(
+            1, [], runtime_state=state, agent_name="main_agent"
         )
 
         self.assertIsNotNone(notice)
@@ -338,7 +351,7 @@ class AcceptancePlanningTests(unittest.TestCase):
             middleware.post_tool(
                 "read_file",
                 {"path": "target.py"},
-                "contents",
+                _result("contents"),
                 messages=[],
                 runtime_state=state,
                 agent_name="main_agent",
@@ -360,15 +373,14 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             self._args(),
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
         )
-        notice = middleware.before_tool(
-            "write_file",
-            {"path": "target.py", "content": "fixed"},
-            messages=[],
+        notice = middleware.per_iteration(
+            1,
+            [],
             runtime_state=state,
             agent_name="main_agent",
         )
@@ -391,7 +403,7 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             self._args(),
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -431,18 +443,12 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             start_args,
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
         )
-        middleware.before_tool(
-            "write_file",
-            {"path": "target.py", "content": "fixed"},
-            messages=[],
-            runtime_state=state,
-            agent_name="main_agent",
-        )
+        middleware.per_iteration(1, [], runtime_state=state, agent_name="main_agent")
 
         context = reviewer.call_args.kwargs["plan_context"]
         self.assertEqual(context["steps"], ["Restate constraints", "Design validation", "Implement"])
@@ -471,18 +477,12 @@ class AcceptancePlanningTests(unittest.TestCase):
         middleware.post_tool(
             "update_plan_state",
             self._args(),
-            "Updated plan state",
+            _result("Updated plan state"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
         )
-        middleware.before_tool(
-            "write_file",
-            {"path": "target.py", "content": "fixed"},
-            messages=[],
-            runtime_state=state,
-            agent_name="main_agent",
-        )
+        middleware.per_iteration(1, [], runtime_state=state, agent_name="main_agent")
 
         usage_events = [event for event in state.event_bus.events if event.type == "llm_usage"]
         self.assertEqual(len(usage_events), 1)

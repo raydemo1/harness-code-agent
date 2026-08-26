@@ -17,7 +17,6 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-from ..tracking_policy import TASK_TRACKING_POLICY
 from ..runtime.middleware import (
     AcceptanceReviewMiddleware,
     ErrorGuidanceMiddleware,
@@ -33,7 +32,7 @@ from ..runtime.permissions import (
     TOOL_PERMISSION_READ,
     TOOL_PERMISSION_SHELL,
 )
-
+from ..tracking_policy import TASK_TRACKING_POLICY
 
 DEFAULT_PROFILE_TOOL_PERMISSIONS = {
     TOOL_PERMISSION_READ,
@@ -136,7 +135,6 @@ class ProfileConfig:
     # --- Middleware thresholds ---
     loop_file_edit_threshold: int | None = None      # edits before loop warning
     loop_command_repeat_threshold: int | None = None  # repeats before loop warning
-    task_tracking_nudge_after: int | None = None      # tool calls before tracking nudge
     require_start_after_n_actions: int | None = None  # action tools before tracked start is required
     acceptance_review_timeout: float | None = None    # fast-model acceptance review timeout
     time_warn_threshold: float | None = None          # fraction of budget for warning
@@ -208,14 +206,14 @@ class BaseProfile(ABC):
                 "keep the implementation focused.\n\n"
                 f"{TASK_TRACKING_POLICY}\n\n"
                 "Use delegation only when independent investigation, test design, review, verification, "
-                "or an isolated patch proposal would reduce risk or context load. Apply every code and "
-                "test change to the real workspace yourself. Long-running "
+                "or an isolated worker proposal would reduce risk or context load. Review worker changes "
+                "before explicitly applying them. Long-running "
                 "shell commands return job IDs; inspect and clean them up through the shell-job tools."
             ),
             boundaries=(
                 "The task text and profile acceptance criteria are the source of truth. Delegation "
-                "is evidence or an isolated proposal, not completed work. Do not delegate real workspace "
-                "modification, integration, final verification, or the stop decision."
+                "is evidence or an isolated proposal, not completed work. Keep integration, final verification, "
+                "and the stop decision with the main agent."
             ),
             completion=(
                 "Run concrete verification and read its output. If it fails, diagnose the evidence "
@@ -224,21 +222,6 @@ class BaseProfile(ABC):
             ),
         )
         return AgentConfig(system_prompt=prompt)
-
-    def subagent_policy(self) -> dict:
-        """Policy for delegated sub-agents."""
-        return {
-            "allowed_scopes": [
-                "codebase_investigation",
-                "test_design",
-                "review",
-                "verify",
-                "patch",
-            ],
-            "read_only": "except isolated patch proposals",
-            "may_modify_files": False,
-            "may_decide_completion": False,
-        }
 
     def acceptance_criteria(self) -> list[str]:
         """High-level completion criteria for the main agent."""

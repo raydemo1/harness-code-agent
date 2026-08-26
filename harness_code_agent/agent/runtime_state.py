@@ -1,10 +1,11 @@
 """Agent runtime state containers."""
 from __future__ import annotations
 
+import contextlib
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import config
 from ..workspace.shell_jobs import ShellJobManager
 from ..workspace.shell_session import PersistentShellSession
 from .acceptance import AcceptanceState
@@ -136,8 +137,10 @@ def _is_business_path(path) -> bool:
 
 @dataclass
 class AgentRuntimeState:
-    shell_session: PersistentShellSession | None = None
-    shell_job_manager: ShellJobManager = field(default_factory=lambda: ShellJobManager(config.WORKSPACE))
+    active_shell_sessions: set[PersistentShellSession] = field(default_factory=set)
+    _shell_sessions_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    shell_job_manager: ShellJobManager | None = None
+    browser_job_id: str | None = None
     task_board: TaskBoard = field(default_factory=TaskBoard)
     recovery: RecoveryState = field(default_factory=RecoveryState)
     fallback: AgentFallbackState = field(default_factory=AgentFallbackState)
@@ -151,3 +154,27 @@ class AgentRuntimeState:
     context_refill_streak: int = 0
     context_anxiety_turn_start_index: int = -1
     event_bus: Any = None
+
+    def register_shell_session(self, session: PersistentShellSession) -> None:
+        with self._shell_sessions_lock:
+            self.active_shell_sessions.add(session)
+
+    def unregister_shell_session(self, session: PersistentShellSession) -> None:
+        with self._shell_sessions_lock:
+            self.active_shell_sessions.discard(session)
+
+    def interrupt_shell_sessions(self) -> bool:
+        with self._shell_sessions_lock:
+            sessions = tuple(self.active_shell_sessions)
+        for session in sessions:
+            with contextlib.suppress(Exception):
+                session.interrupt()
+        return bool(sessions)
+
+    def close_shell_sessions(self) -> None:
+        with self._shell_sessions_lock:
+            sessions = tuple(self.active_shell_sessions)
+            self.active_shell_sessions.clear()
+        for session in sessions:
+            with contextlib.suppress(Exception):
+                session.close()

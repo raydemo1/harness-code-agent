@@ -1,7 +1,8 @@
 """Composition root for built-in tool registration."""
+
 from __future__ import annotations
 
-from ...agent.delegation import delegate_agent
+from ..execution_planner import CallEffect, ResourceClaim, workspace_claim
 from ..permissions import (
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_EDIT,
@@ -9,13 +10,38 @@ from ..permissions import (
     TOOL_PERMISSION_READ,
     TOOL_PERMISSION_SHELL,
 )
-from ..tool_registry import ToolExecutionLane, ToolRegistry
+from ..shell_classification import analyze_shell_command
+from ..tool_registry import (
+    TOOL_CAPABILITY_MAIN,
+    TOOL_CAPABILITY_READONLY_AGENT,
+    TOOL_CAPABILITY_WORKER_AGENT,
+    ToolRegistry,
+)
+from .agents import (
+    apply_agent_changes,
+    close_agent,
+    followup_agent,
+    interrupt_agent,
+    list_agents,
+    read_agent_changes,
+    read_agent_conflicts,
+    resolve_agent_conflicts,
+    send_agent_message,
+    spawn_agent,
+    wait_agents,
+)
 from .browser import browser_test, stop_dev_server
 from .discovery import tool_search
-from .filesystem import apply_patch, list_files, read_file, read_skill_file, repo_search, write_file
+from .filesystem import (
+    apply_patch,
+    list_files,
+    read_file,
+    read_skill_file,
+    repo_search,
+    write_file,
+)
 from .interaction import ask_user
 from .memory_tools import memory_search, read_memory_file, remember_memory
-from .parallel import parallel_agents, parallel_commands
 from .planning import update_plan_state
 from .schemas import BROWSER_TOOL_SCHEMAS, CORE_TOOL_SCHEMAS
 from .shell import list_shell_jobs, read_shell_output, run_bash, stop_shell_job
@@ -24,88 +50,300 @@ from .web import web_fetch, web_search
 
 def _build_builtin_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
-    handlers = {
-        "read_file": read_file,
-        "read_skill_file": read_skill_file,
-        "repo_search": repo_search,
-        "tool_search": tool_search,
-        "parallel_agents": parallel_agents,
-        "parallel_commands": parallel_commands,
-        "write_file": write_file,
-        "apply_patch": apply_patch,
-        "update_plan_state": update_plan_state,
-        "list_files": list_files,
-        "ask_user": ask_user,
-        "memory_search": memory_search,
-        "remember_memory": remember_memory,
-        "read_memory_file": read_memory_file,
-        "run_bash": run_bash,
-        "list_shell_jobs": list_shell_jobs,
-        "read_shell_output": read_shell_output,
-        "stop_shell_job": stop_shell_job,
-        "delegate_agent": delegate_agent,
-        "web_search": web_search,
-        "web_fetch": web_fetch,
-        "browser_test": browser_test,
-        "stop_dev_server": stop_dev_server,
+    schemas = {
+        schema["function"]["name"]: schema
+        for schema in CORE_TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS
     }
-    permissions = {
-        "read_file": TOOL_PERMISSION_READ,
-        "read_skill_file": TOOL_PERMISSION_READ,
-        "repo_search": TOOL_PERMISSION_READ,
-        "tool_search": TOOL_PERMISSION_READ,
-        "parallel_agents": TOOL_PERMISSION_READ,
-        "parallel_commands": TOOL_PERMISSION_READ,
-        "list_files": TOOL_PERMISSION_READ,
-        "ask_user": TOOL_PERMISSION_READ,
-        "memory_search": TOOL_PERMISSION_READ,
-        "remember_memory": TOOL_PERMISSION_EDIT,
-        "read_memory_file": TOOL_PERMISSION_READ,
-        "delegate_agent": TOOL_PERMISSION_READ,
-        "web_search": TOOL_PERMISSION_NETWORK_READ,
-        "web_fetch": TOOL_PERMISSION_NETWORK_READ,
-        "write_file": TOOL_PERMISSION_EDIT,
-        "apply_patch": TOOL_PERMISSION_EDIT,
-        "update_plan_state": TOOL_PERMISSION_CONTROL,
-        "run_bash": TOOL_PERMISSION_SHELL,
-        "list_shell_jobs": TOOL_PERMISSION_READ,
-        "read_shell_output": TOOL_PERMISSION_READ,
-        "stop_shell_job": TOOL_PERMISSION_CONTROL,
-        "browser_test": TOOL_PERMISSION_SHELL,
-        "stop_dev_server": TOOL_PERMISSION_SHELL,
-    }
-    lanes = {
-        "read_file": ToolExecutionLane.WORKSPACE_READ,
-        "read_skill_file": ToolExecutionLane.WORKSPACE_READ,
-        "repo_search": ToolExecutionLane.WORKSPACE_READ,
-        "tool_search": ToolExecutionLane.CONTROL_SERIAL,
-        "parallel_agents": ToolExecutionLane.SUBAGENT_READ,
-        "parallel_commands": ToolExecutionLane.WORKSPACE_READ,
-        "list_files": ToolExecutionLane.WORKSPACE_READ,
-        "ask_user": ToolExecutionLane.CONTROL_SERIAL,
-        "memory_search": ToolExecutionLane.WORKSPACE_READ,
-        "remember_memory": ToolExecutionLane.WORKSPACE_WRITE,
-        "read_memory_file": ToolExecutionLane.WORKSPACE_READ,
-        "delegate_agent": ToolExecutionLane.SUBAGENT_READ,
-        "web_search": ToolExecutionLane.NETWORK_READ,
-        "web_fetch": ToolExecutionLane.NETWORK_READ,
-        "write_file": ToolExecutionLane.WORKSPACE_WRITE,
-        "apply_patch": ToolExecutionLane.WORKSPACE_WRITE,
-        "update_plan_state": ToolExecutionLane.CONTROL_SERIAL,
-        "run_bash": ToolExecutionLane.SHELL_SERIAL,
-        "list_shell_jobs": ToolExecutionLane.CONTROL_SERIAL,
-        "read_shell_output": ToolExecutionLane.CONTROL_SERIAL,
-        "stop_shell_job": ToolExecutionLane.CONTROL_SERIAL,
-        "browser_test": ToolExecutionLane.SHELL_SERIAL,
-        "stop_dev_server": ToolExecutionLane.SHELL_SERIAL,
-    }
-    for schema in CORE_TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS:
-        name = schema["function"]["name"]
-        if name in handlers:
-            registry.register(schema, handlers[name], permission=permissions.get(name), lane=lanes.get(name))
+    main = {TOOL_CAPABILITY_MAIN}
+    all_agents = main | {TOOL_CAPABILITY_READONLY_AGENT, TOOL_CAPABILITY_WORKER_AGENT}
+    worker_agents = main | {TOOL_CAPABILITY_WORKER_AGENT}
+
+    def add(name, handler, permission, effect=None, *, capabilities=main):
+        registry.register(
+            schemas[name],
+            handler,
+            permission=permission,
+            effect=effect,
+            capabilities=capabilities,
+        )
+
+    add(
+        "read_file",
+        read_file,
+        TOOL_PERMISSION_READ,
+        _path_effect("path", access="read"),
+        capabilities=all_agents,
+    )
+    add(
+        "read_skill_file",
+        read_skill_file,
+        TOOL_PERMISSION_READ,
+        capabilities=all_agents,
+    )
+    add(
+        "repo_search",
+        repo_search,
+        TOOL_PERMISSION_READ,
+        _path_effect("path", access="read", scope="subtree", default="."),
+        capabilities=all_agents,
+    )
+    add(
+        "list_files",
+        list_files,
+        TOOL_PERMISSION_READ,
+        _path_effect("directory", access="read", scope="subtree", default="."),
+        capabilities=all_agents,
+    )
+    add("memory_search", memory_search, TOOL_PERMISSION_READ, capabilities=all_agents)
+    add(
+        "read_memory_file",
+        read_memory_file,
+        TOOL_PERMISSION_READ,
+        capabilities=all_agents,
+    )
+    add(
+        "web_search",
+        web_search,
+        TOOL_PERMISSION_NETWORK_READ,
+        CallEffect(
+            (ResourceClaim("network", "*", "global", "read"),),
+            concurrency_key="network",
+        ),
+        capabilities=all_agents,
+    )
+    add(
+        "web_fetch",
+        web_fetch,
+        TOOL_PERMISSION_NETWORK_READ,
+        CallEffect(
+            (ResourceClaim("network", "*", "global", "read"),),
+            concurrency_key="network",
+        ),
+        capabilities=all_agents,
+    )
+    add(
+        "run_bash",
+        run_bash,
+        TOOL_PERMISSION_SHELL,
+        _shell_effect,
+        capabilities=all_agents,
+    )
+    add("browser_test", browser_test, TOOL_PERMISSION_SHELL, capabilities=all_agents)
+    add(
+        "write_file",
+        write_file,
+        TOOL_PERMISSION_EDIT,
+        _path_effect("path", access="write"),
+        capabilities=worker_agents,
+    )
+    add(
+        "apply_patch",
+        apply_patch,
+        TOOL_PERMISSION_EDIT,
+        _path_effect("path", access="write"),
+        capabilities=worker_agents,
+    )
+
+    add(
+        "tool_search",
+        tool_search,
+        TOOL_PERMISSION_READ,
+        CallEffect.global_exclusive(kind="control"),
+    )
+    add(
+        "spawn_agent", spawn_agent, TOOL_PERMISSION_READ, CallEffect(kind="agent_spawn")
+    )
+    add(
+        "send_agent_message",
+        send_agent_message,
+        TOOL_PERMISSION_READ,
+        _agent_effect("agent_id", access="write"),
+    )
+    add(
+        "followup_agent",
+        followup_agent,
+        TOOL_PERMISSION_READ,
+        _agent_effect("agent_id", access="write"),
+    )
+    add(
+        "wait_agents",
+        wait_agents,
+        TOOL_PERMISSION_READ,
+        CallEffect(
+            (ResourceClaim("agent-session", "*", "global", "read"),), kind="agent_wait"
+        ),
+    )
+    add(
+        "list_agents",
+        list_agents,
+        TOOL_PERMISSION_READ,
+        CallEffect(
+            (ResourceClaim("agent-session", "*", "global", "read"),), kind="agent_list"
+        ),
+    )
+    add(
+        "interrupt_agent",
+        interrupt_agent,
+        TOOL_PERMISSION_CONTROL,
+        _agent_effect("agent_id", access="write"),
+    )
+    add(
+        "read_agent_changes",
+        read_agent_changes,
+        TOOL_PERMISSION_READ,
+        _agent_effect("proposal_id", access="read", domain="agent-proposal"),
+    )
+    add(
+        "apply_agent_changes",
+        apply_agent_changes,
+        TOOL_PERMISSION_EDIT,
+        _proposal_effect,
+    )
+    add(
+        "read_agent_conflicts",
+        read_agent_conflicts,
+        TOOL_PERMISSION_READ,
+        _agent_effect("conflict_id", access="read", domain="agent-conflict"),
+    )
+    add(
+        "resolve_agent_conflicts",
+        resolve_agent_conflicts,
+        TOOL_PERMISSION_EDIT,
+        _conflict_effect,
+    )
+    add(
+        "close_agent",
+        close_agent,
+        TOOL_PERMISSION_CONTROL,
+        _agent_effect("agent_id", access="write"),
+    )
+    add(
+        "ask_user",
+        ask_user,
+        TOOL_PERMISSION_READ,
+        CallEffect.global_exclusive(kind="interaction"),
+    )
+    add("remember_memory", remember_memory, TOOL_PERMISSION_EDIT)
+    add(
+        "update_plan_state",
+        update_plan_state,
+        TOOL_PERMISSION_CONTROL,
+        CallEffect.global_exclusive(kind="control"),
+    )
+    add(
+        "list_shell_jobs",
+        list_shell_jobs,
+        TOOL_PERMISSION_READ,
+        CallEffect.global_exclusive(kind="control"),
+    )
+    add(
+        "read_shell_output",
+        read_shell_output,
+        TOOL_PERMISSION_READ,
+        CallEffect.global_exclusive(kind="control"),
+    )
+    add(
+        "stop_shell_job",
+        stop_shell_job,
+        TOOL_PERMISSION_CONTROL,
+        CallEffect.global_exclusive(kind="control"),
+    )
+    add("stop_dev_server", stop_dev_server, TOOL_PERMISSION_SHELL)
     return registry
+
+
+def _root(context) -> str:
+    return str(context.workspace.root) if context is not None else "."
+
+
+def _path_effect(
+    argument: str, *, access: str, scope: str = "exact", default: str = ""
+):
+    def resolve(args, context):
+        return CallEffect(
+            (
+                workspace_claim(
+                    _root(context),
+                    args.get(argument) or default,
+                    scope=scope,
+                    access=access,
+                ),
+            )
+        )
+
+    return resolve
+
+
+def _workspace_global(access: str):
+    def resolve(_args, context):
+        return CallEffect(
+            (workspace_claim(_root(context), ".", scope="global", access=access),)
+        )
+
+    return resolve
+
+
+def _agent_effect(argument: str, *, access: str, domain: str = "agent"):
+    def resolve(args, _context):
+        return CallEffect(
+            (ResourceClaim(domain, str(args.get(argument) or "*"), "exact", access),)
+        )
+
+    return resolve
+
+
+def _proposal_effect(args, context):
+    coordinator = (
+        getattr(context, "agent_coordinator", None) if context is not None else None
+    )
+    if coordinator is None:
+        return CallEffect.global_exclusive(kind="agent_proposal")
+    try:
+        paths = coordinator.proposal_paths(str(args.get("proposal_id") or ""))
+    except (KeyError, ValueError):
+        return CallEffect.global_exclusive(kind="agent_proposal")
+    return CallEffect(
+        tuple(
+            workspace_claim(_root(context), path, scope="exact", access="write")
+            for path in paths
+        ),
+        kind="agent_proposal",
+    )
+
+
+def _conflict_effect(args, context):
+    coordinator = (
+        getattr(context, "agent_coordinator", None) if context is not None else None
+    )
+    if coordinator is None:
+        return CallEffect.global_exclusive(kind="agent_conflict")
+    try:
+        paths = coordinator.conflict_paths(str(args.get("conflict_id") or ""))
+    except (KeyError, ValueError):
+        return CallEffect.global_exclusive(kind="agent_conflict")
+    return CallEffect(
+        tuple(
+            workspace_claim(_root(context), path, scope="exact", access="write")
+            for path in paths
+        ),
+        kind="agent_conflict",
+    )
+
+
+def _shell_effect(args, context):
+    analysis = analyze_shell_command(str(args.get("command") or ""))
+    workspace = workspace_claim(_root(context), ".", scope="global", access="read")
+    if analysis.kind == "inspect":
+        return CallEffect((workspace,), kind="inspect")
+    if analysis.kind == "verify":
+        return CallEffect(
+            (workspace, ResourceClaim("workspace:derived", "*", "global", "write")),
+            kind="verify",
+        )
+    if analysis.kind == "long_running":
+        return CallEffect.global_exclusive(kind="long_running")
+    return CallEffect.global_exclusive(kind=analysis.kind)
 
 
 BUILTIN_TOOL_REGISTRY = _build_builtin_tool_registry()
 TOOL_SCHEMAS = CORE_TOOL_SCHEMAS
-TOOL_DISPATCH = BUILTIN_TOOL_REGISTRY.dispatch()

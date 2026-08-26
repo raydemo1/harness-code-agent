@@ -8,9 +8,9 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 
 def _env_int(name: str, default: int) -> int:
@@ -51,6 +51,7 @@ MEMORY_FILES = (
 )
 PROTECTED_FILES = {"MEMORY.md", "manifest.json", "dream-log.md", "records.jsonl", "inbox.jsonl"}
 LOCK_STALE_SECONDS = _env_int("HARNESS_MEMORY_LOCK_STALE_SECONDS", 300)
+GIT_IDENTITY_TIMEOUT_SECONDS = 0.5
 
 _PROCESS_LOCK = threading.RLock()
 
@@ -73,7 +74,7 @@ class MemoryRecord:
     updated_at: str = ""
 
     @classmethod
-    def from_dict(cls, data: dict) -> "MemoryRecord":
+    def from_dict(cls, data: dict) -> MemoryRecord:
         known = {field.name for field in cls.__dataclass_fields__.values()}
         payload = {key: value for key, value in data.items() if key in known}
         return cls(**payload)
@@ -99,16 +100,27 @@ def resolve_repo_key(workspace: Path) -> str:
             capture_output=True,
             text=True,
             check=True,
+            timeout=GIT_IDENTITY_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+            env=_noninteractive_git_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         common_dir = Path(proc.stdout.strip())
         if not common_dir.is_absolute():
             common_dir = (workspace / common_dir).resolve()
         basis = str(common_dir)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         basis = str(workspace)
     digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
     name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in workspace.name) or "workspace"
     return f"{name}-{digest}"
+
+
+def _noninteractive_git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "Never"
+    return env
 
 
 class MemoryStore:
@@ -125,7 +137,7 @@ class MemoryStore:
             while not acquired:
                 try:
                     fd = os.open(str(self._lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    os.write(fd, f"{os.getpid()} {time.time()}\n".encode("utf-8"))
+                    os.write(fd, f"{os.getpid()} {time.time()}\n".encode())
                     os.close(fd)
                     acquired = True
                 except FileExistsError:
@@ -261,25 +273,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _initial_memory_md() -> str:
-    return "\n".join(
-        [
-            "# Long-Term Memory",
-            "",
-            "This file is a navigation surface for generated memory records.",
-            "",
-            "## Memory Files",
-            "",
-            "| File | Purpose |",
-            "|------|---------|",
-            "| project.md | Architecture, modules, conventions, project facts |",
-            "| decisions.md | Design decisions, tradeoffs, rationale |",
-            "| commands.md | Useful commands and workflows |",
-            "| debugging.md | Debug observations, failures, fixes |",
-            "| preferences.md | User preferences and work style |",
-            "| learnings.md | Agent experiences and mental summaries |",
-            "",
-        ]
-    )
+    return "# Long-Term Memory\n\nThis file is a navigation surface for generated memory records.\n\n## Memory Files\n\n| File | Purpose |\n|------|---------|\n| project.md | Architecture, modules, conventions, project facts |\n| decisions.md | Design decisions, tradeoffs, rationale |\n| commands.md | Useful commands and workflows |\n| debugging.md | Debug observations, failures, fixes |\n| preferences.md | User preferences and work style |\n| learnings.md | Agent experiences and mental summaries |\n"
 
 
 def _utc_now() -> str:

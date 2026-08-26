@@ -3,12 +3,18 @@ App Builder profile for single-agent web app creation and browser verification.
 """
 from __future__ import annotations
 
-from ..tracking_policy import TASK_TRACKING_POLICY
-from .base import BaseProfile, AgentConfig, build_execution_middlewares, build_profile_prompt
+from typing import ClassVar
+
 from ..runtime.middleware import (
     PreExitVerificationMiddleware,
 )
-
+from ..tracking_policy import TASK_TRACKING_POLICY
+from .base import (
+    AgentConfig,
+    BaseProfile,
+    build_execution_middlewares,
+    build_profile_prompt,
+)
 
 _APP_BUILDER_SYSTEM = build_profile_prompt(
     role=(
@@ -24,7 +30,7 @@ _APP_BUILDER_SYSTEM = build_profile_prompt(
         "Build complete behavior rather than a mock screenshot. Make deliberate choices about hierarchy, "
         "typography, color, spacing, and interaction instead of relying on generic component defaults. "
         "Use delegation for focused investigation, design critique, test ideas, review, verification, or "
-        "isolated patch proposals, then integrate the decisions and code yourself. Run the application, inspect browser console output, exercise "
+        "isolated worker proposals, then review and integrate the result. Run the application, inspect browser console output, exercise "
         "representative interactions, and check both mobile and desktop layouts."
     ),
     boundaries=(
@@ -43,11 +49,10 @@ _APP_BUILDER_SYSTEM = build_profile_prompt(
 
 
 class AppBuilderProfile(BaseProfile):
-    _DEFAULTS = {
+    _DEFAULTS: ClassVar[dict] = {
         "task_budget": 3600,
         "loop_file_edit_threshold": 4,
         "loop_command_repeat_threshold": 3,
-        "require_start_after_n_actions": 5,
         "acceptance_review_timeout": 10.0,
         "time_warn_threshold": 0.60,
         "time_critical_threshold": 0.85,
@@ -73,7 +78,6 @@ class AppBuilderProfile(BaseProfile):
                 time_warn_threshold=self._get("time_warn_threshold"),
                 time_critical_threshold=self._get("time_critical_threshold"),
                 enforce_acceptance=True,
-                require_start_after_n_actions=self._get("require_start_after_n_actions"),
                 acceptance_review_timeout=self._get("acceptance_review_timeout"),
                 extra_before_time_budget=[
                     PreExitVerificationMiddleware(

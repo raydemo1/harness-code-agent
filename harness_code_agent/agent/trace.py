@@ -1,6 +1,7 @@
 """Agent trace writer."""
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -19,22 +20,22 @@ class TraceWriter:
     Trace file: {WORKSPACE}/.harness/traces/trace_{agent_name}.jsonl
     """
 
-    def __init__(self, agent_name: str):
+    def __init__(self, agent_name: str, *, workspace: str | Path | None = None):
         self.agent_name = agent_name
         self._start_time = time.time()
-        trace_dir = Path(config.WORKSPACE) / ".harness" / "traces"
+        trace_dir = Path(workspace or Path.cwd()).resolve() / ".harness" / "traces"
         try:
             trace_dir.mkdir(parents=True, exist_ok=True)
             test_file = trace_dir / f"trace_test_{agent_name}"
             test_file.write_text("test")
             test_file.unlink()
             self._path = trace_dir / f"trace_{agent_name}.jsonl"
-        except Exception:
+        except OSError:
             # Workspace not writable, use harness-agent dir
             self._path = Path(__file__).parent / f"trace_{agent_name}.jsonl"
 
     def _write(self, event_type: str, data: dict):
-        try:
+        with contextlib.suppress(Exception):  # never let tracing break the agent
             entry = {
                 "t": round(time.time() - self._start_time, 2),
                 "agent": self.agent_name,
@@ -48,8 +49,6 @@ class TraceWriter:
             if config.TRACE_STDERR:
                 import sys
                 print(f"[TRACE] {line}", file=sys.stderr)
-        except Exception:
-            pass  # never let tracing break the agent
 
     def iteration(self, n: int, tokens: int):
         self._write("iteration", {"n": n, "tokens": tokens})

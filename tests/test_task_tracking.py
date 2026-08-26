@@ -22,9 +22,23 @@ def _install_fake_openai_module() -> None:
 _install_fake_openai_module()
 
 from harness_code_agent import config
-from harness_code_agent.agent.loop import AgentRuntimeState
-from harness_code_agent.runtime.middlewares import RecoveryStrategyMiddleware, TaskTrackingEnforcementMiddleware
+from harness_code_agent.agent.conversation import AgentRuntimeState
+from harness_code_agent.runtime.middlewares import (
+    RecoveryStrategyMiddleware,
+    TaskTrackingEnforcementMiddleware,
+)
+from harness_code_agent.runtime.tool_result import ToolResult
 from harness_code_agent.runtime.tools import execute_tool, execute_tool_result
+
+
+def _result(text: str, *, status: str | None = None) -> ToolResult:
+    """Build a ToolResult from the legacy text conventions used in these tests."""
+    if status is None:
+        status = "failed" if text.startswith(("[error]", "[blocked]")) else "success"
+    metadata = {"status_source": "permission"} if text.startswith("[blocked]") else {}
+    error = text.removeprefix("[error] ").removeprefix("[blocked] ") if status == "failed" else None
+    return ToolResult(tool="run_bash", status=status, output=text, error=error, metadata=metadata)
+
 
 
 class UpdatePlanStateToolTests(unittest.TestCase):
@@ -78,6 +92,36 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         self.assertFalse(data["requires_approval"])
         self.assertFalse(Path(self.temp_dir, "global_plan", "current", "plan.md").exists())
 
+    def test_todo_mode_writes_lightweight_state_without_acceptance(self):
+        state = AgentRuntimeState(session_id="todo-session")
+        result = execute_tool_result(
+            "update_plan_state",
+            self._base_args(mode="todo", steps=["write", "test"], current_step="write"),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(state.task_board.planning_mode, "todo")
+        self.assertEqual(state.task_board.acceptance.revision, 0)
+        data = json.loads(self._state_path("todo-session").read_text(encoding="utf-8"))
+        self.assertEqual(data["mode"], "todo")
+
+    def test_todo_progress_ignores_tracked_replan_flag(self):
+        state = AgentRuntimeState(session_id="todo-recovery")
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "previous check failed"
+
+        result = execute_tool_result(
+            "update_plan_state",
+            self._base_args(mode="todo", update_kind="progress"),
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(state.task_board.planning_mode, "todo")
+
     def test_plan_state_tool_result_exposes_planning_state_metadata(self):
         state = AgentRuntimeState(session_id="test-session")
 
@@ -112,7 +156,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         )
 
         self.assertIn("[error]", result)
-        self.assertIn("mode must be: tracked", result)
+        self.assertIn("mode must be one of: todo, tracked", result)
         self.assertFalse(self._state_path().exists())
         self.assertFalse(Path(self.temp_dir, "global_plan").exists())
 
@@ -126,7 +170,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
         )
 
         self.assertIn("[error]", result)
-        self.assertIn("mode must be: tracked", result)
+        self.assertIn("mode must be one of: todo, tracked", result)
         self.assertFalse(self._state_path().exists())
         self.assertFalse(Path(self.temp_dir, "global_plan").exists())
 
@@ -335,7 +379,7 @@ class UpdatePlanStateToolTests(unittest.TestCase):
             middleware.post_tool(
                 "update_plan_state",
                 {"update_kind": "replan"},
-                "[error] replan update requires replan_reason",
+                _result("[error] replan update requires replan_reason"),
                 [],
                 runtime_state=state,
                 agent_name="main_agent",
@@ -384,8 +428,8 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         state.task_board.planning_mode = "tracked"
 
         blocked = middleware.before_tool(
-            "run_bash",
-            {"command": "pytest"},
+            "write_file",
+            {"path": "probe.txt", "content": "x"},
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -394,26 +438,26 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         for _ in range(4):
             early_post.append(
                 middleware.post_tool(
-                    "run_bash",
-                    {"command": "pytest"},
-                    "ok",
+                    "write_file",
+                    {"path": "probe.txt", "content": "x"},
+                    _result("ok"),
                     messages=[],
                     runtime_state=state,
                     agent_name="main_agent",
                 )
             )
         reminder = middleware.post_tool(
-            "run_bash",
-            {"command": "pytest"},
-            "ok",
+            "write_file",
+            {"path": "probe.txt", "content": "x"},
+            _result("ok"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
         )
         second_reminder = middleware.post_tool(
-            "run_bash",
-            {"command": "pytest"},
-            "ok",
+            "write_file",
+            {"path": "probe.txt", "content": "x"},
+            _result("ok"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -440,7 +484,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         reminder = middleware.post_tool(
             "run_bash",
             {"command": "ls -la /app 2>/dev/null; which python3"},
-            "ok",
+            _result("ok"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -452,7 +496,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertEqual(state.task_board.action_count, 0)
         self.assertFalse(state.task_board.needs_final_update)
 
-    def test_tracked_mode_counts_verification_command_before_start(self):
+    def test_tracked_mode_treats_non_workspace_write_shell_as_probe_before_start(self):
         middleware = TaskTrackingEnforcementMiddleware()
         state = AgentRuntimeState()
         state.task_board.planning_mode = "tracked"
@@ -468,15 +512,15 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         middleware.post_tool(
             "run_bash",
             {"command": "pytest"},
-            "ok",
+            _result("ok"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
         )
 
         self.assertIsNone(blocked)
-        self.assertEqual(state.task_board.action_count, 1)
-        self.assertTrue(state.task_board.needs_final_update)
+        self.assertEqual(state.task_board.action_count, 0)
+        self.assertFalse(state.task_board.needs_final_update)
 
     def test_requires_approval_flag_does_not_block_tracked_actions(self):
         middleware = TaskTrackingEnforcementMiddleware()
@@ -534,7 +578,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             reminder = middleware.post_tool(
                 "run_bash",
                 {"command": "pytest"},
-                "ok",
+                _result("ok"),
                 messages=[],
                 runtime_state=state,
                 agent_name="main_agent",
@@ -572,6 +616,31 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         self.assertIn("acceptance_checks", blocked)
         self.assertNotIn("Terminal", blocked)
 
+    def test_todo_mode_has_no_acceptance_or_replan_gate(self):
+        middleware = TaskTrackingEnforcementMiddleware(enforce_acceptance=True)
+        state = AgentRuntimeState()
+        state.task_board.planning_mode = "todo"
+        state.task_board.replan_required = True
+        state.task_board.replan_reason = "a verification failed"
+
+        final_update = middleware.before_tool(
+            "update_plan_state",
+            {"mode": "todo", "update_kind": "final", "acceptance_checks": []},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+        next_action = middleware.before_tool(
+            "run_bash",
+            {"command": "python -m unittest"},
+            messages=[],
+            runtime_state=state,
+            agent_name="main_agent",
+        )
+
+        self.assertIsNone(final_update)
+        self.assertIsNone(next_action)
+
     def test_unset_mode_allows_small_skip_path_before_start_threshold(self):
         middleware = TaskTrackingEnforcementMiddleware(
             enforce_acceptance=True,
@@ -593,7 +662,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
                 middleware.post_tool(
                     "run_bash",
                     {"command": "pytest"},
-                    "ok",
+                    _result("ok"),
                     messages=[],
                     runtime_state=state,
                     agent_name="main_agent",
@@ -623,7 +692,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             middleware.post_tool(
                 "run_bash",
                 {"command": "pytest"},
-                "ok",
+                _result("ok"),
                 messages=[],
                 runtime_state=state,
                 agent_name="main_agent",
@@ -653,15 +722,15 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             middleware.post_tool(
                 "run_bash",
                 {"command": "pytest"},
-                "ok",
+                _result("ok"),
                 messages=[],
                 runtime_state=state,
                 agent_name="main_agent",
             )
 
         blocked = middleware.before_tool(
-            "delegate_agent",
-            {"agent_profile": "explore", "task": "inspect the parser"},
+            "spawn_agent",
+            {"role": "explorer", "task": "inspect the parser"},
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -675,9 +744,9 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         state.task_board.planning_mode = "tracked"
 
         reminder = middleware.post_tool(
-            "delegate_agent",
-            {"agent_profile": "explore", "task": "inspect the parser"},
-            "ok",
+            "spawn_agent",
+            {"role": "explorer", "task": "inspect the parser"},
+            _result("ok"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -699,15 +768,15 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
             middleware.post_tool(
                 "run_bash",
                 {"command": "pytest"},
-                "ok",
+                _result("ok"),
                 messages=[],
                 runtime_state=state,
                 agent_name="main_agent",
             )
 
         blocked = middleware.before_tool(
-            "delegate_agent",
-            {"agent_profile": "patch", "task": "draft a parser fix"},
+            "spawn_agent",
+            {"role": "worker", "task": "draft a parser fix", "allowed_paths": ["parser.py"]},
             messages=[],
             runtime_state=state,
             agent_name="main_agent",
@@ -725,7 +794,7 @@ class TaskTrackingEnforcementTests(unittest.TestCase):
         middleware.post_tool(
             "run_bash",
             {"command": "pytest"},
-            "ok",
+            _result("ok"),
             messages=[],
             runtime_state=state,
             agent_name="main_agent",

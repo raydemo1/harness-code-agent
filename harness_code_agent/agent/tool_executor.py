@@ -2,39 +2,32 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
-from .. import config
-from ..runtime.permissions import PermissionPolicy
-from ..runtime import shell_classification
-from ..runtime.tool_registry import ToolExecutionLane, tool_schemas_for_profile
+from ..runtime.execution_planner import (
+    CallEffect,
+    ExecutionPlanner,
+    acquire_concurrency,
+)
+from ..runtime.tool_registry import tool_schemas_for_profile
+from ..runtime.tool_result import ToolResult
 from ..runtime.tool_runner import (
     _registry_for_context,
+    emit_tool_call_started,
     execute_tool_result,
     finalize_executed_tool_result,
     finalize_intercepted_tool_result,
 )
-from ..runtime.tool_result import ToolResult
-from ..workspace.shell_session import PersistentShellSession
+from .cancellation import CancelledError
 
 log = logging.getLogger("harness")
 
 
 MAX_WORKERS = 8
-SUBAGENT_LIMIT = 3
-VERIFY_SHELL_LIMIT = 2
-NETWORK_LIMIT = 2
-
-PARALLEL_LANES = {
-    ToolExecutionLane.WORKSPACE_READ,
-    ToolExecutionLane.NETWORK_READ,
-    ToolExecutionLane.SUBAGENT_READ,
-    ToolExecutionLane.SHELL_READ,
-    ToolExecutionLane.SHELL_VERIFY,
-}
 
 
 @dataclass
@@ -43,7 +36,7 @@ class PreparedToolCall:
     tool_call_id: str
     name: str
     args: dict
-    lane: ToolExecutionLane
+    effect: CallEffect
     raw: Any
     blocked_result: ToolResult | None = None
     emit_events: bool = True
@@ -61,24 +54,20 @@ class ExecutedToolCall:
 @dataclass
 class ExecutionGroup:
     calls: list[PreparedToolCall]
-    parallel: bool
+    parallel: bool = True
 
 
 class ToolExecutor:
-    _subagent_semaphore = threading.Semaphore(SUBAGENT_LIMIT)
-    _verify_shell_semaphore = threading.Semaphore(VERIFY_SHELL_LIMIT)
-    _network_semaphore = threading.Semaphore(NETWORK_LIMIT)
 
     def __init__(self, conversation, cancellation_token=None):
         self.conversation = conversation
         self.agent = conversation.agent
         self.runtime_state = conversation.runtime_state
         self.cancellation_token = cancellation_token
-        self._shell_policy = PermissionPolicy()
         self._tool_calls: list = []
-        self._block_remaining_after_index: int | None = None
         self._executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
         self._deferred_user_messages: list[str] = []
+        self._middleware_activity: dict[str, dict[str, Any]] = {}
 
     def execute(self, tool_calls: list) -> bool:
         self._tool_calls = list(tool_calls or [])
@@ -87,29 +76,88 @@ class ToolExecutor:
             prepared, stop = self._prepare_calls(tool_calls)
             if stop:
                 return True
-            for group in _build_groups(prepared):
+            planner = ExecutionPlanner((call.index, call.effect) for call in prepared)
+            by_index = {call.index: call for call in prepared}
+            pending = set(by_index)
+            completed: set[int] = set()
+            buffered: dict[int, ExecutedToolCall] = {}
+            next_record = 0
+            while pending:
                 self.conversation._check_cancelled(self.cancellation_token)
-                executed = self._execute_group(group)
+                ready_indexes = planner.ready(pending, completed)
+                if not ready_indexes:
+                    raise RuntimeError("Tool execution planner produced a dependency cycle")
+                safe_indexes = [index for index in ready_indexes if not self._requires_approval(by_index[index])]
+                selected = safe_indexes or [ready_indexes[0]]
+                executed = self._execute_group(ExecutionGroup([by_index[index] for index in selected]))
                 stop_after_group = False
-                for item in sorted(executed, key=lambda result: result.prepared.index):
-                    self._record_executed_result(item)
+                for item in executed:
+                    buffered[item.prepared.index] = item
+                    pending.discard(item.prepared.index)
+                    completed.add(item.prepared.index)
                     if item.stop_after_tool_loop or self.runtime_state.fallback.stop_requested:
                         stop_after_group = True
+                while next_record in buffered:
+                    self._record_executed_result(buffered.pop(next_record))
+                    next_record += 1
                 if stop_after_group:
-                    self.conversation._emit_agent_fallback()
-                    self.conversation.last_text = self.conversation._fallback_text()
-                    if self._block_remaining_after_index is not None:
-                        self.conversation._append_blocked_tool_results(
-                            self._tool_calls[self._block_remaining_after_index:],
-                            self.runtime_state.fallback.stop_reason,
+                    reason = self.runtime_state.fallback.stop_reason
+                    for index in sorted(pending):
+                        call = by_index[index]
+                        output = f"[blocked] Agent fallback triggered ({reason}); tool was not executed."
+                        buffered[index] = ExecutedToolCall(
+                            call,
+                            ToolResult(
+                                tool=call.name,
+                                status="failed",
+                                output=output,
+                                error=output.removeprefix("[blocked] "),
+                                metadata={"status_source": "budget", "fallback_reason": reason},
+                            ),
+                            stop_after_tool_loop=True,
+                            intercepted=True,
                         )
+                    pending.clear()
+                    while next_record in buffered:
+                        self._record_executed_result(buffered.pop(next_record))
+                        next_record += 1
+                    self.conversation.emitter.emit_agent_fallback(self.runtime_state.fallback)
+                    self.conversation.last_text = self.conversation._fallback_text()
                     self._flush_deferred_user_messages()
                     return True
             self._flush_deferred_user_messages()
             return False
+        except CancelledError:
+            # The assistant message with tool_calls is already in history;
+            # answer every call the API still expects so the next request
+            # is not rejected with a 400.
+            self._repair_orphaned_tool_calls()
+            raise
         finally:
             self.conversation.compaction_gate.end_tool_call()
             self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _repair_orphaned_tool_calls(self) -> None:
+        answered = {
+            message.get("tool_call_id")
+            for message in self.conversation.messages
+            if message.get("role") == "tool"
+        }
+        orphans = [
+            tc
+            for tc in self._tool_calls
+            if tc.get("id") and tc.get("id") not in answered
+        ]
+        if not orphans:
+            return
+        log.info("[%s] Answering %d cancelled tool calls", self.agent.name, len(orphans))
+        self.conversation.trace.error("cancelled_tool_calls", f"{len(orphans)} unanswered")
+        for tc in orphans:
+            self.conversation._append_message({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": "[cancelled] Execution cancelled before this tool produced a result.",
+            })
 
     def _prepare_calls(self, tool_calls: list) -> tuple[list[PreparedToolCall], bool]:
         prepared: list[PreparedToolCall] = []
@@ -127,7 +175,7 @@ class ToolExecutor:
                         tool_call_id=tc["id"],
                         name=fn_name,
                         args={},
-                        lane=ToolExecutionLane.BLOCKED,
+                        effect=CallEffect.global_exclusive(kind="blocked"),
                         raw=tc,
                         blocked_result=ToolResult(
                             tool=fn_name,
@@ -141,7 +189,7 @@ class ToolExecutor:
                 )
                 continue
 
-            lane, blocked = self._classify_call(fn_name, fn_args)
+            effect, blocked = self._classify_call(fn_name, fn_args)
             if self.agent.allowed_tool_names is not None and fn_name not in self.agent.allowed_tool_names:
                 output = f"[blocked] Tool '{fn_name}' is not available to this agent profile."
                 blocked = ToolResult(
@@ -151,7 +199,7 @@ class ToolExecutor:
                     error=output.removeprefix("[blocked] "),
                     metadata={"status_source": "permission"},
                 )
-                lane = ToolExecutionLane.BLOCKED
+                effect = CallEffect.global_exclusive(kind="blocked")
                 self.conversation.trace.middleware_inject("ToolSchemaGuard", "before_tool", output)
             prepared.append(
                 PreparedToolCall(
@@ -159,30 +207,30 @@ class ToolExecutor:
                     tool_call_id=tc["id"],
                     name=fn_name,
                     args=fn_args,
-                    lane=lane,
+                    effect=effect,
                     raw=tc,
                     blocked_result=blocked,
                 )
             )
         return prepared, False
 
-    def _classify_call(self, name: str, args: dict) -> tuple[ToolExecutionLane, ToolResult | None]:
+    def _classify_call(self, name: str, args: dict) -> tuple[CallEffect, ToolResult | None]:
         registry = _registry_for_context(self.agent.tool_context)
-        lane = registry.lane_for(name) or ToolExecutionLane.CONTROL_SERIAL
-        if name != "run_bash":
-            return lane, None
-        command = str(args.get("command", ""))
-        shell_risk = self._shell_policy.classify_shell_command(command)
-        if shell_risk == "shell_blocked":
-            output = "[blocked] blacklisted shell command is never allowed"
-            return ToolExecutionLane.BLOCKED, ToolResult(
-                tool=name,
-                status="failed",
-                output=output,
-                error=output.removeprefix("[blocked] "),
-                metadata={"status_source": "permission", "risk": "shell_blocked"},
-            )
-        return classify_shell_lane(command), None
+        return registry.effect_for(name, args, self.agent.tool_context), None
+
+    def _requires_approval(self, prepared: PreparedToolCall) -> bool:
+        if prepared.blocked_result is not None:
+            return False
+        context = self.agent.tool_context
+        if context is None:
+            return False
+        registry = _registry_for_context(context)
+        decision = context.permission_policy.decide_tool_call(
+            prepared.name,
+            prepared.args,
+            tool_permission=registry.permission_for(prepared.name),
+        )
+        return decision.action == "ask"
 
     def _execute_group(self, group: ExecutionGroup) -> list[ExecutedToolCall]:
         ready: list[PreparedToolCall] = []
@@ -190,7 +238,6 @@ class ToolExecutor:
         for prepared in group.calls:
             self.conversation._check_cancelled(self.cancellation_token)
             if prepared.emit_events and not self.conversation._record_tool_call_budget(prepared.name, prepared.args):
-                self._block_remaining_after_index = prepared.index + 1
                 output = (
                     f"[blocked] Agent fallback triggered ({self.runtime_state.fallback.stop_reason}); "
                     "tool was not executed."
@@ -220,9 +267,9 @@ class ToolExecutor:
             if blocked is not None:
                 executed.append(ExecutedToolCall(prepared, blocked, intercepted=True))
                 if self.runtime_state.fallback.stop_requested:
-                    self._block_remaining_after_index = prepared.index + 1
                     break
                 continue
+            allowed_started = time.perf_counter()
             for mw in self.agent.middlewares:
                 mw.on_tool_allowed(
                     prepared.name,
@@ -231,20 +278,32 @@ class ToolExecutor:
                     runtime_state=self.runtime_state,
                     agent_name=self.agent.name,
                 )
+            activity = self._middleware_activity.setdefault(
+                prepared.tool_call_id,
+                _new_middleware_activity(),
+            )
+            activity["hooks"] += len(self.agent.middlewares)
+            activity["duration_ms"] += (
+                time.perf_counter() - allowed_started
+            ) * 1000
             ready.append(prepared)
 
         if not ready:
             return executed
-        if not group.parallel:
-            for prepared in ready:
-                executed.append(self._execute_one(prepared))
-            return executed
-
         futures: dict[Future, PreparedToolCall] = {}
         pending: set[Future] = set()
         try:
             for prepared in ready:
+                if prepared.emit_events:
+                    emit_tool_call_started(
+                        name=prepared.name,
+                        arguments=prepared.args,
+                        tool_context=self.agent.tool_context,
+                        agent_name=self.agent.name,
+                    )
                 future = self._executor.submit(self._execute_one, prepared)
+                if self.agent.tool_context is not None:
+                    self.agent.tool_context.tool_tasks.track(future)
                 futures[future] = prepared
                 pending.add(future)
             while pending:
@@ -280,7 +339,13 @@ class ToolExecutor:
         return executed
 
     def _run_before_tool(self, prepared: PreparedToolCall) -> ToolResult | None:
+        activity = self._middleware_activity.setdefault(
+            prepared.tool_call_id,
+            _new_middleware_activity(),
+        )
+        started = time.perf_counter()
         for mw in self.agent.middlewares:
+            activity["hooks"] += 1
             blocked = mw.before_tool(
                 prepared.name,
                 prepared.args,
@@ -290,6 +355,9 @@ class ToolExecutor:
             )
             if not blocked:
                 continue
+            activity["outcome"] = "blocked"
+            activity["sources"].append(type(mw).__name__)
+            activity["duration_ms"] += (time.perf_counter() - started) * 1000
             blocked_text = blocked.to_text() if isinstance(blocked, ToolResult) else str(blocked)
             self.conversation.trace.middleware_inject(type(mw).__name__, "before_tool", blocked_text)
             if isinstance(blocked, ToolResult):
@@ -301,19 +369,16 @@ class ToolExecutor:
                 error=blocked_text,
                 metadata={"status_source": "approval" if blocked_text.startswith("[approval_denied]") else "permission"},
             )
+        activity["duration_ms"] += (time.perf_counter() - started) * 1000
         return None
 
     def _execute_one(self, prepared: PreparedToolCall) -> ExecutedToolCall:
-        semaphore = _semaphore_for(prepared.lane)
-        if semaphore is None:
-            return self._execute_one_unlimited(prepared)
-        with semaphore:
+        context = self.agent.tool_context
+        resource_guard = context.resource_coordinator.acquire(prepared.effect.resources) if context is not None else nullcontext()
+        with acquire_concurrency(prepared.effect.concurrency_key), resource_guard:
             return self._execute_one_unlimited(prepared)
 
     def _execute_one_unlimited(self, prepared: PreparedToolCall) -> ExecutedToolCall:
-        if prepared.name == "run_bash" and prepared.lane == ToolExecutionLane.SHELL_SERIAL:
-            if self.runtime_state.shell_session is None:
-                self.runtime_state.shell_session = PersistentShellSession(_agent_workspace_root(self.agent))
         tool_result = execute_tool_result(
             prepared.name,
             prepared.args,
@@ -321,7 +386,6 @@ class ToolExecutor:
             agent_name=self.agent.name,
             tool_context=self.agent.tool_context,
             emit_events=False,
-            execution_lane=prepared.lane,
             cancellation_token=self.cancellation_token,
         )
         return ExecutedToolCall(prepared, tool_result)
@@ -344,6 +408,7 @@ class ToolExecutor:
                 "tool_call_id": prepared.tool_call_id,
                 "content": result,
             })
+            self._emit_middleware_activity(prepared, fallback_outcome="blocked")
             return
 
         tool_result = finalize_executed_tool_result(
@@ -351,6 +416,7 @@ class ToolExecutor:
             arguments=prepared.args,
             tool_context=self.agent.tool_context,
             agent_name=self.agent.name,
+            emit_call=False,
         )
         self.runtime_state.execution_facts.record_result(
             prepared.name,
@@ -383,18 +449,58 @@ class ToolExecutor:
         if invalidation:
             self._deferred_user_messages.append(invalidation)
 
+        post_started = time.perf_counter()
+        activity = self._middleware_activity.setdefault(
+            prepared.tool_call_id,
+            _new_middleware_activity(),
+        )
         for mw in self.agent.middlewares:
+            activity["hooks"] += 1
             inject = mw.post_tool(
                 prepared.name,
                 prepared.args,
-                result,
+                tool_result,
                 self.conversation.messages,
                 runtime_state=self.runtime_state,
                 agent_name=self.agent.name,
             )
             if inject:
+                activity["outcome"] = "guided"
+                activity["sources"].append(type(mw).__name__)
                 self._deferred_user_messages.append(inject)
                 self.conversation.trace.middleware_inject(type(mw).__name__, "post_tool", inject)
+        activity["duration_ms"] += (time.perf_counter() - post_started) * 1000
+        self._emit_middleware_activity(prepared)
+
+    def _emit_middleware_activity(
+        self,
+        prepared: PreparedToolCall,
+        *,
+        fallback_outcome: str = "passed",
+    ) -> None:
+        activity = self._middleware_activity.pop(
+            prepared.tool_call_id,
+            _new_middleware_activity(),
+        )
+        outcome = str(activity.get("outcome") or fallback_outcome)
+        if outcome == "passed" and fallback_outcome != "passed":
+            outcome = fallback_outcome
+        event_bus = getattr(self.agent.tool_context, "event_bus", None)
+        if event_bus is None:
+            return
+        sources = list(dict.fromkeys(str(item) for item in activity["sources"]))
+        event_bus.emit(
+            "middleware_activity",
+            agent=self.agent.name,
+            payload={
+                "tool": prepared.name,
+                "tool_call_id": prepared.tool_call_id,
+                "hooks": int(activity["hooks"]),
+                "duration_ms": round(float(activity["duration_ms"]), 1),
+                "outcome": outcome,
+                "sources": sources,
+            },
+        )
 
     def _flush_deferred_user_messages(self) -> None:
         while self._deferred_user_messages:
@@ -452,47 +558,10 @@ class ToolExecutor:
         self.agent.update_tool_schemas(current_schemas + additions)
 
 
-def _build_groups(calls: list[PreparedToolCall]) -> list[ExecutionGroup]:
-    groups: list[ExecutionGroup] = []
-    current: list[PreparedToolCall] = []
-    for call in calls:
-        if call.lane in PARALLEL_LANES:
-            current.append(call)
-            continue
-        if current:
-            groups.append(ExecutionGroup(current, parallel=True))
-            current = []
-        groups.append(ExecutionGroup([call], parallel=False))
-    if current:
-        groups.append(ExecutionGroup(current, parallel=True))
-    return groups
-
-
-def classify_shell_lane(command: str) -> ToolExecutionLane:
-    lowered = " ".join(str(command or "").strip().lower().split())
-    if not lowered:
-        return ToolExecutionLane.SHELL_SERIAL
-    if shell_classification.is_long_running_shell_command(lowered):
-        return ToolExecutionLane.SHELL_LONG_RUNNING
-    safe_kind = shell_classification.classify_safe_shell_command(lowered)
-    if safe_kind == "verify":
-        return ToolExecutionLane.SHELL_VERIFY
-    if safe_kind == "read":
-        return ToolExecutionLane.SHELL_READ
-    return ToolExecutionLane.SHELL_SERIAL
-
-
-def _semaphore_for(lane: ToolExecutionLane):
-    if lane == ToolExecutionLane.SUBAGENT_READ:
-        return ToolExecutor._subagent_semaphore
-    if lane == ToolExecutionLane.SHELL_VERIFY:
-        return ToolExecutor._verify_shell_semaphore
-    if lane == ToolExecutionLane.NETWORK_READ:
-        return ToolExecutor._network_semaphore
-    return None
-
-
-def _agent_workspace_root(agent) -> str:
-    if getattr(agent, "tool_context", None) is not None:
-        return str(agent.tool_context.workspace.root)
-    return config.WORKSPACE
+def _new_middleware_activity() -> dict[str, Any]:
+    return {
+        "hooks": 0,
+        "duration_ms": 0.0,
+        "outcome": "passed",
+        "sources": [],
+    }

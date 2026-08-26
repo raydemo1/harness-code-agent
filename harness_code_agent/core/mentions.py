@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..sessions.summary import load_session_summary
 from ..sessions.store import SessionStore
-
-
-FILE_CONTEXT_LIMIT = 60_000
+from ..sessions.summary import load_session_summary
 
 
 @dataclass(frozen=True)
@@ -142,13 +139,6 @@ def render_mention_context(resolved: list[ResolvedMention]) -> str:
     return "\n".join(parts)
 
 
-def format_turn_with_mentions(user_text: str, resolved: list[ResolvedMention]) -> str:
-    context = render_mention_context(resolved)
-    if not context:
-        return user_text
-    return f"{context}\n\nUser turn:\n{user_text}"
-
-
 def _resolve_file_mention(mention: Mention, root: Path) -> ResolvedMention:
     if not mention.target:
         raise MentionResolutionError(f"Empty file mention: {mention.raw}")
@@ -159,9 +149,8 @@ def _resolve_file_mention(mention: Mention, root: Path) -> ResolvedMention:
         candidate = (root / raw_path).resolve()
     if not _is_relative_to(candidate, root):
         raise MentionResolutionError(f"File mention escapes workspace: {mention.raw}")
-    if not candidate.exists() or not candidate.is_file():
-        if not candidate.exists() or not candidate.is_dir():
-            raise MentionResolutionError(f"File mention not found: {mention.raw}")
+    if not candidate.exists() or not (candidate.is_file() or candidate.is_dir()):
+        raise MentionResolutionError(f"File mention not found: {mention.raw}")
     is_dir = candidate.is_dir()
     kind = "directory" if is_dir else "file"
     instruction = (

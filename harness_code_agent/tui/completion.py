@@ -1,12 +1,11 @@
 """Completion logic for slash commands and @mentions (UI-agnostic)."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from .commands import SlashCommandRegistry
-
 
 EXCLUDED_DIRS = {
     ".git",
@@ -30,6 +29,7 @@ class MentionCandidate:
     insert_text: str
     display: str
     description: str
+    kind: str
 
 
 def fuzzy_command_candidates(registry: SlashCommandRegistry, query: str):
@@ -81,11 +81,11 @@ def mention_candidates(
         file_prefix = prefix.removeprefix("file:")
         return _file_candidates(root, file_prefix, limit=limit)
 
-    candidates: list[tuple[int, MentionCandidate]] = []
-    candidates.extend((score, candidate) for score, candidate in _scored_file_candidates(root, prefix))
-    candidates.extend((score, candidate) for score, candidate in _scored_session_candidates(session_store, prefix))
-    candidates.sort(key=lambda item: (-item[0], item[1].display.lower()))
-    return [candidate for _score, candidate in candidates[:limit]]
+    # Keep recent conversations visible before workspace files. A global score
+    # sort lets a large file tree crowd the history section out entirely.
+    sessions = _session_candidates(session_store, prefix, limit=min(8, limit))
+    files = _file_candidates(root, prefix, limit=max(0, limit - len(sessions)))
+    return sessions + files
 
 
 def _file_candidates(root: Path, prefix: str, *, limit: int) -> list[MentionCandidate]:
@@ -98,6 +98,8 @@ def _scored_file_candidates(root: Path, prefix: str) -> list[tuple[int, MentionC
     prefix = prefix.strip().strip('"')
     file_candidates: list[tuple[int, MentionCandidate]] = []
     for rel, is_dir in iter_workspace_paths(root, limit=2000):
+        if is_dir:
+            continue
         score = fuzzy_score(prefix, rel)
         if score <= 0 and prefix:
             continue
@@ -106,8 +108,9 @@ def _scored_file_candidates(root: Path, prefix: str) -> list[tuple[int, MentionC
             score or 1,
             MentionCandidate(
                 insert_text=insert,
-                display="@" + insert,
-                description="directory" if is_dir else "file",
+                display=rel,
+                description="当前工作区文件",
+                kind="file",
             ),
         ))
     return file_candidates
@@ -123,7 +126,10 @@ def _scored_session_candidates(session_store, prefix: str) -> list[tuple[int, Me
     candidates: list[tuple[int, MentionCandidate]] = []
     for item in session_store.list_sessions()[:100]:
         session_id = item.get("id", "")
-        score = fuzzy_score(prefix, session_id)
+        preview = _session_preview(session_store, session_id)
+        if not preview:
+            continue
+        score = max(fuzzy_score(prefix, session_id), fuzzy_score(prefix, preview))
         if score <= 0 and prefix:
             continue
         insert = f"session:{session_id}"
@@ -131,11 +137,25 @@ def _scored_session_candidates(session_store, prefix: str) -> list[tuple[int, Me
             score or 1,
             MentionCandidate(
                 insert_text=insert,
-                display="@" + insert,
-                description=("session - " + f"{item.get('profile', '')} {item.get('created_at', '')}".strip()).strip(),
+                display=preview,
+                description="历史会话",
+                kind="session",
             ),
         ))
     return candidates
+
+
+def _session_preview(session_store, session_id: str) -> str:
+    try:
+        for event in reversed(session_store.read_events(session_id)):
+            if event.get("type") != "user_input":
+                continue
+            preview = str((event.get("payload") or {}).get("text") or "").replace("\n", " ").strip()
+            if preview:
+                return preview[:72] + ("…" if len(preview) > 72 else "")
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    return ""
 
 
 def replace_mention_fragment(text: str, insert_text: str) -> str:
@@ -195,6 +215,8 @@ def iter_workspace_paths(root: Path, *, limit: int = 2000) -> Iterable[tuple[str
             for entry in os.scandir(curr_dir):
                 if entry.name in EXCLUDED_DIRS:
                     continue
+                if entry.is_symlink():
+                    continue
                 is_dir = entry.is_dir(follow_symlinks=False)
                 entry_path = Path(entry.path)
                 try:
@@ -211,8 +233,7 @@ def iter_workspace_paths(root: Path, *, limit: int = 2000) -> Iterable[tuple[str
 
     walk(root)
     results.sort(key=lambda item: item[0].lower())
-    for rel, is_dir in results[:limit]:
-        yield rel, is_dir
+    yield from results[:limit]
 
 
 def quote_mention_path(path: str) -> str:

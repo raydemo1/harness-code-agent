@@ -6,7 +6,6 @@ import time
 
 from .base import AgentMiddleware
 
-
 log = logging.getLogger("harness")
 
 

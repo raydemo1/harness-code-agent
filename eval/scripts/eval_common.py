@@ -7,10 +7,9 @@ import os
 import re
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -18,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 RESULTS_ROOT = PROJECT_ROOT / "eval" / "results"
 TASKS_ROOT = PROJECT_ROOT / "eval" / "tasks"
-TBENCH_METADATA_PATH = PROJECT_ROOT / "eval" / "benchmarks" / "tb2_tasks.json"
+TBENCH_METADATA_PATH = PROJECT_ROOT / "harness_code_agent" / "profiles" / "tb2_tasks.json"
 TBENCH_TASK_FILES = {
     "8task": "terminal_bench_8task.json",
     "24task": "terminal_bench_24task.json",
@@ -96,7 +95,7 @@ def load_tbench_metadata() -> dict[str, Any]:
 
 
 def make_run_dir(args: argparse.Namespace, suite: str) -> Path:
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
     suffix = f"_{safe_name(args.run_name)}" if args.run_name else ""
     run_dir = Path(args.output_root) / f"{timestamp}_{suite}{suffix}"
     run_dir.mkdir(parents=True, exist_ok=False)

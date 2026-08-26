@@ -2,15 +2,15 @@
 
 VeriForge — Verifiable Coding-Agent Runtime
 
-VeriForge 是一个面向真实代码仓库的 coding-agent runtime。它把 profile、工具权限、会话记录、上下文管理、失败恢复、验收检查和 benchmark adapter 放在同一套运行时里，让 agent 的每一步都有记录，也有验证入口。
+VeriForge 是一个面向真实代码仓库的 coding-agent runtime，提供 profile、工具权限、会话、上下文、恢复、验收和评测能力。
 
-项目基于 OpenAI-compatible Chat Completions API，可接入 DeepSeek、OpenAI 等兼容服务。平时可以用它修 bug、补测试、做 review、写计划或构建小型 Web 应用；需要评测时，仍然使用同一套 runtime 跑 Terminal-Bench 和 Claw-SWE-Bench 风格任务。
+项目基于 OpenAI-compatible Chat Completions API，可接入 DeepSeek、OpenAI 等兼容服务。它支持修 bug、补测试、做 review、写计划、构建小型 Web 应用，以及运行 Terminal-Bench 和 Claw-SWE-Bench 风格评测。
 
 ## TUI 预览
 
-![VeriForge TUI：计划进度、对话区、输入框与运行状态](https://raw.githubusercontent.com/raydemo1/veriforge-agent/main/docs/images/veriforge-tui.png)
+![VeriForge OpenTUI：Mac 三点窗口、任务清单、工具调用、输入框与运行状态](https://raw.githubusercontent.com/raydemo1/veriforge-agent/main/docs/images/veriforge-tui.png)
 
-终端界面会把任务计划、当前 profile 和运行状态放在对话流里。工具调用、恢复过程和验收结果则写进同一条 session 轨迹，之后可以继续运行或回看。
+终端界面展示任务计划、当前 profile 和运行状态；工具调用、恢复过程和验收结果统一归档到 session。
 
 ## 为什么做这个
 
@@ -34,7 +34,7 @@ VeriForge 把这些边界放进 runtime：什么时候读代码、什么时候�
 
 本地结果来自 VeriForge，官方参考来自 DeepSeek Harness；两者使用同一个模型版本和 Terminal-Bench 2.1 评测集，但推理强度按各自运行配置记录。
 
-我在这个项目里更关心模型之外的部分：profile、工具治理、失败恢复、上下文管理，以及一份能从原始产物复盘出来的评测账本。
+项目重点是模型之外的 profile、工具治理、失败恢复、上下文管理和评测账本。
 
 其他运行记录：
 
@@ -75,7 +75,7 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 | Session log | 记录事件、观察、工具结果、LLM usage 和 checkpoint，方便复盘 |
 | Eval ledger | 从 raw 结果重建 task-level 真相，避免单次中断或环境波动污染总结果 |
 
-一句话概括：让 agent 在真实仓库里工作，同时把过程留下来、把结果验出来。
+一句话概括：让 agent 在真实仓库里工作，并对结果进行验证。
 
 ## 项目结构
 
@@ -83,14 +83,16 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 .
 ├── harness_code_agent/     # 核心 Python 包
 │   ├── cli.py              # `veriforge` 命令行入口
+│   ├── opentui_launcher.py # Bun/OpenTUI 子进程启动器
+│   ├── tui_bridge.py       # Python runtime 与前端之间的 NDJSON bridge
 │   ├── core/               # 交互 session、路由、TUI glue
 │   ├── agent/              # conversation state、trace、上下文压缩、provider 适配
 │   ├── runtime/            # 工具、权限、middleware、approval
-│   ├── workspace/          # 路径保护、快照、持久 shell
+│   ├── workspace/          # 路径保护、快照、Shell 与后台任务
 │   ├── sessions/           # session metadata 和事件日志
-│   ├── skills/             # skill registry
+│   ├── skills/             # skill registry 与按需加载的 catalog
 │   └── profiles/           # general、coding-agent、app-builder、plan、review 等模式
-├── skills/                 # agent 可按需读取的本地技能说明
+├── frontend/opentui/       # Bun + React + TypeScript 的终端界面
 ├── eval/                   # 评估脚本、任务集、结果、benchmark adapter
 │   ├── scripts/            # 基础指标、Terminal-Bench、Claw-SWE-Bench runner
 │   ├── tasks/              # 固定轻量评估任务配置
@@ -104,6 +106,7 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 环境要求：
 
 - Python 3.10+
+- Bun 1.4+（OpenTUI 前端）
 - Git
 - 一个 OpenAI-compatible API key
 - 可选：Playwright Chromium，用于浏览器验证
@@ -114,15 +117,20 @@ python eval/scripts/rebuild_eval_results.py --results-root eval/results --jobs-r
 ```bash
 cd veriforge-agent
 pip install -e .
+
+# 安装 OpenTUI 前端依赖（首次运行前执行）
+cd frontend/opentui
+bun install
+cd ../..
 ```
 
-如果只想在源码目录临时运行，也可以安装 `requirements.txt` 后使用：
+源码目录运行：
 
 ```bash
 python -m harness_code_agent.cli
 ```
 
-但推荐 editable install，因为它会注册 `veriforge` 命令。
+editable install 会注册 `veriforge` 命令。
 
 如果要使用 `app-builder` 的浏览器验证：
 
@@ -172,6 +180,17 @@ DeepSeek 默认档位：
 veriforge
 ```
 
+交互前端使用 Bun + React + TypeScript 的 OpenTUI；Python 负责
+`InteractiveSession`、工具、权限和会话持久化，二者通过带版本校验的本地 NDJSON 协议通信。
+历史恢复、新会话、工作模式、检查点、MCP、运行观察、审批、问题选择、命令和
+`@` 文件补全均在 OpenTUI 内完成。
+
+需要保留当前终端画面而不切换 alternate screen 时：
+
+```bash
+veriforge --no-alt-screen
+```
+
 然后输入任务，例如：
 
 ```text
@@ -181,10 +200,20 @@ veriforge
 常用命令：
 
 ```text
-/doctor       检查本地配置
-/config show  查看当前解析后的运行时配置
-/profiles     查看产品可见 profile
-/help         查看命令和可用 workflow
+/checkpoint   管理检查点
+/mcp          管理 MCP 服务与工具
+/compact      压缩当前对话上下文
+/fork         从当前会话创建分支
+/observe      打开运行观察
+```
+
+输入 `/` 会打开可滚动命令面板，最多显示 8 行；上下键、PageUp/PageDown、Home/End 都会保持当前选项可见。右上角的历史和新会话图标是可点击的真实入口；profile 选择直接点击底部状态栏入口完成，再切回自动模式时由本地匹配优先、fast model 兜底的路由器判断。
+
+主题默认跟随终端，可显式指定；Nerd Font 图标需要主动启用，默认使用不会缺字的 Unicode 图标：
+
+```bash
+veriforge --theme light
+veriforge --theme dark --icons nerd
 ```
 
 也可以启动时直接提交任务：
@@ -201,17 +230,20 @@ veriforge --print "Fix the failing tests"
 echo "Review this repo for obvious bugs" | veriforge
 ```
 
-常用 TUI 快捷键：
+常用 TUI 操作：
 
 ```text
 Enter         提交输入
 Shift+Enter   插入换行
 Tab           接受补全
 Esc           关闭补全
-Ctrl-C        取消当前 turn
-Ctrl-T        切换 thought 元信息显示
-Ctrl-K        手动压缩上下文
+Ctrl-C        取消当前 turn；空闲时退出
+Ctrl-R        打开历史会话
+Ctrl-N        开始新会话
+Ctrl-O        打开运行观察
 Ctrl-P        切换权限模式
+?             输入框为空时打开帮助
+鼠标点击权限  同样可以切换权限模式
 ```
 
 ## Profiles
@@ -237,27 +269,18 @@ veriforge --profile review "Review the current branch"
 veriforge --profile terminal "Fix the broken symlinks in /tmp"
 ```
 
-TUI 中可用短命令：
-
-```text
-/general
-/code
-/plan
-/app
-/review
-```
-
-`plan` profile 有显式 handoff：它写完计划后会停住。用户回复“继续”“执行”“开始”这类短确认时，VeriForge 会切换到 `coding-agent`，并把刚才的 Markdown 计划注入为 approved plan。
+底部 profile 选择面板提供自动路由、通用、编码、规划、应用构建和审查模式。选择具体模式后会固定当前工作模式；再次选择自动路由即可交回本地路由器判断。规划完成后，仍可在当前对话中继续执行已确认的计划。
 
 ## Skills
 
-Skills 采用渐进式披露。VeriForge 不会把所有长规则常驻塞进 prompt，而是先给模型一个精简 catalog；当任务需要某个 skill 时，再用 `read_skill_file` 读取完整说明。
+Skills 采用渐进式披露。常驻 prompt 保留精简 catalog，任务需要时再用 `read_skill_file` 读取完整说明。
 
-- 用户可直接调用的 workflow 暴露为 slash command，例如 `/implement`、`/triage`、`/handoff`、`/workflows`。
+- 用户可直接调用的 workflow 暴露为 slash command，例如 `/to-spec`、`/to-tickets`、`/implement`、`/skill-creator`、`/find-skills` 和 `/workflows`。
 - 面向 agent 的工程纪律只放 name、description、path，相关时再按需加载正文。
+- catalog 选择性同步 Matt Pocock 的工程技能并做 VeriForge 适配；不会自动全量安装上游目录。
 - 文件和历史 session 用 `@file:`、`@session:` 明确引用。
 
-这样专业工作流可以复用，常驻 prompt 也不会被暂时用不上的长文档占满。
+这样专业工作流可以复用，常驻 prompt 保持精简。
 
 ## 会话、快照和复盘
 
@@ -269,51 +292,59 @@ Skills 采用渐进式披露。VeriForge 不会把所有长规则常驻塞进 pr
 - file snapshots
 - checkpoint 信息
 
-常用命令：
+相关命令：
 
 ```text
-/sessions
-/session <session-id>
-/resume <session-id>
-/fork <session-id>
-/rollback <session-id> <path>
-/checkpoint status
-/checkpoint auto off
-/compact show
+/checkpoint
+/compact
+/fork
+/observe
 ```
 
-兼容的非交互命令：
+非交互入口：
 
 ```bash
 veriforge session show latest
+veriforge session observe latest
+veriforge session observe project --export
 ```
 
-在任务里引用文件或历史 session：
+在任务里引用文件：
 
 ```text
 根据 @README.md 修复文档里的启动示例
-继续 @session:20260518-120000-abcd1234 里的工作
 根据 @"docs/path with spaces.md" 补充测试说明
 ```
 
 ## 工具运行时
 
-工具调用统一经过权限、lane、审批和 middleware 管理。
+工具调用统一经过权限检查、审批和并发调度。
 
 内置工具包括：
 
 - repository search 和 bounded file read
 - workspace-scoped 文件写入
 - structured patch
-- persistent shell jobs
+- 独立前台 shell 调用和可管理的后台 shell jobs
 - web search / fetch
-- delegated agents for exploration, review, verification, test design, and isolated patch proposals
-- 并行安全命令和并行只读 delegated agents
+- 后台子代理与隔离 worker 提案
+- 自动并行无冲突的工具调用
 - 用户选择提问
 - 可选浏览器验证
 - MCP server 暴露的 tools
 
-Runtime 还会处理循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。模型可以尝试，运行时会记录这些尝试，并在必要时纠偏。
+运行规则：
+
+- 同一文件的读写按顺序执行。
+- 不同文件的受控修改可以并行。
+- 测试、构建和代码检查不与文件修改并行。
+- `run_bash` 每次使用新的 Shell，并从 workspace 根目录开始。
+- 需要共享目录或环境变量的步骤应写在同一条命令中。
+- 未声明副作用的扩展工具按独占方式运行。
+- 子代理跨主回合运行；补充消息在下一次迭代生效。
+- worker 改动需显式审查和应用；同文件改动使用三方合并。
+
+Runtime 还会处理循环检测、错误提示、恢复探针、任务跟踪、时间预算、验收检查和退出前验证。
 
 ## 权限模式
 
@@ -379,10 +410,7 @@ VeriForge 可以连接 MCP server，把 server tools 暴露给当前 profile。�
 MCP tools 会命名为 `mcp__{server}__{tool}`，避免和内置工具冲突。
 
 ```text
-/mcp status
-/mcp list
-/mcp reload
-/doctor
+/mcp
 ```
 
 ## Evaluation
@@ -447,6 +475,7 @@ Eval ledger 会从 raw `summary.json`、Harbor `result.json`、VeriForge artifac
 | `HARNESS_MODEL_MAX` | provider 默认 | 覆盖 `max` 档模型 |
 | `HARNESS_PROVIDER` | `auto` | `auto` / `openai` / `deepseek` / `openai-compatible` |
 | `HARNESS_STREAM` | `auto` | streaming：`auto` / `1` / `0` |
+| `HARNESS_MODEL_INPUT_MODE` | `text` | 模型输入能力：两种模式均通过内置 Skill 处理 PDF/DOCX；`multimodal` 额外原文直传 JPEG、PNG、GIF、WebP 图片 |
 | `HARNESS_WINDOWS_SHELL` | `pwsh` | Windows host shell：`pwsh` / `wsl`；严格使用所选后端，不自动降级 |
 | `HARNESS_PERMISSION_MODE` | `workspace-write` | 权限模式 |
 | `HARNESS_SANDBOX_MODE` | `host` | Shell sandbox：`host` / `docker` |
@@ -460,8 +489,8 @@ Eval ledger 会从 raw `summary.json`、Harbor `result.json`、VeriForge artifac
 | `MAX_AGENT_TOOL_CALLS` | `200` | 单 turn 工具调用预算 |
 | `AGENT_BUDGET_WARN_FRACTION` | `0.8` | 预算提醒阈值 |
 | `HARNESS_TRACE_STDERR` | 空 | 为 true 时输出底层 API 错误追踪 |
-| `MAX_HARNESS_ROUNDS` | `5` | 旧 harness loop 兼容项 |
-| `PASS_THRESHOLD` | `7.0` | 旧 harness loop 兼容项 |
+| `MAX_HARNESS_ROUNDS` | `5` | harness loop 轮数 |
+| `PASS_THRESHOLD` | `7.0` | 通过阈值 |
 
 Profile 参数可通过环境变量覆盖：
 
@@ -480,6 +509,8 @@ PROFILE_APP_BUILDER_ACCEPTANCE_REVIEW_TIMEOUT=10
 
 ## 测试
 
+当前基线包含 28 个 Python 测试文件、519 个 unittest 用例，以及 18 个 OpenTUI/Bun 测试；两侧需要分别验证。
+
 运行完整 unittest：
 
 ```bash
@@ -495,6 +526,14 @@ python -m unittest tests.test_eval_ledger
 python -m unittest tests.test_terminal_bench_launcher
 ```
 
+运行 OpenTUI 测试和 TypeScript 类型检查：
+
+```bash
+cd frontend/opentui
+bun test
+bun run check
+```
+
 ## 开发指南
 
 新增 profile：
@@ -502,7 +541,7 @@ python -m unittest tests.test_terminal_bench_launcher
 1. 在 `harness_code_agent/profiles/` 下新增 `BaseProfile` 实现。
 2. 实现 `name()`、`description()`、`main_agent()`。
 3. 在 `harness_code_agent/profiles/__init__.py` 中注册。
-4. 只有产品可见 profile 才加入 `PRODUCT_PROFILES`。
+4. 产品可见 profile 加入 `PRODUCT_PROFILES`。
 5. 为关键行为补测试。
 
 新增内置工具：
@@ -510,7 +549,7 @@ python -m unittest tests.test_terminal_bench_launcher
 1. 在 `harness_code_agent/runtime/builtins/` 下按领域实现工具函数。
 2. 在 `harness_code_agent/runtime/builtins/schemas.py` 中声明 schema。
 3. 在 registry 中注册 handler 和 permission class。
-4. 只有现有权限分类表达不了风险时，才新增分类。
+4. 现有权限分类覆盖风险时直接复用，需要扩展时再新增分类。
 5. 覆盖成功路径和失败路径测试。
 
 新增 middleware：
@@ -520,14 +559,12 @@ python -m unittest tests.test_terminal_bench_launcher
 3. 关键行为发事件，方便 debug 和复盘。
 4. 用回归测试覆盖它要防的具体失败模式。
 
-`harness_code_agent/runtime/tools.py` 和 `harness_code_agent/runtime/middlewares.py` 只保留旧 public API 的兼容 re-export，新代码应放在结构化模块里。
-
 ## 注意事项
 
 - 不要提交 `.env`，使用 `.env.template` 作为模板。
 - `HARNESS_MODEL*` 必须是目标 provider 可识别的模型名。
 - `app-builder` 的浏览器验证依赖 Playwright。
-- `terminal` profile 是 eval-only 默认定位，不应进入普通产品自动路由。
+- `terminal` profile 用于 eval runner，普通产品自动路由使用产品 profile。
 - Terminal-Bench runner 会设置 `HARNESS_PERMISSION_MODE=danger-full-access` 和 `HCA_TERMINAL_EVAL_MODE=1`，以允许容器内绝对路径写入，同时保留破坏性命令保护。
 - 默认 `workspace-write` 会对 risky shell 和未知工具触发批准流程。
 - 如果 eval run 被中断，要报告为 interrupted 或 incomplete，不要把局部结果包装成最终 benchmark 数字。

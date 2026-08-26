@@ -1,31 +1,33 @@
 """Shell execution and background shell job tools."""
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import re
+import subprocess
 
 from ... import config
+from ...agent.cancellation import CancelledError
 from ...workspace.shell_jobs import ShellJobNotFound
-from ..shell_classification import is_long_running_shell_command
-from ..tool_registry import ToolExecutionLane, _coerce_tool_lane
+from ..shell_classification import analyze_shell_command
 from ..tool_result import ToolResult
 
 
 def run_bash(
     command: str,
     timeout: int = 300,
+    expected_exit_codes: list[int] | None = None,
     runtime_state=None,
     agent_name: str | None = None,
     tool_context=None,
-    execution_lane: ToolExecutionLane | str | None = None,
+    cancellation_token=None,
 ) -> ToolResult:
-    """Run a shell command inside the agent's persistent shell session."""
-    if execution_lane is not None:
-        lane = _coerce_tool_lane(execution_lane)
-    elif is_long_running_shell_command(command):
-        lane = ToolExecutionLane.SHELL_LONG_RUNNING
-    else:
-        lane = ToolExecutionLane.SHELL_SERIAL
-    if lane == ToolExecutionLane.SHELL_LONG_RUNNING:
+    """Run one self-contained shell command from the workspace root."""
+    if cancellation_token is not None:
+        cancellation_token.check()
+    expected_codes = _normalize_expected_exit_codes(expected_exit_codes)
+    if analyze_shell_command(command).long_running:
         manager = _shell_job_manager(runtime_state)
         if manager is None:
             return ToolResult(
@@ -50,6 +52,18 @@ def run_bash(
             )
             return ToolResult(tool="run_bash", status="success", output=output, metadata=metadata)
         tail = job.output_tail
+        if job.exit_code in expected_codes:
+            return ToolResult(
+                tool="run_bash",
+                status="success",
+                output=tail or f"Command exited with expected code {job.exit_code}.",
+                return_code=job.exit_code,
+                metadata={
+                    **metadata,
+                    "expected_exit_codes": sorted(expected_codes),
+                    "exit_code_expected": True,
+                },
+            )
         output = f"[error] Long-running command exited immediately as {job.status}."
         if tail:
             output += f"\n\nRecent output:\n{tail}"
@@ -62,26 +76,31 @@ def run_bash(
             metadata=metadata,
         )
 
-    use_temporary_shell = lane in {ToolExecutionLane.SHELL_READ, ToolExecutionLane.SHELL_VERIFY}
-    shell_session = None
-    owns_shell = False
-    if use_temporary_shell:
-        from ...workspace.shell_session import PersistentShellSession
+    from ...workspace.shell_session import PersistentShellSession
 
-        shell_session = PersistentShellSession(_workspace_root(tool_context))
-        owns_shell = True
-    elif runtime_state is not None:
-        shell_session = runtime_state.shell_session
-    if shell_session is None:
-        return ToolResult(
-            tool="run_bash",
-            status="failed",
-            output="[error] No active shell session for run_bash",
-            error="No active shell session for run_bash",
-            metadata={"status_source": "runtime"},
+    one_shot_powershell = _requires_one_shot_powershell(command)
+    shell_session = PersistentShellSession(_workspace_root(tool_context))
+    remove_cancel_callback = lambda: None
+    if runtime_state is not None and hasattr(runtime_state, "register_shell_session"):
+        runtime_state.register_shell_session(shell_session)
+    if cancellation_token is not None and not one_shot_powershell:
+        remove_cancel_callback = cancellation_token.add_callback(
+            lambda: _interrupt_shell_session(shell_session)
         )
     try:
-        shell_result = shell_session.run(command, timeout=timeout)
+        if cancellation_token is not None:
+            cancellation_token.check()
+        if one_shot_powershell:
+            shell_result = _run_one_shot_powershell(
+                command,
+                timeout,
+                tool_context,
+                cancellation_token,
+            )
+        else:
+            shell_result = shell_session.run(command, timeout=timeout)
+        if cancellation_token is not None:
+            cancellation_token.check()
         if shell_result.timed_out:
             output = (
                 f"[error] Command timed out after {timeout}s. "
@@ -98,22 +117,24 @@ def run_bash(
             )
         output = _build_shell_output(shell_result.stdout, shell_result.stderr)
         output = output or "(no output)"
-        ok = shell_result.exit_code == 0
+        ok = shell_result.exit_code in expected_codes
         return ToolResult(
             tool="run_bash",
             status="success" if ok else "failed",
             output=output,
             error=None if ok else f"Command exited with code {shell_result.exit_code}",
             return_code=shell_result.exit_code,
-            metadata={"timed_out": False, "status_source": "shell"},
+            metadata={
+                "timed_out": False,
+                "status_source": "shell",
+                "expected_exit_codes": sorted(expected_codes),
+                "exit_code_expected": ok,
+            },
         )
+    except CancelledError:
+        raise
     except Exception as e:
         metadata = {"status_source": "exception"}
-        if _looks_like_dead_shell_error(e):
-            metadata["shell_session_reset"] = _reset_runtime_shell_session(
-                runtime_state,
-                shell_session,
-            )
         return ToolResult(
             tool="run_bash",
             status="failed",
@@ -122,8 +143,86 @@ def run_bash(
             metadata=metadata,
         )
     finally:
-        if owns_shell and shell_session is not None:
-            shell_session.close()
+        remove_cancel_callback()
+        if runtime_state is not None and hasattr(runtime_state, "unregister_shell_session"):
+            runtime_state.unregister_shell_session(shell_session)
+        shell_session.close()
+
+
+def _requires_one_shot_powershell(command: str) -> bool:
+    """Run PowerShell ``exit`` through an explicit one-shot process."""
+    if os.name != "nt" or not re.search(r"(?i)(?:^|[;|&]\s*)exit(?:\s|$)", command):
+        return False
+    from ...workspace.shell_session import sandbox_mode, windows_shell_kind
+
+    return sandbox_mode() == "host" and windows_shell_kind() == "pwsh"
+
+
+def _interrupt_shell_session(shell_session) -> None:
+    with contextlib.suppress(Exception):
+        shell_session.interrupt()
+
+
+def _run_one_shot_powershell(command: str, timeout: int, tool_context, cancellation_token=None):
+    from ...workspace.shell_session import ShellResult, windows_shell_path
+
+    executable = windows_shell_path()
+    if executable is None:
+        raise RuntimeError("PowerShell 7 (pwsh) was not found")
+    process = subprocess.Popen(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=_workspace_root(tool_context),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    )
+    remove_cancel_callback = lambda: None
+    if cancellation_token is not None:
+        remove_cancel_callback = cancellation_token.add_callback(
+            lambda: _terminate_process_tree(process)
+        )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            stdout = str(exc.stdout or "")
+            stderr = str(exc.stderr or "")
+            for stream in (process.stdout, process.stderr, process.stdin):
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
+        return ShellResult(
+            stdout=str(stdout or exc.stdout or ""),
+            stderr=str(stderr or exc.stderr or ""),
+            exit_code=130,
+            timed_out=True,
+        )
+    finally:
+        remove_cancel_callback()
+    return ShellResult(stdout=stdout, stderr=stderr, exit_code=process.returncode)
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            process.kill()
 
 
 def list_shell_jobs(runtime_state=None) -> ToolResult:
@@ -233,6 +332,17 @@ def _shell_job_manager(runtime_state):
     return getattr(runtime_state, "shell_job_manager", None) if runtime_state is not None else None
 
 
+def _normalize_expected_exit_codes(values: list[int] | None) -> set[int]:
+    if values is None:
+        return {0}
+    normalized = {
+        int(value)
+        for value in values[:16]
+        if not isinstance(value, bool) and isinstance(value, int)
+    }
+    return normalized or {0}
+
+
 def _workspace_root(tool_context=None) -> str:
     if tool_context is not None:
         return str(tool_context.workspace.root)
@@ -256,21 +366,3 @@ def _build_shell_output(stdout: str, stderr: str) -> str:
             return stdout + "\n\n--- STDERR ---\n" + stderr
         return "--- STDERR ---\n" + stderr
     return stdout
-
-
-def _looks_like_dead_shell_error(exc: Exception) -> bool:
-    text = str(exc).lower()
-    return "shell failed to become ready" in text
-
-
-def _reset_runtime_shell_session(runtime_state, shell_session) -> bool:
-    if runtime_state is None or shell_session is None:
-        return False
-    if getattr(runtime_state, "shell_session", None) is not shell_session:
-        return False
-    try:
-        shell_session.close()
-    except Exception:
-        pass
-    runtime_state.shell_session = None
-    return True

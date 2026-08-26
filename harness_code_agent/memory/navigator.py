@@ -4,7 +4,6 @@ from collections import Counter
 
 from .store import MEMORY_CONTENT_FILES, MemoryRecord, MemoryStore
 
-
 FILE_PURPOSES = {
     "project.md": "Architecture, modules, conventions, project facts",
     "decisions.md": "Design decisions, tradeoffs, rationale",

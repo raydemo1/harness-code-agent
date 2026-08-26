@@ -6,7 +6,6 @@ import os
 from ... import config
 from .filesystem import READ_FILE_MAX_LINES
 
-
 CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -50,12 +49,12 @@ CORE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_skill_file",
-            "description": "Read a skill file from the skills/ directory. Use this to load a skill's SKILL.md or any sub-files referenced within it. Path should be relative to project root (e.g. 'skills/frontend-design/SKILL.md').",
+            "description": "Read a skill file from the packaged skills catalog. Use this to load a skill's SKILL.md or any sub-files referenced within it. Path should be like 'catalog/frontend-design/SKILL.md'.",
             "parameters": {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": {"type": "string", "description": "Relative path to skill file (e.g. 'skills/frontend-design/SKILL.md')"}
+                    "path": {"type": "string", "description": "Relative path to skill file (e.g. 'catalog/frontend-design/SKILL.md')"}
                 },
             },
         },
@@ -87,88 +86,21 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "parallel_commands",
-            "description": (
-                "Run up to 8 independent read-only or verification shell commands concurrently. "
-                "Use this for safe parallel checks such as independent test files, git status/diff, or bounded inspections. "
-                "Commands that edit files, install dependencies, start services, mutate git state, or depend on shared shell cwd/env are rejected."
-            ),
+            "name": "spawn_agent",
+            "description": "Start one focused background agent and return its id immediately. Emit multiple independent spawn_agent calls in one response to run them concurrently.",
             "parameters": {
                 "type": "object",
-                "required": ["commands"],
+                "required": ["name", "role", "task"],
                 "properties": {
-                    "commands": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 8,
-                        "description": "Independent read-only or verification commands to execute in parallel.",
-                        "items": {
-                            "type": "object",
-                            "required": ["command"],
-                            "properties": {
-                                "id": {
-                                    "type": "string",
-                                    "description": "Optional short label for this command.",
-                                },
-                                "command": {
-                                    "type": "string",
-                                    "description": "Shell command. Must be read-only or verification-only.",
-                                },
-                                "timeout": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "maximum": 1800,
-                                    "default": 300,
-                                    "description": "Per-command timeout in seconds.",
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "parallel_agents",
-            "description": (
-                "Run up to 8 independent read-only delegated agents concurrently. "
-                "Use this when several codebase investigations, test-design passes, reviews, or verification checks can proceed without shared state. "
-                "Patch delegates are not allowed in parallel_agents."
-            ),
-            "parameters": {
-                "type": "object",
-                "required": ["agents"],
-                "properties": {
-                    "agents": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 8,
-                        "description": "Independent delegated agent tasks to run in parallel.",
-                        "items": {
-                            "type": "object",
-                            "required": ["agent_profile", "task"],
-                            "properties": {
-                                "id": {"type": "string", "description": "Optional short label for this delegated task."},
-                                "agent_profile": {
-                                    "type": "string",
-                                    "enum": ["explore", "test_design", "review", "verify"],
-                                    "description": "Read-only delegate profile to run.",
-                                },
-                                "task": {"type": "string", "description": "Detailed delegated task."},
-                                "expected_output": {"type": "string", "description": "Optional output focus."},
-                                "allowed_paths": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "Optional workspace paths the delegate should stay within.",
-                                    "default": [],
-                                },
-                                "max_turns": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
-                                "max_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "default": 300},
-                            },
-                        },
-                    },
+                    "name": {"type": "string", "description": "Short unique agent name."},
+                    "role": {"type": "string", "enum": ["explorer", "test_designer", "reviewer", "verifier", "worker"]},
+                    "task": {"type": "string", "description": "Bounded delegated task."},
+                    "expected_output": {"type": "string"},
+                    "allowed_paths": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Required writable ownership paths for worker; optional for read-only roles."},
+                    "fork_turns": {"oneOf": [{"type": "string", "enum": ["none", "all"]}, {"type": "integer", "minimum": 1, "maximum": 5}], "default": "none"},
+                    "model_intensity": {"type": "string", "enum": ["fast", "normal", "hard", "max"]},
+                    "max_turns": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
+                    "max_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "default": 300},
                 },
             },
         },
@@ -208,15 +140,15 @@ CORE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan_state",
-            "description": "Update tracked todo and acceptance state. skip mode does not call this tool. This tool does not create formal plan.md files or approval gates.",
+            "description": "Update lightweight todo progress or tracked acceptance state. skip mode does not call this tool. This tool does not create formal plan.md files or approval gates.",
             "parameters": {
                 "type": "object",
                 "required": ["mode", "update_kind", "goal", "steps", "current_step", "completed_steps", "blockers", "next_action", "requires_approval"],
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "description": "Use tracked for non-trivial work that needs todo/acceptance tracking. skip is the direct execution path and must not call this tool.",
-                        "enum": ["tracked"],
+                        "description": "Use todo for small clear work and tracked only for complex or risky work needing acceptance gates. skip is the direct execution path and must not call this tool.",
+                        "enum": ["todo", "tracked"],
                     },
                     "update_kind": {
                         "type": "string",
@@ -580,6 +512,7 @@ CORE_TOOL_SCHEMAS = [
                     else "On POSIX this runs a shell suitable for standard Bash-style commands. "
                 )
                 + "Use for installing deps, running builds, starting servers, running tests, etc. "
+                "Keep each call to one logical verification whenever practical. For a negative test where a non-zero exit is the expected success condition, set expected_exit_codes instead of letting recovery treat it as a failure. "
                 "Do not use shell for repository search or file listing; use repo_search/list_files/read_file. "
                 "Repository-browsing shell commands such as bare rg, recursive grep/findstr, Get-ChildItem -Recurse, or dir /s may be blocked or rewritten. "
                 "For long-running verification commands (compilation, training), increase the timeout parameter. "
@@ -591,11 +524,18 @@ CORE_TOOL_SCHEMAS = [
                 "type": "object",
                 "required": ["command"],
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command to run; keep inspection commands bounded."},
+                    "command": {"type": "string", "description": "Shell command to run; keep inspection commands bounded and avoid combining unrelated checks."},
                     "timeout": {
                         "type": "integer",
                         "description": "Timeout in seconds (default 300). Increase for long builds/training.",
                         "default": 300,
+                    },
+                    "expected_exit_codes": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "maxItems": 16,
+                        "description": "Exit codes that count as success (default [0]); use this for deliberate negative tests.",
+                        "default": [0],
                     },
                 },
             },
@@ -645,58 +585,88 @@ CORE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "delegate_agent",
-            "description": (
-                "Delegate bounded work to a focused sub-agent with its own context. "
-                "Use explore, test_design, review, or verify for read-only work; use patch only for an isolated workspace patch proposal. "
-                "The main agent owns integration, applying any patch, final verification, and stop decisions."
-            ),
-            "parameters": {
-                "type": "object",
-                "required": ["agent_profile", "task"],
-                "properties": {
-                    "agent_profile": {
-                        "type": "string",
-                        "enum": ["explore", "test_design", "review", "verify", "patch"],
-                        "description": "Delegate profile to run.",
-                    },
-                    "task": {
-                        "type": "string",
-                        "description": "Detailed delegated task.",
-                    },
-                    "expected_output": {
-                        "type": "string",
-                        "description": "Optional description of the desired output focus.",
-                    },
-                    "allowed_paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional workspace paths the delegate should stay within.",
-                        "default": [],
-                    },
-                    "max_turns": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 20,
-                        "default": 6,
-                        "description": "Approximate maximum delegated reasoning/tool rounds.",
-                    },
-                    "max_seconds": {
-                        "type": "integer",
-                        "minimum": 30,
-                        "maximum": 1800,
-                        "default": 300,
-                        "description": "Delegate time budget in seconds.",
-                    },
-                },
-            },
+            "name": "send_agent_message",
+            "description": "Steer a running agent at its next safe model boundary without waiting for its whole turn to finish.",
+            "parameters": {"type": "object", "required": ["agent_id", "message"], "properties": {"agent_id": {"type": "string"}, "message": {"type": "string"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "followup_agent",
+            "description": "Give an agent another task. Running agents receive it at the next safe boundary; idle agents start a new turn.",
+            "parameters": {"type": "object", "required": ["agent_id", "task"], "properties": {"agent_id": {"type": "string"}, "task": {"type": "string"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_agents",
+            "description": "Wait until all selected background agents finish, then return their summaries.",
+            "parameters": {"type": "object", "properties": {"agent_ids": {"type": "array", "items": {"type": "string"}}, "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 300, "default": 30}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_agents",
+            "description": "List open background agent threads and their status.",
+            "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["", "queued", "running", "completed", "blocked", "failed", "interrupted"]}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "interrupt_agent",
+            "description": "Interrupt only the selected agent's current turn while preserving its thread and completed artifacts.",
+            "parameters": {"type": "object", "required": ["agent_id"], "properties": {"agent_id": {"type": "string"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_agent_changes",
+            "description": "Read a complete isolated change proposal with pagination.",
+            "parameters": {"type": "object", "required": ["proposal_id"], "properties": {"proposal_id": {"type": "string"}, "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50000, "default": 12000}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_agent_changes",
+            "description": "Three-way merge and atomically apply a worker proposal. Real overlapping edits return a conflict id without changing the workspace.",
+            "parameters": {"type": "object", "required": ["proposal_id"], "properties": {"proposal_id": {"type": "string"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_agent_conflicts",
+            "description": "Read base, main, worker, and marked merge content for a proposal conflict.",
+            "parameters": {"type": "object", "required": ["conflict_id"], "properties": {"conflict_id": {"type": "string"}, "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50000, "default": 12000}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_agent_conflicts",
+            "description": "Submit final content for every conflicted file and atomically commit the complete merge after revalidation.",
+            "parameters": {"type": "object", "required": ["conflict_id", "resolutions"], "properties": {"conflict_id": {"type": "string"}, "resolutions": {"type": "object", "additionalProperties": {"type": "string"}}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_agent",
+            "description": "Close an idle agent thread and release its isolated workspace. Unapplied changes require explicit discard_changes.",
+            "parameters": {"type": "object", "required": ["agent_id"], "properties": {"agent_id": {"type": "string"}, "discard_changes": {"type": "boolean", "default": False}}},
         },
     },
     {
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web for information. Use when you need documentation, examples, or domain knowledge not available locally. Returns titles, URLs, and snippets.",
+            "description": "Search the web with the standard web search provider. Use this as an independent web search tool when Exa search is not available or when this provider is specifically needed. Returns titles, URLs, and snippets.",
             "parameters": {
                 "type": "object",
                 "required": ["query"],

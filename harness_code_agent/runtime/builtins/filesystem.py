@@ -1,6 +1,7 @@
 """Workspace filesystem tools."""
 from __future__ import annotations
 
+import difflib
 import os
 import subprocess
 from pathlib import Path
@@ -9,7 +10,6 @@ from ... import config
 from ...agent.context import count_text_tokens
 from ..tool_context import ToolContext
 from ..tool_result import ToolResult
-
 
 # Dual limit: lines and tokens, whichever is smaller wins.
 # Aligned with Claude Code (2000 lines / 100K tokens per tool result).
@@ -29,6 +29,46 @@ DEFAULT_EXCLUDE_PARTS = {
 DEFAULT_EXCLUDE_PATHS = {
     ("eval", "results"),
 }
+
+# Bound the diff attached to file-change events so a single huge rewrite
+# cannot bloat the session JSONL or the transcript.
+_DIFF_MAX_LINES = 200
+
+
+def _change_diff(old: str | None, new: str) -> str:
+    """Compact unified diff between two file versions (old=None means new file)."""
+    if old is None:
+        lines = new.splitlines()
+        body = ["+" + line for line in lines]
+    else:
+        body = [
+            line
+            for line in difflib.unified_diff(
+                old.splitlines(), new.splitlines(), lineterm="", n=1
+            )
+            if not line.startswith(("--- ", "+++ "))
+        ]
+    if len(body) > _DIFF_MAX_LINES:
+        omitted = len(body) - _DIFF_MAX_LINES
+        kept = "\n".join(body[:_DIFF_MAX_LINES])
+        return kept + "\n… " + str(omitted) + " more diff lines"
+    return "\n".join(body)
+
+
+def _change_stats(old: str | None, new: str) -> tuple[int, int]:
+    """Return actual added/deleted line counts before the display diff is capped."""
+    if old is None:
+        return len(new.splitlines()), 0
+    body = [
+        line
+        for line in difflib.unified_diff(
+            old.splitlines(), new.splitlines(), lineterm="", n=1
+        )
+        if not line.startswith(("--- ", "+++ "))
+    ]
+    additions = sum(1 for line in body if line.startswith("+"))
+    deletions = sum(1 for line in body if line.startswith("-"))
+    return additions, deletions
 
 
 def _resolve(path: str) -> Path:
@@ -159,6 +199,7 @@ def repo_search(
             text=True,
             capture_output=True,
             timeout=REPO_SEARCH_TIMEOUT_SECONDS,
+            check=False,
         )
     except FileNotFoundError:
         return ToolResult(
@@ -357,22 +398,21 @@ def read_file(
 
 
 def read_skill_file(path: str) -> ToolResult:
-    """Read a file from the skills directory (outside workspace). Path must be relative to project root."""
-    project_root = Path(__file__).resolve().parents[3]
-    p = (project_root / path).resolve()
-    # Must stay within the skills directory
-    skills_dir = (project_root / "skills").resolve()
+    """Read a file from the packaged skills catalog (outside workspace)."""
+    skills_root = Path(__file__).resolve().parents[2] / "skills"
+    catalog_root = (skills_root / "catalog").resolve()
+    p = (skills_root / path).resolve()
     try:
-        p.relative_to(skills_dir)
+        p.relative_to(catalog_root)
     except ValueError:
         return ToolResult(
             tool="read_skill_file",
             status="failed",
-            output=f"[error] Path must be inside skills/ directory: {path}",
-            error=f"Path must be inside skills/ directory: {path}",
+            output=f"[error] Path must be inside skills/catalog/: {path}",
+            error=f"Path must be inside skills/catalog/: {path}",
             metadata={"path": path, "status_source": "validation"},
         )
-    if not p.exists():
+    if not p.exists() or not p.is_file():
         return ToolResult(
             tool="read_skill_file",
             status="failed",
@@ -380,11 +420,21 @@ def read_skill_file(path: str) -> ToolResult:
             error=f"Skill file not found: {path}",
             metadata={"path": path, "status_source": "native"},
         )
+    content = p.read_text(encoding="utf-8", errors="replace")
+    truncated = len(content) > 60_000
+    output = content[:60_000]
+    if truncated:
+        output += "\n\n[truncated] Skill file exceeds 60,000 characters; read a narrower supporting reference."
     return ToolResult(
         tool="read_skill_file",
         status="success",
-        output=p.read_text(encoding="utf-8", errors="replace")[:60_000],
-        metadata={"path": path, "status_source": "native"},
+        output=output,
+        metadata={
+            "path": path,
+            "status_source": "native",
+            "characters": len(content),
+            "truncated": truncated,
+        },
     )
 
 
@@ -403,17 +453,24 @@ def write_file(
         )
     metadata = {"path": path, "status_source": "native"}
     if tool_context is not None:
-        write_result = tool_context.workspace.write_text(path, content)
-        rel = write_result.path.relative_to(tool_context.workspace.root)
+        workspace = tool_context.workspace
+        write_result = workspace.write_text(path, content)
+        old = write_result.old_content
+        rel = write_result.path.relative_to(workspace.root)
+        additions, deletions = _change_stats(old, content)
         metadata["file_changes"] = [
             {
                 "path": str(rel),
                 "operation": "write_file",
                 "snapshot_path": str(write_result.snapshot_path) if write_result.snapshot_path else None,
+                "diff": _change_diff(old, content),
+                "additions": additions,
+                "deletions": deletions,
             }
         ]
     else:
         p = _resolve(path)
+        old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else None
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
     return ToolResult(
@@ -439,12 +496,16 @@ def apply_patch(
             metadata={"path": path, "status_source": "validation"},
         )
     if tool_context is not None:
-        patch_result = tool_context.workspace.apply_text_patch(
+        workspace = tool_context.workspace
+        patch_result = workspace.apply_text_patch(
             path,
             search=search,
             replace=replace,
         )
-        rel = patch_result.path.relative_to(tool_context.workspace.root)
+        rel = patch_result.path.relative_to(workspace.root)
+        old = patch_result.old_content
+        new = patch_result.new_content
+        additions, deletions = _change_stats(old, new)
         return ToolResult(
             tool="apply_patch",
             status="success",
@@ -458,6 +519,9 @@ def apply_patch(
                         "path": str(rel),
                         "operation": "apply_patch",
                         "snapshot_path": str(patch_result.snapshot_path) if patch_result.snapshot_path else None,
+                        "diff": _change_diff(old, new),
+                        "additions": additions,
+                        "deletions": deletions,
                     }
                 ],
             },

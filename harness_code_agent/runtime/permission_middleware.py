@@ -38,7 +38,7 @@ class PermissionMiddleware(AgentMiddleware):
         Used to look up the declared permission level for each tool.
     """
 
-    def __init__(self, tool_context: "ToolContext", tool_registry):
+    def __init__(self, tool_context: ToolContext, tool_registry):
         self._ctx = tool_context
         self._registry = tool_registry
 
@@ -75,6 +75,17 @@ class PermissionMiddleware(AgentMiddleware):
                 "PermissionMiddleware: blocked %s (risk=%s, reason=%s)",
                 tool_name, decision.risk, decision.reason,
             )
+            if tool_name == "run_bash" and decision.risk == "shell_blocked":
+                return (
+                    "[blocked] 工具未执行：该命令被安全黑名单拦截，可能造成不可恢复的数据或系统破坏。"
+                    "请向用户明确说明未执行，并建议先备份或改用可恢复方案。"
+                )
+            if tool_name == "run_bash" and decision.risk == "shell_write_blocked":
+                return (
+                    "[blocked] 工具未执行：检测到直接删除或覆盖文件的命令。"
+                    "当前策略不允许通过 shell 执行这类不可回退修改；请向用户明确说明未执行，"
+                    "并建议先确认备份后改用受控文件编辑方式。"
+                )
             return f"[blocked] {decision.reason}"
 
         # --- ask (requires user approval) ---
@@ -117,7 +128,10 @@ class PermissionMiddleware(AgentMiddleware):
                     "PermissionMiddleware: user denied %s (reason=%s)",
                     tool_name, approval_result.reason,
                 )
-                return f"[approval_denied] {approval_result.reason}"
+                return (
+                    f"[approval_denied] 工具未执行：该操作未获得审批（{approval_result.reason}）。"
+                    "请向用户明确说明未执行，不要假设文件或外部状态已经改变；如需继续，请先确认操作范围并准备备份。"
+                )
 
         # --- allow ---
         return None

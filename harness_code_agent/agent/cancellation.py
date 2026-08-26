@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 
 
 class CancellationToken:
@@ -9,9 +10,37 @@ class CancellationToken:
 
     def __init__(self) -> None:
         self._event = threading.Event()
+        self._callbacks: list[Callable[[], None]] = []
+        self._lock = threading.Lock()
 
     def cancel(self) -> None:
-        self._event.set()
+        with self._lock:
+            if self._event.is_set():
+                return
+            self._event.set()
+            callbacks = list(self._callbacks)
+            self._callbacks.clear()
+        for callback in callbacks:
+            callback()
+
+    def add_callback(self, callback: Callable[[], None]) -> Callable[[], None]:
+        with self._lock:
+            if self._event.is_set():
+                run_now = True
+            else:
+                self._callbacks.append(callback)
+                run_now = False
+        if run_now:
+            callback()
+
+        def remove() -> None:
+            with self._lock:
+                try:
+                    self._callbacks.remove(callback)
+                except ValueError:
+                    pass
+
+        return remove
 
     @property
     def is_cancelled(self) -> bool:

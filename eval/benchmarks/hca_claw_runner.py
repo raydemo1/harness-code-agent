@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import traceback
 from pathlib import Path
 
@@ -21,7 +20,10 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("HARNESS_MEMORY_DREAM_CHECK_INTERVAL_SECONDS", "3600")
 
     try:
-        from harness_code_agent.core.interactive import InteractiveSession, print_turn_result
+        from harness_code_agent.core.interactive import (
+            InteractiveSession,
+            print_turn_result,
+        )
 
         session = InteractiveSession(
             cwd=workspace,

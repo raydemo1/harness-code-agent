@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
+from typing import ClassVar
 
-from .shell_classification import classify_safe_shell_command
-
+from .shell_classification import (
+    analyze_shell_command,
+    is_workspace_write_shell_command,
+)
 
 TOOL_PERMISSION_READ = "read"
 TOOL_PERMISSION_NETWORK_READ = "network_read"
@@ -19,29 +21,6 @@ VALID_TOOL_PERMISSIONS = {
     TOOL_PERMISSION_CONTROL,
     TOOL_PERMISSION_SHELL,
     TOOL_PERMISSION_DANGEROUS,
-}
-DEFAULT_TOOL_PERMISSIONS = {
-    "read_file": TOOL_PERMISSION_READ,
-    "read_skill_file": TOOL_PERMISSION_READ,
-    "repo_search": TOOL_PERMISSION_READ,
-    "tool_search": TOOL_PERMISSION_READ,
-    "parallel_agents": TOOL_PERMISSION_READ,
-    "parallel_commands": TOOL_PERMISSION_READ,
-    "list_files": TOOL_PERMISSION_READ,
-    "ask_user": TOOL_PERMISSION_READ,
-    "memory_search": TOOL_PERMISSION_READ,
-    "remember_memory": TOOL_PERMISSION_EDIT,
-    "read_memory_file": TOOL_PERMISSION_READ,
-    "delegate_agent": TOOL_PERMISSION_READ,
-    "web_search": TOOL_PERMISSION_NETWORK_READ,
-    "web_fetch": TOOL_PERMISSION_NETWORK_READ,
-    "write_file": TOOL_PERMISSION_EDIT,
-    "apply_patch": TOOL_PERMISSION_EDIT,
-    "update_plan_state": TOOL_PERMISSION_CONTROL,
-    "run_bash": TOOL_PERMISSION_SHELL,
-    "list_shell_jobs": TOOL_PERMISSION_READ,
-    "read_shell_output": TOOL_PERMISSION_READ,
-    "stop_shell_job": TOOL_PERMISSION_CONTROL,
 }
 
 
@@ -66,7 +45,7 @@ class PermissionPolicy:
     WORKSPACE_WRITE = "workspace-write"
     LLM_AUTO = "llm-auto"
     DANGER_FULL_ACCESS = "danger-full-access"
-    VALID_MODES = {WORKSPACE_WRITE, LLM_AUTO, DANGER_FULL_ACCESS}
+    VALID_MODES: ClassVar[set] = {WORKSPACE_WRITE, LLM_AUTO, DANGER_FULL_ACCESS}
 
     def __init__(self, mode: str = WORKSPACE_WRITE):
         if mode not in self.VALID_MODES:
@@ -80,28 +59,39 @@ class PermissionPolicy:
         tool_permission: str | None = None,
     ) -> PermissionDecision:
         args = args or {}
-        risk = self.classify_tool_call(tool_name, args, tool_permission=tool_permission)
+        permission = tool_permission or _builtin_permission(tool_name)
+        risk = self.classify_tool_call(tool_name, args, tool_permission=permission)
         if risk == "shell_blocked":
-            return PermissionDecision("deny", risk, "blacklisted shell command is never allowed")
+            return PermissionDecision(
+                "deny", risk, "blacklisted shell command is never allowed"
+            )
+        if risk == "shell_write_blocked":
+            return PermissionDecision(
+                "deny",
+                risk,
+                "shell file deletion or overwrite is not allowed; use a controlled file edit after confirming a backup",
+            )
+        if (
+            permission == TOOL_PERMISSION_SHELL
+            and risk == "shell_risky"
+            and self.mode != self.DANGER_FULL_ACCESS
+        ):
+            return PermissionDecision(
+                "ask",
+                risk,
+                f"{self.mode} mode requires approval because this shell command may change files or external state",
+            )
         if self.mode == self.DANGER_FULL_ACCESS:
-            return PermissionDecision("allow", risk, "danger-full-access mode allows this tool call")
-        if self.mode == self.WORKSPACE_WRITE:
-            if risk in {"shell_risky", "unknown", "dangerous"}:
-                return PermissionDecision(
-                    "ask",
-                    risk,
-                    "workspace-write mode requires user approval for non-whitelisted commands and tools",
-                )
-            return PermissionDecision("allow", risk, f"workspace-write mode allows {risk}")
-        if self.mode == self.LLM_AUTO:
-            if risk in {"shell_risky", "unknown", "dangerous"}:
-                return PermissionDecision(
-                    "ask",
-                    risk,
-                    "llm-auto mode requires automatic LLM approval for non-whitelisted commands and tools",
-                )
-            return PermissionDecision("allow", risk, f"llm-auto mode allows {risk}")
-        return PermissionDecision("deny", risk, f"{self.mode} mode does not allow {risk}")
+            return PermissionDecision(
+                "allow", risk, "danger-full-access mode allows this tool call"
+            )
+        if risk in {"shell_risky", "unknown", "dangerous"}:
+            return PermissionDecision(
+                "ask",
+                risk,
+                f"{self.mode} mode requires approval for commands or tools with side effects",
+            )
+        return PermissionDecision("allow", risk, f"{self.mode} mode allows {risk}")
 
     def classify_tool_call(
         self,
@@ -109,7 +99,7 @@ class PermissionPolicy:
         args: dict,
         tool_permission: str | None = None,
     ) -> str:
-        permission = tool_permission or DEFAULT_TOOL_PERMISSIONS.get(tool_name)
+        permission = tool_permission or _builtin_permission(tool_name)
         if permission == TOOL_PERMISSION_READ:
             return "read"
         if permission == TOOL_PERMISSION_NETWORK_READ:
@@ -119,33 +109,23 @@ class PermissionPolicy:
         if permission == TOOL_PERMISSION_CONTROL:
             return "control"
         if permission == TOOL_PERMISSION_SHELL:
-            return self.classify_shell_command(str(args.get("command", "")))
+            command = str(args.get("command", ""))
+            analysis = analyze_shell_command(command)
+            risk = "shell_risky" if analysis.kind == "unknown" else analysis.risk
+            if risk == "shell_safe" and analysis.sensitive_read:
+                return "shell_risky"
+            return risk
         if permission == TOOL_PERMISSION_DANGEROUS:
             return "dangerous"
         return "unknown"
 
-    def classify_shell_command(self, command: str) -> str:
-        lowered = command.strip().lower()
-        blocked_patterns = [
-            r"\brm\s+-[^\n;|&]*[rf][^\n;|&]*(?:\s+--[^\n;|&]+)*\s+(?:/|/\*|~|~/\*|\.|\./\*|\*)\s*$",
-            r"\bremove-item\b(?=.*-recurse\b)(?=.*(?:\bc:\\(?:\s|$)|\$home\b|~|(?:^|\s)\.(?:\s|$)|(?:^|\s)\*))",
-            r"\bdel\b(?=.*(?:/[^\s]*s|-recurse\b))(?=.*(?:\bc:\\\*|\$home\b|~|(?:^|\s)\*))",
-            r"\bmkfs(?:\.[\w-]+)?\b",
-            r"(?:^|[;&|]\s*)format(?:\.com)?(?:\s|$)",
-            r"\bdiskpart\b",
-            r"\bdd\b.*\bof=/dev/",
-        ]
-        if any(re.search(pattern, lowered) for pattern in blocked_patterns):
-            return "shell_blocked"
-        if all(fragment in lowered for fragment in (":(){", ":|:&", "};:")):
-            return "shell_blocked"
 
-        if is_read_only_command(lowered):
-            return "shell_safe"
-
-        return "shell_risky"
+def is_workspace_write_command(command: str) -> bool:
+    """Check only the workspace-write boundary, without a read command allowlist."""
+    return is_workspace_write_shell_command(command)
 
 
-def is_read_only_command(command: str) -> bool:
-    """Check whether a shell command is safe to run in read-only contexts."""
-    return classify_safe_shell_command(command) in {"read", "verify"}
+def _builtin_permission(tool_name: str) -> str | None:
+    from .builtins.registry import BUILTIN_TOOL_REGISTRY
+
+    return BUILTIN_TOOL_REGISTRY.permission_for(tool_name)

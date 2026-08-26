@@ -22,20 +22,26 @@ them without touching this file:
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
-from .base import BaseProfile, AgentConfig, build_execution_middlewares, build_profile_prompt
 from ..runtime.middleware import (
     TerminalShellEditPolicyMiddleware,
 )
+from .base import (
+    AgentConfig,
+    BaseProfile,
+    build_execution_middlewares,
+    build_profile_prompt,
+)
+
 
 class TerminalProfile(BaseProfile):
 
     # --- Default values (overridable via ProfileConfig or env vars) ---
-    _DEFAULTS = {
+    _DEFAULTS: ClassVar[dict] = {
         "task_budget": 1800,
         "loop_file_edit_threshold": 4,
         "loop_command_repeat_threshold": 3,
-        "task_tracking_nudge_after": 8,
         "time_warn_threshold": 0.45,
         "time_critical_threshold": 0.75,
         "acceptance_review_timeout": 10.0,
@@ -84,8 +90,8 @@ class TerminalProfile(BaseProfile):
                     "Follow the task's exact external contract: preserve literal field/function names, hosts, "
                     "ports, URLs, protocols, branches, paths, filenames, shapes, signals/process behavior, "
                     "formats, and exact output. "
-                    "Prefer command-driven evidence and syntax that matches the active shell. run_bash uses one "
-                    "persistent shell session, so preserve useful cwd and environment state deliberately. For "
+                    "Prefer command-driven evidence and syntax that matches the active shell. Each run_bash call "
+                    "starts from the workspace root with fresh shell state, so keep dependent steps in one command. For "
                     "background services, verify readiness separately and capture the exact process, port, or "
                     "path evidence. When the task gives a user-visible workflow or command sequence, validation "
                     "should replay that literal workflow; do not replace it with a local substitute unless you "
@@ -111,7 +117,7 @@ class TerminalProfile(BaseProfile):
                     "mutations; constrain shell writes to the task workspace, preview or explain broad edits "
                     "before applying them, and follow mutations with verification or a convergence check. "
                     "Use delegation for parallel exploration, test design, independent review, verification, "
-                    "or isolated patch proposals when that reduces hidden-verifier risk; never treat delegated "
+                    "or isolated worker proposals when that reduces hidden-verifier risk; never treat delegated "
                     "output as completed work until you integrate and verify it yourself."
                 ),
                 completion=(
@@ -144,7 +150,7 @@ class TerminalProfile(BaseProfile):
         if cls._tb2_tasks is None:
             import json
             from pathlib import Path
-            tb2_path = Path(__file__).resolve().parents[2] / "eval" / "benchmarks" / "tb2_tasks.json"
+            tb2_path = Path(__file__).resolve().parent / "tb2_tasks.json"
             if tb2_path.exists():
                 cls._tb2_tasks = json.loads(tb2_path.read_text(encoding="utf-8"))
             else:

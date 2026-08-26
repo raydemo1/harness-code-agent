@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
+from typing import ClassVar
 
-from .base import AgentMiddleware, MAIN_AGENT_NAMES
+from ..tool_result import ToolResult
+from .base import MAIN_AGENT_NAMES, AgentMiddleware
 
 
 @dataclass(frozen=True)
@@ -41,9 +43,9 @@ ACCEPTANCE_REVIEW_SYSTEM_PROMPT = (
 
 
 class AcceptanceReviewMiddleware(AgentMiddleware):
-    """Start a plain-text plan audit and surface it before edits/finalization."""
+    """Start a plain-text plan audit and surface it without blocking execution."""
 
-    EDIT_TOOLS = {"write_file", "apply_patch"}
+    EDIT_TOOLS: ClassVar[set] = {"write_file", "apply_patch"}
 
     def __init__(
         self,
@@ -67,27 +69,30 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
         if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
             return None
         self._flush_events(runtime_state)
-        is_final = (
-            tool_name == "update_plan_state"
-            and str(tool_args.get("update_kind") or "").strip().lower() == "final"
-        )
-        if tool_name not in self.EDIT_TOOLS and not is_final:
-            return None
-        acceptance = runtime_state.task_board.acceptance
-        if acceptance.review_status == "not_started":
-            return None
-        acceptance.wait_for_review()
-        self._flush_events(runtime_state)
-        notification = acceptance.take_notification()
-        if notification:
-            return notification
+        # The audit is advisory. Waiting here used to turn a fast background
+        # review into a hard gate on the first edit, creating an avoidable LLM
+        # round trip (and occasionally making the agent mark an unexecuted step
+        # complete). Events remain visible in the TUI and the result is injected
+        # at the next iteration instead.
         return None
+
+    def per_iteration(
+        self,
+        iteration: int,
+        messages: list[dict],
+        runtime_state=None,
+        agent_name: str | None = None,
+    ) -> str | None:
+        if agent_name not in MAIN_AGENT_NAMES or runtime_state is None:
+            return None
+        self._flush_events(runtime_state)
+        return runtime_state.task_board.acceptance.take_notification() or None
 
     def post_tool(
         self,
         tool_name: str,
         tool_args: dict,
-        result: str,
+        result: ToolResult,
         messages: list[dict],
         runtime_state=None,
         agent_name: str | None = None,
@@ -99,7 +104,8 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
         if (
             tool_name == "update_plan_state"
             and str(tool_args.get("update_kind") or "").strip().lower() == "start"
-            and not result.startswith(("[error]", "[blocked]"))
+            and str(tool_args.get("mode") or "").strip().lower() == "tracked"
+            and result.status == "success"
         ):
             self._start_review(runtime_state)
             return None
@@ -147,7 +153,7 @@ class AcceptanceReviewMiddleware(AgentMiddleware):
                     audit = outcome.raw
                 else:
                     audit = outcome
-                snapshot = acceptance.snapshot()
+                acceptance.snapshot()
                 notification = _audit_notification(audit)
                 if notification:
                     notification = (
@@ -277,14 +283,14 @@ def _call_fast_reviewer(
     timeout_seconds: float,
     previous_error: str | None = None,
 ) -> ReviewOutcome:
-    from ... import config
-    from ...agent.providers import ProviderAdapter, get_client
-    from ...agent.utils import _usage_to_dict
     import json
+
+    from ... import config
+    from ...agent.providers import ProviderAdapter, client_scope
+    from ...agent.utils import _usage_to_dict
 
     profile = config.resolve_model_profile("fast")
     adapter = ProviderAdapter(profile.provider)
-    client = get_client().with_options(timeout=timeout_seconds, max_retries=0)
     review_request = {
         "original_task": task,
         "start_plan": plan_context or {},
@@ -292,22 +298,24 @@ def _call_fast_reviewer(
     }
     if previous_error:
         review_request["previous_invalid_response_error"] = previous_error
-    response = client.chat.completions.create(
-        **adapter.chat_kwargs(
-            profile=profile,
-            messages=[
-                {
-                    "role": "system",
-                    "content": ACCEPTANCE_REVIEW_SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(review_request, ensure_ascii=False),
-                },
-            ],
-            max_tokens=1200,
+    with client_scope() as base_client:
+        client = base_client.with_options(timeout=timeout_seconds, max_retries=0)
+        response = client.chat.completions.create(
+            **adapter.chat_kwargs(
+                profile=profile,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": ACCEPTANCE_REVIEW_SYSTEM_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(review_request, ensure_ascii=False),
+                    },
+                ],
+                max_tokens=1200,
+            )
         )
-    )
     raw = response.choices[0].message.content or ""
     return ReviewOutcome(
         raw=raw,

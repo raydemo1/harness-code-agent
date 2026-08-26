@@ -137,12 +137,15 @@ class HarnessFormatter(logging.Formatter):
         return f"{C.DIM}{ts}{C.RESET} {msg}"
 
 
-def setup_logging(verbose: bool = False):
-    """Configure logging with the rich formatter."""
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(HarnessFormatter())
-
+def setup_logging(verbose: bool = False, *, console: bool = True) -> None:
+    """Configure harness logging without corrupting full-screen interfaces."""
     logger = logging.getLogger("harness")
     logger.handlers.clear()
-    logger.addHandler(handler)
+    if console:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(HarnessFormatter())
+        logger.addHandler(handler)
+    else:
+        logger.addHandler(logging.NullHandler())
+    logger.propagate = False
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
