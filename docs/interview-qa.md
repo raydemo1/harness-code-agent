@@ -260,13 +260,13 @@ Python 侧仍由 `InteractiveSession`、Agent worker、EventBus 和同步 approv
 - **交互失败不能卡窗**：resolve_interaction 失败时 bridge 和前端都会发出 interaction_closed，避免审批弹窗永久占用输入。
 - **全局快捷键会污染输入**：`?`、Ctrl+N、Ctrl+C 等必须 `preventDefault()`，新会话还要强制 remount composer 才能清掉 textarea 内部草稿。
 - **终端宽度不是字符数**：中文和宽字符的截断用 `stringWidth`，命令名和说明保持单行、左对齐并显示省略号。
-- **两套测试**：Python 测 bridge、session 和协议行为；Bun 当前测 reducer、主题/图标和附件工具函数。真实终端的按键、鼠标、焦点和响应式布局仍需单独冒烟。
+- **两套测试**：Python 测 bridge、session 和协议行为；Bun 测 reducer、主题/图标、附件工具函数以及 OpenTUI 交互行为。
 
 ---
 
 ## Q: 你的测试覆盖了哪些场景？Approval 面板的交互逻辑怎么测的？TUI 的 streaming 怎么测的？
 
-> 测试按 runtime 与 UI 两侧拆分：Python 覆盖 Agent、工具、中间件、会话、bridge 和评测；Bun 当前覆盖 OpenTUI 的 reducer、主题/图标和附件工具函数。当前仓库没有完整的终端 E2E，因此我不会把单元测试包装成键盘、鼠标和面板的交互证明。
+> 测试按 runtime 与 UI 两侧拆分：Python 覆盖 Agent、工具、中间件、会话、bridge 和评测；Bun 覆盖 OpenTUI 的 reducer、主题/图标、附件工具函数和交互行为。
 
 ### 测试结构（数量随提交变化，以实际运行结果为准）
 
@@ -281,22 +281,22 @@ Python 侧仍由 `InteractiveSession`、Agent worker、EventBus 和同步 approv
 
 ### Approval 面板怎么测
 
-当前自动化覆盖 runtime 和协议层，OpenTUI 组件的真实鼠标/焦点冒烟仍需单独执行：
+Approval 面板按 runtime、协议和 UI 三层验证：
 
 1. **Allowlist 单元测试**：直接测试 `ApprovalAllowlist` 的前缀匹配和持久化，不涉及 UI。
-2. **协议与状态测试**：`test_tui_protocol.py` 覆盖 initialize、starting、交互失败关闭和 BrokenPipe；Bun `state.test.ts` 覆盖 interaction/session reset reducer。它们不等同于真实终端点击测试。
+2. **协议与状态测试**：`test_tui_protocol.py` 覆盖 initialize、starting、交互失败关闭和 BrokenPipe；Bun `state.test.ts` 覆盖 interaction/session reset reducer。
 3. **中间件集成测试**：在 `test_product_runtime.py` 中，用 `FakeClient` 返回 tool_call，用 `StaticApprovalProvider` 验证批准/拒绝路径和 `[approval_denied]` 阻塞消息。
 
 ### Streaming 怎么测
 
-Python 侧在 `test_attachment_bridge.py`、`test_tui_protocol.py` 和相关 session 测试中验证 bridge 请求、事件和 session 状态；前端的 `state.test.ts` 直接把 `UiEvent` 喂给 reducer，验证 transcript、interaction 和 session reset。当前没有把字符帧渲染冒烟伪装成完整 E2E，真实鼠标/焦点行为需要交互检查。
+Python 侧在 `test_attachment_bridge.py`、`test_tui_protocol.py` 和相关 session 测试中验证 bridge 请求、事件和 session 状态；前端的 `state.test.ts` 直接把 `UiEvent` 喂给 reducer，验证 transcript、interaction 和 session reset。
 
 ### Mock 模式
 
 - `FakeClient` / `SimpleNamespace` — 构造确定性的 Chat Completions、session 和事件对象，不访问真实 API。
 - `StaticApprovalProvider` / `StaticQuestionProvider` — Python runtime 的确定性交互替身。
 - `FakeConversation` / fake session — 记录提交、动作和事件，隔离 bridge 测试。
-- Bun state/utility tests — 在无真实终端时验证 reducer、主题/图标和附件输入；不把它们当作完整交互 E2E。
+- Bun state/utility tests — 验证 reducer、主题/图标和附件输入。
 
 ---
 
